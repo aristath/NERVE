@@ -27,29 +27,7 @@ context/output limits, or benchmark-only shortcuts.
 
 ## Remaining work, in priority order
 
-### 1. Use canonical runtime graph identity for reusable execution templates
-
-Execution-class compatibility, prefix reuse, and command/template reuse need one
-precise graph identity.
-
-- Use the identity consistently for scheduler compatibility, prefix-state keys,
-  resident execution plans, and feedback templates.
-- Maintain reusable prefill, decode, and batch template catalogs.
-- Keep hot metadata in persistent buffers and update it without re-recording or
-  reallocating unaffected work.
-- Invalidate only templates affected by a graph edit, placement change, or shape
-  transition.
-- Preserve calibrated cost knowledge across compatible shape classes without
-  applying unsafe measurements to different launch geometry. A newly encountered
-  prompt shape still falls back to 64 one-component quanta before that exact
-  shape is calibrated.
-- Eliminate per-turn recording of the unchanged 65-command resident sequence and
-  replace the stream-local current-shape feedback template with a synchronized
-  catalog that can safely replay every compatible shape. Timeline values must be
-  rebased without giving independently recorded templates stale relative
-  offsets.
-
-### 2. Make cross-device execution efficient without making it mandatory
+### 1. Make cross-device execution efficient without making it mandatory
 
 Everything may run on one device. Multi-device execution should become useful
 when requested by placement or required by model size.
@@ -75,8 +53,17 @@ when requested by placement or required by model size.
   15.951 and 16.715 tokens/second, versus approximately 19.66 tokens/second in
   the prior single-device run; repeat under matched context and conversation
   conditions before attributing the entire difference to transport.
+- In the first post-canonical-template 27B-FP8 run, the model remained resident
+  on the AMD devices at PCI 0a:00.0 and 19:00.0 with 65,536-token context and
+  output allowances. The three completed measured turns decoded at 13.319,
+  12.952, and 11.973 tokens/second (12.748 average), while the fourth turn entered
+  an unbounded repeated final segment. Resident component command recordings
+  fell from 75 during warmup to 2, then 0 and 0 on the next two turns, proving
+  that repeated recording was removed but also that it was not the dominant
+  two-device throughput bottleneck. The full run is invalid as a five-turn
+  benchmark.
 
-### 3. Complete route-native MoE execution
+### 2. Complete route-native MoE execution
 
 Sparse components and selected-route kernels exist, but routing is not yet a
 fully optimized runtime signal path.
@@ -91,7 +78,7 @@ fully optimized runtime signal path.
 - Make the 35B MoE model's performance reflect its active parameter count rather
   than its full declared size.
 
-### 4. Integrate MTP into the steady-state scheduler and device loop
+### 3. Integrate MTP into the steady-state scheduler and device loop
 
 MTP compilation and transactional verification work, but speculative execution
 is not yet part of the optimized steady-state path.
@@ -107,7 +94,7 @@ is not yet part of the optimized steady-state path.
 - Enable MTP by default only where warmed, realistic workloads show a net
   improvement.
 
-### 5. Finish long-context prefill and mixed-workload scheduling
+### 4. Finish long-context prefill and mixed-workload scheduling
 
 - Interleave prefill and decode fairly under memory pressure.
 - Derive prefill chunk size from available memory, device execution limits, and
@@ -134,7 +121,7 @@ is not yet part of the optimized steady-state path.
   limits.
 - Report prefill and decode throughput separately by default.
 
-### 6. Maintain adversarial correctness and performance gates
+### 5. Maintain adversarial correctness and performance gates
 
 Every meaningful compiler, runtime, state, graph, or kernel change must be tested
 against the supported model set rather than optimized around one model.
@@ -197,6 +184,12 @@ Performance runs must:
   list on measured turn three. The two completed measured turns decoded at
   13.667 and 16.667 tokens/second (15.167 average); the full benchmark is invalid,
   and the implementation remains below the 20-token/second floor.
+- The first post-canonical-template seed-1 run answered the first three measured
+  turns correctly, including the accumulated conversation history, but the
+  knowledge-cutoff turn entered an exact repeated `Output matches / Done /
+  Proceed` final segment and had to be stopped. The three completed turns
+  decoded at 13.319, 12.952, and 11.973 tokens/second (12.748 average). Treat it
+  as another failed correctness gate and not as a complete performance result.
 - An explicitly selected Vulkan test device must make a test run or fail; it must
   never silently turn a device-open error into a passing skip. The prefix,
   cancellation, and physical-page tests now enforce this, and the remaining
