@@ -146,7 +146,7 @@ impl VulkanResidentQueueSubmitter {
     fn submit_prepared_resident_queue_batch(
         &self,
         submissions: &[VulkanPreparedResidentQueueSubmission],
-        timeline_value_offset: u64,
+        timeline_value_transform: VulkanTimelineValueTransform<'_>,
         completion_fence_override: Option<vk::Fence>,
     ) -> Result<(), VulkanError> {
         if submissions.is_empty() {
@@ -162,7 +162,8 @@ impl VulkanResidentQueueSubmitter {
                         vk::SemaphoreSubmitInfo::default()
                             .semaphore(*semaphore)
                             .value(
-                                offset_timeline_value(*value, timeline_value_offset)
+                                timeline_value_transform
+                                    .value(self.device_handle, *semaphore, *value)
                                     .expect("resident submission template offsets were validated"),
                             )
                             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
@@ -188,7 +189,8 @@ impl VulkanResidentQueueSubmitter {
                         vk::SemaphoreSubmitInfo::default()
                             .semaphore(*semaphore)
                             .value(
-                                offset_timeline_value(*value, timeline_value_offset)
+                                timeline_value_transform
+                                    .value(self.device_handle, *semaphore, *value)
                                     .expect("resident submission template offsets were validated"),
                             )
                             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)

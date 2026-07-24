@@ -23,14 +23,16 @@ def can_emit_fp8_representation_from_producer(
 ) -> bool:
     operation = producer.get("op")
     operation_shape_supported = (
-        operation == "rms_norm" and int(scope["input_size"]) == hidden_size
-    ) or operation == "sigmoid_multiply" or (
-        operation == "gated_delta_step"
-        and int(scope["input_size"])
-        == int(producer.get("attrs", {}).get("value_heads", 0))
-        * int(producer.get("attrs", {}).get("value_head_width", 0))
-        and int(scope["block_columns"])
-        == int(producer.get("attrs", {}).get("value_head_width", 0))
+        (operation == "rms_norm" and int(scope["input_size"]) == hidden_size)
+        or operation == "sigmoid_multiply"
+        or (
+            operation == "gated_delta_step"
+            and int(scope["input_size"])
+            == int(producer.get("attrs", {}).get("value_heads", 0))
+            * int(producer.get("attrs", {}).get("value_head_width", 0))
+            and int(scope["block_columns"])
+            == int(producer.get("attrs", {}).get("value_head_width", 0))
+        )
     )
     return (
         operation_shape_supported
@@ -334,6 +336,10 @@ def build_vulkan_resident_package_manifest(
     embedding_batch_shader_file = embedding_shader_file.replace(
         "embedding_lookup_", "embedding_lookup_batch_", 1
     )
+    embedding_batch_shader_file = persistent_batch_control_shader_file(
+        embedding_batch_shader_file,
+        binding=3,
+    )
     output_scale = 1.0 / logits_scale
     if projection_dtype == "F8_E4M3":
         projection_tile_rows = FP8_OUTPUT_PROJECTION_TILE_ROWS
@@ -361,9 +367,7 @@ def build_vulkan_resident_package_manifest(
             for device in target_devices
         )
         projection_prefix = (
-            "tied_output_projection_dot2"
-            if use_bf16_dot2
-            else "tied_output_projection"
+            "tied_output_projection_dot2" if use_bf16_dot2 else "tied_output_projection"
         )
         projection_shader_file = (
             f"{projection_prefix}_bf16_{vocab_size}x{hidden_size}"
@@ -513,6 +517,13 @@ def build_vulkan_resident_package_manifest(
             for decoder in speculative_decoders
         },
     )
+    optional_device_shader_files = {
+        stage["shader_path"].removeprefix("shaders/")
+        for execution in all_component_executions
+        for kernel in execution["kernels"]
+        for implementation in kernel["batch_implementations"]
+        for stage in implementation["stages"]
+    }
     copy_shader_templates(
         shader_source_dir,
         package_dir / "shaders",
@@ -530,13 +541,6 @@ def build_vulkan_resident_package_manifest(
                         },
                     )
                 )
-    optional_device_shader_files = {
-        stage["shader_path"].removeprefix("shaders/")
-        for execution in all_component_executions
-        for kernel in execution["kernels"]
-        for implementation in kernel["batch_implementations"]
-        for stage in implementation["stages"]
-    }
     mandatory_shader_files = shader_files - optional_device_shader_files
     required_device_extensions = required_vulkan_device_extensions(
         package_dir / "shaders", mandatory_shader_files
@@ -623,6 +627,12 @@ def build_vulkan_resident_package_manifest(
             "batch_shader_path": compiled_shader_path(
                 f"shaders/{embedding_batch_shader_file}"
             ),
+            "batch_control": {
+                "kind": "storage_buffer",
+                "byte_count": 4,
+                "binding": 3,
+                "payload": "width",
+            },
         },
         "output_transducer": {
             "spec": {
@@ -760,9 +770,7 @@ def component_execution_specs(
                     workgroup_count_x=workgroup_count_x_for_node(
                         circuit, node, tensor_index
                     ),
-                    cooperative_float8_e4m3_shapes=(
-                        cooperative_float8_e4m3_shapes
-                    ),
+                    cooperative_float8_e4m3_shapes=(cooperative_float8_e4m3_shapes),
                 )
             )
         executions.append(
@@ -814,9 +822,7 @@ def speculative_decoder_specs(
                 circuit=compiled_circuits[ref["id"]],
                 tensor_index=tensor_index,
                 dimensions=dimensions,
-                cooperative_float8_e4m3_shapes=(
-                    cooperative_float8_e4m3_shapes
-                ),
+                cooperative_float8_e4m3_shapes=(cooperative_float8_e4m3_shapes),
             )
             for ref in executable_refs
         ]
@@ -824,9 +830,7 @@ def speculative_decoder_specs(
         output_refs = output_circuit["parameters"]["refs"]
         norm_tensor = output_refs["norm"]["tensor"]
         projection_tensor = output_refs["projection"]["tensor"]
-        projection_scale_tensor = output_refs.get("weight_scale_inv", {}).get(
-            "tensor"
-        )
+        projection_scale_tensor = output_refs.get("weight_scale_inv", {}).get("tensor")
         projection_dtype = tensor_dtype(tensor_index, projection_tensor)
         if projection_dtype == "F8_E4M3" and not isinstance(
             projection_scale_tensor, str
@@ -1046,16 +1050,14 @@ def component_kernel_spec(
                         "subgroup_size": 64,
                     },
                     "stages": [
-                        {
-                            "shader_path": f"shaders/{cooperative_shader_file}",
-                            "local_size_x": 256,
-                            "workgroup_count_x": (
-                                cooperative_float8_e4m3_workgroup_count_x(
-                                    shader_file,
-                                    shape=shape,
-                                )
+                        persistent_batch_control_stage(
+                            cooperative_shader_file,
+                            256,
+                            cooperative_float8_e4m3_workgroup_count_x(
+                                shader_file,
+                                shape=shape,
                             ),
-                        }
+                        )
                     ],
                 }
             )
@@ -1077,15 +1079,11 @@ def component_kernel_spec(
                         "subgroup_size": 64,
                     },
                     "stages": [
-                        {
-                            "shader_path": (
-                                f"shaders/{cooperative_bfloat16_shader_file}"
-                            ),
-                            "local_size_x": 256,
-                            "workgroup_count_x": cooperative_bfloat16_workgroup_count_x(
-                                shader_file
-                            ),
-                        }
+                        persistent_batch_control_stage(
+                            cooperative_bfloat16_shader_file,
+                            256,
+                            cooperative_bfloat16_workgroup_count_x(shader_file),
+                        )
                     ],
                 }
             )
@@ -1103,11 +1101,16 @@ def component_kernel_spec(
                         "subgroup_size": 64,
                     },
                     "stages": [
-                        {
-                            "shader_path": f"shaders/{frame_parallel_shader_file}",
-                            "local_size_x": local_size_x,
-                            "workgroup_count_x": workgroup_count_x,
-                        }
+                        persistent_batch_control_stage(
+                            frame_parallel_shader_file,
+                            local_size_x,
+                            workgroup_count_x,
+                            payload=(
+                                "width_expert_start"
+                                if frame_parallel_shader_file.startswith("sparse_moe_")
+                                else "width"
+                            ),
+                        )
                     ],
                 }
             )
@@ -1133,11 +1136,11 @@ def component_kernel_spec(
                         "subgroup_operations": [],
                     },
                     "stages": [
-                        {
-                            "shader_path": f"shaders/{exact_shader_file}",
-                            "local_size_x": local_size_x,
-                            "workgroup_count_x": workgroup_count_x,
-                        }
+                        persistent_batch_control_stage(
+                            exact_shader_file,
+                            local_size_x,
+                            workgroup_count_x,
+                        )
                     ],
                 }
             )

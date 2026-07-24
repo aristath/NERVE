@@ -194,13 +194,40 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
 
+    fn resident_feedback_replay_timeline_state(
+        &self,
+        feedback_synchronization: Option<&VulkanResidentPlacedFeedbackTimelineSynchronization>,
+        output_synchronization: &VulkanResidentPlacedOutputTimelineSynchronization,
+    ) -> Result<VulkanTimelineSemaphoreReplayState, VulkanResidentInProcessPlacedRuntimeError> {
+        let mut state = VulkanTimelineSemaphoreReplayState::default();
+        if let Some(feedback_synchronization) = feedback_synchronization {
+            feedback_synchronization
+                .capture_replay_timeline_state(&mut state)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
+        self.edge_synchronizations
+            .capture_replay_timeline_state(&mut state)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        self.distributed_dispatch_runners
+            .capture_replay_timeline_state(&mut state)
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Tick(
+                    VulkanMountedPlacedResidentInProcessStreamTickError::Distributed(error),
+                )
+            })?;
+        output_synchronization
+            .capture_replay_timeline_state(&mut state)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        Ok(state)
+    }
+
     fn submit_resident_feedback_window(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         start_stream_tick: u64,
         tick_count: usize,
         stop_token_ids: &[u32],
-        mut submission_replay: Option<&mut Option<VulkanResidentPlacedFeedbackSubmissionReplay>>,
+        mut template_catalog: Option<&mut VulkanResidentPlacedFeedbackTemplateCatalog>,
     ) -> Result<
         VulkanResidentInProcessPlacedPendingFeedbackWindow,
         VulkanResidentInProcessPlacedRuntimeError,
@@ -222,27 +249,38 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .control
             .arm(tick_count, stop_token_ids)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let template_key = VulkanResidentPlacedFeedbackTemplateKey {
+            runtime_execution_identity: self.model.runtime_execution_identity.clone(),
+            tick_count,
+        };
         let mut template_replayed = false;
         let output_timeline_values =
-            if let Some(replay) = submission_replay
+            if let Some(replay) = template_catalog
                 .as_deref_mut()
-                .and_then(Option::as_mut)
-                .filter(|replay| replay.tick_count == tick_count)
+                .and_then(|catalog| catalog.get(&template_key))
             {
                 template_replayed = true;
                 replay
                     .validate_tick_count(tick_count)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let current_timeline_state = self.resident_feedback_replay_timeline_state(
+                    feedback_loop.feedback_synchronization.as_deref(),
+                    &feedback_loop.output_synchronization,
+                )?;
                 let output_timeline_values = self.advance_resident_feedback_submission_replay(
                     feedback_loop.feedback_synchronization.as_deref(),
                     &feedback_loop.output_synchronization,
                     tick_count,
                 )?;
                 replay
-                    .submit_next(tick_count)
+                    .submit_next(tick_count, &current_timeline_state)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 output_timeline_values
             } else {
+                let recorded_timeline_state = self.resident_feedback_replay_timeline_state(
+                    feedback_loop.feedback_synchronization.as_deref(),
+                    &feedback_loop.output_synchronization,
+                )?;
                 let (submission_template, output_timeline_values) = self
                     .mount_resident_feedback_submission_template(
                         devices,
@@ -254,11 +292,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 submission_template
                     .submit_with_timeline_value_offset(0)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                if let Some(replay_slot) = submission_replay {
-                    *replay_slot = Some(
+                if let Some(catalog) = template_catalog {
+                    catalog.insert(
+                        template_key,
                         VulkanResidentPlacedFeedbackSubmissionReplay::new(
                             submission_template,
                             tick_count,
+                            recorded_timeline_state,
                         )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     );

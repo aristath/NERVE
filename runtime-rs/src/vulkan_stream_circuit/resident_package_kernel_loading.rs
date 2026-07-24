@@ -221,6 +221,7 @@ fn load_resident_component_batch_kernels(
                                 )?,
                                 local_size_x: stage.local_size_x,
                                 workgroup_count_x: stage.workgroup_count_x,
+                                control: stage.control,
                             })
                         })
                         .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?,

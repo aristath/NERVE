@@ -1,5 +1,40 @@
 from nerve.model_package_common import *
 
+
+def persistent_batch_control_shader_file(shader_file: str, *, binding: int) -> str:
+    return shader_file.removesuffix(".comp") + f"__pbc{binding}.comp"
+
+
+def persistent_batch_control_stage(
+    shader_file: str,
+    local_size_x: int,
+    workgroup_count_x: int,
+    *,
+    payload: str = "width",
+    binding: int = 31,
+) -> Json:
+    byte_count = {
+        "width": 4,
+        "width_expert_start": 8,
+        "temporal": 16,
+    }[payload]
+    packaged_shader_file = persistent_batch_control_shader_file(
+        shader_file,
+        binding=binding,
+    )
+    return {
+        "shader_path": f"shaders/{packaged_shader_file}",
+        "local_size_x": local_size_x,
+        "workgroup_count_x": workgroup_count_x,
+        "control": {
+            "kind": "storage_buffer",
+            "byte_count": byte_count,
+            "binding": binding,
+            "payload": payload,
+        },
+    }
+
+
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     if re.fullmatch(r"moe_topk_bf16_e\d+_k\d+\.comp", shader_file):
         return shader_file.replace("moe_topk_", "moe_topk_batch1_", 1)
@@ -29,9 +64,7 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
             "parallel_linear_batch1_",
             1,
         )
-    if re.fullmatch(
-        r"moe_reduce_bf16_h\d+_k\d+_scale[0-9eE+.-]+\.comp", shader_file
-    ):
+    if re.fullmatch(r"moe_reduce_bf16_h\d+_k\d+_scale[0-9eE+.-]+\.comp", shader_file):
         return shader_file.replace("moe_reduce_", "moe_reduce_batch1_", 1)
     if re.fullmatch(
         r"rms_norm_batch\d+_bf16_h\d+_eps[0-9eE+.-]+_offset[0-9eE+.-]+\.comp",
@@ -44,16 +77,30 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     return None
 
 
-
 def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] | None:
     causal_scan_shader = causal_scan_batch_shader_file(shader_file)
     if causal_scan_shader is not None:
+        temporal_binding = (
+            6
+            if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
+            else 2
+            if causal_scan_shader.startswith("rotary_temporal_")
+            else None
+        )
         return [
-            {
-                "shader_path": f"shaders/{causal_scan_shader}",
-                "local_size_x": local_size_x,
-                "workgroup_count_x": causal_scan_workgroup_count_x(shader_file),
-            }
+            persistent_batch_control_stage(
+                causal_scan_shader,
+                local_size_x,
+                causal_scan_workgroup_count_x(shader_file),
+                payload="temporal",
+                binding=temporal_binding,
+            )
+            if temporal_binding is not None
+            else persistent_batch_control_stage(
+                causal_scan_shader,
+                local_size_x,
+                causal_scan_workgroup_count_x(shader_file),
+            )
         ]
 
     attention = re.fullmatch(
@@ -72,19 +119,23 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
     sinks = "_sinks" if attention.group(6) else ""
     attention_window = attention.group(5) or "0"
     return [
-        {
-            "shader_path": f"shaders/{stem}",
-            "local_size_x": local_size_x,
-            "workgroup_count_x": query_heads * CAUSAL_SCAN_LANE_TILE_WIDTH,
-        },
-        {
-            "shader_path": (
-                "shaders/append_kv_temporal_commit_bf16_"
+        persistent_batch_control_stage(
+            stem,
+            local_size_x,
+            query_heads * CAUSAL_SCAN_LANE_TILE_WIDTH,
+            payload="temporal",
+            binding=8 if sinks else 7,
+        ),
+        persistent_batch_control_stage(
+            (
+                "append_kv_temporal_commit_bf16_"
                 f"kv{kv_heads}_d{head_width}_w{attention_window}{sinks}.comp"
             ),
-            "local_size_x": 64,
-            "workgroup_count_x": kv_heads,
-        },
+            64,
+            kv_heads,
+            payload="temporal",
+            binding=8 if sinks else 7,
+        ),
     ]
 
 
@@ -122,12 +173,16 @@ def cooperative_bfloat16_batch_shader_file(shader_file: str) -> str | None:
         shader_file,
     )
     if int4 is not None:
-        operation, quantization_format, scale_dtype, group_size, input_size, output_size = (
-            int4.groups()
-        )
-        if (
-            int(group_size) % COOPERATIVE_BFLOAT16_SHAPE[2]
-            or int(input_size) % int(group_size)
+        (
+            operation,
+            quantization_format,
+            scale_dtype,
+            group_size,
+            input_size,
+            output_size,
+        ) = int4.groups()
+        if int(group_size) % COOPERATIVE_BFLOAT16_SHAPE[2] or int(input_size) % int(
+            group_size
         ):
             return None
         return (
@@ -203,10 +258,7 @@ def cooperative_float8_e4m3_batch_shader_file(
             input_size,
             output_size,
         ) = linear.groups()
-        if (
-            int(block_columns) % k
-            or int(input_size) % int(block_columns)
-        ):
+        if int(block_columns) % k or int(input_size) % int(block_columns):
             return None
         return (
             f"{operation}_prequant_batch{batch_tile_width}_cooperative_"
@@ -244,10 +296,7 @@ def cooperative_float8_e4m3_batch_shader_file(
     )
     if fused_ffn is not None:
         block_rows, block_columns, input_size, output_size = fused_ffn.groups()
-        if (
-            int(block_columns) % k
-            or int(input_size) % int(block_columns)
-        ):
+        if int(block_columns) % k or int(input_size) % int(block_columns):
             return None
         return (
             "parallel_linear_silu_multiply_prequant_"
@@ -279,9 +328,7 @@ def cooperative_float8_e4m3_workgroup_count_x(
             shader_file,
         )
         if parallel is not None:
-            output_sizes = [
-                int(size) for size in parallel.groups() if size is not None
-            ]
+            output_sizes = [int(size) for size in parallel.groups() if size is not None]
         else:
             fused_ffn = re.fullmatch(
                 r"parallel_linear_silu_multiply_prequant_fp8_e4m3_"
@@ -332,6 +379,17 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
                 1,
             ),
         )
+    if re.fullmatch(
+        r"rotary_bf16_\d+x\d+_r\d+_theta[0-9eE+.-]+"
+        r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
+        r"_(?:half|interleaved|proportional)__sc\d+\.comp",
+        shader_file,
+    ):
+        return re.sub(
+            r"__sc\d+\.comp$",
+            ".comp",
+            shader_file.replace("rotary_bf16_", "rotary_temporal_bf16_", 1),
+        )
     return None
 
 
@@ -359,6 +417,14 @@ def causal_scan_workgroup_count_x(shader_file: str) -> int:
     )
     if head_norm_rope is not None:
         return int(head_norm_rope.group(1)) + int(head_norm_rope.group(2))
+    rotary = re.fullmatch(
+        r"rotary_bf16_(\d+)x\d+_r\d+_theta[0-9eE+.-]+"
+        r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
+        r"_(?:half|interleaved|proportional)__sc\d+\.comp",
+        shader_file,
+    )
+    if rotary is not None:
+        return int(rotary.group(1))
     raise ModelCompileError(f"shader {shader_file!r} is not a causal scan kernel")
 
 

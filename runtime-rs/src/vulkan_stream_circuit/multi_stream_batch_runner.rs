@@ -23,7 +23,8 @@ impl VulkanResidentPlacedMultiStreamBatchRunner {
             VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget,
         )?;
         if processors.iter().copied().any(|processor| {
-            !Arc::ptr_eq(&processor.model, &first.model)
+            processor.model.runtime_execution_identity
+                != first.model.runtime_execution_identity
                 || processor.model.dynamic_state_capacity_activations
                     != first.model.dynamic_state_capacity_activations
                 || !processor.speculative_decoders.is_empty()
@@ -72,6 +73,7 @@ impl VulkanResidentPlacedMultiStreamBatchRunner {
             embedding_weight,
             &input_signal.buffer,
             &first.model.input_transducer_batch_spirv_words,
+            first.model.input_transducer_batch_control,
             &first.model.input_transducer_spec,
         )?;
 

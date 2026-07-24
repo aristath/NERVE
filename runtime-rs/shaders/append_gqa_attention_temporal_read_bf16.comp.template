@@ -31,7 +31,7 @@ layout(set = 0, binding = {{STATE_READ_BINDING}}) readonly buffer KvStateRead {
     uint words[];
 } kv_state_read;
 
-layout(push_constant) uniform BatchControl {
+layout(set = 0, binding = {{BATCH_CONTROL_BINDING}}) readonly buffer BatchControl {
     uint batch_width;
     uint start_stream_tick_low;
     uint start_stream_tick_high;

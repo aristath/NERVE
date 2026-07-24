@@ -13,6 +13,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     output_transducer_parameter_buffers: Arc<VulkanPermanentParameterBuffers>,
     input_transducer_spirv_words: Vec<u32>,
     input_transducer_batch_spirv_words: Vec<u32>,
+    input_transducer_batch_control: VulkanResidentComponentBatchControlSpec,
     embedding_norm_spirv_words: Vec<u32>,
     embedding_norm_batch_spirv_words: Vec<u32>,
     embedding_norm_batch_lane_tile_width: u32,

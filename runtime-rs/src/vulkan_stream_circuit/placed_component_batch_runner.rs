@@ -2,6 +2,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
     fn new(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         placed_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+        runtime_execution_identity: &str,
         quantum_calibrators: &BTreeMap<
             String,
             Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
@@ -18,6 +19,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         Self::new_with_lane_mounteds(
             devices,
             placed_slices,
+            runtime_execution_identity,
             &lane_mounteds_by_slice,
             quantum_calibrators,
             lane_capacity,
@@ -66,6 +68,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         Self::new_with_lane_mounteds(
             devices,
             &first.device_slices,
+            &first.model.runtime_execution_identity,
             &lane_mounteds_by_slice,
             &first.execution_quantum_calibrators,
             lane_capacity,
@@ -79,6 +82,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
     fn new_with_lane_mounteds(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         placed_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+        runtime_execution_identity: &str,
         lane_mounteds_by_slice: &[Vec<&VulkanMountedPlacedStreamCircuit>],
         quantum_calibrators: &BTreeMap<
             String,
@@ -120,6 +124,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     devices,
                     device,
                     slice,
+                    runtime_execution_identity,
                     lane_mounteds,
                     lane_capacity,
                     execution_mode,

@@ -77,17 +77,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         Ok(ordered)
     }
 
-    fn temporal_block_width(
+    fn temporal_block_lane_capacity(
         &self,
-        available_token_count: usize,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
         const SIGNAL_MEMORY_BUDGET_PER_DEVICE: usize = 256 * 1024 * 1024;
         const RECORDED_DISPATCH_BUDGET_PER_SUBMISSION: usize = 65_536;
 
-        if available_token_count == 0 {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
-        }
-        let mut width = available_token_count;
+        let mut width = VULKAN_BACKEND_LOOP_MAX_WINDOW;
         for slice in &self.device_slices {
             let (_, signal_buffer_plan) =
                 component_batch_signal_buffer_plan(&slice.mounted, &slice.mounted_bound.dispatches)?;
@@ -146,6 +142,16 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         Ok(width.max(1))
     }
 
+    fn temporal_block_width(
+        &self,
+        available_token_count: usize,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        if available_token_count == 0 {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        Ok(available_token_count.min(self.temporal_block_lane_capacity()?))
+    }
+
     fn ensure_temporal_block_execution(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
@@ -168,6 +174,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let execution_graph = VulkanResidentPlacedComponentBatchRunner::new(
             devices,
             &self.device_slices,
+            &self.model.runtime_execution_identity,
             &self.execution_quantum_calibrators,
             block_width,
             VulkanComponentBatchExecutionMode::CausalSequence,
@@ -201,6 +208,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             embedding_weight,
             &input_signal.buffer,
             &self.model.input_transducer_batch_spirv_words,
+            self.model.input_transducer_batch_control,
             &self.model.input_transducer_spec,
         )?;
         let scalar_input = self.device_slices[first_device_index]
@@ -310,7 +318,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let end_stream_tick = start_stream_tick
             .checked_add(tick_count - 1)
             .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-        self.ensure_temporal_block_execution(devices, input_token_ids.len())?;
+        self.ensure_temporal_block_execution(devices, self.temporal_block_lane_capacity()?)?;
         let capacity =
             u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(

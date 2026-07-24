@@ -1,7 +1,7 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v3",
-  "package_id": "model_ddd89a8d_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:74c7e4987187214b20bca30c0bcc4efd0bbb498014d3eecd7aae532841ea2301",
+  "schema": "nerve.vulkan_resident_model_package.v4",
+  "package_id": "model_adc752f6_vulkan_resident",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:e186d37688e68e4c55eca54002a5ed8ff0d13bb705ff361bb57de640f2cf3275",
   "compiler_target": {
     "schema": "nerve.compiler_target.v1",
     "devices": [
@@ -1588,7 +1588,13 @@
       "local_size_x": 256
     },
     "shader_path": "shaders/embedding_lookup_bf16_32x16_scale1.spv",
-    "batch_shader_path": "shaders/embedding_lookup_batch_bf16_32x16_scale1.spv"
+    "batch_shader_path": "shaders/embedding_lookup_batch_bf16_32x16_scale1__pbc3.spv",
+    "batch_control": {
+      "kind": "storage_buffer",
+      "byte_count": 4,
+      "binding": 3,
+      "payload": "width"
+    }
   },
   "output_transducer": {
     "spec": {
@@ -1728,9 +1734,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1749,9 +1761,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1770,9 +1788,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1791,9 +1815,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1812,9 +1842,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             }
@@ -1868,9 +1904,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_batch64_cooperative_3way_bf16_16x16_8_8.spv",
+                  "shader_path": "shaders/parallel_linear_batch64_cooperative_3way_bf16_16x16_8_8__pbc31.spv",
                   "local_size_x": 256,
-                  "workgroup_count_x": 3
+                  "workgroup_count_x": 3,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1889,9 +1931,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_batch2_3way_bf16_16x16_8_8.spv",
+                  "shader_path": "shaders/parallel_linear_batch2_3way_bf16_16x16_8_8__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1910,9 +1958,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_batch4_3way_bf16_16x16_8_8.spv",
+                  "shader_path": "shaders/parallel_linear_batch4_3way_bf16_16x16_8_8__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1931,9 +1985,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_batch8_3way_bf16_16x16_8_8.spv",
+                  "shader_path": "shaders/parallel_linear_batch8_3way_bf16_16x16_8_8__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -1952,9 +2012,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_batch16_3way_bf16_16x16_8_8.spv",
+                  "shader_path": "shaders/parallel_linear_batch16_3way_bf16_16x16_8_8__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             }
@@ -1974,8 +2040,33 @@
           "shader_path": "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv",
           "local_size_x": 64,
           "workgroup_count_x": 2,
-          "batch_mode": "serial_lanes",
-          "batch_implementations": []
+          "batch_mode": "causal_scan",
+          "batch_implementations": [
+            {
+              "execution_domain": "prefill",
+              "lane_tile_width": 64,
+              "independent_candidate_compatible": false,
+              "causal_sequence_compatible": true,
+              "device_requirements": {
+                "vulkan_device_extensions": [],
+                "vulkan_features": [],
+                "subgroup_operations": []
+              },
+              "stages": [
+                {
+                  "shader_path": "shaders/rotary_temporal_bf16_2x8_r8_theta10000_half__pbc2.spv",
+                  "local_size_x": 64,
+                  "workgroup_count_x": 2,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 16,
+                    "binding": 2,
+                    "payload": "temporal"
+                  }
+                }
+              ]
+            }
+          ]
         },
         {
           "execution_index": 3,
@@ -1991,8 +2082,33 @@
           "shader_path": "shaders/rotary_bf16_1x8_r8_theta10000_half__sc2.spv",
           "local_size_x": 64,
           "workgroup_count_x": 1,
-          "batch_mode": "serial_lanes",
-          "batch_implementations": []
+          "batch_mode": "causal_scan",
+          "batch_implementations": [
+            {
+              "execution_domain": "prefill",
+              "lane_tile_width": 64,
+              "independent_candidate_compatible": false,
+              "causal_sequence_compatible": true,
+              "device_requirements": {
+                "vulkan_device_extensions": [],
+                "vulkan_features": [],
+                "subgroup_operations": []
+              },
+              "stages": [
+                {
+                  "shader_path": "shaders/rotary_temporal_bf16_1x8_r8_theta10000_half__pbc2.spv",
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 16,
+                    "binding": 2,
+                    "payload": "temporal"
+                  }
+                }
+              ]
+            }
+          ]
         },
         {
           "execution_index": 4,
@@ -2026,14 +2142,26 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/append_gqa_attention_temporal_read_bf16_q2_kv1_d8_scale0.353553391.spv",
+                  "shader_path": "shaders/append_gqa_attention_temporal_read_bf16_q2_kv1_d8_scale0.353553391__pbc7.spv",
                   "local_size_x": 1024,
-                  "workgroup_count_x": 128
+                  "workgroup_count_x": 128,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 16,
+                    "binding": 7,
+                    "payload": "temporal"
+                  }
                 },
                 {
-                  "shader_path": "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0.spv",
+                  "shader_path": "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0__pbc7.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 16,
+                    "binding": 7,
+                    "payload": "temporal"
+                  }
                 }
               ]
             }
@@ -2087,9 +2215,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch64_cooperative_bf16_16x16.spv",
+                  "shader_path": "shaders/linear_residual_batch64_cooperative_bf16_16x16__pbc31.spv",
                   "local_size_x": 256,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2108,9 +2242,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch2_bf16_16x16.spv",
+                  "shader_path": "shaders/linear_residual_batch2_bf16_16x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2129,9 +2269,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch4_bf16_16x16.spv",
+                  "shader_path": "shaders/linear_residual_batch4_bf16_16x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2150,9 +2296,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch8_bf16_16x16.spv",
+                  "shader_path": "shaders/linear_residual_batch8_bf16_16x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2171,9 +2323,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch16_bf16_16x16.spv",
+                  "shader_path": "shaders/linear_residual_batch16_bf16_16x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             }
@@ -2211,9 +2369,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2232,9 +2396,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2253,9 +2423,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2274,9 +2450,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2295,9 +2477,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0.spv",
+                  "shader_path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             }
@@ -2354,9 +2542,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32__pbc31.spv",
                   "local_size_x": 256,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2375,9 +2569,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2396,9 +2596,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2417,9 +2623,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2438,9 +2650,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             }
@@ -2494,9 +2712,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch64_cooperative_bf16_32x16.spv",
+                  "shader_path": "shaders/linear_residual_batch64_cooperative_bf16_32x16__pbc31.spv",
                   "local_size_x": 256,
-                  "workgroup_count_x": 1
+                  "workgroup_count_x": 1,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2515,9 +2739,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch2_bf16_32x16.spv",
+                  "shader_path": "shaders/linear_residual_batch2_bf16_32x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2536,9 +2766,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch4_bf16_32x16.spv",
+                  "shader_path": "shaders/linear_residual_batch4_bf16_32x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2557,9 +2793,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch8_bf16_32x16.spv",
+                  "shader_path": "shaders/linear_residual_batch8_bf16_32x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             },
@@ -2578,9 +2820,15 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch16_bf16_32x16.spv",
+                  "shader_path": "shaders/linear_residual_batch16_bf16_32x16__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 8
+                  "workgroup_count_x": 8,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width"
+                  }
                 }
               ]
             }
@@ -2662,17 +2910,17 @@
         "byte_count": 22304,
         "sha256": "f7ef90fa8d1445e477466eeb14939fa4aef7ebe2be8243a579f331b980767bbe"
       },
-      "shaders/append_gqa_attention_temporal_read_bf16_q2_kv1_d8_scale0.353553391.spv": {
-        "byte_count": 19432,
-        "sha256": "24b368edd7d99d6ecf73fb7485b0eeb440837829033022cf238240ec438e963a"
+      "shaders/append_gqa_attention_temporal_read_bf16_q2_kv1_d8_scale0.353553391__pbc7.spv": {
+        "byte_count": 19524,
+        "sha256": "8029d21444156f8c3a6db0fff5690efafdb361f3b6f9d2a33bd8bb709281015a"
       },
-      "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0.spv": {
-        "byte_count": 4800,
-        "sha256": "3daa6e584b650ea28a70796bbe03cff07e8a6084c11f50d6d8bd604c482dee0e"
+      "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0__pbc7.spv": {
+        "byte_count": 4892,
+        "sha256": "cec62f75e93ab9d993d1851118dcd2dab86cc7458e39fb7e30257ad8c8882d7d"
       },
-      "shaders/embedding_lookup_batch_bf16_32x16_scale1.spv": {
-        "byte_count": 3360,
-        "sha256": "995826dce9af705756a6a7676af233d29c8478f378d5014ab597d43838c12224"
+      "shaders/embedding_lookup_batch_bf16_32x16_scale1__pbc3.spv": {
+        "byte_count": 3404,
+        "sha256": "6fcc073ff814001c3a0d53ed2eb3522303531b6f76fb86b428416e7ea85ae86b"
       },
       "shaders/embedding_lookup_bf16_32x16_scale1.spv": {
         "byte_count": 2936,
@@ -2686,45 +2934,45 @@
         "byte_count": 9148,
         "sha256": "0fc44a3cde000cb62806231706fa2e0538804f7b5da6d9c1dd76607891a685dd"
       },
-      "shaders/linear_residual_batch16_bf16_16x16.spv": {
-        "byte_count": 11708,
-        "sha256": "dd9adcf952b286e919fc3f87f5c637965e26fa7e26d1891d2078099077919f8d"
+      "shaders/linear_residual_batch16_bf16_16x16__pbc31.spv": {
+        "byte_count": 11752,
+        "sha256": "8d12df36e5fd99e152c975958a0dc59b019c503472f95a89316ecb1fe0f23fb6"
       },
-      "shaders/linear_residual_batch16_bf16_32x16.spv": {
-        "byte_count": 11724,
-        "sha256": "877c8bb9e862d6da1b3a01e1473d20c32f990f63918d79cde58b56b16fa8e7e7"
+      "shaders/linear_residual_batch16_bf16_32x16__pbc31.spv": {
+        "byte_count": 11768,
+        "sha256": "c69b9452af5d573db1083279b80a34604a24b6ee342118968957723d63a39138"
       },
-      "shaders/linear_residual_batch2_bf16_16x16.spv": {
-        "byte_count": 11708,
-        "sha256": "b92483c2206de39060a0bdf91f8cac7c6fbe7017a6b3691d5eb94b2f31e67a41"
+      "shaders/linear_residual_batch2_bf16_16x16__pbc31.spv": {
+        "byte_count": 11752,
+        "sha256": "b3b9574ff5ca08d2ae5e75d0e864f2d37b1ba923588d4c5c6b10701740ca711d"
       },
-      "shaders/linear_residual_batch2_bf16_32x16.spv": {
-        "byte_count": 11724,
-        "sha256": "a563d9cabe5b0870fe29e664203d96b07fbb3067bed6fffb99762dacd6a2ca1d"
+      "shaders/linear_residual_batch2_bf16_32x16__pbc31.spv": {
+        "byte_count": 11768,
+        "sha256": "8beb81a96d4d86944003e89cc4c87f80b5c08bce9b0ff99c0ace7c5cf50b7d44"
       },
-      "shaders/linear_residual_batch4_bf16_16x16.spv": {
-        "byte_count": 11724,
-        "sha256": "34be9d3901398c3cef4e543d200ebe016361739e83be68352e2ceb62c02bf4ce"
+      "shaders/linear_residual_batch4_bf16_16x16__pbc31.spv": {
+        "byte_count": 11768,
+        "sha256": "0f399102ac0bb62d32d16ef50850bd5c9c3498773d5cdcda8f8b5b8f2aa9a18f"
       },
-      "shaders/linear_residual_batch4_bf16_32x16.spv": {
-        "byte_count": 11740,
-        "sha256": "8331792c3c7f45bd59e227e6edc74f07c06a22211af7bc1fadadf736c740db52"
+      "shaders/linear_residual_batch4_bf16_32x16__pbc31.spv": {
+        "byte_count": 11784,
+        "sha256": "fe33d011631a30a193d5ded3ceb988e2570f4cb1584a48973e37011195f45142"
       },
-      "shaders/linear_residual_batch64_cooperative_bf16_16x16.spv": {
-        "byte_count": 12616,
-        "sha256": "28648a2a428cb2ecc74a2999f867fb19c45349938bd68181ad58c9612ae1bbbb"
+      "shaders/linear_residual_batch64_cooperative_bf16_16x16__pbc31.spv": {
+        "byte_count": 12676,
+        "sha256": "9824ca17c8f2c8a17614d1aabdb1a45991c5e90390a7cb915d2c696113af01dd"
       },
-      "shaders/linear_residual_batch64_cooperative_bf16_32x16.spv": {
-        "byte_count": 12632,
-        "sha256": "639e51ca9e3c274dbaa1c70a556b779194ba55106f25977120887ab97d905bf0"
+      "shaders/linear_residual_batch64_cooperative_bf16_32x16__pbc31.spv": {
+        "byte_count": 12692,
+        "sha256": "94ca6cca1700fb8a0450c9e7aa30b12d891276521e7043076c2d644966c9d765"
       },
-      "shaders/linear_residual_batch8_bf16_16x16.spv": {
-        "byte_count": 11708,
-        "sha256": "7c14051fbfc91e54b00c9975d1c0df6b3909cf5f188cead5998784f3a7965e50"
+      "shaders/linear_residual_batch8_bf16_16x16__pbc31.spv": {
+        "byte_count": 11752,
+        "sha256": "11d1558042ec907eed9e8513c3a3b24ead32f994b4c5a336c71d3556e4b1bc23"
       },
-      "shaders/linear_residual_batch8_bf16_32x16.spv": {
-        "byte_count": 11724,
-        "sha256": "6bb65a7825c50a4088f85cfad701580687e08631f82c07cf598683d13a0c9c75"
+      "shaders/linear_residual_batch8_bf16_32x16__pbc31.spv": {
+        "byte_count": 11768,
+        "sha256": "1e5123cdfe951e75afc2cb96fa6982de259b9bca167449c46cf97d8ba2d2600f"
       },
       "shaders/linear_residual_bf16_16x16.spv": {
         "byte_count": 8336,
@@ -2738,45 +2986,45 @@
         "byte_count": 9440,
         "sha256": "172cabeb8fede222f8e498b585241ea4e5f763470c2ec235415c2bba9446f654"
       },
-      "shaders/parallel_linear_batch16_3way_bf16_16x16_8_8.spv": {
-        "byte_count": 13176,
-        "sha256": "860a6e57a508987554d6d442107a22cafa27c41b75f0bf82bbbd0dc4899c40d3"
+      "shaders/parallel_linear_batch16_3way_bf16_16x16_8_8__pbc31.spv": {
+        "byte_count": 13220,
+        "sha256": "a84f76c70473fa5f4ceabd4b42f791c80d4b990a7eba1ac4a4d670da4a81b459"
       },
-      "shaders/parallel_linear_batch2_3way_bf16_16x16_8_8.spv": {
-        "byte_count": 13176,
-        "sha256": "a45d314f4fef814398ebc7f52ccfbd6e44b463c8b56bf52eff7539e32420f033"
+      "shaders/parallel_linear_batch2_3way_bf16_16x16_8_8__pbc31.spv": {
+        "byte_count": 13220,
+        "sha256": "ac4e3392b0febcdf7abbe888d591710d092eba020c637d58df330f1d64807977"
       },
-      "shaders/parallel_linear_batch4_3way_bf16_16x16_8_8.spv": {
-        "byte_count": 13176,
-        "sha256": "60838bd019fda4f38533659143ac2c02fbd1b42a6bab8a102bfeebd4e7dd8664"
+      "shaders/parallel_linear_batch4_3way_bf16_16x16_8_8__pbc31.spv": {
+        "byte_count": 13220,
+        "sha256": "b787b22fbe87ea1c3e180c7fc3bc56a65bdf5001de7fee110ddc88602ff81078"
       },
-      "shaders/parallel_linear_batch64_cooperative_3way_bf16_16x16_8_8.spv": {
-        "byte_count": 16656,
-        "sha256": "806cd0a72134825c9d631c78729624cdae95c4185eb17ef227e32eb6ba5cd3f0"
+      "shaders/parallel_linear_batch64_cooperative_3way_bf16_16x16_8_8__pbc31.spv": {
+        "byte_count": 16716,
+        "sha256": "f3ba599b7ca0003ce13e14081c1494496bab132332cddd7f295affc1f4394b55"
       },
-      "shaders/parallel_linear_batch8_3way_bf16_16x16_8_8.spv": {
-        "byte_count": 13176,
-        "sha256": "ee2b7be01f6264c12587bb4245cdbb11ca786671db6f381f0197ae0556c65391"
+      "shaders/parallel_linear_batch8_3way_bf16_16x16_8_8__pbc31.spv": {
+        "byte_count": 13220,
+        "sha256": "04f53bde53db1393b9248a750e015a84ee62836aa4d4206c45a8991d84e7d6b3"
       },
-      "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32.spv": {
-        "byte_count": 14672,
-        "sha256": "e85d6345ea05511511936dcbd647a68e0bdebc3d7496125298195a823476298a"
+      "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv": {
+        "byte_count": 14716,
+        "sha256": "3f8a832732c08b4a3c0ae5fef9315cff4d283782e6611361ccbe21dc22b794c4"
       },
-      "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32.spv": {
-        "byte_count": 14672,
-        "sha256": "d5ef0ca7d43cee03f0ff0c12684659ecfeae3e32ea246e0ab3c3ea82760668fd"
+      "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32__pbc31.spv": {
+        "byte_count": 14716,
+        "sha256": "0bc6293d2aa08f62646d659291908aab61e1b033d1d3705cde10376430e578fc"
       },
-      "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32.spv": {
-        "byte_count": 14688,
-        "sha256": "80968111ddf3f1d9caae2d09a4a65876b7c0e5d763bcbe478cd4d560c38f24c8"
+      "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32__pbc31.spv": {
+        "byte_count": 14732,
+        "sha256": "403afdca62da64341e33a27c0ce9622e71205f96f3976b0c426c36dda3002165"
       },
-      "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32.spv": {
-        "byte_count": 12944,
-        "sha256": "0b08e866a40c996e498c9bc31f9401aa3c045626cf33080af7d5090d1b5013f7"
+      "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32__pbc31.spv": {
+        "byte_count": 13004,
+        "sha256": "aa75fecde2d4f8893d373bf4a1325d697307ec088438346d4e23199fd9aefb85"
       },
-      "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32.spv": {
-        "byte_count": 14672,
-        "sha256": "e2043fbff637452b0d47cc543508c5eb130888c9c15000a16ea40b82ed928002"
+      "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32__pbc31.spv": {
+        "byte_count": 14716,
+        "sha256": "56bbce846ead3aa202c473346881460ccc90e3b3e9467e78cf40cb5374e973c4"
       },
       "shaders/parallel_linear_silu_multiply_bf16_16x32.spv": {
         "byte_count": 10768,
@@ -2794,25 +3042,29 @@
         "byte_count": 3340,
         "sha256": "3db06a3f4a7ee9d71090da7487c33f759fa9894cb0cd80dad0db5ab170a3c249"
       },
-      "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0.spv": {
-        "byte_count": 8876,
-        "sha256": "e8ef39f14667aab74c3987a74b4f430222f7f55342cd1fa89d35da55e9877672"
+      "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv": {
+        "byte_count": 8920,
+        "sha256": "9d177024bca652695f2ccb661ac8833153ea8845cf0a2b052d855655e208da69"
       },
-      "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0.spv": {
-        "byte_count": 8876,
-        "sha256": "4acafc8f50b149f2ad7a8b248879a8a2ffea05961220e8e19ea09c32e3e9a4a0"
+      "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv": {
+        "byte_count": 8920,
+        "sha256": "2a08dcef66809b1d580c293fdf48f78d9fce477ab0c314dc36eba4345a3fe291"
       },
-      "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0.spv": {
-        "byte_count": 8876,
-        "sha256": "4b4396eb14761552a89ffa10c0d91295c2a789413c79dec60d9ebdb8db0e85e7"
+      "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv": {
+        "byte_count": 8920,
+        "sha256": "7db81fec5799fb670dd55bb229a3456e3b17dbe5be4951bc9793ee9dbfa32de4"
       },
       "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0.spv": {
         "byte_count": 8892,
         "sha256": "0fd6dc41813f10a4669d808c7b1ef43a89b4df6859b8fe10afa9738413531757"
       },
-      "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0.spv": {
-        "byte_count": 8876,
-        "sha256": "4670ed4df21e648d110e5f7e944a067430ebe2f5ee5a31547d0ce536394c11df"
+      "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv": {
+        "byte_count": 8936,
+        "sha256": "f503fede10871c40cf398826001d8a7736a0871eef44b16c55c2f3e1f5755b72"
+      },
+      "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv": {
+        "byte_count": 8920,
+        "sha256": "0ba38e569b68e2600b14acbf20fe4f37120da8c45937561a1b849172c5579d57"
       },
       "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv": {
         "byte_count": 5960,
@@ -2825,6 +3077,14 @@
       "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv": {
         "byte_count": 9172,
         "sha256": "c9d8f1249cca4e34629cea23cf06cb8d5441e0363775e4ed7c996664cd2cad55"
+      },
+      "shaders/rotary_temporal_bf16_1x8_r8_theta10000_half__pbc2.spv": {
+        "byte_count": 10832,
+        "sha256": "add1a8e000b32fc6012e3f7718fdaae63ee39535284713b9333a7acb1dbbdea8"
+      },
+      "shaders/rotary_temporal_bf16_2x8_r8_theta10000_half__pbc2.spv": {
+        "byte_count": 10848,
+        "sha256": "b3d9cbecd59df0eeab466fe901b966c30c04327cf7397f40670c352e9b60d081"
       },
       "shaders/temperature_top_k_candidates_runtime_f32_32_kc32_g128_l256.spv": {
         "byte_count": 8480,
@@ -2860,7 +3120,7 @@
       },
       "transpiled/model.json": {
         "byte_count": 3694,
-        "sha256": "7815f88f0a8e038f4dae600870118c3a4ceb48cf62bbe70b5b0215a26c747229"
+        "sha256": "dc4222205896b7379f787e7b69af0b3449c20be18d909bc70f42b4329b3731ef"
       },
       "transpiled/tensors.json": {
         "byte_count": 7272,

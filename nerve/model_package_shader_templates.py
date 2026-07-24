@@ -2,6 +2,7 @@ from nerve.model_package_common import *
 from nerve.model_package_shaders import *
 from nerve.model_package_tensors import *
 
+
 def copy_shader_templates(
     source_dir: Path, dest_dir: Path, shader_files: set[str]
 ) -> None:
@@ -13,10 +14,53 @@ def copy_shader_templates(
         destination.write_text(render_shader_source(source_dir, shader_file))
 
 
+def lower_batch_control_to_persistent_buffer(
+    shader_file: str,
+    rendered: str,
+    *,
+    binding: int,
+) -> str:
+    lowered, replacement_count = re.subn(
+        r"layout\(push_constant\) uniform BatchControl",
+        f"layout(set = 0, binding = {binding}) readonly buffer BatchControl",
+        rendered,
+    )
+    if replacement_count == 0:
+        declared_bindings = re.findall(
+            r"layout\(set = 0, binding = (\d+)\) readonly buffer BatchControl",
+            rendered,
+        )
+        if declared_bindings == [str(binding)]:
+            return rendered
+        raise ModelCompileError(
+            f"component batch shader {shader_file!r} declares BatchControl bindings "
+            f"{declared_bindings!r}; expected [{binding!r}]"
+        )
+    if replacement_count != 1:
+        raise ModelCompileError(
+            f"component batch shader {shader_file!r} has {replacement_count} "
+            "push-constant batch controls; expected one"
+        )
+    return lowered
+
+
 def render_shader_source(source_dir: Path, shader_file: str) -> str:
     source = source_dir / shader_file
     if source.exists():
         return source.read_text()
+
+    persistent_batch_control_variant = re.fullmatch(
+        r"(.+)__pbc(\d+)\.comp",
+        shader_file,
+    )
+    if persistent_batch_control_variant is not None:
+        source_name, binding = persistent_batch_control_variant.groups()
+        rendered = render_shader_source(source_dir, f"{source_name}.comp")
+        return lower_batch_control_to_persistent_buffer(
+            shader_file,
+            rendered,
+            binding=int(binding),
+        )
 
     stream_control_variant = re.fullmatch(r"(.+)__sc(\d+)\.comp", shader_file)
     if stream_control_variant is not None:
@@ -400,9 +444,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     )
     if fp8_quantizer is not None:
         batch_tile_width = (
-            int(fp8_quantizer.group(1))
-            if fp8_quantizer.group(1) is not None
-            else None
+            int(fp8_quantizer.group(1)) if fp8_quantizer.group(1) is not None else None
         )
         block_columns = int(fp8_quantizer.group(2))
         element_count = int(fp8_quantizer.group(3))
@@ -531,9 +573,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             lambda value: int(value) if value is not None else None,
             cooperative_prequant_parallel_fp8.groups(),
         )
-        output_sizes = [
-            int(size) for size in optional_output_sizes if size is not None
-        ]
+        output_sizes = [int(size) for size in optional_output_sizes if size is not None]
         if (
             min(
                 batch_tile_width,
@@ -603,13 +643,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             "    return bf16_to_f32(packed >> ((index & 1u) * 16u));"
         )
         weight_reads = "\n".join(
-            f"    if (branch == {index}u) "
-            f"return weight_{label.lower()}.values[index];"
+            f"    if (branch == {index}u) return weight_{label.lower()}.values[index];"
             for index, label in enumerate(labels[:-1])
         )
-        weight_reads += (
-            f"\n    return weight_{labels[-1].lower()}.values[index];"
-        )
+        weight_reads += f"\n    return weight_{labels[-1].lower()}.values[index];"
         output_writes = "\n".join(
             f"    if (branch == {index}u) {{\n"
             f"        output_{label.lower()}.values["
@@ -939,18 +976,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     )
     if parallel_fp8 is not None:
         batch_tile_width = (
-            int(parallel_fp8.group(1))
-            if parallel_fp8.group(1) is not None
-            else None
+            int(parallel_fp8.group(1)) if parallel_fp8.group(1) is not None else None
         )
         branch_count = int(parallel_fp8.group(2))
         block_rows = int(parallel_fp8.group(3))
         block_columns = int(parallel_fp8.group(4))
         input_size = int(parallel_fp8.group(5))
         output_sizes = [
-            int(width)
-            for width in parallel_fp8.groups()[5:]
-            if width is not None
+            int(width) for width in parallel_fp8.groups()[5:] if width is not None
         ]
         output_tile_rows = fp8_linear_tile_rows(max(output_sizes))
         if (
@@ -1142,7 +1175,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "OUTPUT_BINDINGS": output_bindings,
                 "WEIGHT_BINDINGS": weight_bindings,
                 "WEIGHT_READS": weight_reads,
-                "OUTPUT_WRITES": output_writes.replace("__OUTPUT_INDEX__", output_index),
+                "OUTPUT_WRITES": output_writes.replace(
+                    "__OUTPUT_INDEX__", output_index
+                ),
             },
         )
 
@@ -1164,8 +1199,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         output_scale = tied_output_projection_fp8.group(6)
         if (
             (batch_tile_width is not None and batch_tile_width <= 0)
-            or
-            block_rows <= 0
+            or block_rows <= 0
             or block_columns != 128
             or input_size <= 0
             or input_size % block_columns != 0
@@ -1368,8 +1402,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         output_size = int(fused_q8_ffn_projection.group(3))
         if (
             (batch_tile_width is not None and batch_tile_width <= 0)
-            or
-            input_size <= 0
+            or input_size <= 0
             or input_size % Q8_0_GROUP_SIZE
             or output_size <= 0
             or output_size % 2
@@ -1415,8 +1448,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         output_binding = 2 if has_residual else 1
         weight_binding = 3 if has_residual else 2
         auxiliary_buffer = (
-            "layout(set = 0, binding = 3) readonly buffer Bias { "
-            "uint words[]; } bias;"
+            "layout(set = 0, binding = 3) readonly buffer Bias { uint words[]; } bias;"
             if has_bias
             else (
                 "layout(set = 0, binding = 1) readonly buffer ResidualFrames { "
@@ -1594,8 +1626,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         output_binding = 2 if has_residual else 1
         weight_binding = 3 if has_residual else 2
         auxiliary_buffer = (
-            "layout(set = 0, binding = 3) readonly buffer Bias { "
-            "uint words[]; } bias;"
+            "layout(set = 0, binding = 3) readonly buffer Bias { uint words[]; } bias;"
             if has_bias
             else (
                 "layout(set = 0, binding = 1) readonly buffer ResidualFrames { "
@@ -1642,9 +1673,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         shader_file,
     )
     if cooperative_int4_linear is not None:
-        operation, quantization_format, scale_dtype = (
-            cooperative_int4_linear.groups()[:3]
-        )
+        operation, quantization_format, scale_dtype = cooperative_int4_linear.groups()[
+            :3
+        ]
         group_size, input_size, output_size = map(
             int, cooperative_int4_linear.groups()[3:]
         )
@@ -2034,6 +2065,28 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
+            r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
+            r"_a([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
+            "rotary_temporal_bf16.comp.template",
+            (
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_FACTOR",
+                "ROPE_CORRECTION_LOW",
+                "ROPE_CORRECTION_HIGH",
+                "ROPE_ATTENTION_FACTOR",
+                "ROPE_LAYOUT",
+            ),
+        ),
+        (
+            r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
+            "rotary_temporal_bf16.comp.template",
+            ("HEAD_COUNT", "HEAD_WIDTH", "ROTARY_WIDTH", "ROPE_THETA", "ROPE_LAYOUT"),
+        ),
+        (
             r"rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
             r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
             r"_a([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
@@ -2230,6 +2283,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 replacements.setdefault("ROPE_CORRECTION_LOW", "0.0")
                 replacements.setdefault("ROPE_CORRECTION_HIGH", "1.0")
                 replacements.setdefault("ROPE_ATTENTION_FACTOR", "1.0")
+            temporal_control_bindings = {
+                "parallel_head_norm_rope_2way_temporal_bf16.comp.template": "6",
+                "rotary_temporal_bf16.comp.template": "2",
+            }
+            if template in temporal_control_bindings:
+                replacements["BATCH_CONTROL_BINDING"] = temporal_control_bindings[
+                    template
+                ]
             return render_shader_template(source_dir, template, replacements)
 
     per_layer_embedding_shape = re.fullmatch(
@@ -2361,6 +2422,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "HAS_SINKS": "1" if has_sinks else "0",
                 "ATTENTION_SINK_BINDING": "5",
                 "STATE_READ_BINDING": "6" if has_sinks else "5",
+                "BATCH_CONTROL_BINDING": "8" if has_sinks else "7",
             },
         )
 
@@ -2383,6 +2445,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "ATTENTION_WINDOW": temporal_kv_commit_shape.group(3),
                 "STATE_WRITE_BINDING": (
                     "7" if temporal_kv_commit_shape.group(4) else "6"
+                ),
+                "BATCH_CONTROL_BINDING": (
+                    "8" if temporal_kv_commit_shape.group(4) else "7"
                 ),
             },
         )

@@ -1,5 +1,6 @@
 from model_package_layout_common import *
 
+
 def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     assert SCALAR_BATCH_LANE_TILE_WIDTH == 16
     assert (
@@ -11,9 +12,7 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == "linear_batch16_fp8_e4m3_b128x128_5120x17408.comp"
     )
     assert (
-        weight_shared_batch_shader_file(
-            "quantize_fp8_e4m3_b128_h5120.comp"
-        )
+        weight_shared_batch_shader_file("quantize_fp8_e4m3_b128_h5120.comp")
         == "quantize_batch16_fp8_e4m3_b128_h5120.comp"
     )
     assert (
@@ -58,12 +57,8 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         "b128x128_5120x17408.comp"
     )
     assert weight_shared_batch_shader_file(
-        "parallel_linear_2way_prequant_fp8_e4m3_"
-        "b128x128_5120x5120_1024.comp"
-    ) == (
-        "parallel_linear_batch16_2way_prequant_fp8_e4m3_"
-        "b128x128_5120x5120_1024.comp"
-    )
+        "parallel_linear_2way_prequant_fp8_e4m3_b128x128_5120x5120_1024.comp"
+    ) == ("parallel_linear_batch16_2way_prequant_fp8_e4m3_b128x128_5120x5120_1024.comp")
     assert (
         weight_shared_batch_shader_file("linear_bf16_1024x1024.comp")
         == "linear_batch16_bf16_1024x1024.comp"
@@ -144,8 +139,7 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == 80
     )
     parallel_fp8_cooperative = cooperative_float8_e4m3_batch_shader_file(
-        "parallel_linear_3way_prequant_fp8_e4m3_"
-        "b128x128_5120x6144_1024_1024.comp",
+        "parallel_linear_3way_prequant_fp8_e4m3_b128x128_5120x6144_1024_1024.comp",
         shape=(16, 16, 16),
     )
     assert parallel_fp8_cooperative == (
@@ -154,15 +148,13 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     )
     assert (
         cooperative_float8_e4m3_workgroup_count_x(
-            "parallel_linear_3way_prequant_fp8_e4m3_"
-            "b128x128_5120x6144_1024_1024.comp",
+            "parallel_linear_3way_prequant_fp8_e4m3_b128x128_5120x6144_1024_1024.comp",
             shape=(16, 16, 16),
         )
         == 96
     )
     fused_ffn_fp8_cooperative = cooperative_float8_e4m3_batch_shader_file(
-        "parallel_linear_silu_multiply_prequant_fp8_e4m3_"
-        "b128x128_5120x17408.comp",
+        "parallel_linear_silu_multiply_prequant_fp8_e4m3_b128x128_5120x17408.comp",
         shape=(16, 16, 16),
     )
     assert fused_ffn_fp8_cooperative == (
@@ -171,8 +163,7 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     )
     assert (
         cooperative_float8_e4m3_workgroup_count_x(
-            "parallel_linear_silu_multiply_prequant_fp8_e4m3_"
-            "b128x128_5120x17408.comp",
+            "parallel_linear_silu_multiply_prequant_fp8_e4m3_b128x128_5120x17408.comp",
             shape=(16, 16, 16),
         )
         == 272
@@ -202,7 +193,7 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
         "subgroup_size": 64,
     }
     assert frame_parallel["stages"][0]["shader_path"] == (
-        "shaders/rms_norm_batch1_bf16_h4096_eps1e-06_offset1.comp"
+        "shaders/rms_norm_batch1_bf16_h4096_eps1e-06_offset1__pbc31.comp"
     )
     assert [implementation["lane_tile_width"] for implementation in portable] == [
         2,
@@ -234,8 +225,7 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     )
     assert (
         causal_scan_batch_shader_file(
-            "gated_delta_step_k16x128_v32x128_af32_dtbf16_nf32_"
-            "eps1e-06_qfp8b128.comp"
+            "gated_delta_step_k16x128_v32x128_af32_dtbf16_nf32_eps1e-06_qfp8b128.comp"
         )
         == "gated_delta_scan_k16x128_v32x128_af32_dtbf16_nf32_"
         "eps1e-06_qfp8b128.comp"
@@ -246,6 +236,12 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     ) == (
         "parallel_head_norm_rope_2way_temporal_bf16_h16_4_d256_r64_"
         "eps1e-06_offset1_theta10000000_half.comp"
+    )
+    assert (
+        causal_scan_batch_shader_file(
+            "rotary_bf16_16x256_r64_theta10000000_half__sc2.comp"
+        )
+        == "rotary_temporal_bf16_16x256_r64_theta10000000_half.comp"
     )
     assert causal_scan_batch_shader_file("linear_bf16_4096x4096.comp") is None
     assert causal_scan_workgroup_count_x("causal_conv1d_silu_bf16_c8192_k4.comp") == 64
@@ -262,6 +258,12 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         )
         == 20
     )
+    assert (
+        causal_scan_workgroup_count_x(
+            "rotary_bf16_16x256_r64_theta10000000_half__sc2.comp"
+        )
+        == 16
+    )
 
     attention_local_size = attention_workgroup_shape(256)[0]
     assert causal_scan_batch_stages(
@@ -271,17 +273,90 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         {
             "shader_path": (
                 "shaders/append_gqa_attention_temporal_read_bf16_"
-                "q16_kv4_d256_scale0.0625.comp"
+                "q16_kv4_d256_scale0.0625__pbc7.comp"
             ),
             "local_size_x": attention_local_size,
             "workgroup_count_x": 16 * 64,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 16,
+                "binding": 7,
+                "payload": "temporal",
+            },
         },
         {
-            "shader_path": "shaders/append_kv_temporal_commit_bf16_kv4_d256_w0.comp",
+            "shader_path": "shaders/append_kv_temporal_commit_bf16_kv4_d256_w0__pbc7.comp",
             "local_size_x": 64,
             "workgroup_count_x": 4,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 16,
+                "binding": 7,
+                "payload": "temporal",
+            },
         },
     ]
+    sink_stages = causal_scan_batch_stages(
+        "append_gqa_attention_bf16_q16_kv4_d256_scale0.0625_w32768_sinks__sc7.comp",
+        attention_local_size,
+    )
+    assert sink_stages is not None
+    assert [stage["control"] for stage in sink_stages] == [
+        {
+            "kind": "storage_buffer",
+            "byte_count": 16,
+            "binding": 8,
+            "payload": "temporal",
+        },
+        {
+            "kind": "storage_buffer",
+            "byte_count": 16,
+            "binding": 8,
+            "payload": "temporal",
+        },
+    ]
+    rope_stages = causal_scan_batch_stages(
+        "parallel_head_norm_rope_2way_bf16_h16_4_d256_r64_eps1e-06_"
+        "offset1_theta10000000_half__sc6.comp",
+        64,
+    )
+    assert rope_stages is not None
+    assert rope_stages[0]["control"] == {
+        "kind": "storage_buffer",
+        "byte_count": 16,
+        "binding": 6,
+        "payload": "temporal",
+    }
+    standalone_rope_stages = causal_scan_batch_stages(
+        "rotary_bf16_16x256_r64_theta10000000_half__sc2.comp",
+        64,
+    )
+    assert standalone_rope_stages == [
+        {
+            "shader_path": (
+                "shaders/rotary_temporal_bf16_16x256_r64_theta10000000_half__pbc2.comp"
+            ),
+            "local_size_x": 64,
+            "workgroup_count_x": 16,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 16,
+                "binding": 2,
+                "payload": "temporal",
+            },
+        }
+    ]
+    conv_stages = causal_scan_batch_stages(
+        "causal_conv1d_silu_bf16_c8192_k4.comp",
+        128,
+    )
+    assert conv_stages is not None
+    assert conv_stages[0]["control"] == {
+        "kind": "storage_buffer",
+        "byte_count": 4,
+        "binding": 31,
+        "payload": "width",
+    }
     attention_spec = component_kernel_spec(
         execution_index=0,
         node={"id": "attention", "op": "append_scaled_dot_product_attention"},
@@ -310,6 +385,8 @@ def test_compiler_renders_temporal_attention_stages(tmp_path: Path) -> None:
         tmp_path.glob("append_gqa_attention_temporal_read_*.comp")
     ).read_text()
     assert "layout(set = 0, binding = 6) readonly buffer KvStateRead" in read_source
+    assert "layout(set = 0, binding = 8) readonly buffer BatchControl" in read_source
+    assert "layout(push_constant) uniform BatchControl" not in read_source
     assert "const uint ATTENTION_WINDOW = 32768u;" in read_source
     assert "absolute_tick >= batch_control.start_stream_tick_low" in read_source
     assert "uint query_head = gl_WorkGroupID.x % QUERY_HEADS;" in read_source
@@ -317,6 +394,8 @@ def test_compiler_renders_temporal_attention_stages(tmp_path: Path) -> None:
     assert "if (position >= batch_control.batch_width) return;" in read_source
     commit_source = next(tmp_path.glob("append_kv_temporal_commit_*.comp")).read_text()
     assert "layout(set = 0, binding = 7) buffer KvStateWrite" in commit_source
+    assert "layout(set = 0, binding = 8) readonly buffer BatchControl" in commit_source
+    assert "layout(push_constant) uniform BatchControl" not in commit_source
     assert "const uint ATTENTION_WINDOW = 32768u;" in commit_source
     assert (
         "min(batch_control.dynamic_state_capacity, ATTENTION_WINDOW)" in commit_source
@@ -324,6 +403,43 @@ def test_compiler_renders_temporal_attention_stages(tmp_path: Path) -> None:
     assert "position * KV_WORD_COUNT + head_word" in commit_source
     assert "{{" not in read_source
     assert "{{" not in commit_source
+
+
+def test_compiler_renders_standalone_temporal_rope(tmp_path: Path) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_file = "rotary_temporal_bf16_16x256_r64_theta10000000_half__pbc2.comp"
+
+    copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
+
+    source = (tmp_path / shader_file).read_text()
+    assert "layout(set = 0, binding = 2) readonly buffer BatchControl" in source
+    assert "layout(push_constant) uniform BatchControl" not in source
+    assert "position < batch_control.batch_width" in source
+    assert "batch_control.start_stream_tick_low + position" in source
+    assert "position * FRAME_WORDS" in source
+    assert "{{" not in source
+
+
+def test_compiler_lowers_component_batch_width_to_a_persistent_buffer(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_file = "linear_batch2_bf16_1024x4096__pbc31.comp"
+    input_shader_file = "embedding_lookup_batch_bf16_32000x768_scale1__pbc3.comp"
+
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {shader_file, input_shader_file},
+    )
+
+    source = (tmp_path / shader_file).read_text()
+    assert "layout(set = 0, binding = 31) readonly buffer BatchControl" in source
+    assert "layout(push_constant) uniform BatchControl" not in source
+    assert "batch_control.batch_width" in source
+    input_source = (tmp_path / input_shader_file).read_text()
+    assert "layout(set = 0, binding = 3) readonly buffer BatchControl" in input_source
+    assert "layout(push_constant) uniform BatchControl" not in input_source
 
 
 def test_compiler_selects_cooperative_bfloat16_projection_kernels() -> None:
@@ -361,10 +477,7 @@ def test_compiler_selects_cooperative_bfloat16_projection_kernels() -> None:
     )
     assert cooperative_bfloat16_batch_shader_file(
         "linear_residual_int4_ct_sbf16_g128_5120x17408.comp"
-    ) == (
-        "linear_residual_batch64_cooperative_"
-        "int4_ct_sbf16_g128_5120x17408.comp"
-    )
+    ) == ("linear_residual_batch64_cooperative_int4_ct_sbf16_g128_5120x17408.comp")
     assert (
         cooperative_bfloat16_workgroup_count_x(
             "linear_residual_int4_ct_sbf16_g128_5120x17408.comp"
@@ -410,10 +523,16 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
         "stages": [
             {
                 "shader_path": (
-                    "shaders/linear_batch64_cooperative_bf16_1024x4096.comp"
+                    "shaders/linear_batch64_cooperative_bf16_1024x4096__pbc31.comp"
                 ),
                 "local_size_x": 256,
                 "workgroup_count_x": 64,
+                "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width",
+                },
             }
         ],
     }
@@ -438,10 +557,16 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
             "stages": [
                 {
                     "shader_path": (
-                        f"shaders/linear_batch{tile_width}_bf16_1024x4096.comp"
+                        f"shaders/linear_batch{tile_width}_bf16_1024x4096__pbc31.comp"
                     ),
                     "local_size_x": 64,
                     "workgroup_count_x": 2048,
+                    "control": {
+                        "kind": "storage_buffer",
+                        "byte_count": 4,
+                        "binding": 31,
+                        "payload": "width",
+                    },
                 }
             ],
         }
@@ -452,10 +577,7 @@ def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
         execution_index=0,
         node={"id": "down", "op": "linear_residual"},
         circuit={},
-        shader_file=(
-            "linear_residual_prequant_fp8_e4m3_"
-            "b128x128_17408x5120.comp"
-        ),
+        shader_file=("linear_residual_prequant_fp8_e4m3_b128x128_17408x5120.comp"),
         local_size_x=1024,
         workgroup_count_x=320,
         cooperative_float8_e4m3_shapes=((16, 16, 16),),
@@ -478,10 +600,16 @@ def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
             {
                 "shader_path": (
                     "shaders/linear_residual_prequant_batch64_cooperative_"
-                    "fp8_e4m3_m16n16k16_b128x128_17408x5120.comp"
+                    "fp8_e4m3_m16n16k16_b128x128_17408x5120__pbc31.comp"
                 ),
                 "local_size_x": 256,
                 "workgroup_count_x": 80,
+                "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 4,
+                    "binding": 31,
+                    "payload": "width",
+                },
             }
         ],
     }
@@ -610,6 +738,8 @@ def test_compiler_renders_position_aware_temporal_head_norm_rope(
     copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
 
     source = (tmp_path / shader_file).read_text()
+    assert "layout(set = 0, binding = 6) readonly buffer BatchControl" in source
+    assert "layout(push_constant) uniform BatchControl" not in source
     assert "uint start_stream_tick_low;" in source
     assert "position < batch_control.batch_width" in source
     assert "start_stream_tick_low + position" in source
@@ -679,14 +809,8 @@ def test_compiler_renders_cooperative_bfloat16_batch_shaders(tmp_path: Path) -> 
 
 def test_compiler_renders_cooperative_int4_prefill_shaders(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
-    gptq = (
-        "linear_bias_batch64_cooperative_"
-        "int4_gptq_sf16_g128_5120x17408.comp"
-    )
-    ct = (
-        "linear_residual_batch64_cooperative_"
-        "int4_ct_sbf16_g128_17408x5120.comp"
-    )
+    gptq = "linear_bias_batch64_cooperative_int4_gptq_sf16_g128_5120x17408.comp"
+    ct = "linear_residual_batch64_cooperative_int4_ct_sbf16_g128_17408x5120.comp"
 
     copy_shader_templates(shader_source_dir, tmp_path, {gptq, ct})
 

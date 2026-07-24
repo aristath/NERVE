@@ -17,12 +17,13 @@ struct VulkanDistributedComponentBatchDispatchRunner {
 struct VulkanDistributedComponentBatchShardRunner {
     device_id: String,
     dispatches: Vec<VulkanDistributedComponentBatchShardDispatch>,
-    sequence: VulkanResidentKernelSequence,
+    batch_control_buffers:
+        BTreeMap<VulkanResidentComponentBatchControlPayload, VulkanResidentBuffer>,
+    sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
 }
 
 struct VulkanDistributedComponentBatchShardDispatch {
     dispatch: VulkanResidentKernelDispatch,
-    batch_control_byte_count: u32,
 }
 
 impl VulkanDistributedComponentBatchRunners {
@@ -159,6 +160,23 @@ impl VulkanDistributedComponentBatchRunners {
                         device_id: shard.device_id.clone(),
                     }
                 })?;
+                let batch_control_payloads = artifact
+                    .stages
+                    .iter()
+                    .map(|stage| stage.control.storage_buffer().2)
+                    .collect::<BTreeSet<_>>();
+                let batch_control_buffers = batch_control_payloads
+                    .into_iter()
+                    .map(|payload| {
+                        let mut buffer = device
+                            .create_host_visible_resident_buffer(payload.byte_count() as usize)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        buffer
+                            .persistently_map()
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        Ok::<_, VulkanResidentInProcessPlacedRuntimeError>((payload, buffer))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
                 let input = batch_slice.distributed_signal_buffer(&input_key, &shard.device_id)?;
                 let output =
                     batch_slice.distributed_signal_buffer(&output_key, &shard.device_id)?;
@@ -277,7 +295,23 @@ impl VulkanDistributedComponentBatchRunners {
                 }
                 let mut resident_dispatches = Vec::with_capacity(artifact.stages.len());
                 for stage in &artifact.stages {
-                    let batch_control_byte_count = batch_stage_control_byte_count(stage);
+                    let (binding, byte_count, payload) = stage.control.storage_buffer();
+                    let control_buffer = batch_control_buffers.get(&payload).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "distributed component batch stage {} has no {:?} control buffer",
+                                stage.shader_path, payload
+                            ),
+                        ))
+                    })?;
+                    bindings.push(
+                        VulkanResidentKernelBufferBinding::new(
+                            binding,
+                            control_buffer,
+                            byte_count as usize,
+                        )
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    );
                     let workgroup_count_x = match planned.distribution {
                         VulkanDistributedDispatchDistribution::ExpertRange => {
                             stage.workgroup_count_x
@@ -320,7 +354,7 @@ impl VulkanDistributedComponentBatchRunners {
                             workgroup_count_y,
                             shard.base_workgroup_z,
                             stage.local_size_x,
-                            batch_control_byte_count,
+                            0,
                             Some(format!(
                                 "component={} node={} distributed_batch=device:{} rows={}..{} base_z={} distribution={:?}",
                                 planned.component_id,
@@ -333,18 +367,15 @@ impl VulkanDistributedComponentBatchRunners {
                             )),
                         )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                    resident_dispatches.push(VulkanDistributedComponentBatchShardDispatch {
-                        dispatch,
-                        batch_control_byte_count,
-                    });
+                    resident_dispatches
+                        .push(VulkanDistributedComponentBatchShardDispatch { dispatch });
+                    bindings.pop();
                 }
-                let sequence = device
-                    .create_resident_kernel_sequence()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 shards.push(VulkanDistributedComponentBatchShardRunner {
                     device_id: shard.device_id.clone(),
                     dispatches: resident_dispatches,
-                    sequence,
+                    batch_control_buffers,
+                    sequence_catalog: RefCell::new(BTreeMap::new()),
                 });
             }
             dispatches.push(VulkanDistributedComponentBatchDispatchRunner {
@@ -445,6 +476,17 @@ impl VulkanDistributedComponentBatchRunners {
                     "distributed component batch has no dispatch {dispatch_index} owned by {owner_device_id:?}"
                 )))
         })?;
+        let _batch_width = batch_control
+            .get(..std::mem::size_of::<u32>())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .and_then(|width| usize::try_from(width).ok())
+            .filter(|width| *width > 0)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "distributed component batch control has no positive batch width".to_string(),
+                ))
+            })?;
         for shard in &dispatch.shards {
             let device = devices.get(&shard.device_id).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -458,52 +500,66 @@ impl VulkanDistributedComponentBatchRunners {
                         batch_control.len()
                     )))
                 })?;
-            let push_constant_storage = shard
-                .dispatches
-                .iter()
-                .map(|resident| {
-                    component_batch_push_constant_bytes(
-                        resident.batch_control_byte_count,
+            for (payload, control_buffer) in &shard.batch_control_buffers {
+                control_buffer
+                    .write_bytes(&component_batch_control_payload_bytes(
+                        *payload,
                         batch_control,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                    ))
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
+            if !shard.sequence_catalog.borrow().contains_key(&0) {
+                let sequence = device
+                    .create_resident_kernel_sequence()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                shard.sequence_catalog.borrow_mut().insert(0, sequence);
+            }
             let steps = shard
                 .dispatches
                 .iter()
-                .zip(&push_constant_storage)
-                .map(|(resident, push_constants)| {
-                    VulkanResidentKernelSequenceStep::new(&resident.dispatch, push_constants)
-                })
+                .map(|resident| VulkanResidentKernelSequenceStep::new(&resident.dispatch, &[]))
                 .collect::<Vec<_>>();
-            device
-                .record_resident_kernel_sequence(&shard.sequence, &steps)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            let catalog = shard.sequence_catalog.borrow();
+            let sequence = catalog
+                .get(&0)
+                .expect("distributed batch sequence shape was inserted");
+            if !sequence.has_recorded_commands() {
+                device
+                    .record_resident_kernel_sequence(sequence, &steps)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
         }
-        let mut submitted = Vec::<(
-            &VulkanComputeDevice,
-            &VulkanDistributedComponentBatchShardRunner,
-        )>::with_capacity(dispatch.shards.len());
-        for shard in &dispatch.shards {
+        let mut submitted =
+            Vec::<(&VulkanComputeDevice, &VulkanResidentKernelSequence)>::with_capacity(
+                dispatch.shards.len(),
+            );
+        let sequence_catalogs = dispatch
+            .shards
+            .iter()
+            .map(|shard| shard.sequence_catalog.borrow())
+            .collect::<Vec<_>>();
+        for (shard, sequence_catalog) in dispatch.shards.iter().zip(&sequence_catalogs) {
             let device = devices.get(&shard.device_id).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                     device_id: shard.device_id.clone(),
                 }
             })?;
-            if let Err(error) = device.submit_recorded_resident_kernel_sequence(&shard.sequence) {
-                for (submitted_device, submitted_shard) in &submitted {
-                    let _ =
-                        submitted_device.wait_resident_kernel_sequence(&submitted_shard.sequence);
+            let sequence = sequence_catalog
+                .get(&0)
+                .expect("distributed batch sequence shape was inserted");
+            if let Err(error) = device.submit_recorded_resident_kernel_sequence(sequence) {
+                for (submitted_device, submitted_sequence) in &submitted {
+                    let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
                 }
                 return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                     error,
                 ));
             }
-            submitted.push((device.as_ref(), shard));
+            submitted.push((device.as_ref(), sequence));
         }
         let mut first_error = None;
-        for (device, shard) in submitted {
-            if let Err(error) = device.wait_resident_kernel_sequence(&shard.sequence)
+        for (device, sequence) in submitted {
+            if let Err(error) = device.wait_resident_kernel_sequence(sequence)
                 && first_error.is_none()
             {
                 first_error = Some(error);

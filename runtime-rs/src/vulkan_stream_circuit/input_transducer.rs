@@ -167,8 +167,9 @@ impl VulkanResidentInputEmbeddingTransducerRunner {
 struct VulkanResidentBatchedInputEmbeddingRunner {
     batch_capacity: usize,
     token_ids_buffer: VulkanResidentBuffer,
+    batch_control_buffer: VulkanResidentBuffer,
     dispatch: VulkanResidentKernelDispatch,
-    sequence: VulkanResidentKernelSequence,
+    sequence: RefCell<Option<VulkanResidentKernelSequence>>,
 }
 
 impl VulkanResidentBatchedInputEmbeddingRunner {
@@ -178,6 +179,7 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
         embedding_weight: &VulkanPermanentParameterBufferAllocation,
         output_frames: &VulkanResidentBuffer,
         spirv_words: &[u32],
+        batch_control: VulkanResidentComponentBatchControlSpec,
         spec: &VulkanResidentInputEmbeddingTransducerSpec,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         if batch_capacity == 0 {
@@ -214,6 +216,24 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
         token_ids_buffer
             .persistently_map()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let (batch_control_binding, batch_control_byte_count, batch_control_payload) =
+            batch_control.storage_buffer();
+        if batch_control_payload != VulkanResidentComponentBatchControlPayload::Width
+            || batch_control_byte_count
+                != VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "input embedding batch control must carry a four-byte width, got {batch_control_payload:?} with {batch_control_byte_count} bytes"
+                )),
+            ));
+        }
+        let mut batch_control_buffer = device
+            .create_host_visible_resident_buffer(batch_control_byte_count as usize)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        batch_control_buffer
+            .persistently_map()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let bindings = [
             VulkanResidentKernelBufferBinding::new(
                 0,
@@ -225,6 +245,12 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
                 .with_access(VulkanResidentKernelBufferAccess::Write),
             VulkanResidentKernelBufferBinding::new(2, &token_ids_buffer, token_byte_capacity)
                 .with_access(VulkanResidentKernelBufferAccess::Read),
+            VulkanResidentKernelBufferBinding::new(
+                batch_control_binding,
+                &batch_control_buffer,
+                batch_control_byte_count as usize,
+            )
+            .with_access(VulkanResidentKernelBufferAccess::Read),
         ];
         let workgroup_count_x = u32::try_from(
             spec.output_frame_word_count
@@ -247,16 +273,15 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
                 workgroup_count_x,
                 workgroup_count_y,
                 spec.local_size_x,
-                std::mem::size_of::<u32>() as u32,
+                0,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         Ok(Self {
             batch_capacity,
             token_ids_buffer,
+            batch_control_buffer,
             dispatch,
-            sequence: device
-                .create_resident_kernel_sequence()
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+            sequence: RefCell::new(None),
         })
     }
 
@@ -286,15 +311,34 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
                 "batched input embedding width exceeds u32".to_string(),
             ))
         })?;
-        device
-            .run_resident_kernel_sequence(
-                &self.sequence,
-                &[VulkanResidentKernelSequenceStep::new(
-                    &self.dispatch,
-                    &batch_width.to_le_bytes(),
-                )],
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        self.batch_control_buffer
+            .write_bytes(&batch_width.to_le_bytes())
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        if self.sequence.borrow().is_none() {
+            let sequence = device
+                .create_resident_kernel_sequence()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            *self.sequence.borrow_mut() = Some(sequence);
+        }
+        let sequence_guard = self.sequence.borrow();
+        let sequence = sequence_guard
+            .as_ref()
+            .expect("batched input sequence was inserted");
+        if sequence.has_recorded_commands() {
+            device
+                .run_recorded_resident_kernel_sequence(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        } else {
+            device
+                .run_resident_kernel_sequence(
+                    sequence,
+                    &[VulkanResidentKernelSequenceStep::new(
+                        &self.dispatch,
+                        &[],
+                    )],
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        }
     }
 }
 
@@ -396,4 +440,3 @@ fn validate_input_embedding_weight(
     }
     Ok(())
 }
-

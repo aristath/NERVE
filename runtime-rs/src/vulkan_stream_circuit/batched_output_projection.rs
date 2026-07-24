@@ -4,7 +4,9 @@ struct VulkanResidentBatchedOutputProjectionRunner {
     _batched_logits_buffer: VulkanResidentBuffer,
     norm_dispatch: VulkanResidentKernelDispatch,
     projection_dispatch: VulkanResidentKernelDispatch,
-    projection_sequence: VulkanResidentKernelSequence,
+    projection_sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    sampler_submission_catalog:
+        RefCell<BTreeMap<usize, VulkanResidentQueueSubmissionTemplate>>,
     sampler_views: Vec<VulkanResidentSamplerLogitsView>,
 }
 
@@ -232,9 +234,8 @@ impl VulkanResidentBatchedOutputProjectionRunner {
             _batched_logits_buffer: batched_logits_buffer,
             norm_dispatch,
             projection_dispatch,
-            projection_sequence: device
-                .create_resident_kernel_sequence()
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+            projection_sequence_catalog: RefCell::new(BTreeMap::new()),
+            sampler_submission_catalog: RefCell::new(BTreeMap::new()),
             sampler_views,
         })
     }
@@ -257,21 +258,44 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 "batched output projection width exceeds u32".to_string(),
             ))
         })?;
-        device
-            .run_resident_kernel_sequence(
-                &self.projection_sequence,
-                &[
-                    VulkanResidentKernelSequenceStep::new(
-                        &self.norm_dispatch,
-                        &batch_width.to_le_bytes(),
-                    ),
-                    VulkanResidentKernelSequenceStep::new(
-                        &self.projection_dispatch,
-                        &batch_width.to_le_bytes(),
-                    ),
-                ],
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        let batch_width_usize = batch_width as usize;
+        if !self
+            .projection_sequence_catalog
+            .borrow()
+            .contains_key(&batch_width_usize)
+        {
+            let sequence = device
+                .create_resident_kernel_sequence()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            self.projection_sequence_catalog
+                .borrow_mut()
+                .insert(batch_width_usize, sequence);
+        }
+        let catalog = self.projection_sequence_catalog.borrow();
+        let sequence = catalog
+            .get(&batch_width_usize)
+            .expect("batched projection sequence was inserted");
+        if sequence.has_recorded_commands() {
+            device
+                .run_recorded_resident_kernel_sequence(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        } else {
+            device
+                .run_resident_kernel_sequence(
+                    sequence,
+                    &[
+                        VulkanResidentKernelSequenceStep::new(
+                            &self.norm_dispatch,
+                            &batch_width.to_le_bytes(),
+                        ),
+                        VulkanResidentKernelSequenceStep::new(
+                            &self.projection_dispatch,
+                            &batch_width.to_le_bytes(),
+                        ),
+                    ],
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        }
     }
 
     fn sample_batch(
@@ -340,7 +364,6 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 )),
             ));
         }
-        let submission_batch = VulkanResidentQueueSubmissionBatch::new();
         for (batch_index, view) in self.sampler_views.iter().take(batch_width).enumerate() {
             view.prepare_token_state(device, token_prefixes[batch_index])
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
@@ -349,21 +372,43 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 dynamic_state_capacities[batch_index],
             )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            view.record(device)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            submission_batch
-                .enqueue_recorded_sequence(
-                    device,
-                    &view.sequence,
-                    &[],
-                    &[],
-                    batch_index + 1 == batch_width,
-                )
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
-        submission_batch
-            .mount()
-            .and_then(|template| template.submit_with_timeline_value_offset(0).map(|_| ()))
+        if !self
+            .sampler_submission_catalog
+            .borrow()
+            .contains_key(&batch_width)
+        {
+            let submission_batch = VulkanResidentQueueSubmissionBatch::new();
+            for (batch_index, view) in
+                self.sampler_views.iter().take(batch_width).enumerate()
+            {
+                if !view.sequence.has_recorded_commands() {
+                    view.record(device)
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                }
+                submission_batch
+                    .enqueue_recorded_sequence(
+                        device,
+                        &view.sequence,
+                        &[],
+                        &[],
+                        batch_index + 1 == batch_width,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
+            let template = submission_batch
+                .mount()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            self.sampler_submission_catalog
+                .borrow_mut()
+                .insert(batch_width, template);
+        }
+        self.sampler_submission_catalog
+            .borrow()
+            .get(&batch_width)
+            .expect("batched sampler submission template was inserted")
+            .submit_with_timeline_value_offset(0)
+            .map(|_| ())
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         device
             .wait_resident_kernel_sequence(&self.sampler_views[batch_width - 1].sequence)

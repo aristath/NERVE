@@ -513,6 +513,11 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                     shader_path,
                     local_size_x: 64,
                     workgroup_count_x: 1,
+                    control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+                        byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+                        binding: 31,
+                        payload: VulkanResidentComponentBatchControlPayload::Width,
+                    },
                 }],
             })
             .collect();
@@ -574,6 +579,19 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
     )
     .unwrap_err();
     assert!(batch_error.to_string().contains("invalid WeightShared"));
+
+    let mut invalid_control = execution(
+        VulkanResidentComponentKernelBatchMode::WeightShared,
+        Some("shaders/project_batch.spv".to_string()),
+    );
+    invalid_control[0].kernels[0].batch_implementations[0].stages[0].control =
+        VulkanResidentComponentBatchControlSpec::StorageBuffer {
+            byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            binding: 3,
+            payload: VulkanResidentComponentBatchControlPayload::Temporal,
+        };
+    let control_error = validate_component_executions("fixture", &invalid_control).unwrap_err();
+    assert!(control_error.to_string().contains("invalid WeightShared"));
 }
 
 #[test]
@@ -586,37 +604,87 @@ fn component_batch_control_preserves_temporal_position_and_capacity() {
 }
 
 #[test]
-fn component_batch_control_uses_width_only_payload_unless_stage_reads_time() {
+fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
     let width_only = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/linear_batch2_fp8_e4m3_b128x128_5120x5120.spv".to_string(),
         spirv_words: Vec::new(),
         local_size_x: 64,
         workgroup_count_x: 1,
+        control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+            byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            binding: 31,
+            payload: VulkanResidentComponentBatchControlPayload::Width,
+        },
     };
     let temporal = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/append_kv_temporal_commit_bf16_kv8_d128_w0.spv".to_string(),
         spirv_words: Vec::new(),
         local_size_x: 64,
         workgroup_count_x: 1,
+        control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+            byte_count: VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
+            binding: 7,
+            payload: VulkanResidentComponentBatchControlPayload::Temporal,
+        },
     };
     let sparse = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/sparse_moe_gate_up_batch1_bf16.spv".to_string(),
         spirv_words: Vec::new(),
         local_size_x: 64,
         workgroup_count_x: 1,
+        control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+            byte_count: 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            binding: 31,
+            payload: VulkanResidentComponentBatchControlPayload::WidthExpertStart,
+        },
     };
 
     assert_eq!(
-        batch_stage_control_byte_count(&width_only),
-        VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+        width_only.control.storage_buffer(),
+        (
+            31,
+            VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            VulkanResidentComponentBatchControlPayload::Width,
+        )
     );
     assert_eq!(
-        batch_stage_control_byte_count(&temporal),
-        VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY
+        temporal.control.storage_buffer(),
+        (
+            7,
+            VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
+            VulkanResidentComponentBatchControlPayload::Temporal,
+        )
     );
     assert_eq!(
-        batch_stage_control_byte_count(&sparse),
-        2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+        sparse.control.storage_buffer(),
+        (
+            31,
+            2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            VulkanResidentComponentBatchControlPayload::WidthExpertStart,
+        )
+    );
+
+    let control = component_batch_control_bytes(64, 0x1122_3344_5566_7788, 65_536);
+    assert_eq!(
+        component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::Width,
+            &control,
+        ),
+        64u32.to_le_bytes(),
+    );
+    assert_eq!(
+        component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::WidthExpertStart,
+            &control,
+        ),
+        [64u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+    );
+    assert_eq!(
+        component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::Temporal,
+            &control,
+        ),
+        control,
     );
 }
 

@@ -95,6 +95,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             let runner = VulkanResidentPlacedComponentBatchRunner::new(
                 devices,
                 &self.device_slices,
+                &self.model.runtime_execution_identity,
                 &self.execution_quantum_calibrators,
                 transaction_width,
                 VulkanComponentBatchExecutionMode::IndependentCandidates,
@@ -148,6 +149,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 embedding_weight,
                 &input_signal.buffer,
                 &self.model.input_transducer_batch_spirv_words,
+                self.model.input_transducer_batch_control,
                 &self.model.input_transducer_spec,
             )?;
             drop(batch_execution);

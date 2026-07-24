@@ -20,7 +20,8 @@ pub struct VulkanResidentSamplerRunner {
     _stream_control_buffer: Arc<VulkanResidentBuffer>,
     input_tracking_dispatches: Vec<VulkanResidentKernelDispatch>,
     seen_token_batch_dispatch: Option<VulkanResidentKernelDispatch>,
-    seen_token_batch_sequence: Option<VulkanResidentKernelSequence>,
+    seen_token_batch_sequence_catalog:
+        RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
     resident_dispatches: Vec<VulkanResidentKernelDispatch>,
     feedback_control_dispatch: VulkanResidentKernelDispatch,
     sequence: VulkanResidentKernelSequence,
@@ -527,10 +528,6 @@ impl VulkanResidentSamplerRunner {
                 )
             })
             .transpose()?;
-        let seen_token_batch_sequence = seen_token_batch_dispatch
-            .as_ref()
-            .map(|_| device.create_resident_kernel_sequence())
-            .transpose()?;
         let mut resident_dispatches = Vec::with_capacity(sampling_kernels.len());
         for kernel in sampling_kernels {
             let mut bindings = match kernel.role.as_str() {
@@ -719,7 +716,7 @@ impl VulkanResidentSamplerRunner {
             _stream_control_buffer: stream_control_buffer,
             input_tracking_dispatches,
             seen_token_batch_dispatch,
-            seen_token_batch_sequence,
+            seen_token_batch_sequence_catalog: RefCell::new(BTreeMap::new()),
             resident_dispatches,
             feedback_control_dispatch,
             sequence,
@@ -794,22 +791,37 @@ impl VulkanResidentSamplerRunner {
             .as_ref()
             .expect("repetition token batch dispatch has an input buffer")
             .write_bytes(&bytes)?;
-        device.run_resident_kernel_sequence(
-            self.seen_token_batch_sequence
-                .as_ref()
-                .expect("repetition token batch dispatch has a sequence"),
-            &[VulkanResidentKernelSequenceStep::new(
-                dispatch,
-                &u32::try_from(token_ids.len())
-                    .map_err(
-                        |_| VulkanResidentSamplerRunnerError::TokenBatchCapacityExceeded {
-                            requested: token_ids.len(),
-                            capacity: VULKAN_BACKEND_LOOP_MAX_WINDOW,
-                        },
-                    )?
-                    .to_le_bytes(),
-            )],
-        )?;
+        if !self
+            .seen_token_batch_sequence_catalog
+            .borrow()
+            .contains_key(&token_ids.len())
+        {
+            self.seen_token_batch_sequence_catalog
+                .borrow_mut()
+                .insert(token_ids.len(), device.create_resident_kernel_sequence()?);
+        }
+        let catalog = self.seen_token_batch_sequence_catalog.borrow();
+        let sequence = catalog
+            .get(&token_ids.len())
+            .expect("repetition token batch sequence was inserted");
+        if sequence.has_recorded_commands() {
+            device.run_recorded_resident_kernel_sequence(sequence)?;
+        } else {
+            device.run_resident_kernel_sequence(
+                sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    dispatch,
+                    &u32::try_from(token_ids.len())
+                        .map_err(
+                            |_| VulkanResidentSamplerRunnerError::TokenBatchCapacityExceeded {
+                                requested: token_ids.len(),
+                                capacity: VULKAN_BACKEND_LOOP_MAX_WINDOW,
+                            },
+                        )?
+                        .to_le_bytes(),
+                )],
+            )?;
+        }
         Ok(())
     }
 
@@ -961,10 +973,6 @@ impl VulkanResidentSamplerRunner {
                     std::mem::size_of::<u32>() as u32,
                 )
             })
-            .transpose()?;
-        let seen_token_batch_sequence = seen_token_batch_dispatch
-            .as_ref()
-            .map(|_| device.create_resident_kernel_sequence())
             .transpose()?;
         let sampling_kernels = kernels.iter().filter(|kernel| {
             sampler_kernel_role_matches(
@@ -1124,7 +1132,7 @@ impl VulkanResidentSamplerRunner {
             seen_token_copy,
             seen_token_batch_buffer,
             seen_token_batch_dispatch,
-            seen_token_batch_sequence,
+            seen_token_batch_sequence_catalog: RefCell::new(BTreeMap::new()),
         })
     }
 }
@@ -1139,7 +1147,8 @@ struct VulkanResidentSamplerLogitsView {
     seen_token_copy: Option<VulkanResidentBufferCopy>,
     seen_token_batch_buffer: Option<VulkanResidentBuffer>,
     seen_token_batch_dispatch: Option<VulkanResidentKernelDispatch>,
-    seen_token_batch_sequence: Option<VulkanResidentKernelSequence>,
+    seen_token_batch_sequence_catalog:
+        RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
 }
 
 impl VulkanResidentSamplerLogitsView {
@@ -1173,22 +1182,37 @@ impl VulkanResidentSamplerLogitsView {
             .as_ref()
             .expect("token-state view tracker has input buffer")
             .write_bytes(&bytes)?;
-        device.run_resident_kernel_sequence(
-            self.seen_token_batch_sequence
-                .as_ref()
-                .expect("token-state view tracker has sequence"),
-            &[VulkanResidentKernelSequenceStep::new(
-                dispatch,
-                &u32::try_from(prefix_token_ids.len())
-                    .map_err(
-                        |_| VulkanResidentSamplerRunnerError::TokenBatchCapacityExceeded {
-                            requested: prefix_token_ids.len(),
-                            capacity: VULKAN_BACKEND_LOOP_MAX_WINDOW,
-                        },
-                    )?
-                    .to_le_bytes(),
-            )],
-        )?;
+        if !self
+            .seen_token_batch_sequence_catalog
+            .borrow()
+            .contains_key(&prefix_token_ids.len())
+        {
+            self.seen_token_batch_sequence_catalog
+                .borrow_mut()
+                .insert(prefix_token_ids.len(), device.create_resident_kernel_sequence()?);
+        }
+        let catalog = self.seen_token_batch_sequence_catalog.borrow();
+        let sequence = catalog
+            .get(&prefix_token_ids.len())
+            .expect("token-state view batch sequence was inserted");
+        if sequence.has_recorded_commands() {
+            device.run_recorded_resident_kernel_sequence(sequence)?;
+        } else {
+            device.run_resident_kernel_sequence(
+                sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    dispatch,
+                    &u32::try_from(prefix_token_ids.len())
+                        .map_err(
+                            |_| VulkanResidentSamplerRunnerError::TokenBatchCapacityExceeded {
+                                requested: prefix_token_ids.len(),
+                                capacity: VULKAN_BACKEND_LOOP_MAX_WINDOW,
+                            },
+                        )?
+                        .to_le_bytes(),
+                )],
+            )?;
+        }
         Ok(())
     }
 

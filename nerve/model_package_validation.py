@@ -4,6 +4,7 @@ from nerve.model_package_assets import *
 from nerve.model_package_shaders import *
 from nerve.model_package_tensors import *
 
+
 def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
     graph = manifest.get("circuit_graph")
     if not isinstance(graph, dict) or graph.get("topology") != "explicit_graph":
@@ -16,7 +17,9 @@ def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
 
     candidates: dict[str, Json] = {}
     for component in components:
-        component_id = component.get("component_id") if isinstance(component, dict) else None
+        component_id = (
+            component.get("component_id") if isinstance(component, dict) else None
+        )
         if not isinstance(component_id, str) or not component_id:
             raise ModelCompileError(
                 "compiled package circuit graph contains a component without an id"
@@ -399,7 +402,9 @@ def validate_compiled_component_executions(
         raise ModelCompileError("compiled package has no component execution list")
     execution_by_component: dict[str, Json] = {}
     for execution in executions:
-        component_id = execution.get("component_id") if isinstance(execution, dict) else None
+        component_id = (
+            execution.get("component_id") if isinstance(execution, dict) else None
+        )
         if (
             not isinstance(component_id, str)
             or not component_id
@@ -439,7 +444,8 @@ def validate_compiled_component_executions(
                 or kernel.get("execution_index") != index
                 or kernel.get("node_id") != node.get("id")
                 or kernel.get("op") != node.get("op")
-                or kernel.get("execution_domain") not in {
+                or kernel.get("execution_domain")
+                not in {
                     "decode",
                     "decode_and_prefill",
                 }
@@ -493,21 +499,16 @@ def valid_batch_implementation(implementation: Any) -> bool:
     )
     shape = requirements.get("cooperative_bfloat16_shape") if requirements else None
     float8_shape = (
-        requirements.get("cooperative_float8_e4m3_shape")
-        if requirements
-        else None
+        requirements.get("cooperative_float8_e4m3_shape") if requirements else None
     )
     subgroup_size = requirements.get("subgroup_size") if requirements else None
     stages = implementation.get("stages")
     return (
         execution_domain in KNOWN_COMPONENT_KERNEL_EXECUTION_DOMAINS
-        and
-        isinstance(implementation.get("lane_tile_width"), int)
+        and isinstance(implementation.get("lane_tile_width"), int)
         and not isinstance(implementation.get("lane_tile_width"), bool)
         and implementation["lane_tile_width"] > 0
-        and isinstance(
-            implementation.get("independent_candidate_compatible"), bool
-        )
+        and isinstance(implementation.get("independent_candidate_compatible"), bool)
         and isinstance(implementation.get("causal_sequence_compatible"), bool)
         and isinstance(stages, list)
         and bool(stages)
@@ -562,6 +563,7 @@ def valid_batch_implementation(implementation: Any) -> bool:
 
 
 def valid_batch_stage(stage: Any) -> bool:
+    control = stage.get("control") if isinstance(stage, dict) else None
     return (
         isinstance(stage, dict)
         and isinstance(stage.get("shader_path"), str)
@@ -572,6 +574,30 @@ def valid_batch_stage(stage: Any) -> bool:
         and isinstance(stage.get("workgroup_count_x"), int)
         and not isinstance(stage.get("workgroup_count_x"), bool)
         and stage["workgroup_count_x"] > 0
+        and valid_batch_control(control)
+    )
+
+
+def valid_batch_control(control: Any) -> bool:
+    control_kind = control.get("kind") if isinstance(control, dict) else None
+    byte_count = control.get("byte_count") if isinstance(control, dict) else None
+    binding = control.get("binding") if isinstance(control, dict) else None
+    payload = control.get("payload") if isinstance(control, dict) else None
+    payload_byte_counts = {
+        "width": 4,
+        "width_expert_start": 8,
+        "temporal": 16,
+    }
+    return (
+        control_kind == "storage_buffer"
+        and isinstance(byte_count, int)
+        and not isinstance(byte_count, bool)
+        and payload in payload_byte_counts
+        and byte_count == payload_byte_counts[payload]
+        and isinstance(binding, int)
+        and not isinstance(binding, bool)
+        and binding >= 0
+        and set(control) == {"kind", "byte_count", "binding", "payload"}
     )
 
 
@@ -727,6 +753,7 @@ def validate_compiled_generation_contract(
         or not input_package["shader_path"]
         or not isinstance(input_package.get("batch_shader_path"), str)
         or not input_package["batch_shader_path"]
+        or not valid_batch_control(input_package.get("batch_control"))
     ):
         raise ModelCompileError(
             "compiled input-transducer execution does not match its circuit component"
@@ -791,7 +818,6 @@ def validate_compiled_generation_contract(
         raise ModelCompileError(
             "compiled sampler execution does not match its circuit component"
         )
-
 
 
 def validate_compiled_package(package_dir: Path, manifest: Json) -> None:

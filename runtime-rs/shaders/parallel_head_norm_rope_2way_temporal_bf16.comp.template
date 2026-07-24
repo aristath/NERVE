@@ -12,7 +12,7 @@ layout(set = 0, binding = 3) buffer OutputBFrames { uint words[]; } output_b_fra
 layout(set = 0, binding = 4) readonly buffer WeightA { uint words[]; } weight_a;
 layout(set = 0, binding = 5) readonly buffer WeightB { uint words[]; } weight_b;
 
-layout(push_constant) uniform BatchControl {
+layout(set = 0, binding = {{BATCH_CONTROL_BINDING}}) readonly buffer BatchControl {
     uint batch_width;
     uint start_stream_tick_low;
     uint start_stream_tick_high;

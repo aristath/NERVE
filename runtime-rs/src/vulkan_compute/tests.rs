@@ -156,6 +156,65 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn timeline_replay_rebases_each_logical_device_semaphore_independently() {
+        let first = VulkanTimelineSemaphoreReplayIdentity {
+            device_handle: 11,
+            semaphore_handle: 101,
+        };
+        let second = VulkanTimelineSemaphoreReplayIdentity {
+            device_handle: 22,
+            semaphore_handle: 202,
+        };
+        let recorded = VulkanTimelineSemaphoreReplayState {
+            next_values: BTreeMap::from([(first, 3), (second, 17)]),
+        };
+        let current = VulkanTimelineSemaphoreReplayState {
+            next_values: BTreeMap::from([(first, 8), (second, 29)]),
+        };
+        let rebase = recorded.rebase_to(&current).unwrap();
+
+        assert_eq!(
+            rebase
+                .value(vk::Device::from_raw(11), vk::Semaphore::from_raw(101), 4)
+                .unwrap(),
+            9
+        );
+        assert_eq!(
+            rebase
+                .value(vk::Device::from_raw(22), vk::Semaphore::from_raw(202), 19)
+                .unwrap(),
+            31
+        );
+    }
+
+    #[test]
+    fn timeline_replay_rejects_topology_changes_and_value_regression() {
+        let identity = VulkanTimelineSemaphoreReplayIdentity {
+            device_handle: 11,
+            semaphore_handle: 101,
+        };
+        let recorded = VulkanTimelineSemaphoreReplayState {
+            next_values: BTreeMap::from([(identity, 8)]),
+        };
+        assert!(
+            recorded
+                .rebase_to(&VulkanTimelineSemaphoreReplayState::default())
+                .unwrap_err()
+                .to_string()
+                .contains("topology changed")
+        );
+        assert!(
+            recorded
+                .rebase_to(&VulkanTimelineSemaphoreReplayState {
+                    next_values: BTreeMap::from([(identity, 7)]),
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("regressed")
+        );
+    }
+
     fn queue_family(
         queue_flags: vk::QueueFlags,
         queue_count: u32,

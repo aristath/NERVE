@@ -1,6 +1,6 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::ffi::{CStr, CString, c_void};
 use std::fmt::{Display, Formatter};
@@ -14,6 +14,7 @@ use std::sync::{
 use std::time::Instant;
 
 use ash::{Entry, vk};
+use ash::vk::Handle as _;
 use serde::{Deserialize, Serialize};
 
 const VK_EXT_SHADER_FLOAT8_NAME: &CStr = c"VK_EXT_shader_float8";

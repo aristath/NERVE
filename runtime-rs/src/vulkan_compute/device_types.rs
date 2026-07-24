@@ -255,6 +255,103 @@ pub struct VulkanTimelineSemaphore {
     permanent_opaque_fd_imported: Cell<bool>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VulkanTimelineSemaphoreReplayIdentity {
+    device_handle: u64,
+    semaphore_handle: u64,
+}
+
+/// The logical next value of every timeline semaphore participating in a
+/// replayable queue topology. Imported handles are deliberately separate
+/// entries: Vulkan may assign a different handle to the same external
+/// semaphore on each logical device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VulkanTimelineSemaphoreReplayState {
+    next_values: BTreeMap<VulkanTimelineSemaphoreReplayIdentity, u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VulkanTimelineSemaphoreValueRebase {
+    offsets: BTreeMap<VulkanTimelineSemaphoreReplayIdentity, u64>,
+}
+
+impl VulkanTimelineSemaphoreReplayState {
+    pub fn capture(
+        &mut self,
+        semaphore: &VulkanTimelineSemaphore,
+        next_value: u64,
+    ) -> Result<(), VulkanError> {
+        let identity = semaphore.replay_identity();
+        if let Some(previous) = self.next_values.insert(identity, next_value)
+            && previous != next_value
+        {
+            return Err(VulkanError(format!(
+                "timeline semaphore replay state records conflicting next values {previous} and {next_value}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn rebase_to(
+        &self,
+        current: &Self,
+    ) -> Result<VulkanTimelineSemaphoreValueRebase, VulkanError> {
+        if self.next_values.keys().ne(current.next_values.keys()) {
+            return Err(VulkanError(
+                "timeline semaphore replay topology changed between recording and replay"
+                    .to_string(),
+            ));
+        }
+        let offsets = self
+            .next_values
+            .iter()
+            .map(|(identity, recorded)| {
+                let current = current
+                    .next_values
+                    .get(identity)
+                    .expect("validated replay topology has the same semaphore keys");
+                let offset = current.checked_sub(*recorded).ok_or_else(|| {
+                    VulkanError(format!(
+                        "timeline semaphore replay next value regressed from {recorded} to {current}"
+                    ))
+                })?;
+                Ok((*identity, offset))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(VulkanTimelineSemaphoreValueRebase { offsets })
+    }
+}
+
+impl VulkanTimelineSemaphore {
+    fn replay_identity(&self) -> VulkanTimelineSemaphoreReplayIdentity {
+        VulkanTimelineSemaphoreReplayIdentity {
+            device_handle: self.device_handle.as_raw(),
+            semaphore_handle: self.semaphore.as_raw(),
+        }
+    }
+}
+
+impl VulkanTimelineSemaphoreValueRebase {
+    fn value(
+        &self,
+        device_handle: vk::Device,
+        semaphore: vk::Semaphore,
+        recorded_value: u64,
+    ) -> Result<u64, VulkanError> {
+        let identity = VulkanTimelineSemaphoreReplayIdentity {
+            device_handle: device_handle.as_raw(),
+            semaphore_handle: semaphore.as_raw(),
+        };
+        let offset = self.offsets.get(&identity).ok_or_else(|| {
+            VulkanError(format!(
+                "queue template references timeline semaphore {} on device {} outside its replay state",
+                identity.semaphore_handle, identity.device_handle
+            ))
+        })?;
+        offset_timeline_value(recorded_value, *offset)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct VulkanTimelineSemaphorePoint<'a> {
     semaphore: &'a VulkanTimelineSemaphore,
@@ -302,7 +399,30 @@ struct VulkanResidentQueueSubmissionTemplateGroup {
 #[derive(Clone)]
 struct VulkanResidentQueueSubmitter {
     device: ash::Device,
+    device_handle: vk::Device,
     queue: vk::Queue,
+}
+
+#[derive(Clone, Copy)]
+enum VulkanTimelineValueTransform<'a> {
+    UniformOffset(u64),
+    PerSemaphore(&'a VulkanTimelineSemaphoreValueRebase),
+}
+
+impl VulkanTimelineValueTransform<'_> {
+    fn value(
+        self,
+        device_handle: vk::Device,
+        semaphore: vk::Semaphore,
+        recorded_value: u64,
+    ) -> Result<u64, VulkanError> {
+        match self {
+            Self::UniformOffset(offset) => offset_timeline_value(recorded_value, offset),
+            Self::PerSemaphore(rebase) => {
+                rebase.value(device_handle, semaphore, recorded_value)
+            }
+        }
+    }
 }
 
 struct VulkanPreparedResidentQueueSubmission {
@@ -431,13 +551,14 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
     pub fn mount_calibrated(
         self,
         calibrator: &RuntimeExecutionQuantumCalibrator,
+        shape_class_id: &str,
     ) -> Result<VulkanResidentQueueSubmissionTemplate, VulkanError> {
-        self.mount_with_calibrator(Some(calibrator))
+        self.mount_with_calibrator(Some((calibrator, shape_class_id)))
     }
 
     fn mount_with_calibrator(
         self,
-        calibrator: Option<&RuntimeExecutionQuantumCalibrator>,
+        calibrator: Option<(&RuntimeExecutionQuantumCalibrator, &str)>,
     ) -> Result<VulkanResidentQueueSubmissionTemplate, VulkanError> {
         let quantum_budget = self.quantum_budget;
         let mut groups = self.groups.into_inner();
@@ -455,8 +576,8 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let quantum_budget = if let Some(calibrator) = calibrator {
-                    calibrator.prepare_regions(&mut regions)
+                let quantum_budget = if let Some((calibrator, shape_class_id)) = calibrator {
+                    calibrator.prepare_regions(shape_class_id, &mut regions)
                 } else {
                     quantum_budget
                         .expect("bounded submission has a quantum budget")
@@ -488,6 +609,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
             .map(|group| VulkanResidentQueueSubmissionTemplateGroup {
                 submitter: VulkanResidentQueueSubmitter {
                     device: group.device.device.clone(),
+                    device_handle: group.device.device.handle(),
                     queue: group.device.queue,
                 },
                 submissions: group.submissions,
@@ -526,7 +648,34 @@ impl VulkanResidentQueueSubmissionTemplate {
             for quantum_range in &group.quantum_ranges {
                 group.submitter.submit_prepared_resident_queue_batch(
                     &group.submissions[quantum_range.clone()],
-                    timeline_value_offset,
+                    VulkanTimelineValueTransform::UniformOffset(timeline_value_offset),
+                    None,
+                )?;
+            }
+        }
+        Ok(self.submission_count)
+    }
+
+    pub fn submit_with_timeline_value_rebase(
+        &self,
+        rebase: &VulkanTimelineSemaphoreValueRebase,
+    ) -> Result<usize, VulkanError> {
+        for group in &self.groups {
+            for submission in &group.submissions {
+                for (semaphore, value) in submission
+                    .wait_points
+                    .iter()
+                    .chain(&submission.signal_points)
+                {
+                    rebase.value(group.submitter.device_handle, *semaphore, *value)?;
+                }
+            }
+        }
+        for group in &self.groups {
+            for quantum_range in &group.quantum_ranges {
+                group.submitter.submit_prepared_resident_queue_batch(
+                    &group.submissions[quantum_range.clone()],
+                    VulkanTimelineValueTransform::PerSemaphore(rebase),
                     None,
                 )?;
             }
@@ -584,7 +733,7 @@ impl VulkanResidentQueueSubmissionTemplate {
                 let started = Instant::now();
                 group.submitter.submit_prepared_resident_queue_batch(
                     submissions,
-                    timeline_value_offset,
+                    VulkanTimelineValueTransform::UniformOffset(timeline_value_offset),
                     Some(completion_fence),
                 )?;
                 group.submitter.wait_for_completion_fence(completion_fence)?;

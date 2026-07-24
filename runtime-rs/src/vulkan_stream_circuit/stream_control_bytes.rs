@@ -110,29 +110,23 @@ fn component_batch_control_bytes(
     bytes
 }
 
-fn component_batch_push_constant_bytes(
-    byte_count: u32,
+fn component_batch_control_payload_bytes(
+    payload: VulkanResidentComponentBatchControlPayload,
     control: &[u8; VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY as usize],
-) -> Result<Vec<u8>, VulkanResidentInProcessPlacedRuntimeError> {
-    match byte_count {
-        byte_count if byte_count == 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY => {
+) -> Vec<u8> {
+    match payload {
+        VulkanResidentComponentBatchControlPayload::Width => {
+            control[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize].to_vec()
+        }
+        VulkanResidentComponentBatchControlPayload::WidthExpertStart => {
             let mut bytes =
                 Vec::with_capacity(2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize);
             bytes.extend_from_slice(
                 &control[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize],
             );
             bytes.extend_from_slice(&0u32.to_le_bytes());
-            Ok(bytes)
+            bytes
         }
-        VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY => {
-            Ok(control[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize].to_vec())
-        }
-        VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY => Ok(control.to_vec()),
-        0 => Ok(Vec::new()),
-        _ => Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-            VulkanError(format!(
-                "unsupported component batch control byte count {byte_count}"
-            )),
-        )),
+        VulkanResidentComponentBatchControlPayload::Temporal => control.to_vec(),
     }
 }

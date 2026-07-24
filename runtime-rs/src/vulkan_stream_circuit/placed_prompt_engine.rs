@@ -738,7 +738,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             }
         }
         let key = VulkanResidentInProcessPlacedPromptEngineBatchKey {
-            execution_class_id: batch.activations[0].execution_class_id.clone(),
+            runtime_execution_identity: batch.activations[0].execution_class_id.clone(),
             stream_ids: stream_ids.clone(),
         };
         if !self.multi_stream_batch_runners.contains_key(&key) {
@@ -1334,7 +1334,7 @@ struct VulkanResidentInProcessPlacedPromptEnginePendingActivation {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct VulkanResidentInProcessPlacedPromptEngineBatchKey {
-    execution_class_id: String,
+    runtime_execution_identity: String,
     stream_ids: Vec<String>,
 }
 
@@ -1491,7 +1491,7 @@ fn placed_prompt_streams_share_physical_batch_contract(
     first: &VulkanResidentInProcessPlacedPromptStream,
     second: &VulkanResidentInProcessPlacedPromptStream,
 ) -> bool {
-    Arc::ptr_eq(&first.package, &second.package)
+    first.package.runtime_execution_identity == second.package.runtime_execution_identity
         && first.speculative_draft_tokens == 0
         && second.speculative_draft_tokens == 0
         && first.processor.speculative_decoder_count() == 0

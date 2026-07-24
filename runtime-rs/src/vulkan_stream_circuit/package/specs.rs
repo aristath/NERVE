@@ -69,6 +69,7 @@ pub struct VulkanResidentInputEmbeddingTransducerPackageSpec {
     pub spec: VulkanResidentInputEmbeddingTransducerSpec,
     pub shader_path: String,
     pub batch_shader_path: String,
+    pub batch_control: VulkanResidentComponentBatchControlSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +135,49 @@ pub struct VulkanResidentComponentBatchStageSpec {
     pub shader_path: String,
     pub local_size_x: u32,
     pub workgroup_count_x: u32,
+    pub control: VulkanResidentComponentBatchControlSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VulkanResidentComponentBatchControlSpec {
+    StorageBuffer {
+        byte_count: u32,
+        binding: u32,
+        payload: VulkanResidentComponentBatchControlPayload,
+    },
+}
+
+impl VulkanResidentComponentBatchControlSpec {
+    pub(crate) fn storage_buffer(
+        self,
+    ) -> (u32, u32, VulkanResidentComponentBatchControlPayload) {
+        match self {
+            Self::StorageBuffer {
+                byte_count,
+                binding,
+                payload,
+            } => (binding, byte_count, payload),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanResidentComponentBatchControlPayload {
+    Width,
+    WidthExpertStart,
+    Temporal,
+}
+
+impl VulkanResidentComponentBatchControlPayload {
+    pub(crate) fn byte_count(self) -> u32 {
+        match self {
+            Self::Width => VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            Self::WidthExpertStart => 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            Self::Temporal => VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

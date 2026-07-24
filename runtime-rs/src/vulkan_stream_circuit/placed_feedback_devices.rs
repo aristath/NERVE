@@ -156,8 +156,17 @@ struct VulkanPlacedOutputTimelineTurn<'a> {
 struct VulkanResidentPlacedFeedbackSubmissionReplay {
     template: VulkanResidentQueueSubmissionTemplate,
     tick_count: usize,
-    next_timeline_value_offset: u64,
+    recorded_timeline_state: VulkanTimelineSemaphoreReplayState,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VulkanResidentPlacedFeedbackTemplateKey {
+    runtime_execution_identity: String,
+    tick_count: usize,
+}
+
+type VulkanResidentPlacedFeedbackTemplateCatalog =
+    BTreeMap<VulkanResidentPlacedFeedbackTemplateKey, VulkanResidentPlacedFeedbackSubmissionReplay>;
 
 impl VulkanResidentPlacedFeedbackTimelineSynchronization {
     fn new(
@@ -235,6 +244,15 @@ impl VulkanResidentPlacedFeedbackTimelineSynchronization {
         self.pending_value.set(Some(next_value - 1));
         Ok(())
     }
+
+    fn capture_replay_timeline_state(
+        &self,
+        state: &mut VulkanTimelineSemaphoreReplayState,
+    ) -> Result<(), VulkanError> {
+        let next_value = self.next_value.get();
+        state.capture(&self.output_signal, next_value)?;
+        state.capture(&self.input_wait, next_value)
+    }
 }
 
 impl VulkanResidentPlacedOutputTimelineSynchronization {
@@ -304,19 +322,30 @@ impl VulkanResidentPlacedOutputTimelineSynchronization {
         self.next_value.set(next_value);
         Ok((first_value..next_value).collect())
     }
+
+    fn capture_replay_timeline_state(
+        &self,
+        state: &mut VulkanTimelineSemaphoreReplayState,
+    ) -> Result<(), VulkanError> {
+        state.capture(&self.signal, self.next_value.get())
+    }
 }
 
 impl VulkanResidentPlacedFeedbackSubmissionReplay {
     fn new(
         template: VulkanResidentQueueSubmissionTemplate,
         tick_count: usize,
+        recorded_timeline_state: VulkanTimelineSemaphoreReplayState,
     ) -> Result<Self, VulkanError> {
-        let next_timeline_value_offset = u64::try_from(tick_count)
-            .map_err(|_| VulkanError("resident feedback replay width exceeds u64".to_string()))?;
+        if tick_count == 0 {
+            return Err(VulkanError(
+                "resident feedback replay width must not be zero".to_string(),
+            ));
+        }
         Ok(Self {
             template,
             tick_count,
-            next_timeline_value_offset,
+            recorded_timeline_state,
         })
     }
 
@@ -330,19 +359,16 @@ impl VulkanResidentPlacedFeedbackSubmissionReplay {
         Ok(())
     }
 
-    fn submit_next(&mut self, tick_count: usize) -> Result<usize, VulkanError> {
+    fn submit_next(
+        &self,
+        tick_count: usize,
+        current_timeline_state: &VulkanTimelineSemaphoreReplayState,
+    ) -> Result<usize, VulkanError> {
         self.validate_tick_count(tick_count)?;
-        let offset = self.next_timeline_value_offset;
-        let next_offset = offset
-            .checked_add(u64::try_from(tick_count).map_err(|_| {
-                VulkanError("resident feedback replay width exceeds u64".to_string())
-            })?)
-            .ok_or_else(|| {
-                VulkanError("resident feedback replay offset exhausted u64".to_string())
-            })?;
-        let submitted = self.template.submit_with_timeline_value_offset(offset)?;
-        self.next_timeline_value_offset = next_offset;
-        Ok(submitted)
+        let rebase = self
+            .recorded_timeline_state
+            .rebase_to(current_timeline_state)?;
+        self.template.submit_with_timeline_value_rebase(&rebase)
     }
 }
 
@@ -690,6 +716,18 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
                     .checked_add(count)
                     .expect("placed edge replay advance was validated"),
             );
+        }
+        Ok(())
+    }
+
+    fn capture_replay_timeline_state(
+        &self,
+        state: &mut VulkanTimelineSemaphoreReplayState,
+    ) -> Result<(), VulkanError> {
+        for synchronization in self.edges.values() {
+            let next_value = synchronization.next_value.get();
+            state.capture(&synchronization.source_signal, next_value)?;
+            state.capture(&synchronization.destination_wait, next_value)?;
         }
         Ok(())
     }

@@ -367,6 +367,11 @@ pub const RUNTIME_EXECUTION_TARGET_QUANTUM_DURATION_NS: u64 = 250_000_000;
 #[derive(Debug)]
 pub struct RuntimeExecutionQuantumCalibrator {
     target_duration_ns: u64,
+    shape_classes: BTreeMap<String, RuntimeExecutionQuantumShapeCalibration>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeExecutionQuantumShapeCalibration {
     aggregate: RuntimeExecutionTimingModel,
     family_mixes: BTreeMap<String, RuntimeExecutionTimingModel>,
 }
@@ -385,20 +390,20 @@ impl RuntimeExecutionQuantumCalibrator {
         }
         Ok(Self {
             target_duration_ns,
-            aggregate: RuntimeExecutionTimingModel::default(),
-            family_mixes: BTreeMap::new(),
+            shape_classes: BTreeMap::new(),
         })
     }
 
     pub fn prepare_regions(
         &self,
+        shape_class_id: &str,
         regions: &mut [RuntimeExecutionRegion],
     ) -> RuntimeExecutionQuantumBudget {
+        let calibration = self.shape_classes.get(shape_class_id);
         let mut largest_region = RuntimeExecutionCost::default();
         for region in regions {
-            let prediction = self
-                .family_mixes
-                .get(&region_family_mix(region))
+            let prediction = calibration
+                .and_then(|calibration| calibration.family_mixes.get(&region_family_mix(region)))
                 .and_then(|model| model.predict(region.cost))
                 .unwrap_or(self.target_duration_ns);
             region.cost.predicted_duration_ns = prediction.max(1);
@@ -409,22 +414,34 @@ impl RuntimeExecutionQuantumCalibrator {
 
         RuntimeExecutionQuantumBudget {
             max_work_units: Some(
-                self.aggregate
-                    .budget_for_duration(self.target_duration_ns, |cost| cost.work_units)
+                calibration
+                    .and_then(|calibration| {
+                        calibration
+                            .aggregate
+                            .budget_for_duration(self.target_duration_ns, |cost| cost.work_units)
+                    })
                     .unwrap_or(largest_region.work_units)
                     .max(largest_region.work_units)
                     .max(1),
             ),
             max_memory_bytes: Some(
-                self.aggregate
-                    .budget_for_duration(self.target_duration_ns, |cost| cost.memory_bytes)
+                calibration
+                    .and_then(|calibration| {
+                        calibration
+                            .aggregate
+                            .budget_for_duration(self.target_duration_ns, |cost| cost.memory_bytes)
+                    })
                     .unwrap_or(largest_region.memory_bytes)
                     .max(largest_region.memory_bytes)
                     .max(1),
             ),
             max_dispatches: Some(
-                self.aggregate
-                    .budget_for_duration(self.target_duration_ns, |cost| cost.dispatches)
+                calibration
+                    .and_then(|calibration| {
+                        calibration
+                            .aggregate
+                            .budget_for_duration(self.target_duration_ns, |cost| cost.dispatches)
+                    })
                     .unwrap_or(largest_region.dispatches)
                     .max(largest_region.dispatches)
                     .max(1),
@@ -436,15 +453,25 @@ impl RuntimeExecutionQuantumCalibrator {
 
     pub fn observe_quantum(
         &mut self,
+        shape_class_id: &str,
         cost: RuntimeExecutionCost,
         kernel_families: &[String],
         duration_ns: u64,
     ) {
-        self.aggregate.observe(cost, duration_ns);
-        self.family_mixes
+        let calibration = self
+            .shape_classes
+            .entry(shape_class_id.to_string())
+            .or_default();
+        calibration.aggregate.observe(cost, duration_ns);
+        calibration
+            .family_mixes
             .entry(family_mix_key(kernel_families))
             .or_default()
             .observe(cost, duration_ns);
+    }
+
+    pub fn has_observations(&self, shape_class_id: &str) -> bool {
+        self.shape_classes.contains_key(shape_class_id)
     }
 
     pub fn target_duration_ns(&self) -> u64 {
@@ -588,7 +615,7 @@ mod tests {
     fn uncalibrated_regions_start_at_one_safe_region_per_quantum() {
         let calibrator = RuntimeExecutionQuantumCalibrator::new(100).unwrap();
         let mut regions = vec![region("a", "a", 10, 1), region("b", "b", 10, 1)];
-        let budget = calibrator.prepare_regions(&mut regions);
+        let budget = calibrator.prepare_regions("shape-a", &mut regions);
         let schedule = RuntimeExecutionSchedule::linear(&regions, budget).unwrap();
 
         assert_eq!(regions[0].cost.predicted_duration_ns, 100);
@@ -608,7 +635,7 @@ mod tests {
         let mut calibrator = RuntimeExecutionQuantumCalibrator::new(100).unwrap();
         let mut observed = region("observed", "a", 10, 1);
         observed.kernel_families = vec!["linear".to_string()];
-        calibrator.observe_quantum(observed.cost, &observed.kernel_families, 25);
+        calibrator.observe_quantum("shape-a", observed.cost, &observed.kernel_families, 25);
 
         let mut regions = (0..5)
             .map(|index| {
@@ -617,7 +644,7 @@ mod tests {
                 candidate
             })
             .collect::<Vec<_>>();
-        let budget = calibrator.prepare_regions(&mut regions);
+        let budget = calibrator.prepare_regions("shape-a", &mut regions);
         let schedule = RuntimeExecutionSchedule::linear(&regions, budget).unwrap();
 
         assert_eq!(regions[0].cost.predicted_duration_ns, 25);
@@ -630,5 +657,27 @@ mod tests {
             vec![0..4, 4..5]
         );
         assert_eq!(schedule.quanta[0].kernel_families, vec!["linear"]);
+    }
+
+    #[test]
+    fn calibration_never_crosses_incompatible_execution_shapes() {
+        let mut calibrator = RuntimeExecutionQuantumCalibrator::new(100).unwrap();
+        let mut observed = region("observed", "a", 10, 1);
+        observed.kernel_families = vec!["linear".to_string()];
+        calibrator.observe_quantum(
+            "capacity=64:width=64",
+            observed.cost,
+            &observed.kernel_families,
+            25,
+        );
+
+        let mut compatible = vec![observed.clone()];
+        calibrator.prepare_regions("capacity=64:width=64", &mut compatible);
+        assert_eq!(compatible[0].cost.predicted_duration_ns, 25);
+
+        let mut incompatible = vec![observed];
+        calibrator.prepare_regions("capacity=128:width=64", &mut incompatible);
+        assert_eq!(incompatible[0].cost.predicted_duration_ns, 100);
+        assert!(!calibrator.has_observations("capacity=128:width=64"));
     }
 }

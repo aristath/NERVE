@@ -56,6 +56,11 @@ fn validate_component_executions(
                             !stage.shader_path.is_empty()
                                 && stage.local_size_x > 0
                                 && stage.workgroup_count_x > 0
+                                && {
+                                    let (_, byte_count, payload) =
+                                        stage.control.storage_buffer();
+                                    byte_count == payload.byte_count()
+                                }
                         })
                         && extensions.iter().all(|extension| !extension.is_empty())
                         && extensions.windows(2).all(|pair| pair[0] < pair[1])
@@ -316,6 +321,8 @@ fn validate_generation_execution_contract(
         )));
     }
 
+    let (_, input_batch_control_byte_count, input_batch_control_payload) =
+        manifest.input_transducer.batch_control.storage_buffer();
     let input_weight = input
         .params
         .refs
@@ -327,6 +334,9 @@ fn validate_generation_execution_contract(
         || manifest.input_transducer.spec.output_signal_id != input_edges[0].destination.port_id
         || manifest.input_transducer.shader_path.is_empty()
         || manifest.input_transducer.batch_shader_path.is_empty()
+        || input_batch_control_payload != VulkanResidentComponentBatchControlPayload::Width
+        || input_batch_control_byte_count
+            != VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
     {
         return Err(VulkanResidentTokenModelPackageError::new(format!(
             "resident model package {:?} input-transducer execution does not match its circuit component",

@@ -11,6 +11,7 @@ use crate::vulkan_compute::{
     VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceStep, VulkanResidentQueueSubmissionBatch,
     VulkanSharedHostAllocation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
+    VulkanTimelineSemaphoreReplayState,
 };
 use crate::vulkan_stream_circuit::{
     VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,

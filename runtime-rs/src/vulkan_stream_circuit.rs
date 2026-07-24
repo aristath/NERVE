@@ -46,13 +46,19 @@ use crate::vulkan::{DEFAULT_COMPUTE_LOCAL_SIZE_X, DEFAULT_SPIRV_ENTRY_POINT, rea
 use crate::vulkan_compute::{
     VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT, VulkanComputeDevice, VulkanError,
     VulkanResidentBuffer, VulkanResidentBufferCopy, VulkanResidentBufferCopyBatch,
-    VulkanResidentBufferRangeCopy, VulkanResidentKernelBufferAccess,
-    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
+    VulkanResidentBufferRangeCopy, VulkanResidentExecutionQuantumMeasurement,
+    VulkanResidentKernelBufferAccess, VulkanResidentKernelBufferBinding,
+    VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate, VulkanShaderFeature,
     VulkanSubgroupOperation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
-    record_vulkan_execution_quantum_measurement, vulkan_spirv_requirements,
+    VulkanTimelineSemaphoreReplayState, record_vulkan_execution_quantum_measurement,
+    vulkan_spirv_requirements,
+};
+#[cfg(test)]
+use crate::vulkan_compute::{
+    reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 use crate::vulkan_distributed::{
     VulkanDistributedActivationBufferPlan, VulkanDistributedActivationBuffers,
@@ -70,7 +76,7 @@ pub const VULKAN_STREAM_CIRCUIT_BACKEND_ID: &str = "vulkan_stream_circuit_ir";
 pub const VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA: &str =
     "nerve.vulkan_reusable_kernel_artifacts.v1";
 pub const VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA: &str =
-    "nerve.vulkan_resident_model_package.v3";
+    "nerve.vulkan_resident_model_package.v4";
 pub const VULKAN_PACKAGE_COMPILER_FINGERPRINT: &str = env!("NERVE_PACKAGE_COMPILER_FINGERPRINT");
 const CONTRACT_DIGEST_ALGORITHM: &str = "nerve.json_tree_sha256.v1";
 const VULKAN_STREAM_CONTROL_BYTE_CAPACITY: usize = 5 * std::mem::size_of::<u32>();

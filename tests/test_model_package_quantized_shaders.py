@@ -1,6 +1,7 @@
 from model_package_layout_common import *
 from nerve.model_package_tensors import can_fuse_native_parallel_linears
 
+
 def test_parallel_linear_shader_selector_rejects_invalid_metadata_and_layout() -> None:
     node = {
         "id": "qkv",
@@ -266,9 +267,7 @@ def test_compiler_renders_internal_q8_0_parallel_and_fused_shaders(
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
 
     parallel = (tmp_path / "parallel_linear_2way_q8_0_512x768.comp").read_text()
-    fused = (
-        tmp_path / "parallel_linear_silu_multiply_q8_0_512x768.comp"
-    ).read_text()
+    fused = (tmp_path / "parallel_linear_silu_multiply_q8_0_512x768.comp").read_text()
     parallel_batch = (
         tmp_path / "parallel_linear_batch16_2way_q8_0_512x768.comp"
     ).read_text()
@@ -511,10 +510,16 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
         {
             "shader_path": (
                 "shaders/sparse_moe_gate_up_batch1_fp8_e4m3_b128x128_"
-                "h2048_i512_e256_k8.comp"
+                "h2048_i512_e256_k8__pbc31.comp"
             ),
             "local_size_x": 64,
             "workgroup_count_x": 128,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 8,
+                "binding": 31,
+                "payload": "width_expert_start",
+            },
         }
     ]
 

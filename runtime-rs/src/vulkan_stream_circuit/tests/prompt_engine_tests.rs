@@ -624,6 +624,9 @@ fn placed_prompt_engine_single_submit_runs_the_engine_queue() {
 fn placed_prompt_engine_batches_fairly_and_cancels_between_physical_batches() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for physical batching was unavailable: {error}")
+        }
         Err(error) => {
             eprintln!("skipping placed prompt engine batch cancellation test: {error}");
             return;
@@ -636,7 +639,17 @@ fn placed_prompt_engine_batches_fairly_and_cancels_between_physical_batches() {
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
     let devices = BTreeMap::from([("gpu0".to_string(), device)]);
-    let model = Arc::new(
+    let short_model = Arc::new(
+        VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices(
+            &devices,
+            manifest_dir,
+            runtime_model.clone(),
+            Some(64),
+            false,
+        )
+        .unwrap(),
+    );
+    let long_model = Arc::new(
         VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices(
             &devices,
             manifest_dir,
@@ -646,9 +659,14 @@ fn placed_prompt_engine_batches_fairly_and_cancels_between_physical_batches() {
         )
         .unwrap(),
     );
+    assert!(!Arc::ptr_eq(&short_model, &long_model));
+    assert_eq!(
+        short_model.runtime_execution_identity,
+        long_model.runtime_execution_identity
+    );
     let short =
-        VulkanResidentInProcessPlacedPromptStream::new(model.clone(), devices.clone(), 0).unwrap();
-    let long = VulkanResidentInProcessPlacedPromptStream::new(model, devices, 1).unwrap();
+        VulkanResidentInProcessPlacedPromptStream::new(short_model, devices.clone(), 0).unwrap();
+    let long = VulkanResidentInProcessPlacedPromptStream::new(long_model, devices, 1).unwrap();
 
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     engine.add_stream("short", short).unwrap();

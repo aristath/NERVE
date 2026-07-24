@@ -206,7 +206,7 @@
             package_manifest: PathBuf::from("package.json"),
             package_root: PathBuf::from("."),
             package_id: "model-test".to_string(),
-            compiled_schema: "nerve.vulkan_resident_model_package.v3".to_string(),
+            compiled_schema: "nerve.vulkan_resident_model_package.v4".to_string(),
             config_path: "config.json".to_string(),
             tokenizer: serde_json::json!({"path": "tokenizer"}),
             available_devices: vec![RuntimeAvailableDevice {
@@ -331,7 +331,7 @@
             ok: true,
             package_manifest: PathBuf::from("package.json"),
             package_root: PathBuf::from("."),
-            schema: "nerve.vulkan_resident_model_package.v3".to_string(),
+            schema: "nerve.vulkan_resident_model_package.v4".to_string(),
             package_id: "model-test".to_string(),
             config_path: "config.json".to_string(),
             tokenizer: serde_json::json!({"path": "tokenizer"}),

@@ -62,6 +62,9 @@ fn placed_prompt_stream_owns_package_devices_and_session() {
 fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan test device could not be opened: {error}")
+        }
         Err(error) => {
             eprintln!("skipping placed resident feedback-window test: {error}");
             return;
@@ -281,15 +284,21 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
 }
 
 #[test]
-fn placed_prompt_stream_reuses_feedback_submission_templates_across_events() {
+fn placed_prompt_stream_reuses_every_recorded_feedback_window_shape() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan test device could not be opened: {error}")
+        }
         Err(error) => {
             eprintln!("skipping placed feedback-template replay test: {error}");
             return;
         }
     };
-    let manifest_path = fixture_model_package_manifest_path();
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID),
+    );
     let devices = BTreeMap::from([(
         RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string(),
         Rc::new(device),
@@ -298,7 +307,7 @@ fn placed_prompt_stream_reuses_feedback_submission_templates_across_events() {
         VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
             devices,
             manifest_path.parent().unwrap(),
-            fixture_model_runtime_model(),
+            runtime_model,
             Some(4),
             0,
             0,
@@ -333,9 +342,20 @@ fn placed_prompt_stream_reuses_feedback_submission_templates_across_events() {
         .unwrap()
         .window_policy
         .next_tick_count
-        .set(2);
+        .set(3);
     let second = stream
         .submit_input_event(VulkanResidentTokenInputEvent::new("second", vec![1], 5))
+        .unwrap();
+    stream
+        .processor
+        .resident_feedback_loop
+        .as_ref()
+        .unwrap()
+        .window_policy
+        .next_tick_count
+        .set(2);
+    let third = stream
+        .submit_input_event(VulkanResidentTokenInputEvent::new("third", vec![1], 5))
         .unwrap();
 
     assert_eq!(
@@ -356,13 +376,43 @@ fn placed_prompt_stream_reuses_feedback_submission_templates_across_events() {
             bounded_wait_timeout_count: 0,
         }
     );
+    assert_eq!(second.session_run.run.resident_feedback.template_record_count, 1);
+    assert_eq!(second.session_run.run.resident_feedback.template_replay_count, 0);
+    assert_eq!(third.session_run.run.resident_feedback.template_record_count, 0);
+    assert_eq!(third.session_run.run.resident_feedback.template_replay_count, 2);
+    assert_eq!(stream.resident_feedback_template_catalog.len(), 2);
+
+    stream.reset_transient_state().unwrap();
+    stream
+        .processor
+        .resident_feedback_loop
+        .as_ref()
+        .unwrap()
+        .window_policy
+        .next_tick_count
+        .set(2);
+    let after_reset = stream
+        .submit_input_event(VulkanResidentTokenInputEvent::new(
+            "after-reset",
+            vec![1],
+            5,
+        ))
+        .unwrap();
     assert_eq!(
-        second.session_run.run.resident_feedback,
-        VulkanResidentFeedbackExecutionStats {
-            template_record_count: 0,
-            template_replay_count: 2,
-            ..first.session_run.run.resident_feedback
-        }
+        after_reset
+            .session_run
+            .run
+            .resident_feedback
+            .template_record_count,
+        0
+    );
+    assert_eq!(
+        after_reset
+            .session_run
+            .run
+            .resident_feedback
+            .template_replay_count,
+        2
     );
 }
 

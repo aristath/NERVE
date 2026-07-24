@@ -422,6 +422,24 @@ impl VulkanDistributedDispatchRunners {
         Ok(())
     }
 
+    pub fn capture_replay_timeline_state(
+        &self,
+        state: &mut VulkanTimelineSemaphoreReplayState,
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+        for dispatch in &self.dispatches {
+            let next_value = dispatch.dependency_clock.next_value.get();
+            for synchronization in &dispatch.helper_synchronization {
+                state
+                    .capture(&synchronization.ready_source, next_value)
+                    .and_then(|_| state.capture(&synchronization.ready_wait, next_value))
+                    .and_then(|_| state.capture(&synchronization.done_source, next_value))
+                    .and_then(|_| state.capture(&synchronization.done_wait, next_value))
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn configure_feedback_indirect_dispatches<'a, F, E>(
         &mut self,
         control: &mut VulkanResidentFeedbackControlPlane,

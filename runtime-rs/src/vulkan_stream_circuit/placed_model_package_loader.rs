@@ -376,6 +376,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
             output_transducer_parameter_buffers,
             input_transducer_spirv_words,
             input_transducer_batch_spirv_words,
+            input_transducer_batch_control: runtime_model
+                .package
+                .input_transducer
+                .batch_control,
             embedding_norm_spirv_words,
             embedding_norm_batch_spirv_words,
             embedding_norm_batch_lane_tile_width: runtime_model

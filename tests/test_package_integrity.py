@@ -386,6 +386,12 @@ def minimal_package(root: Path) -> dict[str, object]:
             },
             "shader_path": "shaders/kernel.spv",
             "batch_shader_path": "shaders/kernel.spv",
+            "batch_control": {
+                "kind": "storage_buffer",
+                "byte_count": 4,
+                "binding": 3,
+                "payload": "width",
+            },
         },
         "output_transducer": {
             "spec": {
@@ -515,7 +521,9 @@ def test_package_integrity_rejects_corrupt_or_incomplete_artifacts(
     elif corruption == "sampler_contract":
         manifest["sampler"]["spec"]["top_k"] = 2
     elif corruption == "batch_contract":
-        manifest["component_executions"][0]["kernels"][0]["batch_mode"] = "weight_shared"
+        manifest["component_executions"][0]["kernels"][0]["batch_mode"] = (
+            "weight_shared"
+        )
     elif corruption == "device_extensions":
         manifest["required_vulkan_device_extensions"] = [
             "VK_EXT_shader_float8",
@@ -569,6 +577,12 @@ def test_package_integrity_rejects_batch_requirements_that_do_not_match_spirv(
                     "shader_path": "shaders/kernel.spv",
                     "local_size_x": 64,
                     "workgroup_count_x": 1,
+                    "control": {
+                        "kind": "storage_buffer",
+                        "byte_count": 4,
+                        "binding": 31,
+                        "payload": "width",
+                    },
                 }
             ],
         }

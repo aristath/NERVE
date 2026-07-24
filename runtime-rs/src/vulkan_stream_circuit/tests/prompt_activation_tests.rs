@@ -1,4 +1,80 @@
 #[test]
+fn temporal_prompt_replays_recorded_commands_across_active_widths() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for temporal template replay was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping temporal template replay test: {error}");
+            return;
+        }
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices.clone(),
+        manifest_path.parent().unwrap(),
+        runtime_model,
+        Some(64),
+        0,
+        0,
+    )
+    .unwrap();
+    let tokens = [4, 5, 6, 7];
+
+    reset_vulkan_resident_execution_counters();
+    stream
+        .processor
+        .run_temporal_prompt_block(&devices, &tokens, 0, false)
+        .unwrap();
+    let after_first = vulkan_resident_execution_counters();
+    assert!(after_first.resident_sequence_recorded_command_buffers > 0);
+
+    stream
+        .processor
+        .run_temporal_prompt_block(&devices, &tokens, 4, false)
+        .unwrap();
+    let after_second = vulkan_resident_execution_counters();
+    assert_eq!(
+        after_second.resident_sequence_recorded_command_buffers,
+        after_first.resident_sequence_recorded_command_buffers
+    );
+    assert!(
+        after_second.resident_queue_batch_commands > after_first.resident_queue_batch_commands
+    );
+
+    stream
+        .processor
+        .run_temporal_prompt_block(&devices, &tokens[..2], 8, false)
+        .unwrap();
+    let after_third = vulkan_resident_execution_counters();
+    assert_eq!(
+        after_third.resident_sequence_recorded_command_buffers,
+        after_second.resident_sequence_recorded_command_buffers
+    );
+    assert!(
+        after_third.resident_queue_batch_commands > after_second.resident_queue_batch_commands
+    );
+
+    stream
+        .processor
+        .run_temporal_prompt_block(&devices, &tokens, 10, false)
+        .unwrap();
+    let after_fourth = vulkan_resident_execution_counters();
+    assert_eq!(
+        after_fourth.resident_sequence_recorded_command_buffers,
+        after_third.resident_sequence_recorded_command_buffers
+    );
+    assert!(
+        after_fourth.resident_queue_batch_commands > after_third.resident_queue_batch_commands
+    );
+}
+
+#[test]
 fn temporal_prompt_block_matches_scalar_ticks_and_component_state() {
     let Some(manifest_path) = std::env::var_os("NERVE_TEMPORAL_TEST_PACKAGE").map(PathBuf::from)
     else {
@@ -17,6 +93,10 @@ fn temporal_prompt_block_matches_scalar_ticks_and_component_state() {
         }
     };
     let manifest = VulkanResidentModelPackageManifest::from_json_file(&manifest_path).unwrap();
+    let vocabulary_size =
+        u32::try_from(manifest.input_transducer.spec.parameter_shape[0]).unwrap();
+    assert!(vocabulary_size > 5);
+    let token_pattern = [1, 2, 3, 4, 5];
     let state_dtypes = manifest
         .circuit_graph
         .components
@@ -73,7 +153,7 @@ fn temporal_prompt_block_matches_scalar_ticks_and_component_state() {
     temporal.speculative_draft_tokens = 0;
     let event = VulkanResidentTokenInputEvent::new(
         "temporal-equivalence",
-        vec![760, 6_511, 314, 9_338, 369],
+        token_pattern.to_vec(),
         1,
     );
 
@@ -156,7 +236,6 @@ fn temporal_prompt_block_matches_scalar_ticks_and_component_state() {
     .unwrap();
     scalar.speculative_draft_tokens = 0;
     temporal.speculative_draft_tokens = 0;
-    let token_pattern = [760, 6_511, 314, 9_338, 369];
     let prompt_tokens = (0..64)
         .map(|index| token_pattern[index % token_pattern.len()])
         .collect();
@@ -543,4 +622,3 @@ fn placed_active_prompt_event_stop_after_current_processes_closing_feedback() {
     assert_eq!(run.stop_reason, "user_stop");
     assert_eq!(run.tick_count, 2);
 }
-
