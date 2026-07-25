@@ -88,6 +88,90 @@ fn placed_prompt_engine_owns_streams_and_submits_input_events() {
 }
 
 #[test]
+fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for resident stream transaction was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping resident stream transaction test: {error}");
+            return;
+        }
+    };
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(64),
+        7,
+        0,
+    )
+    .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("canonical", vec![4, 5], 0),
+        )
+        .unwrap();
+    let stream_before = engine.snapshot().streams[0].clone();
+    let state_before = engine
+        .runtime_scheduler
+        .stream_transient_state_snapshot("main")
+        .unwrap();
+    let history_before = engine.stream_histories["main"].clone();
+    let arena_before = engine
+        .runtime_scheduler
+        .transient_state_arena_snapshot()
+        .unwrap();
+
+    let transactional = engine
+        .submit_input_event_transactionally_until_idle_with_output(
+            "main",
+            VulkanResidentTokenInputEvent::new("branch", vec![6], 3),
+            |_| {},
+        )
+        .unwrap();
+
+    assert_eq!(engine.snapshot().streams[0], stream_before);
+    assert_eq!(
+        engine
+            .runtime_scheduler
+            .stream_transient_state_snapshot("main")
+            .unwrap(),
+        state_before
+    );
+    assert_eq!(engine.stream_histories["main"], history_before);
+    assert_eq!(
+        engine
+            .runtime_scheduler
+            .transient_state_arena_snapshot()
+            .unwrap()
+            .live_block_count,
+        arena_before.live_block_count
+    );
+
+    let committed = engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("committed", vec![6], 3),
+        )
+        .unwrap();
+    assert_eq!(
+        transactional.generated_token_ids,
+        committed.generated_token_ids
+    );
+}
+
+#[test]
 fn placed_prompt_engine_reuses_physical_state_pages_beyond_context_capacity() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,

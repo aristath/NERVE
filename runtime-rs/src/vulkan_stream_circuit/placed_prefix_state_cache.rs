@@ -252,15 +252,27 @@ impl VulkanResidentPlacedPrefixStateCache {
                 ),
             ));
         }
-        if !target.is_idle()
-            || target.pending_scheduler_activation.is_some()
-            || target.next_stream_tick() != 0
-        {
+        Self::restore_entry(entry, target)?;
+        self.stats.hit_count = self.stats.hit_count.saturating_add(1);
+        self.stats.reused_token_count = self.stats.reused_token_count.saturating_add(key.token_count);
+        self.stats.saved_prefill_token_count = self
+            .stats
+            .saved_prefill_token_count
+            .saturating_add(key.token_count);
+        Ok(())
+    }
+
+    fn restore_entry(
+        entry: &VulkanResidentPlacedPrefixStateEntry,
+        target: &mut VulkanResidentInProcessPlacedPromptStream,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !target.is_idle() || target.pending_scheduler_activation.is_some() {
             return Err(placed_scheduler_divergence(
-                "prefix state can only be restored into a fresh idle stream",
+                "resident state can only be restored into an idle stream",
             ));
         }
 
+        target.transient_state_pages.clear();
         for range in &entry.ranges {
             if let VulkanResidentPlacedPrefixStateRangeKind::Dynamic {
                 block_id,
@@ -344,21 +356,20 @@ impl VulkanResidentPlacedPrefixStateCache {
             .ok_or_else(|| VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                 device_id: target.package.output_device_id.clone(),
             })?;
-        for token_batch in key.token_ids.chunks(VULKAN_BACKEND_LOOP_MAX_WINDOW) {
+        target
+            .processor
+            .sampler
+            .reset_token_state()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        for token_batch in entry.key.token_ids.chunks(VULKAN_BACKEND_LOOP_MAX_WINDOW) {
             target
                 .processor
                 .sampler
                 .record_input_tokens(output_device, token_batch)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         }
-        target.session.next_stream_tick = u64::try_from(key.token_count)
+        target.session.next_stream_tick = u64::try_from(entry.key.token_count)
             .map_err(|_| VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-        self.stats.hit_count = self.stats.hit_count.saturating_add(1);
-        self.stats.reused_token_count = self.stats.reused_token_count.saturating_add(key.token_count);
-        self.stats.saved_prefill_token_count = self
-            .stats
-            .saved_prefill_token_count
-            .saturating_add(key.token_count);
         Ok(())
     }
 }

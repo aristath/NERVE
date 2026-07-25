@@ -35,7 +35,8 @@ use crate::stream_runtime::{
     RuntimeStreamActivation, RuntimeStreamActivationBatch, RuntimeStreamActivationBatchKind,
     RuntimeStreamActivationKind, RuntimeStreamActivationOutcome, RuntimeStreamInputEvent,
     RuntimeStreamScheduler, RuntimeStreamSchedulerBudget, RuntimeStreamSchedulerError,
-    RuntimeStreamSchedulerSnapshot, RuntimeStreamStateReservation, RuntimeStreamStatus,
+    RuntimeStreamSchedulerSnapshot, RuntimeStreamStateCheckpoint, RuntimeStreamStateReservation,
+    RuntimeStreamStatus,
 };
 use crate::stream_state::{
     TransientStateBlockId, TransientStateBlockShape, TransientStateKey, TransientStateRetention,
@@ -130,6 +131,7 @@ include!("vulkan_stream_circuit/placed_prompt_stream.rs");
 include!("vulkan_stream_circuit/placed_prompt_scheduled_activation.rs");
 include!("vulkan_stream_circuit/placed_prefix_state_cache.rs");
 include!("vulkan_stream_circuit/placed_prompt_engine.rs");
+include!("vulkan_stream_circuit/placed_stream_transaction.rs");
 include!("vulkan_stream_circuit/placed_prompt_device.rs");
 include!("vulkan_stream_circuit/placed_runtime_error.rs");
 include!("vulkan_stream_circuit/resident_model_package.rs");

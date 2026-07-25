@@ -44,26 +44,37 @@ fn run_placed_chat(
         codec,
         &transcript_codec,
         &stop_token_ids,
-        |turn_index, token_ids| {
+        |turn_index, chat_session, input_text, prepared| {
             print!("llm> ");
             io::stdout().flush()?;
             let mut decoder = codec.decode_stream();
             let mut output_error = None;
-            let mut event = VulkanResidentTokenInputEvent::new(
-                format!("chat_{turn_index}"),
-                token_ids.to_vec(),
-                args.max_new_tokens,
-            )
-            .with_origin("cli_chat");
-            let input_event_id = event.id.clone();
-            if !stop_token_ids.is_empty() {
-                event = event.with_stop_tokens(stop_token_ids.clone());
-            }
             reset_vulkan_resident_execution_counters();
             let run_start = Instant::now();
-            let run = engine.submit_input_event_until_idle_with_output(
+
+            let user_run = engine.submit_input_event_until_idle(
                 "main",
-                event,
+                VulkanResidentTokenInputEvent::new(
+                    format!("chat_{turn_index}_user"),
+                    prepared.user_token_delta.clone(),
+                    0,
+                )
+                .with_origin("cli_chat_canonical_user"),
+            )?;
+            let mut generation_event = VulkanResidentTokenInputEvent::new(
+                format!("chat_{turn_index}_generation"),
+                prepared.generation_prompt_token_delta.clone(),
+                args.max_new_tokens,
+            )
+            .with_origin("cli_chat_generation_branch");
+            let generation_event_id = generation_event.id.clone();
+            if !stop_token_ids.is_empty() {
+                generation_event = generation_event.with_stop_tokens(stop_token_ids.clone());
+            }
+            let generation_run = engine
+                .submit_input_event_transactionally_until_idle_with_output(
+                "main",
+                generation_event,
                 |output_event| {
                     if output_error.is_some() {
                         return;
@@ -80,39 +91,101 @@ fn run_placed_chat(
                     }
                 },
             )?;
+            let assistant_content_ids = assistant_content_token_ids(
+                &generation_run.generated_token_ids,
+                &stop_token_ids,
+            );
+            let assistant_content = transcript_codec.decode_tokens(assistant_content_ids)?;
+            let (assistant_commit_delta, canonical_committed_token_ids) = chat_session
+                .render_assistant_commit_token_delta(
+                    prepared,
+                    input_text,
+                    &assistant_content,
+                    &transcript_codec,
+                )?;
+            let commit_run = engine.submit_input_event_until_idle(
+                "main",
+                VulkanResidentTokenInputEvent::new(
+                    format!("chat_{turn_index}_assistant_commit"),
+                    assistant_commit_delta.clone(),
+                    0,
+                )
+                .with_origin("cli_chat_canonical_assistant"),
+            )?;
             let run_time_ns = elapsed_nanos_u64(run_start);
             let execution_counters = vulkan_resident_execution_counters();
-            let submitted_run = run
+            let submitted_run = generation_run
                 .engine_run
                 .input_runs
                 .iter()
                 .find(|input_run| {
                     input_run.stream_id == "main"
-                        && input_run.submitted_run.input_event.id == input_event_id
+                        && input_run.submitted_run.input_event.id == generation_event_id
                 })
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
-                        "placed chat engine run loop did not return the submitted chat event run",
+                        "placed chat engine run loop did not return the generation-branch event run",
                     )
                 })?;
+            let engine_runs = [
+                &user_run.engine_run,
+                &generation_run.engine_run,
+                &commit_run.engine_run,
+            ];
+            let prefill_activation_count = engine_runs
+                .iter()
+                .map(|run| run.prefill_activation_count)
+                .sum();
+            let decode_activation_count = engine_runs
+                .iter()
+                .map(|run| run.decode_activation_count)
+                .sum();
             let timing = runtime_prompt_timing_report(
                 0,
                 run_time_ns,
-                token_ids.len(),
-                run.generated_token_ids.len(),
-                run.engine_run.scheduler_step_count,
-                run.engine_run.activation_batch_count,
-                run.engine_run.prefill_activation_batch_count,
-                run.engine_run.decode_activation_batch_count,
-                run.engine_run.max_activation_batch_width,
-                run.engine_run.physical_multi_stream_batch_count,
-                run.engine_run.max_physical_multi_stream_batch_width,
-                run.engine_run.max_pending_activation_count,
-                run.engine_run.prefill_activation_count,
-                run.engine_run.decode_activation_count,
-                run.engine_run.prefill_time_ns,
-                run.engine_run.decode_time_ns,
+                prepared
+                    .user_token_delta
+                    .len()
+                    .saturating_add(prepared.generation_prompt_token_delta.len())
+                    .saturating_add(assistant_commit_delta.len()),
+                generation_run.generated_token_ids.len(),
+                engine_runs.iter().map(|run| run.scheduler_step_count).sum(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.activation_batch_count)
+                    .sum(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.prefill_activation_batch_count)
+                    .sum(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.decode_activation_batch_count)
+                    .sum(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.max_activation_batch_width)
+                    .max()
+                    .unwrap_or_default(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.physical_multi_stream_batch_count)
+                    .sum(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.max_physical_multi_stream_batch_width)
+                    .max()
+                    .unwrap_or_default(),
+                engine_runs
+                    .iter()
+                    .map(|run| run.max_pending_activation_count)
+                    .max()
+                    .unwrap_or_default(),
+                prefill_activation_count,
+                decode_activation_count,
+                engine_runs.iter().map(|run| run.prefill_time_ns).sum(),
+                engine_runs.iter().map(|run| run.decode_time_ns).sum(),
                 submitted_run.submitted_run.session_run.tick_count,
                 submitted_run
                     .submitted_run
@@ -120,12 +193,13 @@ fn run_placed_chat(
                     .run
                     .scheduler_turn_count,
             );
-            let prefix_state_cache = run.engine_run.prefix_state_cache.clone();
+            let prefix_state_cache = commit_run.engine_run.prefix_state_cache.clone();
             if let Some(error) = output_error {
                 return Err(Box::new(io::Error::new(io::ErrorKind::InvalidData, error)));
             }
             Ok(RuntimeChatTurn {
-                generated_token_ids: run.generated_token_ids,
+                generated_token_ids: generation_run.generated_token_ids,
+                canonical_committed_token_ids,
                 streamed: true,
                 timing,
                 execution_counters,
@@ -180,8 +254,8 @@ fn run_placed_chat(
                         .resident_feedback,
                 ),
                 sparse_moe: sparse_moe_contract.work_report(
-                    run.engine_run.prefill_activation_count,
-                    run.engine_run.decode_activation_count,
+                    prefill_activation_count,
+                    decode_activation_count,
                 ),
                 transport_edges: runtime_placed_transport_edge_reports(
                     &submitted_run

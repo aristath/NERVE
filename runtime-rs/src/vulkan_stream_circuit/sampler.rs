@@ -839,6 +839,13 @@ impl VulkanResidentSamplerRunner {
         Ok(())
     }
 
+    fn reset_token_state(&self) -> Result<(), VulkanResidentSamplerRunnerError> {
+        if let Some(buffer) = &self._seen_token_buffer {
+            buffer.write_bytes(&vec![0; buffer.byte_capacity()])?;
+        }
+        Ok(())
+    }
+
     fn completed_run(&self) -> Result<VulkanResidentSamplerRun, VulkanResidentSamplerRunnerError> {
         let output = self.output_buffer.read_bytes(self.output_byte_capacity)?;
         let token_id = u32::from_le_bytes([output[0], output[1], output[2], output[3]]);

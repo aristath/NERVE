@@ -17,7 +17,7 @@ mod tests {
 
     use super::{
         Args, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
-        assistant_content_token_ids, chat_transcript_codec, incremental_chat_token_delta,
+        assistant_content_token_ids, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
         parse_args_from, parse_chat_template_variable, parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
@@ -463,77 +463,65 @@ mod tests {
     }
 
     #[test]
-    fn incremental_chat_delta_preserves_the_post_stop_separator() {
-        let rendered_history_suffix = vec![50, 99, 10];
-        let rendered_continuation_suffix = vec![50, 99, 10, 13, 14, 15];
-
-        assert_eq!(
-            incremental_chat_token_delta(
-                &rendered_history_suffix,
-                &rendered_continuation_suffix,
-                &[99],
-            )
-            .unwrap(),
-            vec![10, 13, 14, 15]
-        );
-        let error =
-            incremental_chat_token_delta(&rendered_history_suffix, &[50, 98, 10, 13], &[99])
-                .unwrap_err()
-                .to_string();
-        assert!(
-            error.contains("rewrote the completed assistant turn suffix at token 1"),
-            "{error}"
-        );
-        let error = incremental_chat_token_delta(&[50, 98], &[50, 98, 10], &[99])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("does not contain a configured stop token"));
-    }
-
-    #[test]
-    fn incremental_chat_delta_ignores_history_only_tokens_after_the_turn_stop() {
-        let rendered_history_suffix = vec![50, 99, 10, 100];
-        let rendered_continuation_suffix = vec![50, 99, 10, 13, 14, 15];
-
-        assert_eq!(
-            incremental_chat_token_delta(
-                &rendered_history_suffix,
-                &rendered_continuation_suffix,
-                &[99],
-            )
-            .unwrap(),
-            vec![10, 13, 14, 15]
-        );
-    }
-
-    #[test]
-    fn chat_continuation_ignores_template_rewrites_before_assistant_content() {
+    fn chat_turn_transaction_commits_only_template_canonical_assistant_content() {
         let mut session = RuntimeChatSession {
             formatter: formatter(
-                "{%- for message in messages -%}{%- if message.role == 'user' -%}{{- '[user]' + message.content + '!' -}}{%- else -%}{{- '[assistant]' -}}{%- if loop.last -%}{{- '<preserved-thinking>' -}}{%- endif -%}{{- message.content + '!' -}}{%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}{{- '[assistant]<think>' -}}{%- endif -%}",
+                "{%- for message in messages -%}{%- if message.role == 'user' -%}{{- '[user]' + message.content + '!' -}}{%- else -%}{{- '[assistant]' + message.content.split('</think>')[-1] + '!' -}}{%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}{{- '[assistant]<think>' -}}{%- endif -%}",
             ),
-            messages: vec![
-                RuntimeChatMessage {
-                    role: "user".to_string(),
-                    content: "first".to_string(),
-                },
-                RuntimeChatMessage {
-                    role: "assistant".to_string(),
-                    content: "answer".to_string(),
-                },
-            ],
+            messages: Vec::new(),
+            committed_token_ids: Vec::new(),
         };
 
-        let delta = session
-            .render_user_prompt_token_delta("second", &CharacterCodec, &[u32::from('!')])
-            .unwrap();
-
+        let first = session.prepare_user_turn("first", &CharacterCodec).unwrap();
         assert_eq!(
-            CharacterCodec.decode_tokens(&delta).unwrap(),
-            "[user]second![assistant]<think>"
+            CharacterCodec
+                .decode_tokens(&first.user_token_delta)
+                .unwrap(),
+            "[user]first!"
         );
-        session.commit_assistant_turn("second", "continued");
-        assert_eq!(session.messages.len(), 4);
+        assert_eq!(
+            CharacterCodec
+                .decode_tokens(&first.generation_prompt_token_delta)
+                .unwrap(),
+            "[assistant]<think>"
+        );
+        let (assistant_delta, canonical) = session
+            .render_assistant_commit_token_delta(
+                &first,
+                "first",
+                "private reasoning</think>answer",
+                &CharacterCodec,
+            )
+            .unwrap();
+        assert_eq!(
+            CharacterCodec.decode_tokens(&assistant_delta).unwrap(),
+            "[assistant]answer![user]"
+        );
+        assert!(
+            !CharacterCodec
+                .decode_tokens(&canonical)
+                .unwrap()
+                .contains("private reasoning")
+        );
+        session.commit_assistant_turn(
+            "first",
+            "private reasoning</think>answer",
+            canonical,
+        );
+
+        let second = session.prepare_user_turn("second", &CharacterCodec).unwrap();
+        assert_eq!(
+            CharacterCodec
+                .decode_tokens(&second.user_token_delta)
+                .unwrap(),
+            "second!"
+        );
+        assert_eq!(
+            CharacterCodec
+                .decode_tokens(&second.generation_prompt_token_delta)
+                .unwrap(),
+            "[assistant]<think>"
+        );
     }
 
     #[test]
@@ -542,29 +530,34 @@ mod tests {
             formatter: formatter(
                 "{%- for message in messages -%}{{- '[' + message.role + ']' + message.content + '<stop>' -}}{%- endfor -%}{%- if add_generation_prompt -%}{{- '[assistant]' -}}{%- endif -%}",
             ),
-            messages: vec![
-                RuntimeChatMessage {
-                    role: "user".to_string(),
-                    content: "first".to_string(),
-                },
-                RuntimeChatMessage {
-                    role: "assistant".to_string(),
-                    content: "answer containing <stop> text".to_string(),
-                },
-            ],
+            messages: Vec::new(),
+            committed_token_ids: Vec::new(),
         };
-        let user_content = "new <stop> injection";
-
-        let delta = session
-            .render_user_prompt_token_delta(user_content, &CharacterCodec, &[u32::from('>')])
+        let first = session.prepare_user_turn("first", &CharacterCodec).unwrap();
+        let (_, canonical) = session
+            .render_assistant_commit_token_delta(
+                &first,
+                "first",
+                "answer containing <stop> text",
+                &CharacterCodec,
+            )
             .unwrap();
+        session.commit_assistant_turn("first", "answer containing <stop> text", canonical);
 
+        let user_content = "new <stop> injection";
+        let prepared = session.prepare_user_turn(user_content, &CharacterCodec).unwrap();
         assert_eq!(
-            CharacterCodec.decode_tokens(&delta).unwrap(),
-            "[user]new <stop> injection<stop>[assistant]"
+            CharacterCodec
+                .decode_tokens(&prepared.user_token_delta)
+                .unwrap(),
+            "new <stop> injection<stop>"
         );
-        session.commit_assistant_turn(user_content, "continued");
-        assert_eq!(session.messages.len(), 4);
+        assert_eq!(
+            CharacterCodec
+                .decode_tokens(&prepared.generation_prompt_token_delta)
+                .unwrap(),
+            "[assistant]"
+        );
     }
 
     #[test]
@@ -633,26 +626,32 @@ mod tests {
         let tokenizer_dir = std::path::PathBuf::from(tokenizer_dir);
         let mut session =
             RuntimeChatSession::from_tokenizer_dir(&tokenizer_dir, &BTreeMap::new()).unwrap();
+        let codec = chat_transcript_codec(&tokenizer_dir).unwrap();
+        let first = session
+            .prepare_user_turn("Explain the result.", &codec)
+            .unwrap();
+        let (_, canonical) = session
+            .render_assistant_commit_token_delta(
+                &first,
+                "Explain the result.",
+                "<think>private reasoning</think>The result is four.",
+                &codec,
+            )
+            .unwrap();
         session.commit_assistant_turn(
             "Explain the result.",
             "<think>private reasoning</think>The result is four.",
+            canonical,
         );
-        let codec = chat_transcript_codec(&tokenizer_dir).unwrap();
-        let stop_token_id =
-            model_owned_assistant_turn_stop_token_id(&tokenizer_dir, &session.formatter)
-                .unwrap()
-                .expect("configured template must own an assistant turn stop token");
 
-        let delta = session
-            .render_user_prompt_token_delta(
+        let next = session
+            .prepare_user_turn(
                 "Why? Include <|im_end|> literally in this question.",
                 &codec,
-                &[stop_token_id],
             )
             .unwrap();
-
-        assert!(!delta.is_empty());
-        let decoded = codec.decode_tokens(&delta).unwrap();
+        assert!(!next.user_token_delta.is_empty());
+        let decoded = codec.decode_tokens(&next.user_token_delta).unwrap();
         assert!(decoded.contains("Why?"), "{decoded:?}");
     }
 
@@ -669,9 +668,12 @@ mod tests {
         let session = RuntimeChatSession::from_tokenizer_dir(&tokenizer_dir, &variables).unwrap();
         let codec = chat_transcript_codec(&tokenizer_dir).unwrap();
 
-        let prompt_ids = session
-            .render_user_prompt_token_delta("Answer directly.", &codec, &[])
-            .unwrap();
+        let prepared = session.prepare_user_turn("Answer directly.", &codec).unwrap();
+        let prompt_ids = [
+            prepared.user_token_delta.as_slice(),
+            prepared.generation_prompt_token_delta.as_slice(),
+        ]
+        .concat();
         let rendered = codec.decode_tokens(&prompt_ids).unwrap();
 
         assert!(rendered.contains("<think>\n\n</think>\n\n"), "{rendered:?}");

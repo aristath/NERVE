@@ -15,6 +15,7 @@ pub struct VulkanResidentInProcessPlacedPromptEngine {
     latest_prefix_checkpoint_by_stream: BTreeMap<String, RuntimePrefixStateCacheKey>,
     multi_stream_batch_runners:
         BTreeMap<VulkanResidentInProcessPlacedPromptEngineBatchKey, VulkanResidentPlacedMultiStreamBatchRunner>,
+    active_transaction_stream_ids: BTreeSet<String>,
     pending_wait_group_cursor: usize,
 }
 
@@ -41,6 +42,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             resident_prefix_state_cache: VulkanResidentPlacedPrefixStateCache::default(),
             latest_prefix_checkpoint_by_stream: BTreeMap::new(),
             multi_stream_batch_runners: BTreeMap::new(),
+            active_transaction_stream_ids: BTreeSet::new(),
             pending_wait_group_cursor: 0,
         }
     }
@@ -966,6 +968,9 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         stream_id: &str,
         remaining_prompt_token_count: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedPromptEngineError> {
+        if self.active_transaction_stream_ids.contains(stream_id) {
+            return Ok(());
+        }
         let state = self
             .runtime_scheduler
             .stream_transient_state_snapshot(stream_id)?;
