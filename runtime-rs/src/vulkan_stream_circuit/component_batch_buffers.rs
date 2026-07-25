@@ -85,11 +85,11 @@ fn component_batch_signal_buffer_plan(
             else {
                 continue;
             };
-            let host_visible = matches!(
-                key,
-                VulkanComponentBatchSignalKey::IncomingEdge(_)
-                    | VulkanComponentBatchSignalKey::OutgoingEdge(_)
-            );
+            // Component-batch activations remain device-local. A cross-device
+            // edge uses a dedicated transfer route rather than forcing every
+            // producer and consumer dispatch to operate directly on system
+            // memory.
+            let host_visible = false;
             let external_source = matches!(
                 key,
                 VulkanComponentBatchSignalKey::ModelInput(_)
@@ -149,4 +149,3 @@ fn component_batch_signal_buffer_plan(
             .collect(),
     ))
 }
-

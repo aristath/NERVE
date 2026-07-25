@@ -11,6 +11,7 @@ pub struct VulkanInProcessPlacedEdgeTransport {
     direct_copy_byte_count: usize,
     direct_receive_count: usize,
     direct_receive_byte_count: usize,
+    edge_stats: BTreeMap<VulkanPlacedEdgePacketKey, VulkanPlacedEdgeTransportEdgeStats>,
 }
 
 pub struct VulkanPlacedEdgeDirectCopy {
@@ -19,6 +20,7 @@ pub struct VulkanPlacedEdgeDirectCopy {
     pub source_component_id: String,
     pub destination_component_id: String,
     pub byte_count: usize,
+    route: VulkanPlacedEdgeTransferRoute,
     copy: Option<VulkanResidentMappedBufferCopy>,
 }
 
@@ -50,6 +52,7 @@ impl VulkanInProcessPlacedEdgeTransport {
             direct_copy_byte_count: self.direct_copy_byte_count,
             direct_receive_count: self.direct_receive_count,
             direct_receive_byte_count: self.direct_receive_byte_count,
+            edges: self.edge_stats.values().cloned().collect(),
         }
     }
 
@@ -65,10 +68,17 @@ impl VulkanInProcessPlacedEdgeTransport {
         self.direct_copies.len()
     }
 
-    fn edge_uses_shared_allocation(&self, key: &VulkanPlacedEdgePacketKey) -> bool {
+    fn edge_uses_shared_storage(&self, key: &VulkanPlacedEdgePacketKey) -> bool {
         self.direct_copies
             .get(key)
-            .is_some_and(|direct_copy| direct_copy.copy.is_none())
+            .is_some_and(|direct_copy| {
+                matches!(
+                    direct_copy.route,
+                    VulkanPlacedEdgeTransferRoute::SameDeviceAlias
+                        | VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                        | VulkanPlacedEdgeTransferRoute::SharedHost
+                )
+            })
     }
 
     pub fn reset_tick_state(&mut self) {
@@ -82,12 +92,24 @@ impl VulkanInProcessPlacedEdgeTransport {
         self.direct_copy_byte_count = 0;
         self.direct_receive_count = 0;
         self.direct_receive_byte_count = 0;
+        for edge in self.edge_stats.values_mut() {
+            edge.reset_tick_counts();
+        }
     }
 
     pub fn register_direct_edge_copy(
         &mut self,
         outgoing: &VulkanPlacedEdgeBufferAllocation,
         incoming: &VulkanPlacedEdgeBufferAllocation,
+    ) -> Result<(), VulkanPlacedEdgeTransportError> {
+        self.register_direct_edge_copy_with_route(outgoing, incoming, None)
+    }
+
+    fn register_direct_edge_copy_with_route(
+        &mut self,
+        outgoing: &VulkanPlacedEdgeBufferAllocation,
+        incoming: &VulkanPlacedEdgeBufferAllocation,
+        route_override: Option<VulkanPlacedEdgeTransferRoute>,
     ) -> Result<(), VulkanPlacedEdgeTransportError> {
         let outgoing_key = VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
         let incoming_key = VulkanPlacedEdgePacketKey::from_incoming_endpoint(&incoming.endpoint);
@@ -107,14 +129,32 @@ impl VulkanInProcessPlacedEdgeTransport {
                 incoming_byte_capacity: incoming.byte_capacity,
             });
         }
-        let copy = if Arc::ptr_eq(&outgoing.buffer, &incoming.buffer)
-            || outgoing
-                .buffer
-                .shares_host_allocation_with(&incoming.buffer)
+        let (route, copy) = if let Some(route) = route_override {
+            if route != VulkanPlacedEdgeTransferRoute::DeviceLocalStaging {
+                return Err(VulkanPlacedEdgeTransportError::Vulkan {
+                    operation: "register direct edge route override",
+                    error: VulkanError(format!(
+                        "unsupported direct edge route override {route:?}"
+                    )),
+                });
+            }
+            (route, None)
+        } else if Arc::ptr_eq(&outgoing.buffer, &incoming.buffer) {
+            (VulkanPlacedEdgeTransferRoute::SameDeviceAlias, None)
+        } else if outgoing
+            .buffer
+            .shares_device_memory_with(&incoming.buffer)
         {
-            None
+            (VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal, None)
+        } else if outgoing
+            .buffer
+            .shares_host_allocation_with(&incoming.buffer)
+        {
+            (VulkanPlacedEdgeTransferRoute::SharedHost, None)
         } else {
-            Some(
+            (
+                VulkanPlacedEdgeTransferRoute::HostStaging,
+                Some(
                 outgoing
                     .buffer
                     .create_persistently_mapped_copy_to(&incoming.buffer, outgoing.byte_capacity)
@@ -122,8 +162,26 @@ impl VulkanInProcessPlacedEdgeTransport {
                         operation: "create persistently mapped edge buffer copy",
                         error,
                     })?,
+                ),
             )
         };
+        self.edge_stats.insert(
+            outgoing_key.clone(),
+            VulkanPlacedEdgeTransportEdgeStats {
+                key: outgoing_key.clone(),
+                signal: outgoing.endpoint.signal.clone(),
+                route,
+                byte_capacity: outgoing.byte_capacity,
+                publish_count: 0,
+                receive_count: 0,
+                transferred_byte_count: 0,
+                queue_signal_count: 0,
+                queue_wait_count: 0,
+                host_wait_count: 0,
+                queue_overlap_eligible: route.supports_queue_overlap(),
+                overlap_submission_count: 0,
+            },
+        );
         self.direct_copies.insert(
             outgoing_key.clone(),
             VulkanPlacedEdgeDirectCopy {
@@ -132,6 +190,7 @@ impl VulkanInProcessPlacedEdgeTransport {
                 source_component_id: outgoing.endpoint.local_component_id.clone(),
                 destination_component_id: outgoing.endpoint.remote_component_id.clone(),
                 byte_count: outgoing.byte_capacity,
+                route,
                 copy,
             },
         );
@@ -160,9 +219,13 @@ impl VulkanInProcessPlacedEdgeTransport {
                     }
                 })?;
             }
-            self.ready_direct_edges.insert(key);
+            self.ready_direct_edges.insert(key.clone());
             self.direct_copy_count += 1;
             self.direct_copy_byte_count += direct_copy.byte_count;
+            if let Some(edge) = self.edge_stats.get_mut(&key) {
+                edge.publish_count += 1;
+                edge.transferred_byte_count += direct_copy.byte_count;
+            }
             return Ok(VulkanPlacedEdgeTransportReceipt {
                 key: direct_copy.key.clone(),
                 signal: direct_copy.signal.clone(),
@@ -231,6 +294,9 @@ impl VulkanInProcessPlacedEdgeTransport {
             }
             self.direct_receive_count += 1;
             self.direct_receive_byte_count += direct_copy.byte_count;
+            if let Some(edge) = self.edge_stats.get_mut(&key) {
+                edge.receive_count += 1;
+            }
             return Ok(VulkanPlacedEdgeTransportReceipt {
                 key: direct_copy.key.clone(),
                 signal: direct_copy.signal.clone(),
@@ -285,6 +351,27 @@ impl VulkanInProcessPlacedEdgeTransport {
             }
         }
         Ok(batch)
+    }
+
+    fn record_queue_signal(&mut self, key: &VulkanPlacedEdgePacketKey) {
+        if let Some(edge) = self.edge_stats.get_mut(key) {
+            edge.queue_signal_count += 1;
+        }
+    }
+
+    fn record_queue_wait(&mut self, key: &VulkanPlacedEdgePacketKey) {
+        if let Some(edge) = self.edge_stats.get_mut(key) {
+            edge.queue_wait_count += 1;
+            if edge.queue_overlap_eligible {
+                edge.overlap_submission_count += 1;
+            }
+        }
+    }
+
+    fn record_host_wait(&mut self, key: &VulkanPlacedEdgePacketKey) {
+        if let Some(edge) = self.edge_stats.get_mut(key) {
+            edge.host_wait_count += 1;
+        }
     }
 }
 
@@ -381,4 +468,3 @@ impl Display for VulkanPlacedEdgeIoPlanError {
 }
 
 impl Error for VulkanPlacedEdgeIoPlanError {}
-

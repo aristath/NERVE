@@ -242,6 +242,13 @@ impl VulkanResidentRuntimeModel {
             .components
             .iter()
             .map(|component| self.placement.device_for_component(&component.component_id).to_string())
+            .chain(
+                self.placement
+                    .component_shard_devices
+                    .values()
+                    .flatten()
+                    .cloned(),
+            )
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -258,6 +265,30 @@ impl VulkanResidentRuntimeModel {
     pub fn coalesce_placement_to_device(mut self, device_id: impl Into<String>) -> Self {
         self.placement = StreamCircuitPlacementSpec::new(device_id);
         self
+    }
+
+    pub fn with_component_shard_devices(
+        mut self,
+        component_id: &str,
+        device_ids: Vec<String>,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        if !self
+            .circuit_graph
+            .components
+            .iter()
+            .any(|component| component.component_id == component_id)
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime graph has no component {component_id:?} to shard"
+            )));
+        }
+        self.placement = self
+            .placement
+            .with_component_shard_devices(component_id, device_ids);
+        self.resolved_graph(PathBuf::from("."))?
+            .placement_plan(&self.placement)
+            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        Ok(self)
     }
 }
 
@@ -392,4 +423,3 @@ fn apply_runtime_graph_state_policy(
         state.sharing = Some(format!("{source_prefix}{}", state.id));
     }
 }
-

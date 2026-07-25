@@ -15,6 +15,7 @@ struct VulkanResidentInProcessPlacedFeedbackLoopEligibility {
     device_slice_count: usize,
     every_slice_has_terminal_segment: bool,
     distributed_dispatches_are_bridged: bool,
+    every_edge_is_resident_replayable: bool,
     has_dynamic_push_constants: bool,
     window_width: usize,
     sampler_history_capacity: usize,
@@ -28,6 +29,8 @@ impl VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             Some("missing_terminal_segment")
         } else if !self.distributed_dispatches_are_bridged {
             Some("unbridged_distributed_dispatch")
+        } else if !self.every_edge_is_resident_replayable {
+            Some("host_staged_edge")
         } else {
             None
         }
@@ -157,6 +160,7 @@ struct VulkanResidentPlacedFeedbackSubmissionReplay {
     template: VulkanResidentQueueSubmissionTemplate,
     tick_count: usize,
     recorded_timeline_state: VulkanTimelineSemaphoreReplayState,
+    transport_stats: VulkanPlacedEdgeTransportStats,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -336,6 +340,7 @@ impl VulkanResidentPlacedFeedbackSubmissionReplay {
         template: VulkanResidentQueueSubmissionTemplate,
         tick_count: usize,
         recorded_timeline_state: VulkanTimelineSemaphoreReplayState,
+        transport_stats: VulkanPlacedEdgeTransportStats,
     ) -> Result<Self, VulkanError> {
         if tick_count == 0 {
             return Err(VulkanError(
@@ -346,6 +351,7 @@ impl VulkanResidentPlacedFeedbackSubmissionReplay {
             template,
             tick_count,
             recorded_timeline_state,
+            transport_stats,
         })
     }
 
@@ -455,6 +461,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         model: &VulkanResidentInProcessPlacedModelPackage,
         device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         activation_schedule: &VulkanMountedPlacedResidentInProcessSchedule,
+        every_edge_is_resident_replayable: bool,
         mount: VulkanResidentPlacedFeedbackMount<'_>,
         device_for: &F,
     ) -> Result<Option<Self>, VulkanError>
@@ -513,6 +520,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                         dependency.has_owner_producer && dependency.has_owner_continuation
                     })
             }),
+            every_edge_is_resident_replayable,
             has_dynamic_push_constants,
             window_width,
             sampler_history_capacity: sampler.history_capacity_activations,
@@ -674,6 +682,7 @@ struct VulkanPlacedDeviceLinks {
     endpoint_overrides: BTreeMap<String, Vec<VulkanPlacedEdgeEndpointBufferOverride>>,
     synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     stream_control_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
+    every_edge_is_resident_replayable: bool,
 }
 
 #[derive(Default)]
@@ -686,9 +695,19 @@ struct VulkanPlacedEdgeTimelineSynchronization {
     destination_wait: VulkanTimelineSemaphore,
     next_value: Cell<u64>,
     pending_value: Cell<Option<u64>>,
+    transfer_route: VulkanPlacedEdgeTransferRoute,
 }
 
 impl VulkanPlacedEdgeTimelineSynchronizations {
+    fn transfer_route(
+        &self,
+        key: &VulkanPlacedEdgePacketKey,
+    ) -> Option<VulkanPlacedEdgeTransferRoute> {
+        self.edges
+            .get(key)
+            .map(|synchronization| synchronization.transfer_route)
+    }
+
     fn advance_replayed_dependencies(&self, count: usize) -> Result<(), VulkanError> {
         let count = u64::try_from(count)
             .map_err(|_| VulkanError("placed edge replay width exceeds u64".to_string()))?;
@@ -783,6 +802,7 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
             .values()
             .any(|synchronization| synchronization.pending_value.get().is_some())
     }
+
 }
 
 fn create_placed_device_links<'a, F>(
@@ -812,6 +832,7 @@ where
     let mut endpoint_overrides =
         BTreeMap::<String, Vec<VulkanPlacedEdgeEndpointBufferOverride>>::new();
     let mut synchronizations = BTreeMap::new();
+    let mut every_edge_is_resident_replayable = true;
     for (outgoing, incoming) in edge_pairs {
         let outgoing_byte_capacity = outgoing
             .byte_capacity
@@ -819,40 +840,63 @@ where
         let source_device = device_for(&outgoing.local_device_id)?;
         let destination_device = device_for(&incoming.local_device_id)?;
         let devices_share_queue = source_device.shares_logical_device_with(destination_device);
-        let (outgoing_buffer, incoming_buffer) = if devices_share_queue {
-            let buffer = Arc::new(
-                source_device
-                    .create_resident_buffer(outgoing_byte_capacity)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-            );
-            (buffer.clone(), buffer)
-        } else {
-            let allocation = source_device
-                .create_shared_host_allocation(&[destination_device], outgoing_byte_capacity)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            let outgoing_buffer = Arc::new(
-                source_device
-                    .import_shared_host_buffer(Arc::clone(&allocation))
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-            );
-            let incoming_buffer = Arc::new(
-                destination_device
-                    .import_shared_host_buffer(allocation)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-            );
-            (outgoing_buffer, incoming_buffer)
-        };
-        if !devices_share_queue {
-            if !source_device.supports_opaque_fd_timeline_semaphores()
-                || !destination_device.supports_opaque_fd_timeline_semaphores()
+        let supports_cross_queue_timeline =
+            source_device.supports_opaque_fd_timeline_semaphores()
+                && destination_device.supports_opaque_fd_timeline_semaphores();
+        let mut resident_transfer = None;
+        let edge_buffers = if devices_share_queue {
+                let buffer = Arc::new(
+                    source_device
+                        .create_resident_buffer(outgoing_byte_capacity)
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                );
+                (buffer.clone(), buffer, true)
+            } else if supports_cross_queue_timeline
+                && let Ok(shared) = source_device
+                    .create_shared_resident_buffers(&[destination_device], outgoing_byte_capacity)
             {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "cross-device edge {:?} requires persistent opaque-file timeline semaphores",
-                        VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing)
-                    )),
-                ));
-            }
+                let mut buffers = shared.buffers.into_iter();
+                let source_shared_buffer = buffers
+                    .next()
+                    .expect("shared edge allocation contains its owner");
+                let destination_shared_buffer = buffers
+                    .next()
+                    .expect("shared edge allocation contains its destination");
+                match shared.route {
+                    VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                        resident_transfer = Some(
+                            VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+                        );
+                        (source_shared_buffer, destination_shared_buffer, true)
+                    }
+                    VulkanSharedResidentBufferRoute::SharedHost => {
+                        resident_transfer = Some(VulkanPlacedEdgeTransferRoute::SharedHost);
+                        (source_shared_buffer, destination_shared_buffer, true)
+                    }
+                }
+            } else {
+                let mut outgoing_buffer = source_device
+                    .create_host_visible_resident_buffer(outgoing_byte_capacity)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                outgoing_buffer
+                    .persistently_map()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let mut incoming_buffer = destination_device
+                    .create_host_visible_resident_buffer(outgoing_byte_capacity)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                incoming_buffer
+                    .persistently_map()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                (
+                    Arc::new(outgoing_buffer),
+                    Arc::new(incoming_buffer),
+                    false,
+                )
+            };
+        let (outgoing_buffer, incoming_buffer, edge_is_resident_replayable) = edge_buffers;
+        every_edge_is_resident_replayable &= edge_is_resident_replayable;
+        if let Some(transfer_route) = resident_transfer {
+            debug_assert!(supports_cross_queue_timeline);
             let source_signal = source_device
                 .create_opaque_fd_exportable_timeline_semaphore(0)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -876,6 +920,7 @@ where
                         destination_wait,
                         next_value: Cell::new(1),
                         pending_value: Cell::new(None),
+                        transfer_route,
                     },
                 )
                 .is_some()
@@ -960,5 +1005,6 @@ where
             edges: synchronizations,
         },
         stream_control_buffers,
+        every_edge_is_resident_replayable,
     })
 }

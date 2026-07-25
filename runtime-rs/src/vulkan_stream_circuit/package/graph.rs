@@ -177,6 +177,12 @@ impl VulkanResidentPackageCircuitGraph {
                 .filter(|(component_id, _)| processor_ids.contains(component_id.as_str()))
                 .map(|(component_id, device_id)| (component_id.clone(), device_id.clone()))
                 .collect(),
+            component_shard_devices: placement
+                .component_shard_devices
+                .iter()
+                .filter(|(component_id, _)| processor_ids.contains(component_id.as_str()))
+                .map(|(component_id, device_ids)| (component_id.clone(), device_ids.clone()))
+                .collect(),
         }
     }
 
@@ -206,10 +212,39 @@ impl VulkanResidentPackageCircuitGraph {
         &self,
         placement: &StreamCircuitPlacementSpec,
     ) -> Vec<String> {
+        let processor_ids = self
+            .components
+            .iter()
+            .filter(|component| component.runtime_role.is_signal_processor())
+            .map(|component| component.component_id.as_str())
+            .collect::<BTreeSet<_>>();
+        processor_ids
+            .iter()
+            .map(|component_id| placement.device_for_component(component_id).to_string())
+            .chain(
+                placement
+                    .component_shard_devices
+                    .iter()
+                    .filter(|(component_id, _)| processor_ids.contains(component_id.as_str()))
+                    .flat_map(|(_, device_ids)| device_ids.iter().cloned()),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(super) fn signal_processor_owner_device_ids(
+        &self,
+        placement: &StreamCircuitPlacementSpec,
+    ) -> Vec<String> {
         self.components
             .iter()
             .filter(|component| component.runtime_role.is_signal_processor())
-            .map(|component| placement.device_for_component(&component.component_id).to_string())
+            .map(|component| {
+                placement
+                    .device_for_component(&component.component_id)
+                    .to_string()
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()

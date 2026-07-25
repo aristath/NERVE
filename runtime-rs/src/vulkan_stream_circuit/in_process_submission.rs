@@ -28,6 +28,7 @@ impl From<VulkanMountedPlacedResidentStreamTickError>
 fn register_in_process_direct_edge_copies(
     slices: &[VulkanMountedPlacedResidentInProcessStreamTickSlice<'_>],
     transport: &mut VulkanInProcessPlacedEdgeTransport,
+    edge_synchronizations: Option<&VulkanPlacedEdgeTimelineSynchronizations>,
 ) -> Result<(), VulkanMountedPlacedResidentInProcessStreamTickError> {
     for source_slice in slices {
         for outgoing in &source_slice.mounted.edge_io.outgoing_buffers {
@@ -44,8 +45,12 @@ fn register_in_process_direct_edge_copies(
             else {
                 continue;
             };
+            let key = VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
+            let route_override = edge_synchronizations
+                .and_then(|synchronizations| synchronizations.transfer_route(&key))
+                .filter(|route| *route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging);
             transport
-                .register_direct_edge_copy(outgoing, incoming)
+                .register_direct_edge_copy_with_route(outgoing, incoming, route_override)
                 .map_err(VulkanMountedPlacedResidentStreamTickError::Transport)?;
         }
     }
@@ -228,6 +233,7 @@ impl VulkanPlacedSubmissionPolicy {
 #[derive(Clone, Copy)]
 struct VulkanPlacedSubmissionContext<'a, 'batch> {
     policy: VulkanPlacedSubmissionPolicy,
+    participant_devices: Option<&'a BTreeMap<String, Rc<VulkanComputeDevice>>>,
     state_transactions: Option<&'a [VulkanResidentStateTransactionBank]>,
     feedback_turn: Option<VulkanPlacedFeedbackTimelineTurn<'a>>,
     output_turn: Option<VulkanPlacedOutputTimelineTurn<'a>>,
@@ -237,6 +243,7 @@ struct VulkanPlacedSubmissionContext<'a, 'batch> {
 impl VulkanPlacedSubmissionContext<'_, '_> {
     const SYNCHRONOUS: Self = Self {
         policy: VulkanPlacedSubmissionPolicy::SYNCHRONOUS,
+        participant_devices: None,
         state_transactions: None,
         feedback_turn: None,
         output_turn: None,
@@ -252,4 +259,3 @@ struct VulkanPlacedSliceSubmissionContext<'a, 'batch> {
     output_turn: Option<VulkanPlacedOutputTimelineTurn<'a>>,
     submission_batch: Option<&'batch VulkanResidentQueueSubmissionBatch<'a>>,
 }
-

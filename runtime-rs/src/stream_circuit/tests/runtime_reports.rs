@@ -240,6 +240,7 @@
             runtime_graph_controls: RuntimeGraphControls {
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
+                component_shard_devices: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: vec![RuntimeGraphDuplicateAfterControl {
                     after_instance_id: "layer_00".to_string(),
@@ -339,6 +340,7 @@
             runtime_graph: RuntimeGraphControls {
                 default_device_id: None,
                 node_devices: BTreeMap::new(),
+                component_shard_devices: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: Vec::new(),
             },
@@ -383,6 +385,7 @@
             runtime_graph_controls: RuntimeGraphControls {
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
+                component_shard_devices: BTreeMap::new(),
                 source_chain: Some(vec![RuntimeGraphSourceChainEntry {
                     instance_id: "layer_05_repeat".to_string(),
                     source_component_id: "layer_05".to_string(),
@@ -558,6 +561,7 @@
             runtime_graph: RuntimeGraphControls {
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
+                component_shard_devices: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: Vec::new(),
             },
@@ -675,6 +679,7 @@
             runtime_graph: RuntimeGraphControls {
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
+                component_shard_devices: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: Vec::new(),
             },
@@ -693,6 +698,7 @@
             scheduler_turns: 1,
             completed_stage_deltas: vec![42],
             transport: RuntimePlacedTransportReport {
+                edges: Vec::new(),
                 published_packet_count: 0,
                 published_byte_count: 0,
                 received_packet_count: 0,
@@ -702,6 +708,7 @@
                 direct_receive_count: 2,
                 direct_receive_byte_count: 4096,
                 by_tick: vec![RuntimePlacedTransportStatsReport {
+                    edges: Vec::new(),
                     pending_packet_count: 0,
                     pending_byte_count: 0,
                     pending_direct_edge_count: 0,

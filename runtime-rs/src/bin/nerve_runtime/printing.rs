@@ -204,6 +204,30 @@ fn print_runtime_feedback_stats(stats: &RuntimeFeedbackExecutionReport) {
     );
 }
 
+fn print_runtime_transport_edges(edges: &[RuntimePlacedTransportEdgeReport]) {
+    if edges.is_empty() {
+        return;
+    }
+    println!("transport_edges:");
+    for edge in edges {
+        println!(
+            "  edge={} {}->{} signal={} route={} bytes={} transfers={} queue_signals={} queue_waits={} host_waits={} overlap_eligible={} overlap_submissions={}",
+            edge.edge_index,
+            edge.from_device_id,
+            edge.to_device_id,
+            edge.signal,
+            edge.route,
+            edge.transferred_byte_count,
+            edge.publish_count,
+            edge.queue_signal_count,
+            edge.queue_wait_count,
+            edge.host_wait_count,
+            edge.queue_overlap_eligible,
+            edge.overlap_submission_count,
+        );
+    }
+}
+
 fn print_runtime_speculative_stats(
     cycle_count: usize,
     proposed_draft_token_count: usize,
@@ -287,6 +311,8 @@ Options:
                              Set a model-owned chat template variable; may be repeated.
   --device <DEVICE_ID>       Default logical device for unplaced nodes. May be supplied once.
   --place-node <NODE=DEV>    Assign one runtime node instance to a logical device.
+  --shard-component <NODE=DEV,DEV>
+                             Shard eligible internal work while preserving the logical node boundary.
   --bind-device <DEV=TARGET> Bind a logical device to a discovered Vulkan device ID.
   --chain <ITEM[,ITEM...]>    Runtime source chain. ITEM is SOURCE or INSTANCE=SOURCE.
   --duplicate-after <AFTER=NEW>

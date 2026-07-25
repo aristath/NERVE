@@ -178,6 +178,13 @@ fn run_placed_chat(
                         .run
                         .resident_feedback,
                 ),
+                transport_edges: runtime_placed_transport_edge_reports(
+                    &submitted_run
+                        .submitted_run
+                        .session_run
+                        .run
+                        .transport_stats,
+                ),
             })
         },
     )
@@ -294,6 +301,7 @@ fn execute_placed_prompt_run(
     let transport_direct_copy_byte_count = run.transport_stats.direct_copy_byte_count;
     let transport_direct_receive_count = run.transport_stats.direct_receive_count;
     let transport_direct_receive_byte_count = run.transport_stats.direct_receive_byte_count;
+    let transport_edges = runtime_placed_transport_edge_reports(&run.transport_stats);
 
     Ok(RuntimePlacedPromptRunReport {
         ok: true,
@@ -330,6 +338,7 @@ fn execute_placed_prompt_run(
             direct_copy_byte_count: transport_direct_copy_byte_count,
             direct_receive_count: transport_direct_receive_count,
             direct_receive_byte_count: transport_direct_receive_byte_count,
+            edges: transport_edges,
             by_tick: transport_stats_by_tick,
         },
         timing,
@@ -344,6 +353,39 @@ fn execute_placed_prompt_run(
         speculative_draft_catch_up_time_ns: run.speculative_decode.draft_catch_up_time_ns,
         resident_feedback: runtime_feedback_execution_report(run.resident_feedback),
     })
+}
+
+fn runtime_placed_transport_edge_reports(
+    stats: &VulkanPlacedEdgeTransportStats,
+) -> Vec<RuntimePlacedTransportEdgeReport> {
+    stats
+        .edges
+        .iter()
+        .map(|edge| RuntimePlacedTransportEdgeReport {
+            edge_index: edge.key.edge_index,
+            from_device_id: edge.key.from_device_id.clone(),
+            to_device_id: edge.key.to_device_id.clone(),
+            signal: edge.signal.clone(),
+            route: match edge.route {
+                VulkanPlacedEdgeTransferRoute::SameDeviceAlias => "same_device_alias",
+                VulkanPlacedEdgeTransferRoute::DeviceLocalCopy => "device_local_copy",
+                VulkanPlacedEdgeTransferRoute::DeviceLocalStaging => "device_local_staging",
+                VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal => "external_device_local",
+                VulkanPlacedEdgeTransferRoute::SharedHost => "shared_host",
+                VulkanPlacedEdgeTransferRoute::HostStaging => "host_staging",
+            }
+            .to_string(),
+            byte_capacity: edge.byte_capacity,
+            publish_count: edge.publish_count,
+            receive_count: edge.receive_count,
+            transferred_byte_count: edge.transferred_byte_count,
+            queue_signal_count: edge.queue_signal_count,
+            queue_wait_count: edge.queue_wait_count,
+            host_wait_count: edge.host_wait_count,
+            queue_overlap_eligible: edge.queue_overlap_eligible,
+            overlap_submission_count: edge.overlap_submission_count,
+        })
+        .collect()
 }
 
 fn runtime_feedback_execution_report(
@@ -379,6 +421,7 @@ fn print_placed_prompt_report(
         print_runtime_timing_stats("stats", &report.timing);
         print_runtime_execution_counters(&vulkan_resident_execution_counters());
         print_runtime_feedback_stats(&report.resident_feedback);
+        print_runtime_transport_edges(&report.transport.edges);
         print_speculative_profile(report);
         print_placed_component_timing_profile(&report.component_timing_summaries, 5);
     }

@@ -73,6 +73,7 @@ fn runtime_graph_report(args: &Args) -> RuntimeGraphControls {
     RuntimeGraphControls {
         default_device_id: args.default_device_id.clone(),
         node_devices: args.node_devices.clone(),
+        component_shard_devices: args.component_shard_devices.clone(),
         source_chain: args.source_chain.as_ref().map(|source_chain| {
             source_chain
                 .iter()

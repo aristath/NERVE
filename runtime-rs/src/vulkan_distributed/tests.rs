@@ -16,10 +16,17 @@ mod tests {
 
     #[test]
     fn placed_components_do_not_implicitly_shard_their_internal_dispatches() {
-        let device_ids = vec!["gpu0".to_string(), "gpu1".to_string()];
-        let plan = VulkanDistributedExecutionPlan::for_placed_components(&device_ids, 256).unwrap();
+        let prepared_plan = fixture_prepared_plan();
+        let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("gpu0", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &BTreeMap::new(),
+            256,
+        )
+        .unwrap();
 
-        assert_eq!(plan.device_ids, device_ids);
+        assert!(plan.device_ids.is_empty());
         assert!(plan.dispatches.is_empty());
         assert!(plan.dispatch_groups.is_empty());
         assert_eq!(plan.shared_input_byte_capacity, 0);
@@ -209,7 +216,7 @@ mod tests {
             &[("owner", &prepared)],
             &tensor_index,
             &artifacts,
-            &["owner".to_string(), "helper".to_string()],
+            &component_device_pools("moe", &["owner", "helper"]),
             256,
         )
         .unwrap();
@@ -262,13 +269,15 @@ mod tests {
             &[("owner", &prepared)],
             &tensor_index,
             &artifacts,
-            &["owner".to_string(), "helper".to_string()],
+            &component_device_pools("moe", &["owner", "helper"]),
             256,
         )
-        .unwrap();
+        .unwrap_err();
         assert!(
-            legacy_plan.dispatches.is_empty(),
-            "sparse expert sharding requires the explicit expert_start contract"
+            legacy_plan
+                .to_string()
+                .contains("has no compatible distributable dispatch"),
+            "an explicitly requested sparse shard must not silently fall back"
         );
     }
 
@@ -327,11 +336,7 @@ mod tests {
             &[("owner", &prepared_plan)],
             &tensor_index,
             &artifact_manifest,
-            &[
-                "helper-a".to_string(),
-                "helper-b".to_string(),
-                "owner".to_string(),
-            ],
+            &component_device_pools("component", &["helper-a", "helper-b", "owner"]),
             4,
         )
         .unwrap();
@@ -347,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planner_keeps_unsplittable_dispatch_on_its_owner() {
+    fn distributed_planner_rejects_requested_unsplittable_dispatch() {
         let tensor_index = fixture_tensor_index("row_major");
         let prepared_plan = fixture_prepared_plan();
         let artifact_manifest = fixture_artifact_manifest();
@@ -355,13 +360,15 @@ mod tests {
             &[("owner", &prepared_plan)],
             &tensor_index,
             &artifact_manifest,
-            &["helper".to_string(), "owner".to_string()],
+            &component_device_pools("component", &["helper", "owner"]),
             1024,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(plan.dispatches.is_empty());
-        assert_eq!(plan.distributed_parameter_byte_count, 0);
+        assert!(
+            plan.to_string()
+                .contains("has no compatible distributable dispatch")
+        );
     }
 
     #[test]
@@ -514,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_push_constant_dispatches_on_their_owner_device() {
+    fn rejects_requested_push_constant_dispatches() {
         let mut prepared_plan = fixture_prepared_plan();
         prepared_plan.dispatches[0].push_constants = vec![VulkanKernelScalarBinding {
             name: "stream_tick".to_string(),
@@ -526,17 +533,19 @@ mod tests {
             &[("owner", &prepared_plan)],
             &fixture_tensor_index("row_major"),
             &fixture_artifact_manifest(),
-            &["owner".to_string(), "helper".to_string()],
+            &component_device_pools("component", &["owner", "helper"]),
             4,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(plan.dispatches.is_empty());
-        assert_eq!(plan.distributed_parameter_byte_count, 0);
+        assert!(
+            plan.to_string()
+                .contains("has no compatible distributable dispatch")
+        );
     }
 
     #[test]
-    fn keeps_quantized_parallel_projections_on_their_owner_device() {
+    fn rejects_requested_unsupported_quantized_parallel_projections() {
         let mut prepared_plan = fixture_prepared_plan();
         let gate = prepared_plan.dispatches[0].descriptors[2].clone();
         let up = prepared_plan.dispatches[0].descriptors[3].clone();
@@ -585,13 +594,15 @@ mod tests {
             &[("owner", &prepared_plan)],
             &tensor_index,
             &fixture_artifact_manifest(),
-            &["owner".to_string(), "helper".to_string()],
+            &component_device_pools("component", &["owner", "helper"]),
             4,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(plan.dispatches.is_empty());
-        assert_eq!(plan.distributed_parameter_byte_count, 0);
+        assert!(
+            plan.to_string()
+                .contains("has no compatible distributable dispatch")
+        );
     }
 
     #[test]
@@ -731,14 +742,25 @@ mod tests {
             &[("owner", &prepared_plan)],
             &tensor_index,
             &artifact_manifest,
-            &[
-                "owner".to_string(),
-                "helper-a".to_string(),
-                "helper-b".to_string(),
-                "helper-c".to_string(),
-            ],
+            &component_device_pools(
+                "component",
+                &["owner", "helper-a", "helper-b", "helper-c"],
+            ),
             storage_buffer_offset_alignment,
         )
+    }
+
+    fn component_device_pools(
+        component_id: &str,
+        device_ids: &[&str],
+    ) -> BTreeMap<String, Vec<String>> {
+        BTreeMap::from([(
+            component_id.to_string(),
+            device_ids
+                .iter()
+                .map(|device_id| (*device_id).to_string())
+                .collect(),
+        )])
     }
 
     fn fixture_prepared_plan() -> VulkanPreparedDispatchPlan {

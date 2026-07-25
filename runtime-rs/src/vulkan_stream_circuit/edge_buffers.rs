@@ -88,7 +88,7 @@ pub struct VulkanPlacedEdgeEndpointBufferOverride {
     pub buffer: Arc<VulkanResidentBuffer>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VulkanPlacedEdgePacketKey {
     pub edge_index: usize,
     pub from_device_id: String,
@@ -136,6 +136,78 @@ pub struct VulkanPlacedEdgeTransportReceiveBatch {
     pub missing_packets: Vec<VulkanPlacedEdgePacketKey>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanPlacedEdgeTransferRoute {
+    SameDeviceAlias,
+    DeviceLocalCopy,
+    DeviceLocalStaging,
+    ExternalDeviceLocal,
+    SharedHost,
+    HostStaging,
+}
+
+impl VulkanPlacedEdgeTransferRoute {
+    pub fn supports_queue_overlap(self) -> bool {
+        matches!(
+            self,
+            Self::DeviceLocalStaging | Self::ExternalDeviceLocal | Self::SharedHost
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanPlacedEdgeTransportEdgeStats {
+    pub key: VulkanPlacedEdgePacketKey,
+    pub signal: String,
+    pub route: VulkanPlacedEdgeTransferRoute,
+    pub byte_capacity: usize,
+    pub publish_count: usize,
+    pub receive_count: usize,
+    pub transferred_byte_count: usize,
+    pub queue_signal_count: usize,
+    pub queue_wait_count: usize,
+    pub host_wait_count: usize,
+    pub queue_overlap_eligible: bool,
+    pub overlap_submission_count: usize,
+}
+
+impl VulkanPlacedEdgeTransportEdgeStats {
+    fn reset_tick_counts(&mut self) {
+        self.publish_count = 0;
+        self.receive_count = 0;
+        self.transferred_byte_count = 0;
+        self.queue_signal_count = 0;
+        self.queue_wait_count = 0;
+        self.host_wait_count = 0;
+        self.overlap_submission_count = 0;
+    }
+
+    fn accumulate(&mut self, tick: &Self) {
+        debug_assert_eq!(self.key, tick.key);
+        debug_assert_eq!(self.route, tick.route);
+        debug_assert_eq!(
+            self.queue_overlap_eligible,
+            tick.queue_overlap_eligible
+        );
+        self.publish_count = self.publish_count.saturating_add(tick.publish_count);
+        self.receive_count = self.receive_count.saturating_add(tick.receive_count);
+        self.transferred_byte_count = self
+            .transferred_byte_count
+            .saturating_add(tick.transferred_byte_count);
+        self.queue_signal_count = self
+            .queue_signal_count
+            .saturating_add(tick.queue_signal_count);
+        self.queue_wait_count = self
+            .queue_wait_count
+            .saturating_add(tick.queue_wait_count);
+        self.host_wait_count = self.host_wait_count.saturating_add(tick.host_wait_count);
+        self.overlap_submission_count = self
+            .overlap_submission_count
+            .saturating_add(tick.overlap_submission_count);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanPlacedEdgeTransportStats {
     pub pending_packet_count: usize,
@@ -150,6 +222,7 @@ pub struct VulkanPlacedEdgeTransportStats {
     pub direct_copy_byte_count: usize,
     pub direct_receive_count: usize,
     pub direct_receive_byte_count: usize,
+    pub edges: Vec<VulkanPlacedEdgeTransportEdgeStats>,
 }
 
 impl VulkanPlacedEdgeTransportStats {
@@ -182,6 +255,22 @@ impl VulkanPlacedEdgeTransportStats {
         self.direct_receive_byte_count = self
             .direct_receive_byte_count
             .saturating_add(tick.direct_receive_byte_count);
+        for tick_edge in &tick.edges {
+            if let Some(edge) = self.edges.iter_mut().find(|edge| {
+                edge.key == tick_edge.key
+                    && edge.route == tick_edge.route
+                    && edge.signal == tick_edge.signal
+            }) {
+                edge.accumulate(tick_edge);
+            } else {
+                self.edges.push(tick_edge.clone());
+            }
+        }
+        self.edges.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then_with(|| left.route.cmp(&right.route))
+                .then_with(|| left.signal.cmp(&right.signal))
+        });
     }
 }
-

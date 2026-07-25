@@ -52,6 +52,51 @@ mod tests {
     }
 
     #[test]
+    fn component_shard_pools_are_explicit_runtime_controls() {
+        let args = parse_args_from(
+            [
+                "--place-node",
+                "layer_07=gpu1",
+                "--shard-component",
+                "layer_07=gpu1,gpu2,gpu3",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.component_shard_devices,
+            BTreeMap::from([(
+                "layer_07".to_string(),
+                vec!["gpu1".to_string(), "gpu2".to_string(), "gpu3".to_string()],
+            )])
+        );
+    }
+
+    #[test]
+    fn component_shard_pools_reject_ambiguous_or_repeated_devices() {
+        for invalid in [
+            "layer_07=gpu0",
+            "layer_07=gpu0,gpu0",
+            "layer_07=gpu0,",
+            "=gpu0,gpu1",
+        ] {
+            let error = parse_args_from(
+                ["--shard-component", invalid]
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .unwrap_err();
+
+            assert!(
+                error.contains("invalid component shard assignment"),
+                "{invalid:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn device_capability_inspection_is_a_package_free_mode() {
         let args = parse_args_from(
             ["--inspect-devices", "--json"]

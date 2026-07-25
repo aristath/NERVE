@@ -7,10 +7,10 @@ fn validate_device_pool(device_ids: &[String]) -> Result<(), VulkanDistributedPl
     let mut unique = BTreeSet::new();
     if let Some(device_id) = device_ids
         .iter()
-        .find(|device_id| !unique.insert(device_id.as_str()))
+        .find(|device_id| device_id.is_empty() || !unique.insert(device_id.as_str()))
     {
         return Err(VulkanDistributedPlanError(format!(
-            "distributed execution device pool repeats {device_id:?}"
+            "distributed execution device pool contains an empty or repeated device {device_id:?}"
         )));
     }
     Ok(())

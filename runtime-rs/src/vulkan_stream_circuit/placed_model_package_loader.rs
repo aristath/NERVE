@@ -195,13 +195,19 @@ impl VulkanResidentInProcessPlacedModelPackage {
         )?;
         let sampler_kernels =
             load_resident_sampler_kernels(manifest_dir, &runtime_model.package.sampler)?;
+        let signal_processor_placement = runtime_model
+            .circuit_graph
+            .signal_processor_placement(&runtime_model.placement);
         let device_ids = runtime_model
             .circuit_graph
             .signal_processor_device_ids(&runtime_model.placement);
-        let mut device_slice_plans = Vec::with_capacity(device_ids.len());
+        let owner_device_ids = runtime_model
+            .circuit_graph
+            .signal_processor_owner_device_ids(&runtime_model.placement);
+        let mut device_slice_plans = Vec::with_capacity(owner_device_ids.len());
         let mut hosted_component_count = 0usize;
 
-        for device_id in &device_ids {
+        for device_id in &owner_device_ids {
             let slice_device = device_for(device_id)?;
             let package_slice = VulkanResidentModelPackageDeviceSlicePlan::prepare(
                 slice_device,
@@ -231,6 +237,13 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let distributed_loaded_manifest =
             resident_package_loaded_kernel_manifest_for_slice_plans(&device_slice_plans)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        let distributed_artifact_manifest = VulkanReusableKernelArtifactManifest::new(
+            distributed_loaded_manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.artifact.clone())
+                .collect(),
+        );
         let storage_buffer_offset_alignment = device_ids
             .iter()
             .map(|device_id| {
@@ -240,8 +253,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .into_iter()
             .max()
             .unwrap_or(1);
-        let distributed_execution_plan = VulkanDistributedExecutionPlan::for_placed_components(
-            &device_ids,
+        let distributed_execution_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &prepared_plans,
+            &tensor_index,
+            &distributed_artifact_manifest,
+            &signal_processor_placement.component_shard_devices,
             storage_buffer_offset_alignment,
         )
         .map_err(|error| {
@@ -533,6 +549,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             endpoint_overrides: shared_edge_endpoint_overrides,
             synchronizations: edge_synchronizations,
             stream_control_buffers,
+            every_edge_is_resident_replayable,
         } = create_placed_device_links(&self.device_slices, &device_for)?;
         let mut devices = Vec::with_capacity(self.device_slices.len());
         for package_slice in &self.device_slices {
@@ -701,13 +718,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     "resident feedback dispatch capacity overflowed".to_string(),
                 ))
             })?;
-        let feedback_device_ids = devices
-            .iter()
-            .map(|slice| slice.device_id.clone())
-            .collect::<Vec<_>>();
         let vocabulary_size = self.sampler_spec.logits_byte_capacity / size_of::<f32>();
         let mut feedback_control = VulkanResidentFeedbackControlPlane::new(
-            &feedback_device_ids,
+            &self.device_ids,
             &self.output_device_id,
             vocabulary_size,
             feedback_dispatch_capacity,
@@ -783,6 +796,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             self,
             &devices,
             &activation_schedule,
+            every_edge_is_resident_replayable,
             VulkanResidentPlacedFeedbackMount {
                 input_transducer: &input_transducer,
                 output_transducer: &output_transducer,

@@ -15,6 +15,32 @@ pub(super) fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, Vulka
     }
 }
 
+fn selected_test_vulkan_device_pair() -> Option<(Rc<VulkanComputeDevice>, Rc<VulkanComputeDevice>)>
+{
+    let (Ok(raw_owner_index), Ok(raw_peer_index)) = (
+        std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX"),
+        std::env::var("NERVE_TEST_VULKAN_PEER_DEVICE_INDEX"),
+    ) else {
+        return None;
+    };
+    let owner_index = raw_owner_index
+        .parse::<usize>()
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+    let peer_index = raw_peer_index
+        .parse::<usize>()
+        .expect("NERVE_TEST_VULKAN_PEER_DEVICE_INDEX must be an integer");
+    assert_ne!(owner_index, peer_index);
+    let owner = Rc::new(
+        VulkanComputeDevice::new_for_physical_device_index(owner_index)
+            .expect("explicit Vulkan owner device must open"),
+    );
+    let peer = Rc::new(
+        VulkanComputeDevice::new_for_physical_device_index(peer_index)
+            .expect("explicit Vulkan peer device must open"),
+    );
+    Some((owner, peer))
+}
+
 #[test]
 fn backend_loop_window_is_device_owned_and_snapshot_memory_bounded() {
     assert_eq!(
@@ -49,6 +75,7 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         device_slice_count: 3,
         every_slice_has_terminal_segment: true,
         distributed_dispatches_are_bridged: true,
+        every_edge_is_resident_replayable: true,
         has_dynamic_push_constants: false,
         window_width: 64,
         sampler_history_capacity: 4_096,
@@ -61,6 +88,14 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         }
         .window_width(),
         Some(32)
+    );
+    assert_eq!(
+        VulkanResidentInProcessPlacedFeedbackLoopEligibility {
+            every_edge_is_resident_replayable: false,
+            ..eligible
+        }
+        .disabled_reason(),
+        Some("host_staged_edge")
     );
     assert_eq!(
         VulkanResidentInProcessPlacedFeedbackLoopEligibility {

@@ -827,7 +827,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
               sampled_token_id,
               scheduler_turn_count,
               completed_stage_count,
-              closes_after_device_cancel | {
+              closes_after_device_cancel,
+              transport_stats | {
                 let stream_tick = session.next_stream_tick;
                 let output_event = {
                     let active_input_event = active_input_event
@@ -841,7 +842,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                         stream_tick,
                         scheduler_turn_count,
                         completed_stage_count,
-                        &VulkanPlacedEdgeTransportStats::default(),
+                        transport_stats,
                         activation
                             .should_emit_public_output
                             .then_some(sampled_token_id),

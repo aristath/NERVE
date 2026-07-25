@@ -54,6 +54,20 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
                     ));
                 }
             }
+            "--shard-component" => {
+                let assignment = next_value(&mut raw, &arg)?;
+                let (component_id, device_ids) =
+                    parse_component_shard_assignment(&assignment)?;
+                if parsed
+                    .component_shard_devices
+                    .insert(component_id.clone(), device_ids)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "duplicate internal shard placement for component {component_id:?}"
+                    ));
+                }
+            }
             "--bind-device" => {
                 let assignment = next_value(&mut raw, &arg)?;
                 let (device_id, target) = parse_device_binding_assignment(&assignment)?;
@@ -262,6 +276,40 @@ fn parse_node_device_assignment(raw: &str) -> Result<(String, String), String> {
         ));
     }
     Ok((component_id.to_string(), device_id.to_string()))
+}
+
+fn parse_component_shard_assignment(raw: &str) -> Result<(String, Vec<String>), String> {
+    let (component_id, raw_devices) = raw.split_once('=').ok_or_else(|| {
+        format!(
+            "invalid component shard assignment {raw:?}; expected COMPONENT=DEVICE,DEVICE"
+        )
+    })?;
+    let component_id = component_id.trim();
+    if component_id.is_empty() {
+        return Err(format!(
+            "invalid component shard assignment {raw:?}; component id must not be empty"
+        ));
+    }
+    let device_ids = raw_devices
+        .split(',')
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if device_ids.len() < 2 || device_ids.iter().any(String::is_empty) {
+        return Err(format!(
+            "invalid component shard assignment {raw:?}; at least two non-empty devices are required"
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    if let Some(repeated) = device_ids
+        .iter()
+        .find(|device_id| !unique.insert(device_id.as_str()))
+    {
+        return Err(format!(
+            "invalid component shard assignment {raw:?}; device {repeated:?} repeats"
+        ));
+    }
+    Ok((component_id.to_string(), device_ids))
 }
 
 fn parse_device_binding_assignment(raw: &str) -> Result<(String, String), String> {

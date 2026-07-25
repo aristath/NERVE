@@ -11,6 +11,59 @@
     }
 
     #[test]
+    fn placement_plan_rejects_invalid_internal_shard_pools() {
+        let resolved =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+
+        let error = resolved
+            .placement_plan(
+                &StreamCircuitPlacementSpec::new("gpu0")
+                    .with_component_shard_devices("layer_99", vec!["gpu0".into(), "gpu1".into()]),
+            )
+            .unwrap_err();
+        assert!(error.0.contains("unknown component"));
+        assert!(error.0.contains("layer_99"));
+
+        let error = resolved
+            .placement_plan(
+                &StreamCircuitPlacementSpec::new("gpu0")
+                    .with_component_device("layer_00", "gpu1")
+                    .with_component_shard_devices(
+                        "layer_00",
+                        vec!["gpu0".into(), "gpu2".into()],
+                    ),
+            )
+            .unwrap_err();
+        assert!(error.0.contains("omits its owner device"));
+        assert!(error.0.contains("gpu1"));
+    }
+
+    #[test]
+    fn internal_sharding_preserves_the_logical_component_boundary() {
+        let resolved =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let canonical = resolved
+            .placement_plan(&StreamCircuitPlacementSpec::new("gpu0"))
+            .unwrap();
+        let sharded = resolved
+            .placement_plan(
+                &StreamCircuitPlacementSpec::new("gpu0").with_component_shard_devices(
+                    "layer_00",
+                    vec!["gpu0".into(), "gpu1".into(), "gpu2".into()],
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(sharded.components, canonical.components);
+        assert_eq!(sharded.edges, canonical.edges);
+        assert_eq!(sharded.local_edge_count, canonical.local_edge_count);
+        assert_eq!(
+            sharded.cross_device_edge_count,
+            canonical.cross_device_edge_count
+        );
+    }
+
+    #[test]
     fn runtime_graph_defaults_to_source_series_with_device_overrides() {
         let resolved =
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();

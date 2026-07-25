@@ -42,7 +42,7 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
     transport: &mut VulkanInProcessPlacedEdgeTransport,
     schedule: &VulkanMountedPlacedResidentInProcessSchedule,
     distributed_runners: Option<&VulkanDistributedDispatchRunners>,
-    edge_synchronizations: Option<&VulkanPlacedEdgeTimelineSynchronizations>,
+    edge_synchronizations: Option<&'a VulkanPlacedEdgeTimelineSynchronizations>,
     submission: VulkanPlacedSubmissionContext<'a, 'batch>,
 ) -> Result<
     VulkanMountedPlacedResidentInProcessStreamTickRun,
@@ -50,6 +50,7 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
 > {
     let VulkanPlacedSubmissionContext {
         policy: submission_policy,
+        participant_devices,
         state_transactions,
         feedback_turn,
         output_turn,
@@ -113,7 +114,7 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
         );
     }
     transport.reset_tick_state();
-    register_in_process_direct_edge_copies(slices, transport)?;
+    register_in_process_direct_edge_copies(slices, transport, edge_synchronizations)?;
     if edge_synchronizations
         .is_some_and(VulkanPlacedEdgeTimelineSynchronizations::has_pending_dependencies)
     {
@@ -128,10 +129,48 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
     }
 
     let mut completed_stage_delta = 0usize;
-    let device_by_id = slices
-        .iter()
-        .map(|slice| (slice.device_id().to_string(), slice.device))
+    let mut device_by_id = participant_devices
+        .into_iter()
+        .flat_map(|devices| {
+            devices
+                .iter()
+                .map(|(device_id, device)| (device_id.clone(), device.as_ref()))
+        })
         .collect::<BTreeMap<_, _>>();
+    for slice in slices.iter() {
+        if let Some(bound) = device_by_id.insert(slice.device_id().to_string(), slice.device)
+            && !bound.shares_logical_device_with(slice.device)
+        {
+            return Err(
+                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
+                    format!(
+                        "placed slice device {:?} disagrees with its bound execution participant",
+                        slice.device_id()
+                    ),
+                )),
+            );
+        }
+    }
+    if participant_devices.is_none()
+        && slices
+            .first()
+            .is_some_and(|first| {
+                slices
+                    .iter()
+                    .all(|slice| slice.device.shares_logical_device_with(first.device))
+            })
+        && let (Some(first), Some(runners)) = (slices.first(), distributed_runners)
+    {
+        for device_id in runners
+            .dispatches
+            .iter()
+            .flat_map(|dispatch| dispatch.shards.iter().map(|shard| shard.device_id.as_str()))
+        {
+            device_by_id
+                .entry(device_id.to_string())
+                .or_insert(first.device);
+        }
+    }
 
     for (turn_index, device_indices) in schedule.turns.iter().enumerate() {
         for device_index in device_indices {
@@ -347,4 +386,3 @@ fn in_process_stream_tick_run_snapshot(
         },
     }
 }
-

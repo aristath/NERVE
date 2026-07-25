@@ -52,9 +52,9 @@ use crate::vulkan_compute::{
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate, VulkanShaderFeature,
-    VulkanSubgroupOperation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
-    VulkanTimelineSemaphoreReplayState, record_vulkan_execution_quantum_measurement,
-    vulkan_spirv_requirements,
+    VulkanSharedResidentBufferRoute, VulkanSubgroupOperation, VulkanTimelineSemaphore,
+    VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
+    record_vulkan_execution_quantum_measurement, vulkan_spirv_requirements,
 };
 #[cfg(test)]
 use crate::vulkan_compute::{

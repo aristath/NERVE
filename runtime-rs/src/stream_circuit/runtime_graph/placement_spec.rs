@@ -4,6 +4,8 @@ pub struct StreamCircuitPlacementSpec {
     pub default_device_id: String,
     #[serde(default)]
     pub node_devices: BTreeMap<String, String>,
+    #[serde(default)]
+    pub component_shard_devices: BTreeMap<String, Vec<String>>,
 }
 
 impl StreamCircuitPlacementSpec {
@@ -12,6 +14,7 @@ impl StreamCircuitPlacementSpec {
             schema: STREAM_CIRCUIT_PLACEMENT_SCHEMA.to_string(),
             default_device_id: default_device_id.into(),
             node_devices: BTreeMap::new(),
+            component_shard_devices: BTreeMap::new(),
         }
     }
 
@@ -29,5 +32,21 @@ impl StreamCircuitPlacementSpec {
             .get(component_id)
             .map(String::as_str)
             .unwrap_or(&self.default_device_id)
+    }
+
+    pub fn with_component_shard_devices(
+        mut self,
+        component_id: impl Into<String>,
+        device_ids: Vec<String>,
+    ) -> Self {
+        self.component_shard_devices
+            .insert(component_id.into(), device_ids);
+        self
+    }
+
+    pub fn shard_devices_for_component(&self, component_id: &str) -> Option<&[String]> {
+        self.component_shard_devices
+            .get(component_id)
+            .map(Vec::as_slice)
     }
 }

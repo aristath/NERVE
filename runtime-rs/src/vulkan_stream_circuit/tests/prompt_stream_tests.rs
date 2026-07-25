@@ -284,6 +284,168 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
 }
 
 #[test]
+fn cross_physical_resident_edges_match_colocated_feedback_execution() {
+    let Some((owner, peer)) = selected_test_vulkan_device_pair() else {
+        eprintln!(
+            "skipping cross-physical resident edge test without explicit owner and peer devices"
+        );
+        return;
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let manifest = VulkanResidentModelPackageManifest::from_json_file(&manifest_path).unwrap();
+    let runtime_model = manifest
+        .mount_runtime_graph_controls(
+            Some("gpu0"),
+            &BTreeMap::from([("layer_00_repeat".to_string(), "gpu1".to_string())]),
+            &[("layer_00".to_string(), "layer_00_repeat".to_string())],
+            None,
+        )
+        .unwrap();
+    let input = VulkanResidentTokenInputEvent::new("event", vec![1], 4);
+
+    let mut colocated =
+        VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+            BTreeMap::from([
+                ("gpu0".to_string(), owner.clone()),
+                ("gpu1".to_string(), owner.clone()),
+            ]),
+            manifest_dir,
+            runtime_model.clone(),
+            Some(8),
+            0,
+            0,
+        )
+        .unwrap();
+    let colocated_run = colocated.submit_input_event(input.clone()).unwrap();
+    drop(colocated);
+
+    let mut split =
+        VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+            BTreeMap::from([
+                ("gpu0".to_string(), owner),
+                ("gpu1".to_string(), peer),
+            ]),
+            manifest_dir,
+            runtime_model,
+            Some(8),
+            0,
+            0,
+        )
+        .unwrap();
+    let split_run = split.submit_input_event(input).unwrap();
+
+    assert_eq!(
+        split_run.generated_token_ids,
+        colocated_run.generated_token_ids
+    );
+    assert_eq!(
+        split_run.session_run.run.stop_reason,
+        colocated_run.session_run.run.stop_reason
+    );
+    assert_eq!(
+        split_run.session_run.run.output_source_stream_ticks,
+        colocated_run.session_run.run.output_source_stream_ticks
+    );
+    let cross_edge = split_run
+        .session_run
+        .run
+        .transport_stats
+        .edges
+        .iter()
+        .find(|edge| edge.key.from_device_id != edge.key.to_device_id)
+        .expect("split execution must report its cross-device edge");
+    assert!(matches!(
+        cross_edge.route,
+        VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+            | VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+            | VulkanPlacedEdgeTransferRoute::SharedHost
+    ));
+    assert!(cross_edge.queue_overlap_eligible);
+    assert!(cross_edge.overlap_submission_count > 0);
+    assert_eq!(cross_edge.host_wait_count, 0);
+    assert!(
+        split_run
+            .session_run
+            .run
+            .resident_feedback
+            .template_record_count
+            > 0
+    );
+}
+
+#[test]
+fn explicit_internal_component_sharding_matches_canonical_execution() {
+    let Some((owner, peer)) = selected_test_vulkan_device_pair() else {
+        eprintln!(
+            "skipping internal component shard test without explicit owner and peer devices"
+        );
+        return;
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let canonical_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let sharded_model = canonical_model
+        .clone()
+        .with_component_shard_devices(
+            "layer_00",
+            vec!["gpu0".to_string(), "gpu1".to_string()],
+        )
+        .unwrap();
+    let input = VulkanResidentTokenInputEvent::new("event", vec![1], 4);
+
+    let mut canonical =
+        VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+            BTreeMap::from([("gpu0".to_string(), owner.clone())]),
+            manifest_dir,
+            canonical_model,
+            Some(8),
+            0,
+            0,
+        )
+        .unwrap();
+    let canonical_run = canonical.submit_input_event(input.clone()).unwrap();
+    drop(canonical);
+
+    let mut sharded =
+        VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+            BTreeMap::from([
+                ("gpu0".to_string(), owner),
+                ("gpu1".to_string(), peer),
+            ]),
+            manifest_dir,
+            sharded_model,
+            Some(8),
+            0,
+            0,
+        )
+        .unwrap();
+    assert!(
+        !sharded
+            .package()
+            .distributed_execution_plan()
+            .dispatches
+            .is_empty()
+    );
+    let sharded_run = sharded.submit_input_event(input).unwrap();
+
+    assert_eq!(
+        sharded_run.generated_token_ids,
+        canonical_run.generated_token_ids
+    );
+    assert_eq!(
+        sharded_run.session_run.run.stop_reason,
+        canonical_run.session_run.run.stop_reason
+    );
+    assert_eq!(
+        sharded_run.session_run.run.output_source_stream_ticks,
+        canonical_run.session_run.run.output_source_stream_ticks
+    );
+}
+
+#[test]
 fn placed_prompt_stream_reuses_every_recorded_feedback_window_shape() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,

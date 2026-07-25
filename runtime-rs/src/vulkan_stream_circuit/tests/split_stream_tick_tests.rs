@@ -447,9 +447,9 @@ fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
             0,
         ),
     ];
-    register_in_process_direct_edge_copies(&slices, &mut transport).unwrap();
+    register_in_process_direct_edge_copies(&slices, &mut transport, None).unwrap();
     assert_eq!(transport.direct_edge_binding_count(), 2);
-    register_in_process_direct_edge_copies(&slices, &mut transport).unwrap();
+    register_in_process_direct_edge_copies(&slices, &mut transport, None).unwrap();
     assert_eq!(transport.direct_edge_binding_count(), 2);
     let run =
         run_mounted_placed_resident_stream_tick_slices_in_process(&mut slices, &mut transport)

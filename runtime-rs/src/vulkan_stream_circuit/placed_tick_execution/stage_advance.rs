@@ -3,7 +3,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
     device_by_id: &BTreeMap<String, &'a VulkanComputeDevice>,
     transport: &mut VulkanInProcessPlacedEdgeTransport,
     distributed_runners: &VulkanDistributedDispatchRunners,
-    edge_synchronizations: &VulkanPlacedEdgeTimelineSynchronizations,
+    edge_synchronizations: &'a VulkanPlacedEdgeTimelineSynchronizations,
     submission: VulkanPlacedSliceSubmissionContext<'a, 'batch>,
 ) -> Result<usize, VulkanMountedPlacedResidentInProcessStreamTickError> {
     let VulkanPlacedSliceSubmissionContext {
@@ -55,8 +55,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     })?;
                 let edge_key =
                     VulkanPlacedEdgePacketKey::from_incoming_endpoint(&incoming.endpoint);
-                let uses_shared_allocation = transport.edge_uses_shared_allocation(&edge_key);
-                if !uses_shared_allocation {
+                let uses_shared_storage = transport.edge_uses_shared_storage(&edge_key);
+                if !uses_shared_storage {
+                    transport.record_host_wait(&edge_key);
                     if submission_batch.is_some() {
                         return Err(
                             VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
@@ -78,13 +79,14 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 }
                 match transport.receive_incoming_edge(slice.mounted, *edge_index) {
                     Ok(_) => {
-                        if uses_shared_allocation
+                        if uses_shared_storage
                             && let Some(wait_point) = edge_synchronizations
                                 .take_destination_wait(&incoming.endpoint)
                                 .map_err(
                                     VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
                                 )?
                         {
+                            transport.record_queue_wait(&edge_key);
                             pending_edge_wait_points.push(wait_point);
                         }
                         slice.cursor.complete_current_stage();
@@ -347,13 +349,14 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         })?;
                     let edge_key =
                         VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
-                    if transport.edge_uses_shared_allocation(&edge_key)
+                    if transport.edge_uses_shared_storage(&edge_key)
                         && let Some(signal_point) = edge_synchronizations
                             .prepare_source_signal(&outgoing.endpoint)
                             .map_err(
                                 VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
                             )?
                     {
+                        transport.record_queue_signal(&edge_key);
                         signal_points.push(signal_point);
                     }
                 }
@@ -481,7 +484,8 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     })?;
                 let edge_key =
                     VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
-                if !transport.edge_uses_shared_allocation(&edge_key) {
+                if !transport.edge_uses_shared_storage(&edge_key) {
+                    transport.record_host_wait(&edge_key);
                     if submission_batch.is_some() {
                         return Err(
                             VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(

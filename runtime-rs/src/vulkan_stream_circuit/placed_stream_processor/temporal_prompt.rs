@@ -368,7 +368,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         )),
                     ));
                 };
-                runner.execution_graph.transfer_edge(
+                let route = runner.execution_graph.transfer_edge(
                     device_index,
                     next_device_index,
                     outgoing.endpoint.edge_index,
@@ -385,6 +385,32 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 transport_stats.direct_receive_byte_count = transport_stats
                     .direct_receive_byte_count
                     .saturating_add(transferred_bytes);
+                transport_stats
+                    .edges
+                    .push(VulkanPlacedEdgeTransportEdgeStats {
+                        key: VulkanPlacedEdgePacketKey::from_outgoing_endpoint(
+                            &outgoing.endpoint,
+                        ),
+                        signal: outgoing.endpoint.signal.clone(),
+                        route,
+                        byte_capacity: outgoing.byte_capacity,
+                        publish_count: 1,
+                        receive_count: 1,
+                        transferred_byte_count: transferred_bytes,
+                        queue_signal_count: usize::from(
+                            route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                        ),
+                        queue_wait_count: usize::from(
+                            route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                        ),
+                        host_wait_count: usize::from(matches!(
+                            route,
+                            VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+                                | VulkanPlacedEdgeTransferRoute::HostStaging
+                        )),
+                        queue_overlap_eligible: route.supports_queue_overlap(),
+                        overlap_submission_count: 0,
+                    });
             }
         }
 

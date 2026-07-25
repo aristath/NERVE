@@ -226,22 +226,23 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    let shared_allocation = device
-                        .create_shared_host_allocation(&peers, byte_capacity)
+                    let shared = device
+                        .create_shared_resident_buffers(&peers, byte_capacity)
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                     let mut shared_device_buffers = BTreeMap::new();
-                    for device_id in shared_device_ids {
-                        let import_device = devices.get(device_id).ok_or_else(|| {
-                            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                                device_id: device_id.clone(),
-                            }
-                        })?;
-                        let imported = Arc::new(
-                            import_device
-                                .import_shared_host_buffer(Arc::clone(&shared_allocation))
-                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                        );
-                        shared_device_buffers.insert(device_id.clone(), imported);
+                    let mut shared_buffers = shared.buffers.into_iter();
+                    shared_device_buffers.insert(
+                        slice.device_id.clone(),
+                        shared_buffers
+                            .next()
+                            .expect("shared batch activation contains its owner"),
+                    );
+                    for (device_id, buffer) in shared_device_ids
+                        .iter()
+                        .filter(|device_id| *device_id != &slice.device_id)
+                        .zip(shared_buffers)
+                    {
+                        shared_device_buffers.insert(device_id.clone(), buffer);
                     }
                     let owner_buffer = Arc::clone(
                         shared_device_buffers

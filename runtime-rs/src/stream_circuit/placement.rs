@@ -36,6 +36,32 @@ impl StreamCircuitPlacementPlan {
                 )));
             }
         }
+        for (component_id, device_ids) in &spec.component_shard_devices {
+            if !component_ids.contains(component_id.as_str()) {
+                return Err(CircuitPlacementError(format!(
+                    "internal sharding references unknown component {component_id:?}"
+                )));
+            }
+            if device_ids.len() < 2 {
+                return Err(CircuitPlacementError(format!(
+                    "internal sharding for component {component_id:?} requires at least two devices"
+                )));
+            }
+            let mut unique = BTreeSet::new();
+            if let Some(device_id) = device_ids.iter().find(|device_id| {
+                device_id.is_empty() || !unique.insert(device_id.as_str())
+            }) {
+                return Err(CircuitPlacementError(format!(
+                    "internal sharding for component {component_id:?} contains an empty or repeated device {device_id:?}"
+                )));
+            }
+            let owner = spec.device_for_component(component_id);
+            if !device_ids.iter().any(|device_id| device_id == owner) {
+                return Err(CircuitPlacementError(format!(
+                    "internal sharding for component {component_id:?} omits its owner device {owner:?}"
+                )));
+            }
+        }
 
         let components = graph
             .circuits
@@ -215,4 +241,3 @@ impl EdgeTransport {
         matches!(self, Self::CrossDevice { .. })
     }
 }
-

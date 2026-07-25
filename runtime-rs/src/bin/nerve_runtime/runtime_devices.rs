@@ -51,12 +51,16 @@ fn runtime_model(
     package_manifest: &Path,
 ) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
     let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
-    Ok(manifest.mount_runtime_graph_controls(
+    let mut model = manifest.mount_runtime_graph_controls(
         args.default_device_id.as_deref(),
         &args.node_devices,
         &args.duplicate_after,
         args.source_chain.as_deref(),
-    )?)
+    )?;
+    for (component_id, device_ids) in &args.component_shard_devices {
+        model = model.with_component_shard_devices(component_id, device_ids.clone())?;
+    }
+    Ok(model)
 }
 
 struct RuntimeBoundVulkanDevices {

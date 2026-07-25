@@ -97,6 +97,7 @@ pub struct RuntimeGraphDuplicateAfterControl {
 pub struct RuntimeGraphControls {
     pub default_device_id: Option<String>,
     pub node_devices: BTreeMap<String, String>,
+    pub component_shard_devices: BTreeMap<String, Vec<String>>,
     pub source_chain: Option<Vec<RuntimeGraphSourceChainEntry>>,
     pub duplicate_after: Vec<RuntimeGraphDuplicateAfterControl>,
 }
@@ -281,6 +282,25 @@ pub struct RuntimePlacedTransportStatsReport {
     pub direct_copy_byte_count: usize,
     pub direct_receive_count: usize,
     pub direct_receive_byte_count: usize,
+    pub edges: Vec<RuntimePlacedTransportEdgeReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePlacedTransportEdgeReport {
+    pub edge_index: usize,
+    pub from_device_id: String,
+    pub to_device_id: String,
+    pub signal: String,
+    pub route: String,
+    pub byte_capacity: usize,
+    pub publish_count: usize,
+    pub receive_count: usize,
+    pub transferred_byte_count: usize,
+    pub queue_signal_count: usize,
+    pub queue_wait_count: usize,
+    pub host_wait_count: usize,
+    pub queue_overlap_eligible: bool,
+    pub overlap_submission_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +313,7 @@ pub struct RuntimePlacedTransportReport {
     pub direct_copy_byte_count: usize,
     pub direct_receive_count: usize,
     pub direct_receive_byte_count: usize,
+    pub edges: Vec<RuntimePlacedTransportEdgeReport>,
     pub by_tick: Vec<RuntimePlacedTransportStatsReport>,
 }
 

@@ -10,7 +10,7 @@ use crate::vulkan_compute::{
     VulkanComputeDevice, VulkanError, VulkanResidentBuffer, VulkanResidentKernelBufferAccess,
     VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceStep, VulkanResidentQueueSubmissionBatch,
-    VulkanSharedHostAllocation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
+    VulkanSharedResidentBufferRoute, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
     VulkanTimelineSemaphoreReplayState,
 };
 use crate::vulkan_stream_circuit::{
@@ -46,38 +46,13 @@ pub struct VulkanDistributedDispatchSubmission {
 }
 
 impl VulkanDistributedExecutionPlan {
-    pub fn for_placed_components(
-        device_ids: &[String],
-        storage_buffer_offset_alignment: usize,
-    ) -> Result<Self, VulkanDistributedPlanError> {
-        validate_device_pool(device_ids)?;
-        if storage_buffer_offset_alignment == 0
-            || !storage_buffer_offset_alignment.is_power_of_two()
-            || !storage_buffer_offset_alignment.is_multiple_of(BF16_BYTE_COUNT)
-        {
-            return Err(VulkanDistributedPlanError(format!(
-                "distributed storage-buffer offset alignment {storage_buffer_offset_alignment} is invalid"
-            )));
-        }
-        Ok(Self {
-            device_ids: device_ids.to_vec(),
-            storage_buffer_offset_alignment,
-            dispatches: Vec::new(),
-            dispatch_groups: Vec::new(),
-            shared_input_byte_capacity: 0,
-            shared_output_byte_capacity: 0,
-            distributed_parameter_byte_count: 0,
-        })
-    }
-
     pub fn from_prepared_plans(
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
         artifact_manifest: &VulkanReusableKernelArtifactManifest,
-        device_ids: &[String],
+        component_device_pools: &BTreeMap<String, Vec<String>>,
         storage_buffer_offset_alignment: usize,
     ) -> Result<Self, VulkanDistributedPlanError> {
-        validate_device_pool(device_ids)?;
         if storage_buffer_offset_alignment == 0
             || !storage_buffer_offset_alignment.is_power_of_two()
             || !storage_buffer_offset_alignment.is_multiple_of(BF16_BYTE_COUNT)
@@ -90,21 +65,37 @@ impl VulkanDistributedExecutionPlan {
         let mut shared_input_byte_capacity = 0usize;
         let mut shared_output_byte_capacity = 0usize;
         let mut distributed_parameter_byte_count = 0usize;
-
-        for (owner_device_id, prepared_plan) in prepared_plans {
-            if device_ids.len() < 2 {
-                continue;
-            }
-            if !device_ids
-                .iter()
-                .any(|device_id| device_id == owner_device_id)
-            {
+        let mut device_ids = BTreeSet::new();
+        for (component_id, component_devices) in component_device_pools {
+            validate_device_pool(component_devices)?;
+            if component_devices.len() < 2 {
                 return Err(VulkanDistributedPlanError(format!(
-                    "dispatch owner {:?} is absent from the distributed execution device pool",
-                    owner_device_id
+                    "internal sharding for component {component_id:?} requires at least two devices"
                 )));
             }
+            device_ids.extend(component_devices.iter().cloned());
+        }
+        let mut requested_components = component_device_pools
+            .keys()
+            .map(|component_id| (component_id.as_str(), false))
+            .collect::<BTreeMap<_, _>>();
+
+        for (owner_device_id, prepared_plan) in prepared_plans {
             for dispatch in &prepared_plan.dispatches {
+                let Some(component_devices) =
+                    component_device_pools.get(dispatch.component_id.as_str())
+                else {
+                    continue;
+                };
+                if !component_devices
+                    .iter()
+                    .any(|device_id| device_id == owner_device_id)
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "internal shard pool for component {:?} omits its owner device {:?}",
+                        dispatch.component_id, owner_device_id
+                    )));
+                }
                 if dispatch.op != DISTRIBUTABLE_PARALLEL_PROJECTION_OP
                     && !DISTRIBUTABLE_SPARSE_EXPERT_OPS.contains(&dispatch.op.as_str())
                 {
@@ -124,7 +115,7 @@ impl VulkanDistributedExecutionPlan {
                     owner_device_id,
                     dispatch,
                     tensor_index,
-                    device_ids,
+                    component_devices,
                     artifact.workgroup_count_x,
                     storage_buffer_offset_alignment,
                 )?
@@ -143,12 +134,23 @@ impl VulkanDistributedExecutionPlan {
                         )
                     })?;
                 dispatches.push(planned);
+                *requested_components
+                    .get_mut(dispatch.component_id.as_str())
+                    .expect("component device pool was selected above") = true;
             }
+        }
+        if let Some((component_id, _)) = requested_components
+            .iter()
+            .find(|(_, was_planned)| !**was_planned)
+        {
+            return Err(VulkanDistributedPlanError(format!(
+                "requested internal sharding for component {component_id:?} has no compatible distributable dispatch"
+            )));
         }
 
         let dispatch_groups = distributed_dispatch_groups(&dispatches);
         Ok(Self {
-            device_ids: device_ids.to_vec(),
+            device_ids: device_ids.into_iter().collect(),
             storage_buffer_offset_alignment,
             dispatches,
             dispatch_groups,
@@ -487,8 +489,8 @@ impl VulkanDistributedActivationBuffers {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let shared_allocation = owner
-                .create_shared_host_allocation(&peers, byte_capacity)
+            let shared = owner
+                .create_shared_resident_buffers(&peers, byte_capacity)
                 .map_err(|error| {
                     VulkanDistributedActivationBufferError(format!(
                         "failed to allocate {} shared activation bytes for {}.slot_{}: {error}",
@@ -496,22 +498,17 @@ impl VulkanDistributedActivationBuffers {
                     ))
                 })?;
             let mut device_buffers = BTreeMap::new();
-            for device_id in &planned.device_ids {
-                let device = device_for(device_id).map_err(|error| {
-                    VulkanDistributedActivationBufferError(format!(
-                        "failed to resolve distributed activation participant {device_id:?}: {error}"
-                    ))
-                })?;
-                let buffer = Arc::new(
-                    device
-                        .import_shared_host_buffer(Arc::clone(&shared_allocation))
-                        .map_err(|error| {
-                            VulkanDistributedActivationBufferError(format!(
-                                "failed to import {}.slot_{} on {device_id:?}: {error}",
-                                planned.component_id, planned.slot
-                            ))
-                        })?,
-                );
+            let mut shared_buffers = shared.buffers.into_iter();
+            let owner_buffer = shared_buffers
+                .next()
+                .expect("shared activation allocation contains its owner");
+            device_buffers.insert(planned.owner_device_id.clone(), owner_buffer);
+            for (device_id, buffer) in planned
+                .device_ids
+                .iter()
+                .filter(|device_id| *device_id != &planned.owner_device_id)
+                .zip(shared_buffers)
+            {
                 if device_buffers.insert(device_id.clone(), buffer).is_some() {
                     return Err(VulkanDistributedActivationBufferError(format!(
                         "distributed activation {}.slot_{} repeats device {device_id:?}",
@@ -535,7 +532,8 @@ impl VulkanDistributedActivationBuffers {
                 })?;
             allocations.push(VulkanDistributedActivationBuffer {
                 planned: planned.clone(),
-                shared_allocation,
+                route: shared.route,
+                external_device_local_error: shared.external_device_local_error,
                 device_buffers,
             });
         }
@@ -590,7 +588,8 @@ impl VulkanDistributedActivationBuffers {
 
 pub struct VulkanDistributedActivationBuffer {
     pub planned: VulkanDistributedActivationBufferAllocation,
-    pub shared_allocation: Arc<VulkanSharedHostAllocation>,
+    pub route: VulkanSharedResidentBufferRoute,
+    pub external_device_local_error: Option<String>,
     pub device_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 

@@ -100,7 +100,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             &self.activation_schedule,
             Some(&self.distributed_dispatch_runners),
             Some(&self.edge_synchronizations),
-            VulkanPlacedSubmissionContext::SYNCHRONOUS,
+            VulkanPlacedSubmissionContext {
+                participant_devices: Some(devices),
+                ..VulkanPlacedSubmissionContext::SYNCHRONOUS
+            },
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::Tick)
     }
@@ -206,6 +209,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         tick_slices: &mut SmallVec<[VulkanMountedPlacedResidentInProcessStreamTickSlice<'a>; 4]>,
         transport: &mut VulkanInProcessPlacedEdgeTransport,
         output_device: &VulkanComputeDevice,
+        participant_devices: Option<&'a BTreeMap<String, Rc<VulkanComputeDevice>>>,
     ) -> Result<
         VulkanMountedPlacedResidentInProcessStreamTickRun,
         VulkanResidentInProcessPlacedRuntimeError,
@@ -230,6 +234,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         wait_for_completion: false,
                         feedback_lane: None,
                     },
+                    participant_devices,
                     state_transactions: None,
                     feedback_turn: None,
                     output_turn: Some(output_turn),
@@ -265,7 +270,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         VulkanResidentInProcessPlacedRuntimeError,
     > {
         let mut tick_slices = self.prepared_token_tick_slices_for_device(device, stream_tick, tail);
-        self.run_prepared_token_tick_slices_deferred(&mut tick_slices, transport, device)
+        self.run_prepared_token_tick_slices_deferred(&mut tick_slices, transport, device, None)
     }
 
     fn run_prepared_token_id_stream_tick_in_process_with_transport(
@@ -337,6 +342,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             &mut tick_slices,
             transport,
             output_device.as_ref(),
+            Some(devices),
         )
     }
 

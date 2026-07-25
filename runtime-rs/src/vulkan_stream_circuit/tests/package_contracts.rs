@@ -434,6 +434,49 @@ fn placed_generation_endpoints_follow_topology_not_system_component_order() {
 }
 
 #[test]
+fn signal_processor_device_ids_include_explicit_internal_shard_helpers() {
+    let manifest = fixture_model_package_manifest();
+    let placement = StreamCircuitPlacementSpec::new(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID)
+        .with_component_shard_devices(
+            "layer_00",
+            vec![
+                RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string(),
+                "gpu-helper".to_string(),
+            ],
+        );
+
+    assert_eq!(
+        manifest
+            .circuit_graph
+            .signal_processor_device_ids(&placement),
+        vec![
+            "gpu-helper".to_string(),
+            RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn signal_processor_owner_device_ids_exclude_internal_shard_helpers() {
+    let manifest = fixture_model_package_manifest();
+    let placement = StreamCircuitPlacementSpec::new(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID)
+        .with_component_shard_devices(
+            "layer_00",
+            vec![
+                RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string(),
+                "gpu-helper".to_string(),
+            ],
+        );
+
+    assert_eq!(
+        manifest
+            .circuit_graph
+            .signal_processor_owner_device_ids(&placement),
+        vec![RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string()]
+    );
+}
+
+#[test]
 fn fused_generation_components_follow_connected_processor_devices() {
     let resolved = fixture_model_package_manifest()
         .circuit_graph

@@ -3,6 +3,7 @@ struct VulkanResidentInProcessPlacedPendingFeedbackWindow {
     tick_count: usize,
     terminal_output_value: u64,
     template_replayed: bool,
+    transport_stats: VulkanPlacedEdgeTransportStats,
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {
@@ -53,12 +54,17 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         feedback_synchronization: Option<&VulkanResidentPlacedFeedbackTimelineSynchronization>,
         output_synchronization: &VulkanResidentPlacedOutputTimelineSynchronization,
     ) -> Result<
-        (VulkanResidentQueueSubmissionTemplate, Vec<u64>),
+        (
+            VulkanResidentQueueSubmissionTemplate,
+            Vec<u64>,
+            VulkanPlacedEdgeTransportStats,
+        ),
         VulkanResidentInProcessPlacedRuntimeError,
     > {
         let mut transport = VulkanInProcessPlacedEdgeTransport::new();
         let submission_batch = VulkanResidentQueueSubmissionBatch::new();
         let mut output_timeline_values = Vec::with_capacity(tick_count);
+        let mut transport_stats = VulkanPlacedEdgeTransportStats::default();
         for tick_index in 0..tick_count {
             let stream_tick =
                 start_stream_tick
@@ -140,6 +146,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         wait_for_completion: false,
                         feedback_lane: Some(tick_index),
                     },
+                    participant_devices: Some(devices),
                     state_transactions: None,
                     feedback_turn,
                     output_turn: Some(output_turn),
@@ -152,6 +159,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     run.status,
                 ));
             }
+            transport_stats.accumulate(&run.transport_stats);
         }
         let queued_submission_count = submission_batch.pending_submission_count();
         let submission_template = submission_batch
@@ -161,7 +169,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             submission_template.submission_count(),
             queued_submission_count
         );
-        Ok((submission_template, output_timeline_values))
+        Ok((
+            submission_template,
+            output_timeline_values,
+            transport_stats,
+        ))
     }
 
     fn advance_resident_feedback_submission_replay(
@@ -254,7 +266,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             tick_count,
         };
         let mut template_replayed = false;
-        let output_timeline_values =
+        let (output_timeline_values, transport_stats) =
             if let Some(replay) = template_catalog
                 .as_deref_mut()
                 .and_then(|catalog| catalog.get(&template_key))
@@ -275,13 +287,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 replay
                     .submit_next(tick_count, &current_timeline_state)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                output_timeline_values
+                (output_timeline_values, replay.transport_stats.clone())
             } else {
                 let recorded_timeline_state = self.resident_feedback_replay_timeline_state(
                     feedback_loop.feedback_synchronization.as_deref(),
                     &feedback_loop.output_synchronization,
                 )?;
-                let (submission_template, output_timeline_values) = self
+                let (submission_template, output_timeline_values, transport_stats) = self
                     .mount_resident_feedback_submission_template(
                         devices,
                         start_stream_tick,
@@ -299,11 +311,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             submission_template,
                             tick_count,
                             recorded_timeline_state,
+                            transport_stats.clone(),
                         )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     );
                 }
-                output_timeline_values
+                (output_timeline_values, transport_stats)
             };
         let terminal_output_value = output_timeline_values.last().copied().ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -315,6 +328,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             tick_count,
             terminal_output_value,
             template_replayed,
+            transport_stats,
         })
     }
 
@@ -395,7 +409,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         VulkanResidentInProcessPlacedRuntimeError,
     >
     where
-        F: FnMut(usize, u32, usize, usize, bool)
+        F: FnMut(
+            usize,
+            u32,
+            usize,
+            usize,
+            bool,
+            &VulkanPlacedEdgeTransportStats,
+        )
             -> Result<(), VulkanResidentInProcessPlacedRuntimeError>,
     {
         let feedback_loop = self.resident_feedback_loop.as_ref().ok_or_else(|| {
@@ -447,6 +468,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_CANCELLED {
             feedback_loop.control.acknowledge_cancellation();
         }
+        let no_transport = VulkanPlacedEdgeTransportStats::default();
         for tick_index in 0..completion.sampled_tick_count {
             let stream_tick = pending
                 .start_stream_tick
@@ -466,6 +488,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 feedback_loop.completed_stage_count_per_tick,
                 completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_CANCELLED
                     && tick_index + 1 == completion.sampled_tick_count,
+                if tick_index == 0 {
+                    &pending.transport_stats
+                } else {
+                    &no_transport
+                },
             )?;
         }
         Ok(completion)

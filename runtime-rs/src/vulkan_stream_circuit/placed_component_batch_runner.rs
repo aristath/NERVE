@@ -203,12 +203,79 @@ impl VulkanResidentPlacedComponentBatchRunner {
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     ))
                 } else {
-                    VulkanComponentBatchEdgeTransferBinding::Mapped(
-                        source
-                            .buffer
-                            .create_persistently_mapped_copy_to(&destination.buffer, byte_len)
-                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                    )
+                    if !source_device.supports_shared_host_memory()
+                        || !destination_device.supports_shared_host_memory()
+                        || !source_device.supports_opaque_fd_timeline_semaphores()
+                        || !destination_device.supports_opaque_fd_timeline_semaphores()
+                    {
+                        VulkanComponentBatchEdgeTransferBinding::HostStaging {
+                            source: Arc::clone(&source.buffer),
+                            destination: Arc::clone(&destination.buffer),
+                            byte_len,
+                        }
+                    } else {
+                        let staging_allocation = source_device
+                            .create_shared_host_allocation(
+                                &[destination_device.as_ref()],
+                                byte_len,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        let source_staging = Arc::new(
+                            source_device
+                                .import_shared_host_buffer(Arc::clone(&staging_allocation))
+                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        );
+                        let destination_staging = Arc::new(
+                            destination_device
+                                .import_shared_host_buffer(staging_allocation)
+                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        );
+                        let source_copy = Box::new(
+                            source_device
+                                .create_resident_buffer_copy(
+                                    &source.buffer,
+                                    &source_staging,
+                                    byte_len,
+                                )
+                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        );
+                        let destination_copy = Box::new(
+                            destination_device
+                                .create_resident_buffer_copy(
+                                    &destination_staging,
+                                    &destination.buffer,
+                                    byte_len,
+                                )
+                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        );
+                        let source_signal = source_device
+                            .create_opaque_fd_exportable_timeline_semaphore(0)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        let destination_wait = destination_device
+                            .create_timeline_semaphore(0)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        destination_device
+                            .import_timeline_semaphore_opaque_fd(
+                                &destination_wait,
+                                source_device
+                                    .export_timeline_semaphore_opaque_fd(&source_signal)
+                                    .map_err(
+                                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                                    )?,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        VulkanComponentBatchEdgeTransferBinding::DeviceLocalStaging {
+                            source_device: Rc::clone(source_device),
+                            destination_device: Rc::clone(destination_device),
+                            source_copy,
+                            destination_copy,
+                            source_signal,
+                            destination_wait,
+                            next_value: Cell::new(1),
+                            _source_staging: source_staging,
+                            _destination_staging: destination_staging,
+                        }
+                    }
                 };
                 edge_transfers.push(VulkanComponentBatchEdgeTransfer {
                     source_device_index,
@@ -243,7 +310,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         source_device_index: usize,
         destination_device_index: usize,
         edge_index: usize,
-    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+    ) -> Result<VulkanPlacedEdgeTransferRoute, VulkanResidentInProcessPlacedRuntimeError> {
         self.edge_transfers
             .iter()
             .find(|transfer| {
