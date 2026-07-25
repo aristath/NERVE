@@ -1,5 +1,21 @@
 from model_structure_common import *
 from model_structure_common import _tensor
+from nerve.model_transpiler_discovery import discover_rope_interleaved
+
+
+def test_distinguishes_rotary_pair_layout_from_mrope_axis_layout() -> None:
+    assert (
+        discover_rope_interleaved(
+            {"rope_parameters": {"mrope_interleaved": True}}
+        )
+        is False
+    )
+    assert (
+        discover_rope_interleaved(
+            {"rope_parameters": {"rope_interleaved": True}}
+        )
+        is True
+    )
 
 def test_discovers_attention_without_optional_query_key_norms() -> None:
     tensors = {
@@ -178,7 +194,9 @@ def test_discovers_nested_hybrid_decoder_by_tensor_structure() -> None:
     assert structure.model_type == "synthetic_hybrid_text"
     assert structure.head_width == 256
     assert structure.rotary_width == 64
-    assert structure.rope_interleaved is True
+    # `mrope_interleaved` selects multimodal position-axis ordering. Qwen still
+    # applies the ordinary half-split rotate_half operation to q/k channels.
+    assert structure.rope_interleaved is False
     assert structure.rms_norm_weight_offset == 1.0
     assert structure.token_ids["eos"] == 248044
     assert [layer.operator_type for layer in structure.layers] == [
@@ -210,7 +228,7 @@ def test_discovers_nested_hybrid_decoder_by_tensor_structure() -> None:
     assert split["attrs"]["blocks"] == 8
     assert split["attrs"]["block_part_width"] == 256
     rope = next(node for node in attention_circuit["nodes"] if node["id"] == "q_rope")
-    assert rope["attrs"]["interleaved"] is True
+    assert rope["attrs"]["interleaved"] is False
 
 
 def test_discovers_sparse_moe_and_model_specific_numerics_by_structure(

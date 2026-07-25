@@ -1664,11 +1664,15 @@ def discover_rope_theta(config: Json) -> float:
 
 
 def discover_rope_interleaved(config: Json) -> bool:
+    # Rotary pair layout and multimodal position-axis layout are independent
+    # contracts. In particular, Qwen's `mrope_interleaved` reorganizes the
+    # temporal/height/width frequency streams before applying the ordinary
+    # half-split `rotate_half`; it does not select adjacent-pair rotation.
     if "rope_interleaved" in config:
         return bool(config["rope_interleaved"])
     rope_parameters = config.get("rope_parameters")
     if isinstance(rope_parameters, dict):
-        for key in ("mrope_interleaved", "rope_interleaved", "interleaved"):
+        for key in ("rope_interleaved", "interleaved"):
             if key in rope_parameters:
                 return bool(rope_parameters[key])
-    return bool(config.get("mrope_interleaved", False))
+    return False
