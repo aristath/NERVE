@@ -1,7 +1,7 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
   "package_id": "model_d119caf1_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:5a31eb1bae3e602778b2b2c44c989a877cbba5946921f5242e57ce80be830a73",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:25978661e09877bb97467bf016142acd4d4d84d3a751f6db419d44c4160317b6",
   "compiler_target": {
     "schema": "nerve.compiler_target.v1",
     "devices": [
@@ -1720,7 +1720,7 @@
           "batch_mode": "weight_shared",
           "batch_implementations": [
             {
-              "execution_domain": "prefill",
+              "execution_domain": "decode_and_prefill",
               "lane_tile_width": 1,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
@@ -2355,7 +2355,7 @@
           "batch_mode": "weight_shared",
           "batch_implementations": [
             {
-              "execution_domain": "prefill",
+              "execution_domain": "decode_and_prefill",
               "lane_tile_width": 1,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
