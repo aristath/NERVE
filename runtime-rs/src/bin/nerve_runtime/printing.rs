@@ -265,12 +265,14 @@ fn print_runtime_transport_edges(edges: &[RuntimePlacedTransportEdgeReport]) {
 
 fn print_runtime_speculative_stats(
     cycle_count: usize,
+    rollback_cycle_count: usize,
     proposed_draft_token_count: usize,
     accepted_draft_token_count: usize,
     emitted_token_count: usize,
     draft_time_ns: u64,
     target_verification_time_ns: u64,
     draft_catch_up_time_ns: u64,
+    total_time_ns: u64,
 ) {
     if cycle_count == 0 {
         return;
@@ -281,12 +283,14 @@ fn print_runtime_speculative_stats(
         100.0 * accepted_draft_token_count as f64 / proposed_draft_token_count as f64
     };
     println!("speculative:");
-    println!("  cycles={cycle_count}");
+    println!("  cycles={cycle_count} rollback_cycles={rollback_cycle_count}");
     println!(
-        "  drafts proposed={} accepted={} acceptance={acceptance:.2}%",
-        proposed_draft_token_count, accepted_draft_token_count
+        "  drafts proposed={} accepted={} rejected={} acceptance={acceptance:.2}%",
+        proposed_draft_token_count,
+        accepted_draft_token_count,
+        proposed_draft_token_count.saturating_sub(accepted_draft_token_count),
     );
-    println!("  emitted_tokens={emitted_token_count}");
+    println!("  useful_tokens={emitted_token_count}");
     println!("  draft_ms={:.3}", nanos_to_millis(draft_time_ns));
     println!(
         "  target_verification_ms={:.3}",
@@ -296,6 +300,7 @@ fn print_runtime_speculative_stats(
         "  draft_catch_up_ms={:.3}",
         nanos_to_millis(draft_catch_up_time_ns)
     );
+    println!("  total_ms={:.3}", nanos_to_millis(total_time_ns));
 }
 
 fn print_placed_component_timing_profile(

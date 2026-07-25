@@ -286,12 +286,14 @@ struct RuntimeChatTurn {
     execution_counters: VulkanResidentExecutionCounters,
     prefix_state_cache: VulkanResidentPlacedPrefixStateCacheStats,
     speculative_cycle_count: usize,
+    speculative_rollback_cycle_count: usize,
     proposed_draft_token_count: usize,
     accepted_draft_token_count: usize,
     speculative_emitted_token_count: usize,
     speculative_draft_time_ns: u64,
     speculative_target_verification_time_ns: u64,
     speculative_draft_catch_up_time_ns: u64,
+    speculative_total_time_ns: u64,
     resident_feedback: RuntimeFeedbackExecutionReport,
     transport_edges: Vec<RuntimePlacedTransportEdgeReport>,
     sparse_moe: RuntimeSparseMoeWorkReport,
@@ -409,12 +411,14 @@ where
             print_runtime_prefix_state_cache_stats(&turn.prefix_state_cache);
             print_runtime_speculative_stats(
                 turn.speculative_cycle_count,
+                turn.speculative_rollback_cycle_count,
                 turn.proposed_draft_token_count,
                 turn.accepted_draft_token_count,
                 turn.speculative_emitted_token_count,
                 turn.speculative_draft_time_ns,
                 turn.speculative_target_verification_time_ns,
                 turn.speculative_draft_catch_up_time_ns,
+                turn.speculative_total_time_ns,
             );
             print_runtime_feedback_stats(&turn.resident_feedback);
             print_runtime_sparse_moe_stats(&turn.sparse_moe);

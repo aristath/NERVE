@@ -210,6 +210,12 @@ fn run_placed_chat(
                     .run
                     .speculative_decode
                     .cycle_count,
+                speculative_rollback_cycle_count: submitted_run
+                    .submitted_run
+                    .session_run
+                    .run
+                    .speculative_decode
+                    .rollback_cycle_count,
                 proposed_draft_token_count: submitted_run
                     .submitted_run
                     .session_run
@@ -246,6 +252,12 @@ fn run_placed_chat(
                     .run
                     .speculative_decode
                     .draft_catch_up_time_ns,
+                speculative_total_time_ns: submitted_run
+                    .submitted_run
+                    .session_run
+                    .run
+                    .speculative_decode
+                    .total_time_ns,
                 resident_feedback: runtime_feedback_execution_report(
                     submitted_run
                         .submitted_run
@@ -425,12 +437,14 @@ fn execute_placed_prompt_run(
         component_timings,
         component_timing_summaries,
         speculative_cycle_count: run.speculative_decode.cycle_count,
+        speculative_rollback_cycle_count: run.speculative_decode.rollback_cycle_count,
         proposed_draft_token_count: run.speculative_decode.proposed_draft_token_count,
         accepted_draft_token_count: run.speculative_decode.accepted_draft_token_count,
         speculative_emitted_token_count: run.speculative_decode.emitted_token_count,
         speculative_draft_time_ns: run.speculative_decode.draft_time_ns,
         speculative_target_verification_time_ns: run.speculative_decode.target_verification_time_ns,
         speculative_draft_catch_up_time_ns: run.speculative_decode.draft_catch_up_time_ns,
+        speculative_total_time_ns: run.speculative_decode.total_time_ns,
         resident_feedback: runtime_feedback_execution_report(run.resident_feedback),
         sparse_moe: sparse_moe_contract.work_report(
             prefill_activation_count,
@@ -516,12 +530,14 @@ fn print_placed_prompt_report(
 fn print_speculative_profile(report: &RuntimePlacedPromptRunReport) {
     print_runtime_speculative_stats(
         report.speculative_cycle_count,
+        report.speculative_rollback_cycle_count,
         report.proposed_draft_token_count,
         report.accepted_draft_token_count,
         report.speculative_emitted_token_count,
         report.speculative_draft_time_ns,
         report.speculative_target_verification_time_ns,
         report.speculative_draft_catch_up_time_ns,
+        report.speculative_total_time_ns,
     );
 }
 
