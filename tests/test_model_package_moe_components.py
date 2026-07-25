@@ -127,8 +127,8 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
         tensor_index,
         {"hidden_size": 2048, "intermediate_size": 512},
     ) == expected
-    assert workgroup_count_x_for_node(circuit, node, tensor_index) == 1024
-    assert local_size_x_for_shader_file(expected, node) == 64
+    assert workgroup_count_x_for_node(circuit, node, tensor_index) == 128
+    assert local_size_x_for_shader_file(expected, node) == 512
     assert frame_parallel_batch_shader_file(expected) == expected.replace(
         "_prequant_", "_batch1_prequant_", 1
     )
@@ -140,8 +140,8 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
         node=node,
         circuit=circuit,
         shader_file=expected,
-        local_size_x=64,
-        workgroup_count_x=1024,
+        local_size_x=512,
+        workgroup_count_x=128,
     )
     assert kernel["batch_implementations"][0]["stages"][0][
         "descriptor_bindings"

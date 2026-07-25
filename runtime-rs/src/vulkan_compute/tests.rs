@@ -775,7 +775,10 @@ mod tests {
             &legacy_shape,
         );
         let mut prequant_shape = gate_shape.to_vec();
-        prequant_shape.push(("{{TILE_ROWS}}", "4"));
+        prequant_shape.extend([
+            ("{{LOCAL_SIZE_X}}", "512"),
+            ("{{TILE_ROWS}}", "32"),
+        ]);
         let prequant_words = render(
             "sparse_moe_gate_up_prequant_fp8_e4m3.comp.template",
             &prequant_shape,
@@ -870,8 +873,8 @@ mod tests {
                     VulkanResidentKernelBufferBinding::new(5, &weight_scale, 4)
                         .with_access(VulkanResidentKernelBufferAccess::Read),
                 ],
-                16,
-                64,
+                2,
+                512,
                 4,
             )
             .unwrap();

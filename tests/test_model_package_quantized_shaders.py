@@ -457,8 +457,9 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "shared fe4m3vec4 quantized_hidden" not in prequant_gate_up_shader
     assert "readonly buffer QuantizedHidden" in prequant_gate_up_shader
     assert "readonly buffer HiddenScales" in prequant_gate_up_shader
-    assert "const uint TILE_ROWS = 4u;" in prequant_gate_up_shader
-    assert "layout(local_size_x = 64" in prequant_gate_up_shader
+    assert "const uint TILE_ROWS = 32u;" in prequant_gate_up_shader
+    assert "layout(local_size_x = 512" in prequant_gate_up_shader
+    assert "uint local_row = gl_SubgroupID;" in prequant_gate_up_shader
     assert "barrier();" in prequant_gate_up_shader
     assert "shared fe4m3vec4 quantized_intermediate" in down_shader
     assert "SPV_VALVE_mixed_float_dot_product" in gate_up_shader

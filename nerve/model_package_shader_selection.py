@@ -1109,7 +1109,7 @@ def local_size_x_for_node(node: Json) -> int:
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
     if shader_file.startswith("sparse_moe_gate_up_prequant_fp8_"):
-        return 64
+        return 512
     if shader_file.startswith(("sparse_moe_gate_up_fp8_", "sparse_moe_down_fp8_")):
         return 512
     if shader_file.startswith(

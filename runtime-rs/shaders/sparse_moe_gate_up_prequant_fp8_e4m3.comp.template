@@ -13,7 +13,7 @@ spirv_instruction(
 )
 float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = {{LOCAL_SIZE_X}}, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer QuantizedHidden { uint words[]; } quantized_hidden;
 layout(set = 0, binding = 1) readonly buffer HiddenScales { float values[]; } hidden_scales;
@@ -94,7 +94,11 @@ void main() {
     expert -= expert_start;
 
     uint first_row = tile * TILE_ROWS;
-    for (uint local_row = 0u; local_row < TILE_ROWS; local_row++) {
+    for (
+        uint local_row = gl_SubgroupID;
+        local_row < TILE_ROWS;
+        local_row += gl_NumSubgroups
+    ) {
         uint row = first_row + local_row;
         float gate = 0.0;
         float up = 0.0;
@@ -140,18 +144,19 @@ void main() {
     }
     barrier();
 
-    if (gl_SubgroupInvocationID < TILE_ROWS / 2u) {
-        uint row = first_row + gl_SubgroupInvocationID * 2u;
+    uint lane = gl_LocalInvocationID.x;
+    if (lane < TILE_ROWS / 2u) {
+        uint row = first_row + lane * 2u;
         if (row < INTERMEDIATE_SIZE) {
             uint hi = row + 1u < INTERMEDIATE_SIZE
                 ? f32_to_bf16(
-                    activated_rows[gl_SubgroupInvocationID * 2u + 1u]
+                    activated_rows[lane * 2u + 1u]
                 )
                 : 0u;
             expert_intermediates.words[route * INTERMEDIATE_WORDS + row / 2u] =
                 (hi << 16u)
                 | f32_to_bf16(
-                    activated_rows[gl_SubgroupInvocationID * 2u]
+                    activated_rows[lane * 2u]
                 );
         }
     }

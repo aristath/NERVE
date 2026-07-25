@@ -2960,6 +2960,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                     "INTERMEDIATE_SIZE": str(intermediate_size),
                     "NUM_EXPERTS": str(num_experts),
                     "EXPERTS_PER_TOKEN": str(experts_per_token),
+                    "LOCAL_SIZE_X": "512",
                     "TILE_ROWS": str(FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS),
                 },
             )
