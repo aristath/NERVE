@@ -641,6 +641,9 @@ def test_shader_templates_compile_to_vulkan_1_4_spirv(tmp_path: Path) -> None:
         "rotary_bf16_12x64_r64_theta10000_half__sc2.comp",
         "append_kv_state_bf16_4x64__sc9.comp",
         "gqa_attention_bf16_q12_kv4_d64_scale0.125__sc6.comp",
+        "append_gqa_attention_bf16_q12_kv4_d64_scale0.125__sc7.comp",
+        "append_gqa_attention_temporal_read_bf16_q12_kv4_d64_"
+        "scale0.125__pbc7.comp",
         "causal_conv1d_silu_bf16_c768_k4.comp",
         "causal_conv1d_silu_temporal_bf16_c768_k4.comp",
         "gated_delta_scan_k4x64_v4x64_af32_dtbf16_nf32_eps1e-06.comp",

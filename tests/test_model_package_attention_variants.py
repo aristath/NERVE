@@ -69,6 +69,11 @@ def test_compiler_renders_fused_kv_append_attention_variants(
     assert "const uint TOKEN_BATCHES = TILE_TOKENS / PHYSICAL_TILE_TOKENS;" in plain
     assert "for (uint batch = 0u; batch < TOKEN_BATCHES; batch++)" in plain
     assert "tile_token * subgroups_per_token + subgroup_part" in plain
+    assert "shared float tile_reduction[" in plain
+    assert "kv_state_read_word(slot * SLOT_WORD_COUNT)" in plain
+    assert "denominator * old_scale + tile_reduction[0] * tile_value_scale" in plain
+    assert "shared float tile_alpha[" not in plain
+    assert "shared float tile_beta[" not in plain
     assert "binding = 5) readonly buffer AttentionSinks" in sinks
     assert "binding = 6) readonly buffer KvStateRead" in sinks
     assert "binding = 7) buffer KvStateWrite" in sinks

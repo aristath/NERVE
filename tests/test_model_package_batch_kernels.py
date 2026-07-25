@@ -389,6 +389,10 @@ def test_compiler_renders_temporal_attention_stages(tmp_path: Path) -> None:
     assert "layout(push_constant) uniform BatchControl" not in read_source
     assert "const uint ATTENTION_WINDOW = 32768u;" in read_source
     assert "absolute_tick >= batch_control.start_stream_tick_low" in read_source
+    assert "shared float tile_reduction[" in read_source
+    assert "(absolute_tick % capacity) * SLOT_WORD_COUNT" in read_source
+    assert "shared float tile_alpha[" not in read_source
+    assert "shared float tile_beta[" not in read_source
     assert "uint query_head = gl_WorkGroupID.x % QUERY_HEADS;" in read_source
     assert "uint position = gl_WorkGroupID.x / QUERY_HEADS;" in read_source
     assert "if (position >= batch_control.batch_width) return;" in read_source

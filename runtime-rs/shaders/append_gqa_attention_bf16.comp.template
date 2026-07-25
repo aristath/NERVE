@@ -48,6 +48,7 @@ const uint KV_WORD_COUNT = KV_ELEMENT_COUNT / 2u;
 const uint SLOT_ELEMENT_COUNT = KV_ELEMENT_COUNT * 2u;
 const uint SLOT_WORD_COUNT = KV_WORD_COUNT * 2u;
 const uint TILE_TOKENS = {{TILE_TOKENS}}u;
+const uint TILE_REDUCTION_WIDTH = {{TILE_REDUCTION_WIDTH}}u;
 const uint PADDED_HEAD_WIDTH = ((HEAD_WIDTH + 63u) / 64u) * 64u;
 const uint PHYSICAL_TILE_TOKENS = {{LOCAL_SIZE}}u / PADDED_HEAD_WIDTH;
 const uint TOKEN_BATCHES = TILE_TOKENS / PHYSICAL_TILE_TOKENS;
@@ -59,15 +60,18 @@ const uint STATE_PAGE_TABLE_WORDS = 9u;
 
 shared float query_values[{{HEAD_WIDTH}}];
 shared float subgroup_partials[{{TILE_TOKENS}} * MAX_SUBGROUPS_PER_TOKEN];
-shared float tile_alpha[{{TILE_TOKENS}}];
-shared float tile_beta[{{TILE_TOKENS}}];
+shared float tile_scores[{{TILE_TOKENS}}];
+shared float tile_reduction[{{TILE_REDUCTION_WIDTH}}];
 shared float tile_value_weight[{{TILE_TOKENS}}];
 shared float value_contributions[{{TILE_TOKENS}} * {{HEAD_WIDTH}}];
 shared float tile_accumulator_carry;
+shared float tile_value_scale;
 shared float softmax_denominator;
 shared float attention_output_scale;
 shared float output_values[{{HEAD_WIDTH}}];
 shared uint chronological_start;
+shared uint current_write_word_base;
+shared uint tile_read_word_base[{{TILE_TOKENS}}];
 
 float bf16_to_f32(uint value) {
     return uintBitsToFloat((value & 0xffffu) << 16);
@@ -133,25 +137,38 @@ float read_current_v(uint kv_head, uint dim) {
     return read_packed_bf16(current_v_frame.words[index >> 1], index);
 }
 
-float read_k(uint token_index, uint tokens, uint slot, uint kv_head, uint dim) {
+float read_k(
+    uint token_index,
+    uint tokens,
+    uint physical_word_base,
+    uint kv_head,
+    uint dim
+) {
     if (token_index + 1u == tokens) {
         return read_current_k(kv_head, dim);
     }
-    uint element_index = (slot * SLOT_ELEMENT_COUNT) + (kv_head * HEAD_WIDTH) + dim;
+    uint element_index = kv_head * HEAD_WIDTH + dim;
     return read_packed_bf16(
-        kv_state_read.words[kv_state_read_word(element_index >> 1)],
+        kv_state_read.words[physical_word_base + (element_index >> 1)],
         element_index
     );
 }
 
-float read_v(uint token_index, uint tokens, uint slot, uint kv_head, uint dim) {
+float read_v(
+    uint token_index,
+    uint tokens,
+    uint physical_word_base,
+    uint kv_head,
+    uint dim
+) {
     if (token_index + 1u == tokens) {
         return read_current_v(kv_head, dim);
     }
-    uint element_index =
-        (slot * SLOT_ELEMENT_COUNT) + KV_ELEMENT_COUNT + (kv_head * HEAD_WIDTH) + dim;
+    uint element_index = kv_head * HEAD_WIDTH + dim;
     return read_packed_bf16(
-        kv_state_read.words[kv_state_read_word(element_index >> 1)],
+        kv_state_read.words[
+            physical_word_base + KV_WORD_COUNT + (element_index >> 1)
+        ],
         element_index
     );
 }
@@ -176,12 +193,10 @@ void write_current_kv(uint query_head, uint kv_head, uint local_index, uint capa
         query_head % QUERY_GROUPS_PER_KV_HEAD == 0u
         && local_index < HEAD_WIDTH / 2u
     ) {
-        uint slot = stream_control.words[1] % capacity;
-        uint slot_base = slot * SLOT_WORD_COUNT;
         uint head_word = kv_head * (HEAD_WIDTH / 2u) + local_index;
-        kv_state_write.words[kv_state_write_word(slot_base + head_word)] =
+        kv_state_write.words[current_write_word_base + head_word] =
             current_k_frame.words[head_word];
-        kv_state_write.words[kv_state_write_word(slot_base + KV_WORD_COUNT + head_word)] =
+        kv_state_write.words[current_write_word_base + KV_WORD_COUNT + head_word] =
             current_v_frame.words[head_word];
     }
 }
@@ -203,7 +218,6 @@ void main() {
         : min(runtime_capacity, ATTENTION_WINDOW);
     uint tokens = capacity == 0u ? 0u : available_tokens(capacity);
     uint kv_head = query_head / QUERY_GROUPS_PER_KV_HEAD;
-    write_current_kv(query_head, kv_head, local_index, capacity);
 
     if (local_index < HEAD_WIDTH) {
         query_values[local_index] = read_query(query_head * HEAD_WIDTH + local_index);
@@ -212,14 +226,32 @@ void main() {
         chronological_start = capacity == 0u
             ? 0u
             : (stream_control.words[1] + capacity + 1u - tokens) % capacity;
+        current_write_word_base = capacity == 0u
+            ? 0u
+            : kv_state_write_word(
+                (stream_control.words[1] % capacity) * SLOT_WORD_COUNT
+            );
     }
     barrier();
+    write_current_kv(query_head, kv_head, local_index, capacity);
 
     float maximum = LOWEST_FLOAT;
     float denominator = 0.0;
     float accumulator = 0.0;
 
     for (uint tile_start = 0u; tile_start < tokens; tile_start += TILE_TOKENS) {
+        uint tile_count = min(TILE_TOKENS, tokens - tile_start);
+        if (local_index < tile_count) {
+            uint token_index = tile_start + local_index;
+            uint slot = chronological_start + token_index;
+            if (slot >= capacity) {
+                slot -= capacity;
+            }
+            tile_read_word_base[local_index] =
+                kv_state_read_word(slot * SLOT_WORD_COUNT);
+        }
+        barrier();
+
         for (uint batch = 0u; batch < TOKEN_BATCHES; batch++) {
             uint tile_token = batch * PHYSICAL_TILE_TOKENS + tile_entry;
             uint token_index = tile_start + tile_token;
@@ -229,12 +261,14 @@ void main() {
                 && token_index < tokens
                 && dim < HEAD_WIDTH
             ) {
-                uint slot = chronological_start + token_index;
-                if (slot >= capacity) {
-                    slot -= capacity;
-                }
                 product = query_values[dim]
-                    * read_k(token_index, tokens, slot, kv_head, dim);
+                    * read_k(
+                        token_index,
+                        tokens,
+                        tile_read_word_base[tile_token],
+                        kv_head,
+                        dim
+                    );
             }
             float partial = subgroupAdd(product);
             if (
@@ -248,30 +282,55 @@ void main() {
         }
         barrier();
 
-        if (local_index == 0u) {
-            uint tile_count = min(TILE_TOKENS, tokens - tile_start);
-            for (uint index = 0u; index < tile_count; index++) {
+        if (local_index < TILE_REDUCTION_WIDTH) {
+            if (local_index < tile_count) {
                 float dot_product = 0.0;
                 for (uint part = 0u; part < subgroups_per_token; part++) {
-                    dot_product += subgroup_partials[index * subgroups_per_token + part];
+                    dot_product += subgroup_partials[
+                        local_index * subgroups_per_token + part
+                    ];
                 }
-                float score = dot_product * ATTENTION_SCALE;
-                float next_maximum = max(maximum, score);
-                float alpha = exp(maximum - next_maximum);
-                float beta = exp(score - next_maximum);
-                tile_alpha[index] = alpha;
-                tile_beta[index] = beta;
-                denominator = denominator * alpha + beta;
-                maximum = next_maximum;
+                tile_scores[local_index] = dot_product * ATTENTION_SCALE;
+                tile_reduction[local_index] = tile_scores[local_index];
+            } else {
+                tile_reduction[local_index] = LOWEST_FLOAT;
             }
-
-            float carry = 1.0;
-            for (uint reverse = tile_count; reverse > 0u; reverse--) {
-                uint index = reverse - 1u;
-                tile_value_weight[index] = tile_beta[index] * carry;
-                carry *= tile_alpha[index];
+        }
+        barrier();
+        for (uint stride = TILE_REDUCTION_WIDTH / 2u; stride > 0u; stride >>= 1u) {
+            if (local_index < stride) {
+                tile_reduction[local_index] = max(
+                    tile_reduction[local_index],
+                    tile_reduction[local_index + stride]
+                );
             }
-            tile_accumulator_carry = carry;
+            barrier();
+        }
+        float tile_maximum = tile_reduction[0];
+        if (local_index < TILE_REDUCTION_WIDTH) {
+            float weight = local_index < tile_count
+                ? exp(tile_scores[local_index] - tile_maximum)
+                : 0.0;
+            if (local_index < tile_count) {
+                tile_value_weight[local_index] = weight;
+            }
+            tile_reduction[local_index] = weight;
+        }
+        barrier();
+        for (uint stride = TILE_REDUCTION_WIDTH / 2u; stride > 0u; stride >>= 1u) {
+            if (local_index < stride) {
+                tile_reduction[local_index] += tile_reduction[local_index + stride];
+            }
+            barrier();
+        }
+        if (local_index == 0u) {
+            float next_maximum = max(maximum, tile_maximum);
+            float old_scale = exp(maximum - next_maximum);
+            tile_value_scale = exp(tile_maximum - next_maximum);
+            denominator =
+                denominator * old_scale + tile_reduction[0] * tile_value_scale;
+            maximum = next_maximum;
+            tile_accumulator_carry = old_scale;
         }
         barrier();
 
@@ -286,13 +345,15 @@ void main() {
                 local_index < PHYSICAL_TILE_TOKENS * HEAD_WIDTH
                 && value_token < tokens
             ) {
-                uint slot = chronological_start + value_token;
-                if (slot >= capacity) {
-                    slot -= capacity;
-                }
                 value_contributions[contribution_index] =
-                    tile_value_weight[tile_token]
-                    * read_v(value_token, tokens, slot, kv_head, value_dim);
+                    tile_value_weight[tile_token] * tile_value_scale
+                    * read_v(
+                        value_token,
+                        tokens,
+                        tile_read_word_base[tile_token],
+                        kv_head,
+                        value_dim
+                    );
             } else if (local_index < PHYSICAL_TILE_TOKENS * HEAD_WIDTH) {
                 value_contributions[contribution_index] = 0.0;
             }
@@ -300,7 +361,6 @@ void main() {
         barrier();
 
         if (local_index < HEAD_WIDTH) {
-            uint tile_count = min(TILE_TOKENS, tokens - tile_start);
             float tile_sum = 0.0;
             for (uint index = 0u; index < tile_count; index++) {
                 tile_sum += value_contributions[index * HEAD_WIDTH + local_index];

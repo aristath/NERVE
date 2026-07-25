@@ -9,12 +9,22 @@ def attention_tile_token_width(head_width: int) -> int:
     if physical_tile_tokens == 0:
         return 0
     shared_float_budget = (32 * 1024) // 4
-    fixed_shared_floats = 2 * head_width + 4
-    tile_shared_floats = head_width + ((head_width + 31) // 32) + 3
-    max_token_batches = (shared_float_budget - fixed_shared_floats) // (
-        physical_tile_tokens * tile_shared_floats
-    )
-    token_batches = max(1, min(7, max_token_batches))
+    subgroup_partials_per_token = (head_width + 31) // 32
+    token_batches = 0
+    for candidate in range(1, 8):
+        tile_tokens = physical_tile_tokens * candidate
+        reduction_width = 1 << (tile_tokens - 1).bit_length()
+        shared_floats = (
+            2 * head_width
+            + tile_tokens
+            * (head_width + subgroup_partials_per_token + 4)
+            + reduction_width
+            + 6
+        )
+        if shared_floats > shared_float_budget:
+            break
+        token_batches = candidate
+    token_batches = max(1, token_batches)
     return physical_tile_tokens * token_batches
 
 def write_compiled_tensor(
