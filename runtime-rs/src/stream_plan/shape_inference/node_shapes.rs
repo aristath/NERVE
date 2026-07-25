@@ -8,7 +8,7 @@ fn infer_node_output_shapes(
     let outputs = node.outputs.len();
     let unknown = || Ok(vec![None; outputs]);
 
-    match node.op.as_str() {
+    let inferred = match node.op.as_str() {
         "quantize_fp8_e4m3" => {
             let element_count = attr_usize(node, "element_count");
             let block_columns = attr_usize(node, "block_columns");
@@ -192,7 +192,124 @@ fn infer_node_output_shapes(
             Ok(repeat_shape(first_input_shape(node, signals), outputs))
         }
         _ => unknown(),
+    }?;
+    apply_physical_output_representation_shapes(component_id, node, inferred)
+}
+
+fn apply_physical_output_representation_shapes(
+    component_id: &str,
+    node: &CircuitNode,
+    mut shapes: Vec<Option<Vec<usize>>>,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    let Some(representations) = node
+        .attrs
+        .get("physical_output_representations")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(shapes);
+    };
+    if representations.is_empty() {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an empty physical output representation list",
+            node.id
+        )));
     }
+
+    let mut physical_outputs = BTreeSet::new();
+    for representation in representations {
+        let contract = representation
+            .get("contract")
+            .and_then(serde_json::Value::as_str);
+        let logical_signal = representation
+            .get("logical_signal")
+            .and_then(serde_json::Value::as_str);
+        let outputs = representation
+            .get("outputs")
+            .and_then(serde_json::Value::as_array);
+        let element_count = representation
+            .get("element_count")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
+        let block_columns = representation
+            .get("block_columns")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
+        let (Some(logical_signal), Some(outputs), Some(element_count), Some(block_columns)) =
+            (logical_signal, outputs, element_count, block_columns)
+        else {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} has an incomplete physical output representation",
+                node.id
+            )));
+        };
+        if contract != Some("bf16_blockwise_fp8_e4m3_f32_scale.v1")
+            || outputs.len() != 2
+            || element_count == 0
+            || block_columns == 0
+            || element_count % block_columns != 0
+        {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} has invalid blockwise FP8 output geometry",
+                node.id
+            )));
+        }
+        let logical_index = node
+            .outputs
+            .iter()
+            .position(|output| output == logical_signal)
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} physical representation references absent logical output {logical_signal:?}",
+                    node.id
+                ))
+            })?;
+        if shapes[logical_index]
+            .as_deref()
+            .and_then(product)
+            .is_some_and(|elements| elements != element_count)
+        {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} physical representation has {element_count} elements but logical output {logical_signal:?} has shape {:?}",
+                node.id, shapes[logical_index]
+            )));
+        }
+        let physical_shapes = [
+            vec![element_count],
+            vec![element_count / block_columns],
+        ];
+        for (output, shape) in outputs.iter().zip(physical_shapes) {
+            let output = output.as_str().ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} physical output id must be a string",
+                    node.id
+                ))
+            })?;
+            if !physical_outputs.insert(output) {
+                return Err(CircuitPlanError(format!(
+                    "{component_id} node {} maps physical output {output:?} more than once",
+                    node.id
+                )));
+            }
+            let output_index = node
+                .outputs
+                .iter()
+                .position(|candidate| candidate == output)
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} physical representation references absent output {output:?}",
+                        node.id
+                    ))
+                })?;
+            if output_index == logical_index {
+                return Err(CircuitPlanError(format!(
+                    "{component_id} node {} physical representation reuses logical output {output:?}",
+                    node.id
+                )));
+            }
+            shapes[output_index] = Some(shape);
+        }
+    }
+    Ok(shapes)
 }
 
 fn infer_linear_output_shapes(
