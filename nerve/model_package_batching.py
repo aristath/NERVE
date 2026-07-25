@@ -13,29 +13,37 @@ def persistent_batch_control_stage(
     payload: str = "width",
     binding: int = 31,
     descriptor_bindings: list[Json] | None = None,
+    control_access: str = "read",
+    indirect_dispatch_byte_offset: int | None = None,
 ) -> Json:
     byte_count = {
         "width": 4,
         "width_expert_start": 8,
+        "width_expert_range_indirect": 28,
         "temporal": 16,
     }[payload]
     packaged_shader_file = persistent_batch_control_shader_file(
         shader_file,
         binding=binding,
     )
+    control = {
+        "kind": "storage_buffer",
+        "byte_count": byte_count,
+        "binding": binding,
+        "payload": payload,
+    }
+    if control_access != "read":
+        control["access"] = control_access
     stage = {
         "shader_path": f"shaders/{packaged_shader_file}",
         "local_size_x": local_size_x,
         "workgroup_count_x": workgroup_count_x,
-        "control": {
-            "kind": "storage_buffer",
-            "byte_count": byte_count,
-            "binding": binding,
-            "payload": payload,
-        },
+        "control": control,
     }
     if descriptor_bindings is not None:
         stage["descriptor_bindings"] = descriptor_bindings
+    if indirect_dispatch_byte_offset is not None:
+        stage["indirect_dispatch_byte_offset"] = indirect_dispatch_byte_offset
     return stage
 
 
@@ -82,38 +90,52 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     return None
 
 
-def sparse_moe_route_compaction_shader_file(shader_file: str) -> str | None:
+def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     match = re.fullmatch(
-        r"sparse_moe_gate_up_(?:bf16|(?:prequant_)?fp8_e4m3_b\d+x\d+|"
+        r"sparse_moe_(gate_up|down)_(?:bf16|(?:prequant_)?fp8_e4m3_b\d+x\d+|"
         r"int4_ct_s(?:f16|bf16)_g\d+)_"
-        r"h\d+_i(\d+)_e\d+_k(\d+)\.comp",
+        r"h(\d+)_i(\d+)_e\d+_k(\d+)\.comp",
         shader_file,
     )
     if match is None:
         return None
-    intermediate_size, experts_per_token = map(int, match.groups())
+    stage, hidden_size, intermediate_size, experts_per_token = match.groups()
+    output_rows = int(intermediate_size) if stage == "gate_up" else int(hidden_size)
+    tile_rows = (
+        FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS
+        if stage == "gate_up" and "_prequant_fp8_" in shader_file
+        else FP8_SPARSE_GATE_UP_TILE_ROWS
+        if stage == "gate_up" and "_fp8_" in shader_file
+        else FP8_SPARSE_DOWN_TILE_ROWS
+        if stage == "down" and "_fp8_" in shader_file
+        else INT4_CT_OUTPUT_TILE_ROWS
+        if "_int4_ct_" in shader_file
+        else 2
+    )
+    tiles_per_route = (output_rows + tile_rows - 1) // tile_rows
+    operation = "compact" if stage == "gate_up" else "count"
     return (
-        "moe_route_compact_batch1_"
-        f"i{intermediate_size}_k{experts_per_token}.comp"
+        f"moe_route_{operation}_batch1_i{intermediate_size}_"
+        f"k{experts_per_token}_t{tiles_per_route}.comp"
     )
 
 
-def sparse_moe_route_compaction_workgroup_count_x(shader_file: str) -> int:
+def sparse_moe_route_scheduling_workgroup_count_x(shader_file: str) -> int:
     match = re.fullmatch(
-        r"moe_route_compact_batch1_i\d+_k(\d+)\.comp",
+        r"moe_route_(compact|count)_batch1_i\d+_k(\d+)_t\d+\.comp",
         shader_file,
     )
     if match is None:
         raise ModelCompileError(
-            f"shader {shader_file!r} is not a sparse route-compaction kernel"
+            f"shader {shader_file!r} is not a sparse route-scheduling kernel"
         )
-    return int(match.group(1))
+    return int(match.group(2)) if match.group(1) == "compact" else 1
 
 
-def sparse_moe_route_compaction_descriptor_bindings(node: Json) -> list[Json]:
-    if node.get("op") != "sparse_moe_gate_up":
+def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
+    if node.get("op") not in {"sparse_moe_gate_up", "sparse_moe_down"}:
         raise ModelCompileError(
-            "sparse route compaction requires a sparse_moe_gate_up node"
+            "sparse route scheduling requires a sparse MoE projection node"
         )
     inputs = node.get("inputs")
     outputs = node.get("outputs")
@@ -127,16 +149,20 @@ def sparse_moe_route_compaction_descriptor_bindings(node: Json) -> list[Json]:
         raise ModelCompileError(
             f"sparse gate node {node.get('id')!r} has no valid descriptor interface"
         )
-    return [
+    bindings = [
         {
             "binding": 1,
             "source_binding": len(inputs) - 1,
         },
-        {
-            "binding": 2,
-            "source_binding": len(inputs),
-        },
     ]
+    if node["op"] == "sparse_moe_gate_up":
+        bindings.append(
+            {
+                "binding": 2,
+                "source_binding": len(inputs),
+            }
+        )
+    return bindings
 
 
 def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] | None:

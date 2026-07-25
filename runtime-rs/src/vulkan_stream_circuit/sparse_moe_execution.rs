@@ -12,11 +12,6 @@ impl VulkanResidentRuntimeModel {
     ) -> Result<VulkanSparseMoeExecutionContract, VulkanResidentTokenModelPackageError> {
         let mut contract = VulkanSparseMoeExecutionContract::default();
         for component in &self.circuit_graph.components {
-            let shard_count = self
-                .placement
-                .component_shard_devices
-                .get(&component.component_id)
-                .map_or(1, Vec::len);
             for node in &component.circuit.nodes {
                 if node.op != "sparse_moe_gate_up" {
                     continue;
@@ -38,7 +33,7 @@ impl VulkanResidentRuntimeModel {
                     .saturating_add(selected);
                 contract.submitted_route_slots_per_activation = contract
                     .submitted_route_slots_per_activation
-                    .saturating_add(selected.saturating_mul(shard_count));
+                    .saturating_add(selected);
             }
         }
         Ok(contract)
@@ -101,12 +96,12 @@ mod sparse_moe_execution_tests {
     use super::*;
 
     #[test]
-    fn route_work_reports_selected_scaling_and_shard_predication() {
+    fn route_work_reports_only_device_compacted_selected_routes() {
         let contract = VulkanSparseMoeExecutionContract {
             component_count: 40,
             declared_experts_per_activation: 40 * 256,
             selected_routes_per_activation: 40 * 8,
-            submitted_route_slots_per_activation: 40 * 8 * 2,
+            submitted_route_slots_per_activation: 40 * 8,
         };
 
         let report = contract.work_report(3, 2);
@@ -114,10 +109,10 @@ mod sparse_moe_execution_tests {
         assert_eq!(report.activation_count, 5);
         assert_eq!(report.declared_expert_slots, 51_200);
         assert_eq!(report.selected_expert_routes, 1_600);
-        assert_eq!(report.submitted_expert_route_slots, 3_200);
+        assert_eq!(report.submitted_expert_route_slots, 1_600);
         assert_eq!(report.grouped_prefill_routes, 960);
         assert_eq!(report.skipped_dense_expert_slots, 49_600);
-        assert_eq!(report.empty_shard_route_checks, 1_600);
+        assert_eq!(report.empty_shard_route_checks, 0);
         assert!(report.route_weights_device_resident);
         assert!(report.reduction_device_resident);
     }

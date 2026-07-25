@@ -1,5 +1,5 @@
 from model_package_layout_common import *
-from nerve.model_package_batching import sparse_moe_route_compaction_shader_file
+from nerve.model_package_batching import sparse_moe_route_scheduling_shader_file
 from nerve.model_package_shader_selection import local_size_x_for_shader_file
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_tensors import fp8_prequantization_spec
@@ -37,7 +37,8 @@ def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> No
 def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
-        "moe_route_compact_batch1_i512_k8.comp",
+        "moe_route_compact_batch1_i512_k8_t256.comp",
+        "moe_route_count_batch1_i512_k8_t512.comp",
         "scaled_add_bf16_1024_scale0.22.comp",
         "moe_topk_bf16_e32_k8.comp",
         "sparse_moe_gate_up_bf16_h1024_i512_e32_k8.comp",
@@ -69,7 +70,8 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
         "{{" not in (tmp_path / shader_file).read_text() for shader_file in shader_files
     )
     compile_shader_artifacts(tmp_path)
-    assert (tmp_path / "moe_route_compact_batch1_i512_k8.spv").is_file()
+    assert (tmp_path / "moe_route_compact_batch1_i512_k8_t256.spv").is_file()
+    assert (tmp_path / "moe_route_count_batch1_i512_k8_t512.spv").is_file()
 
 
 def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
@@ -132,8 +134,8 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
     assert frame_parallel_batch_shader_file(expected) == expected.replace(
         "_prequant_", "_batch1_prequant_", 1
     )
-    assert sparse_moe_route_compaction_shader_file(expected) == (
-        "moe_route_compact_batch1_i512_k8.comp"
+    assert sparse_moe_route_scheduling_shader_file(expected) == (
+        "moe_route_compact_batch1_i512_k8_t16.comp"
     )
     kernel = component_kernel_spec(
         execution_index=0,
@@ -308,7 +310,8 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     down_file = "sparse_moe_down_int4_ct_sbf16_g32_h3072_i1024_e256_k10.comp"
     batch_gate = gate_file.replace("_int4_ct_", "_batch1_int4_ct_")
     batch_down = down_file.replace("_int4_ct_", "_batch1_int4_ct_")
-    route_compaction = "moe_route_compact_batch1_i1024_k10.comp"
+    route_compaction = "moe_route_compact_batch1_i1024_k10_t64.comp"
+    route_count = "moe_route_count_batch1_i1024_k10_t192.comp"
 
     assert shader_file_for_node(circuit, gate_up, tensor_index, dimensions) == gate_file
     assert shader_file_for_node(circuit, down, tensor_index, dimensions) == down_file
@@ -319,7 +322,14 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     copy_shader_templates(
         shader_source_dir,
         tmp_path,
-        {gate_file, down_file, batch_gate, batch_down, route_compaction},
+        {
+            gate_file,
+            down_file,
+            batch_gate,
+            batch_down,
+            route_compaction,
+            route_count,
+        },
     )
 
     gate_source = (tmp_path / gate_file).read_text()

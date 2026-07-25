@@ -1094,21 +1094,22 @@ def component_kernel_spec(
             )
         if frame_parallel_shader_file is not None:
             frame_parallel_stages = []
-            route_compaction_shader_file = sparse_moe_route_compaction_shader_file(
+            route_scheduling_shader_file = sparse_moe_route_scheduling_shader_file(
                 shader_file
             )
-            if route_compaction_shader_file is not None:
+            if route_scheduling_shader_file is not None:
                 frame_parallel_stages.append(
                     persistent_batch_control_stage(
-                        route_compaction_shader_file,
+                        route_scheduling_shader_file,
                         64,
-                        sparse_moe_route_compaction_workgroup_count_x(
-                            route_compaction_shader_file
+                        sparse_moe_route_scheduling_workgroup_count_x(
+                            route_scheduling_shader_file
                         ),
-                        payload="width_expert_start",
+                        payload="width_expert_range_indirect",
                         descriptor_bindings=(
-                            sparse_moe_route_compaction_descriptor_bindings(node)
+                            sparse_moe_route_scheduling_descriptor_bindings(node)
                         ),
+                        control_access="read_write",
                     )
                 )
             frame_parallel_stages.append(
@@ -1117,9 +1118,14 @@ def component_kernel_spec(
                     local_size_x,
                     workgroup_count_x,
                     payload=(
-                        "width_expert_start"
+                        "width_expert_range_indirect"
                         if frame_parallel_shader_file.startswith("sparse_moe_")
                         else "width"
+                    ),
+                    indirect_dispatch_byte_offset=(
+                        16
+                        if frame_parallel_shader_file.startswith("sparse_moe_")
+                        else None
                     ),
                 )
             )

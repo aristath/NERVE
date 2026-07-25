@@ -138,6 +138,8 @@ pub struct VulkanResidentComponentBatchStageSpec {
     #[serde(default)]
     pub descriptor_bindings: Vec<VulkanResidentComponentBatchDescriptorBindingSpec>,
     pub control: VulkanResidentComponentBatchControlSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indirect_dispatch_byte_offset: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +155,8 @@ pub enum VulkanResidentComponentBatchControlSpec {
         byte_count: u32,
         binding: u32,
         payload: VulkanResidentComponentBatchControlPayload,
+        #[serde(default)]
+        access: VulkanResidentComponentBatchControlAccess,
     },
 }
 
@@ -165,9 +169,24 @@ impl VulkanResidentComponentBatchControlSpec {
                 byte_count,
                 binding,
                 payload,
+                ..
             } => (binding, byte_count, payload),
         }
     }
+
+    pub(crate) fn access(self) -> VulkanResidentComponentBatchControlAccess {
+        match self {
+            Self::StorageBuffer { access, .. } => access,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanResidentComponentBatchControlAccess {
+    #[default]
+    Read,
+    ReadWrite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -175,6 +194,7 @@ impl VulkanResidentComponentBatchControlSpec {
 pub enum VulkanResidentComponentBatchControlPayload {
     Width,
     WidthExpertStart,
+    WidthExpertRangeIndirect,
     Temporal,
 }
 
@@ -183,6 +203,9 @@ impl VulkanResidentComponentBatchControlPayload {
         match self {
             Self::Width => VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             Self::WidthExpertStart => 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            Self::WidthExpertRangeIndirect => {
+                7 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+            }
             Self::Temporal => VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
         }
     }

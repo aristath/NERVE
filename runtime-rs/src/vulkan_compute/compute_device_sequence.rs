@@ -600,6 +600,11 @@ impl VulkanComputeDevice {
                         let buffer_barriers = dependencies
                             .iter()
                             .map(|dependency| {
+                                let consumes_indirect_command = step
+                                    .indirect_dispatch
+                                    .is_some_and(|indirect| {
+                                        indirect.buffer.buffer == dependency.buffer
+                                    });
                                 vk::BufferMemoryBarrier::default()
                                     .src_access_mask(
                                         vk::AccessFlags::SHADER_READ
@@ -607,7 +612,12 @@ impl VulkanComputeDevice {
                                     )
                                     .dst_access_mask(
                                         vk::AccessFlags::SHADER_READ
-                                            | vk::AccessFlags::SHADER_WRITE,
+                                            | vk::AccessFlags::SHADER_WRITE
+                                            | if consumes_indirect_command {
+                                                vk::AccessFlags::INDIRECT_COMMAND_READ
+                                            } else {
+                                                vk::AccessFlags::empty()
+                                            },
                                     )
                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -619,7 +629,12 @@ impl VulkanComputeDevice {
                         self.device.cmd_pipeline_barrier(
                             sequence.command_buffer,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::PipelineStageFlags::COMPUTE_SHADER
+                                | if step.indirect_dispatch.is_some() {
+                                    vk::PipelineStageFlags::DRAW_INDIRECT
+                                } else {
+                                    vk::PipelineStageFlags::empty()
+                                },
                             vk::DependencyFlags::empty(),
                             &[],
                             &buffer_barriers,

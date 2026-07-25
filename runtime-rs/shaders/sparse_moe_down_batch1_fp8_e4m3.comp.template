@@ -25,6 +25,11 @@ layout(set = 0, binding = 4) readonly buffer ExpertOutputScaleInv { uint words[]
 layout(push_constant) uniform BatchControl {
     uint batch_width;
     uint expert_start;
+    uint expert_count;
+    uint owned_route_count;
+    uint dispatch_x;
+    uint dispatch_y;
+    uint dispatch_z;
 } batch_control;
 
 const uint BLOCK_ROWS = {{BLOCK_ROWS}}u;
@@ -95,13 +100,20 @@ fe4m3vec4 read_weightx4(uint expert, uint row, uint column) {
 }
 
 void main() {
-    uint compact_batch = gl_WorkGroupID.y;
     uint group = gl_WorkGroupID.x;
-    uint compact_route = group / TILES_PER_ROUTE;
+    uint linear_route = group / TILES_PER_ROUTE;
+    bool route_native = batch_control.expert_count != 0u;
+    uint compact_batch = route_native
+        ? linear_route / EXPERTS_PER_TOKEN
+        : gl_WorkGroupID.y;
+    uint compact_route = route_native
+        ? linear_route % EXPERTS_PER_TOKEN
+        : linear_route;
     uint tile = group % TILES_PER_ROUTE;
     if (
-        compact_batch >= batch_control.batch_width
-        || compact_route >= EXPERTS_PER_TOKEN
+        (route_native && linear_route >= batch_control.owned_route_count)
+        || (!route_native && compact_batch >= batch_control.batch_width)
+        || (!route_native && compact_route >= EXPERTS_PER_TOKEN)
     ) {
         return;
     }
@@ -119,7 +131,9 @@ void main() {
         return;
     }
     uint expert_start = batch_control.expert_start;
-    uint expert_count = expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS;
+    uint expert_count = route_native
+        ? batch_control.expert_count
+        : expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS;
     if (expert < expert_start || expert >= expert_start + expert_count) {
         return;
     }

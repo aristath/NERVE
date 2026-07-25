@@ -6,6 +6,19 @@ struct VulkanComponentBatchDispatchStep {
     snapshot_state_buffer_indices: BTreeSet<usize>,
 }
 
+fn component_batch_control_buffer_access(
+    control: VulkanResidentComponentBatchControlSpec,
+) -> VulkanResidentKernelBufferAccess {
+    match control.access() {
+        VulkanResidentComponentBatchControlAccess::Read => {
+            VulkanResidentKernelBufferAccess::Read
+        }
+        VulkanResidentComponentBatchControlAccess::ReadWrite => {
+            VulkanResidentKernelBufferAccess::ReadWrite
+        }
+    }
+}
+
 fn component_batch_descriptors_commit_state<'a>(
     usages: impl IntoIterator<Item = &'a VulkanKernelDescriptorUsage>,
 ) -> bool {
@@ -27,8 +40,11 @@ fn component_batch_stages_replace_push_constants(
             && binding.source == VulkanKernelScalarSource::PushConstant
             && !stages.is_empty()
             && stages.iter().all(|stage| {
-                stage.control.storage_buffer().2
-                    == VulkanResidentComponentBatchControlPayload::WidthExpertStart
+                matches!(
+                    stage.control.storage_buffer().2,
+                    VulkanResidentComponentBatchControlPayload::WidthExpertStart
+                        | VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+                )
             })
     })
 }

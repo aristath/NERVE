@@ -1,0 +1,42 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
+layout(set = 0, binding = 31) buffer BatchControl {
+    uint batch_width;
+    uint expert_start;
+    uint expert_count;
+    uint owned_route_count;
+    uint dispatch_x;
+    uint dispatch_y;
+    uint dispatch_z;
+} batch_control;
+
+const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
+const uint TILES_PER_ROUTE = {{TILES_PER_ROUTE}}u;
+
+void main() {
+    if (
+        batch_control.expert_count == 0u
+        || gl_WorkGroupID.x != 0u
+        || gl_WorkGroupID.y != 0u
+        || gl_LocalInvocationID.x != 0u
+    ) {
+        return;
+    }
+
+    uint source_count = batch_control.batch_width * EXPERTS_PER_TOKEN;
+    uint owned_count = 0u;
+    uint expert_end = batch_control.expert_start + batch_control.expert_count;
+    for (uint source_index = 0u; source_index < source_count; source_index++) {
+        uint expert = expert_routes.words[source_index] & 0xffffu;
+        if (expert >= batch_control.expert_start && expert < expert_end) {
+            owned_count++;
+        }
+    }
+    batch_control.owned_route_count = owned_count;
+    batch_control.dispatch_x = owned_count * TILES_PER_ROUTE;
+    batch_control.dispatch_y = 1u;
+    batch_control.dispatch_z = 1u;
+}

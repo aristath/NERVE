@@ -567,6 +567,11 @@ def valid_batch_stage(stage: Any) -> bool:
     descriptor_bindings = (
         stage.get("descriptor_bindings") if isinstance(stage, dict) else None
     )
+    indirect_offset = (
+        stage.get("indirect_dispatch_byte_offset")
+        if isinstance(stage, dict)
+        else None
+    )
     return (
         isinstance(stage, dict)
         and isinstance(stage.get("shader_path"), str)
@@ -578,6 +583,16 @@ def valid_batch_stage(stage: Any) -> bool:
         and not isinstance(stage.get("workgroup_count_x"), bool)
         and stage["workgroup_count_x"] > 0
         and valid_batch_control(control)
+        and (
+            indirect_offset is None
+            or (
+                isinstance(indirect_offset, int)
+                and not isinstance(indirect_offset, bool)
+                and indirect_offset >= 0
+                and indirect_offset % 4 == 0
+                and indirect_offset + 12 <= control["byte_count"]
+            )
+        )
         and valid_batch_descriptor_bindings(
             descriptor_bindings,
             control_binding=control["binding"],
@@ -622,9 +637,11 @@ def valid_batch_control(control: Any) -> bool:
     byte_count = control.get("byte_count") if isinstance(control, dict) else None
     binding = control.get("binding") if isinstance(control, dict) else None
     payload = control.get("payload") if isinstance(control, dict) else None
+    access = control.get("access", "read") if isinstance(control, dict) else None
     payload_byte_counts = {
         "width": 4,
         "width_expert_start": 8,
+        "width_expert_range_indirect": 28,
         "temporal": 16,
     }
     return (
@@ -636,7 +653,12 @@ def valid_batch_control(control: Any) -> bool:
         and isinstance(binding, int)
         and not isinstance(binding, bool)
         and binding >= 0
-        and set(control) == {"kind", "byte_count", "binding", "payload"}
+        and access in {"read", "read_write"}
+        and set(control)
+        in (
+            {"kind", "byte_count", "binding", "payload"},
+            {"kind", "byte_count", "binding", "payload", "access"},
+        )
     )
 
 

@@ -518,7 +518,9 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                         byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
                         binding: 31,
                         payload: VulkanResidentComponentBatchControlPayload::Width,
+                        access: VulkanResidentComponentBatchControlAccess::Read,
                     },
+                    indirect_dispatch_byte_offset: None,
                 }],
             })
             .collect();
@@ -590,6 +592,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
             byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 3,
             payload: VulkanResidentComponentBatchControlPayload::Temporal,
+            access: VulkanResidentComponentBatchControlAccess::Read,
         };
     let control_error = validate_component_executions("fixture", &invalid_control).unwrap_err();
     assert!(control_error.to_string().contains("invalid WeightShared"));
@@ -635,7 +638,9 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
             payload: VulkanResidentComponentBatchControlPayload::Width,
+            access: VulkanResidentComponentBatchControlAccess::Read,
         },
+        indirect_dispatch_byte_offset: None,
     };
     let temporal = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/append_kv_temporal_commit_bf16_kv8_d128_w0.spv".to_string(),
@@ -647,7 +652,9 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             byte_count: VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
             binding: 7,
             payload: VulkanResidentComponentBatchControlPayload::Temporal,
+            access: VulkanResidentComponentBatchControlAccess::Read,
         },
+        indirect_dispatch_byte_offset: None,
     };
     let sparse = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/sparse_moe_gate_up_batch1_bf16.spv".to_string(),
@@ -659,7 +666,9 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             byte_count: 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
             payload: VulkanResidentComponentBatchControlPayload::WidthExpertStart,
+            access: VulkanResidentComponentBatchControlAccess::Read,
         },
+        indirect_dispatch_byte_offset: None,
     };
 
     assert_eq!(
@@ -728,8 +737,27 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             VulkanResidentComponentBatchControlPayload::WidthExpertStart,
             &control,
             128,
+            64,
         ),
         [64u32.to_le_bytes(), 128u32.to_le_bytes()].concat(),
+    );
+    assert_eq!(
+        distributed_component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+            &control,
+            128,
+            64,
+        ),
+        [
+            64u32.to_le_bytes(),
+            128u32.to_le_bytes(),
+            64u32.to_le_bytes(),
+            0u32.to_le_bytes(),
+            0u32.to_le_bytes(),
+            0u32.to_le_bytes(),
+            0u32.to_le_bytes(),
+        ]
+        .concat(),
     );
     assert_eq!(
         component_batch_control_payload_bytes(
@@ -746,6 +774,7 @@ fn distributed_batch_group_retains_every_members_control_buffer_set() {
         device_id: "gpu0".to_string(),
         dispatches: Vec::new(),
         expert_start,
+        expert_count: 128,
         batch_control_buffer_sets: vec![BTreeMap::new()],
         sequence_catalog: RefCell::new(BTreeMap::new()),
     };

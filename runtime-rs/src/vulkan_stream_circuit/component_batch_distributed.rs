@@ -104,6 +104,7 @@ struct VulkanDistributedComponentBatchShardRunner {
     device_id: String,
     dispatches: Vec<VulkanDistributedComponentBatchShardDispatch>,
     expert_start: u32,
+    expert_count: u32,
     batch_control_buffer_sets:
         Vec<BTreeMap<VulkanResidentComponentBatchControlPayload, VulkanResidentBuffer>>,
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
@@ -111,12 +112,15 @@ struct VulkanDistributedComponentBatchShardRunner {
 
 struct VulkanDistributedComponentBatchShardDispatch {
     dispatch: VulkanResidentKernelDispatch,
+    control_buffer_set_index: usize,
+    indirect_dispatch:
+        Option<(VulkanResidentComponentBatchControlPayload, usize)>,
 }
 
 impl VulkanDistributedComponentBatchShardRunner {
     fn append_group_member(
         &mut self,
-        member: VulkanDistributedComponentBatchShardRunner,
+        mut member: VulkanDistributedComponentBatchShardRunner,
     ) -> Result<(), VulkanError> {
         if self.device_id != member.device_id {
             return Err(VulkanError(format!(
@@ -129,6 +133,24 @@ impl VulkanDistributedComponentBatchShardRunner {
                 "distributed component batch group changes expert start from {} to {}",
                 self.expert_start, member.expert_start
             )));
+        }
+        if self.expert_count != member.expert_count {
+            return Err(VulkanError(format!(
+                "distributed component batch group changes expert count from {} to {}",
+                self.expert_count, member.expert_count
+            )));
+        }
+        let control_buffer_set_offset = self.batch_control_buffer_sets.len();
+        for dispatch in &mut member.dispatches {
+            dispatch.control_buffer_set_index = dispatch
+                .control_buffer_set_index
+                .checked_add(control_buffer_set_offset)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "distributed component batch control-buffer index overflowed"
+                            .to_string(),
+                    )
+                })?;
         }
         self.dispatches.extend(member.dispatches);
         // Every resident dispatch keeps descriptor references to the control
@@ -489,7 +511,7 @@ impl VulkanDistributedComponentBatchRunners {
                             control_buffer,
                             byte_count as usize,
                         )
-                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                        .with_access(component_batch_control_buffer_access(stage.control)),
                     );
                     let workgroup_count_x = match planned.distribution {
                         VulkanDistributedDispatchDistribution::ExpertRange => {
@@ -550,14 +572,30 @@ impl VulkanDistributedComponentBatchRunners {
                             )),
                         )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                    resident_dispatches
-                        .push(VulkanDistributedComponentBatchShardDispatch { dispatch });
+                    resident_dispatches.push(VulkanDistributedComponentBatchShardDispatch {
+                        dispatch,
+                        control_buffer_set_index: 0,
+                        indirect_dispatch: stage
+                            .indirect_dispatch_byte_offset
+                            .map(|byte_offset| {
+                                (
+                                    payload,
+                                    usize::try_from(byte_offset)
+                                        .expect("u32 indirect offset fits usize"),
+                                )
+                            }),
+                    });
                 }
                 shards.push(VulkanDistributedComponentBatchShardRunner {
                     device_id: shard.device_id.clone(),
                     expert_start: u32::try_from(shard.row_start).map_err(|_| {
                         VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                             "distributed component batch expert start exceeds u32".to_string(),
+                        ))
+                    })?,
+                    expert_count: u32::try_from(shard.row_count).map_err(|_| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "distributed component batch expert count exceeds u32".to_string(),
                         ))
                     })?,
                     dispatches: resident_dispatches,
@@ -775,6 +813,7 @@ impl VulkanDistributedComponentBatchRunners {
                             *payload,
                             batch_control,
                             shard.expert_start,
+                            shard.expert_count,
                         ))
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 }
@@ -788,8 +827,34 @@ impl VulkanDistributedComponentBatchRunners {
             let steps = shard
                 .dispatches
                 .iter()
-                .map(|resident| VulkanResidentKernelSequenceStep::new(&resident.dispatch, &[]))
-                .collect::<Vec<_>>();
+                .map(|resident| {
+                    let Some((payload, byte_offset)) = resident.indirect_dispatch else {
+                        return Ok(VulkanResidentKernelSequenceStep::new(
+                            &resident.dispatch,
+                            &[],
+                        ));
+                    };
+                    let control_buffer = shard
+                        .batch_control_buffer_sets
+                        .get(resident.control_buffer_set_index)
+                        .and_then(|buffers| buffers.get(&payload))
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                format!(
+                                    "distributed indirect dispatch has no {:?} control buffer set {}",
+                                    payload, resident.control_buffer_set_index
+                                ),
+                            ))
+                        })?;
+                    VulkanResidentKernelSequenceStep::new_indirect(
+                        &resident.dispatch,
+                        &[],
+                        control_buffer,
+                        byte_offset,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let catalog = shard.sequence_catalog.borrow();
             let sequence = catalog
                 .get(&0)
@@ -873,11 +938,22 @@ fn distributed_component_batch_control_payload_bytes(
     payload: VulkanResidentComponentBatchControlPayload,
     control: &[u8; VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY as usize],
     expert_start: u32,
+    expert_count: u32,
 ) -> Vec<u8> {
     let mut bytes = component_batch_control_payload_bytes(payload, control);
-    if payload == VulkanResidentComponentBatchControlPayload::WidthExpertStart {
-        bytes[VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize..]
+    if matches!(
+        payload,
+        VulkanResidentComponentBatchControlPayload::WidthExpertStart
+            | VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+    ) {
+        bytes[VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize
+            ..2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize]
             .copy_from_slice(&expert_start.to_le_bytes());
+    }
+    if payload == VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect {
+        bytes[2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize
+            ..3 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize]
+            .copy_from_slice(&expert_count.to_le_bytes());
     }
     bytes
 }

@@ -127,6 +127,15 @@ fn component_batch_control_payload_bytes(
             bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes
         }
+        VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect => {
+            let mut bytes =
+                vec![0; 7 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize];
+            bytes[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize]
+                .copy_from_slice(
+                    &control[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize],
+                );
+            bytes
+        }
         VulkanResidentComponentBatchControlPayload::Temporal => control.to_vec(),
     }
 }

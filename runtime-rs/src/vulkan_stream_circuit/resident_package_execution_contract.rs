@@ -80,6 +80,20 @@ fn validate_component_executions(
                                         stage.control.storage_buffer();
                                     byte_count == payload.byte_count()
                                 }
+                                && stage.indirect_dispatch_byte_offset.is_none_or(
+                                    |offset| {
+                                        offset.is_multiple_of(
+                                            std::mem::size_of::<u32>() as u32,
+                                        ) && offset
+                                            .checked_add(
+                                                VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT
+                                                    as u32,
+                                            )
+                                            .is_some_and(|end| {
+                                                end <= stage.control.storage_buffer().1
+                                            })
+                                    },
+                                )
                                 && component_batch_stage_descriptor_contract_is_valid(stage)
                         })
                         && extensions.iter().all(|extension| !extension.is_empty())

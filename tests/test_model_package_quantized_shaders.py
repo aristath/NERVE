@@ -416,7 +416,8 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
-        "moe_route_compact_batch1_i512_k8.comp",
+        "moe_route_compact_batch1_i512_k8_t16.comp",
+        "moe_route_count_batch1_i512_k8_t32.comp",
         "moe_topk_bf16_e256_k8.comp",
         "moe_topk_batch1_bf16_e256_k8.comp",
         "sparse_moe_gate_up_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
@@ -470,7 +471,7 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "expert_routes.words[route] = (weight << 16u) | expert;" in router_shader
     assert "route < EXPERTS_PER_TOKEN" in reduce_shader
     route_compaction = (
-        tmp_path / "moe_route_compact_batch1_i512_k8.comp"
+        tmp_path / "moe_route_compact_batch1_i512_k8_t16.comp"
     ).read_text()
     assert "candidate_expert < source_expert" in route_compaction
     assert "EXPERT_FRAME_WORDS" in route_compaction
@@ -487,7 +488,8 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         in (tmp_path / "sigmoid_scalar_multiply_bf16_2048.comp").read_text()
     )
     compile_shader_artifacts(tmp_path)
-    assert (tmp_path / "moe_route_compact_batch1_i512_k8.spv").is_file()
+    assert (tmp_path / "moe_route_compact_batch1_i512_k8_t16.spv").is_file()
+    assert (tmp_path / "moe_route_count_batch1_i512_k8_t32.spv").is_file()
 
 
 def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
@@ -539,7 +541,7 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
     assert spec["batch_implementations"][0]["stages"] == [
         {
             "shader_path": (
-                "shaders/moe_route_compact_batch1_i512_k8__pbc31.comp"
+                "shaders/moe_route_compact_batch1_i512_k8_t16__pbc31.comp"
             ),
             "local_size_x": 64,
             "workgroup_count_x": 8,
@@ -549,9 +551,10 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
             ],
             "control": {
                 "kind": "storage_buffer",
-                "byte_count": 8,
+                "byte_count": 28,
                 "binding": 31,
-                "payload": "width_expert_start",
+                "payload": "width_expert_range_indirect",
+                "access": "read_write",
             },
         },
         {
@@ -563,10 +566,11 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
             "workgroup_count_x": 128,
             "control": {
                 "kind": "storage_buffer",
-                "byte_count": 8,
+                "byte_count": 28,
                 "binding": 31,
-                "payload": "width_expert_start",
+                "payload": "width_expert_range_indirect",
             },
+            "indirect_dispatch_byte_offset": 16,
         }
     ]
 

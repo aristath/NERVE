@@ -27,7 +27,7 @@ def lower_batch_control_to_persistent_buffer(
     )
     if replacement_count == 0:
         declared_bindings = re.findall(
-            r"layout\(set = 0, binding = (\d+)\) readonly buffer BatchControl",
+            r"layout\(set = 0, binding = (\d+)\) (?:readonly )?buffer BatchControl",
             rendered,
         )
         if declared_bindings == [str(binding)]:
@@ -2747,13 +2747,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
-    moe_route_compact_shape = re.fullmatch(
-        r"moe_route_compact_batch1_i(\d+)_k(\d+)\.comp",
+    moe_route_schedule_shape = re.fullmatch(
+        r"moe_route_(compact|count)_batch1_i(\d+)_k(\d+)_t(\d+)\.comp",
         shader_file,
     )
-    if moe_route_compact_shape is not None:
-        intermediate_size, experts_per_token = map(
-            int, moe_route_compact_shape.groups()
+    if moe_route_schedule_shape is not None:
+        operation = moe_route_schedule_shape.group(1)
+        intermediate_size, experts_per_token, tiles_per_route = map(
+            int, moe_route_schedule_shape.groups()[1:]
         )
         if intermediate_size <= 0 or intermediate_size % 2:
             raise ModelCompileError(
@@ -2765,10 +2766,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
         return render_shader_template(
             source_dir,
-            "moe_route_compact_batch1.comp.template",
+            f"moe_route_{operation}_batch1.comp.template",
             {
                 "INTERMEDIATE_SIZE": str(intermediate_size),
                 "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "TILES_PER_ROUTE": str(tiles_per_route),
             },
         )
 
@@ -2848,30 +2850,76 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                     "expert_start; } dispatch_control;"
                     if batch_tile is None
                     else "layout(push_constant) uniform BatchControl { uint "
-                    "batch_width; uint expert_start; } batch_control;"
+                    "batch_width; uint expert_start; uint expert_count; uint "
+                    "owned_route_count; uint dispatch_x; uint dispatch_y; uint "
+                    "dispatch_z; } batch_control;"
                 ),
                 "EXPERT_START": (
                     "dispatch_control.expert_start"
                     if batch_tile is None
                     else "batch_control.expert_start"
                 ),
-                "BATCH_INDEX": ("0u" if batch_tile is None else "gl_WorkGroupID.y"),
+                "BATCH_INDEX": (
+                    "0u"
+                    if batch_tile is None
+                    else (
+                        "batch_control.expert_count == 0u ? gl_WorkGroupID.y : "
+                        "(route / EXPERTS_PER_TOKEN)"
+                    )
+                ),
                 "BATCH_WIDTH": (
-                    "1u" if batch_tile is None else "batch_control.batch_width"
+                    "1u"
+                    if batch_tile is None
+                    else (
+                        "(batch_control.expert_count == 0u ? "
+                        "batch_control.batch_width : "
+                        "((batch_control.owned_route_count + EXPERTS_PER_TOKEN - 1u) "
+                        "/ EXPERTS_PER_TOKEN))"
+                    )
+                ),
+                "ROUTE_LIMIT": (
+                    "EXPERTS_PER_TOKEN"
+                    if batch_tile is None
+                    else (
+                        "(batch_control.expert_count == 0u ? EXPERTS_PER_TOKEN "
+                        ": batch_control.owned_route_count)"
+                    )
+                ),
+                "EXPERT_COUNT": (
+                    "expert_input_weight.words.length() / EXPERT_INPUT_WORDS"
+                    if batch_tile is None and stage == "gate_up"
+                    else "expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS"
+                    if batch_tile is None
+                    else (
+                        "(batch_control.expert_count == 0u "
+                        "? expert_input_weight.words.length() / EXPERT_INPUT_WORDS "
+                        ": batch_control.expert_count)"
+                        if stage == "gate_up"
+                        else (
+                            "(batch_control.expert_count == 0u "
+                            "? expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS "
+                            ": batch_control.expert_count)"
+                        )
+                    )
                 ),
                 "ROUTE_MAPPING": (
                     ""
                     if batch_tile is None
                     else (
-                        "    uint compact_batch = batch_index;\n"
-                        "    uint compact_route = route;\n"
+                        "    uint compact_batch = batch_control.expert_count == 0u\n"
+                        "        ? batch_index\n"
+                        "        : route / EXPERTS_PER_TOKEN;\n"
+                        "    uint compact_route = batch_control.expert_count == 0u\n"
+                        "        ? route\n"
+                        "        : route % EXPERTS_PER_TOKEN;\n"
                         "    uint compact_index = expert_intermediates.words[\n"
                         "        compact_batch * EXPERT_FRAME_WORDS\n"
                         "            + EXPERT_DATA_WORDS\n"
                         "            + compact_route\n"
                         "    ];\n"
                         "    batch_index = compact_index / EXPERTS_PER_TOKEN;\n"
-                        "    route = compact_index % EXPERTS_PER_TOKEN;"
+                        "    route = compact_index % EXPERTS_PER_TOKEN;\n"
+                        "    tile = group % TILES_PER_ROUTE;"
                     )
                 ),
                 "INTERMEDIATE_OUTPUT_OFFSET": (

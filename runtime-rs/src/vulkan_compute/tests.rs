@@ -905,7 +905,8 @@ mod tests {
         .unwrap();
         let rendered = template
             .replace("{{INTERMEDIATE_SIZE}}", "4")
-            .replace("{{EXPERTS_PER_TOKEN}}", "2");
+            .replace("{{EXPERTS_PER_TOKEN}}", "2")
+            .replace("{{TILES_PER_ROUTE}}", "7");
         let source_path = std::env::temp_dir().join(format!(
             "nerve-test-sparse-moe-route-compact-{}.comp",
             std::process::id()
@@ -922,8 +923,10 @@ mod tests {
             .unwrap();
         let expert_intermediates = device.create_resident_buffer(72).unwrap();
         expert_intermediates.write_bytes(&[0; 72]).unwrap();
-        let batch_control = device.create_resident_buffer(8).unwrap();
-        batch_control.write_bytes(&u32_bytes(&[3, 0])).unwrap();
+        let batch_control = device.create_resident_buffer(28).unwrap();
+        batch_control
+            .write_bytes(&u32_bytes(&[3, 0, 0, 0, 0, 0, 0]))
+            .unwrap();
 
         let dispatch = device
             .create_resident_kernel_dispatch_2d(
@@ -933,8 +936,8 @@ mod tests {
                         .with_access(VulkanResidentKernelBufferAccess::Read),
                     VulkanResidentKernelBufferBinding::new(2, &expert_intermediates, 72)
                         .with_access(VulkanResidentKernelBufferAccess::Write),
-                    VulkanResidentKernelBufferBinding::new(31, &batch_control, 8)
-                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(31, &batch_control, 28)
+                        .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
                 ],
                 2,
                 3,
@@ -952,6 +955,21 @@ mod tests {
             .map(|index| words[index])
             .collect::<Vec<_>>();
         assert_eq!(compact_source_indices, vec![1, 3, 5, 2, 4, 0]);
+
+        expert_intermediates.write_bytes(&[0; 72]).unwrap();
+        batch_control
+            .write_bytes(&u32_bytes(&[3, 2, 2, 0, 0, 0, 0]))
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&dispatch, &[])
+            .unwrap();
+
+        let words = bytes_to_u32(&expert_intermediates.read_bytes(72).unwrap());
+        assert_eq!([words[4], words[5]], [2, 5]);
+        assert_eq!(
+            bytes_to_u32(&batch_control.read_bytes(28).unwrap()),
+            vec![3, 2, 2, 2, 14, 1, 1],
+        );
     }
 
     #[test]

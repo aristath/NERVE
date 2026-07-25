@@ -304,6 +304,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         let batch_control_buffers = [
             VulkanResidentComponentBatchControlPayload::Width,
             VulkanResidentComponentBatchControlPayload::WidthExpertStart,
+            VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
             VulkanResidentComponentBatchControlPayload::Temporal,
         ]
         .into_iter()
@@ -432,7 +433,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                             control_buffer,
                             byte_count as usize,
                         )
-                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                        .with_access(component_batch_control_buffer_access(stage.control)),
                     );
                     let resident = device
                         .create_resident_kernel_dispatch_2d_labeled(

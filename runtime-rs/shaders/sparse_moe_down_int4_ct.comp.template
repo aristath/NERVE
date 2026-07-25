@@ -85,11 +85,11 @@ vec4 unpack_weight_hi(uint packed) {
 }
 
 void main() {
-    uint batch_index = {{BATCH_INDEX}};
     uint group = gl_WorkGroupID.x;
     uint route = group / TILES_PER_ROUTE;
     uint tile = group % TILES_PER_ROUTE;
-    if (batch_index >= {{BATCH_WIDTH}} || route >= EXPERTS_PER_TOKEN) return;
+    uint batch_index = {{BATCH_INDEX}};
+    if (batch_index >= {{BATCH_WIDTH}} || route >= {{ROUTE_LIMIT}}) return;
 {{ROUTE_MAPPING}}
     uint route_offset = batch_index * EXPERTS_PER_TOKEN;
     uint route_index = route_offset + route;
@@ -97,7 +97,7 @@ void main() {
     uint expert = packed_route & 0xffffu;
     if (expert >= NUM_EXPERTS) return;
     uint expert_start = {{EXPERT_START}};
-    uint expert_count = expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS;
+    uint expert_count = {{EXPERT_COUNT}};
     if (expert < expert_start || expert >= expert_start + expert_count) return;
     expert -= expert_start;
     float route_weight = bf16_to_f32(packed_route >> 16u);
