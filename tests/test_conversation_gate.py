@@ -141,12 +141,30 @@ def test_gate_rejects_malformed_thinking_boundary() -> None:
         stats=turns[0].stats,
     )
 
-    with pytest.raises(ConversationGateError, match="exactly one"):
+    with pytest.raises(ConversationGateError, match="must contain one"):
         validate_conversation_turns(
             turns,
             require_thinking=True,
             minimum_decode_tokens_per_second=20.0,
         )
+
+
+@pytest.mark.parametrize("channel", ("thought", "analysis"))
+def test_gate_accepts_decoded_reasoning_channels(channel: str) -> None:
+    turns = _valid_turns()
+    turns[0] = ConversationTurn(
+        prompt=turns[0].prompt,
+        response=f"{channel}\nReasoning through the request. I am a language model.",
+        stats=turns[0].stats,
+    )
+
+    mean_decode, _ = validate_conversation_turns(
+        turns,
+        require_thinking=True,
+        minimum_decode_tokens_per_second=20.0,
+    )
+
+    assert mean_decode == 25.0
 
 
 def test_gate_rejects_turn_contamination_instead_of_accepting_meaningful_text() -> None:

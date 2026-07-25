@@ -144,16 +144,27 @@ def _final_answer(response: str, require_thinking: bool) -> str:
     closing_count = response.count("</think>")
     opening_count = response.count("<think>")
     if require_thinking:
-        if closing_count != 1:
+        if closing_count == 1:
+            if opening_count > 1:
+                raise ConversationGateError(
+                    "thinking response contains more than one <think> boundary"
+                )
+            answer = response.rsplit("</think>", 1)[1].strip()
+        elif (
+            closing_count == 0
+            and opening_count == 0
+            and response.startswith(("thought\n", "analysis\n"))
+        ):
+            # Channel-based templates can decode the channel label while their
+            # special delimiters are intentionally omitted by the tokenizer.
+            # The model may not emit a second visible delimiter before its
+            # answer, so retain the complete, validated channel stream.
+            answer = response.split("\n", 1)[1].strip()
+        else:
             raise ConversationGateError(
-                "thinking response must contain exactly one </think> boundary; "
-                f"found {closing_count}"
+                "thinking response must contain one </think> boundary or begin "
+                "with a decoded thought/analysis channel"
             )
-        if opening_count > 1:
-            raise ConversationGateError(
-                "thinking response contains more than one <think> boundary"
-            )
-        answer = response.rsplit("</think>", 1)[1].strip()
     else:
         if closing_count > 1 or opening_count > 1:
             raise ConversationGateError("response contains malformed thinking boundaries")
