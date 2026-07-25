@@ -203,25 +203,10 @@ fn plan_parallel_projection_dispatch(
         (second_binding, second_tensor),
     ] = parameter_descriptors.as_slice()
     else {
-        // Physical sharding is an optional optimization. Quantized projection
-        // families carry auxiliary scale/zero-point tensors in addition to
-        // their matrices and need a family-specific sharding contract. Keep
-        // those dispatches on their component's owner device until such a contract
-        // is available; layer placement still distributes the model itself.
+        // A requested shard pool fails closed later when no dispatch in the
+        // component exposes a supported physical distribution contract.
         return Ok(None);
     };
-    if ![first_tensor, second_tensor].iter().all(|tensor| {
-        tensor_index.tensors.get(**tensor).is_some_and(|metadata| {
-            metadata.dtype == "BF16"
-                && metadata.shape.len() == 2
-                && matches!(
-                    metadata.layout.as_deref(),
-                    Some("row_major" | "vulkan_bf16_row_pair_u32")
-                )
-        })
-    }) {
-        return Ok(None);
-    }
     let first = projection_metadata(tensor_index, dispatch, first_tensor)?;
     let second = projection_metadata(tensor_index, dispatch, second_tensor)?;
     if first.shape != second.shape {
