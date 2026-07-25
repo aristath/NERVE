@@ -127,12 +127,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .iter()
                     .all(|transaction| transaction.cycle_width >= 1)
             });
-        let scalar_window_is_sufficient = self
-            .scalar_verification_execution
+        let batch_capacity = self.causal_block_lane_capacity(batch_width)?;
+        let causal_window_is_sufficient = self
+            .temporal_block_executions
             .borrow()
-            .as_ref()
-            .is_some_and(|runner| runner.lane_capacity >= batch_width);
-        if transactions_are_sufficient && scalar_window_is_sufficient {
+            .contains_key(&(batch_capacity, true));
+        if transactions_are_sufficient && causal_window_is_sufficient {
             return Ok(());
         }
         if !transactions_are_sufficient {
@@ -152,7 +152,111 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             )?;
             *self.verification_state_transactions.borrow_mut() = Some(transactions);
         }
-        self.ensure_scalar_verification_window(devices, batch_width)
+        self.ensure_temporal_block_execution(devices, batch_width, true)
+    }
+
+    fn run_causal_verification_window(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+    ) -> Result<Vec<u32>, VulkanResidentInProcessPlacedRuntimeError> {
+        if input_token_ids.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        self.run_causal_component_block(
+            devices,
+            input_token_ids,
+            start_stream_tick,
+            true,
+        )?;
+        let output_device = devices.get(&self.model.output_device_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: self.model.output_device_id.clone(),
+            }
+        })?;
+        let capacity =
+            u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "causal verification context capacity exceeds u32".to_string(),
+                ))
+            })?;
+        let stream_ticks = (0..input_token_ids.len())
+            .map(|lane| {
+                start_stream_tick
+                    .checked_add(u64::try_from(lane).map_err(|_| {
+                        VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
+                    })?)
+                    .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let capacities = vec![capacity; input_token_ids.len()];
+        let token_prefixes = (0..input_token_ids.len())
+            .map(|lane| &input_token_ids[..=lane])
+            .collect::<Vec<_>>();
+        let block_capacity = self.causal_block_lane_capacity(input_token_ids.len())?;
+        let runner_guard = self.temporal_block_executions.borrow();
+        let runner = runner_guard.get(&(block_capacity, true)).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "causal verification execution is not mounted".to_string(),
+            ))
+        })?;
+        let target_output = runner.speculative_target_output.as_ref().ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "causal verification output is not mounted".to_string(),
+            ))
+        })?;
+        target_output.project(output_device, input_token_ids.len())?;
+        target_output.sample_lanes(
+            output_device,
+            &token_prefixes,
+            &stream_ticks,
+            &capacities,
+        )?;
+        let batch_tokens = stream_ticks
+            .iter()
+            .map(|stream_tick| {
+                self.sampler
+                    .completed_run_at(*stream_tick)
+                    .map(|run| run.token_id)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(batch_tokens)
+    }
+
+    fn commit_speculative_feedback_control(
+        &self,
+        token_id: u32,
+        next_stream_tick: u64,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let output_slice = self
+            .device_slices
+            .iter()
+            .find(|slice| slice.device_id == self.model.output_device_id)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: self.model.output_device_id.clone(),
+                }
+            })?;
+        let capacity =
+            u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative feedback context capacity exceeds u32".to_string(),
+                ))
+            })?;
+        output_slice
+            .mounted
+            .stream_control_buffer
+            .write_bytes(&stream_control_bytes(
+                token_id,
+                VulkanMountedPlacedStreamControl {
+                    stream_tick: next_stream_tick,
+                    control_flags: 0,
+                    dynamic_state_capacity_activations: capacity,
+                },
+            ))
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
 
     fn capture_verification_baseline(

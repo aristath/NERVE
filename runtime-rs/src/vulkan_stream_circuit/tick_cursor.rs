@@ -358,13 +358,6 @@ pub struct VulkanMountedPlacedResidentStreamTickDispatchExtensions<'a> {
     sequence_variant: u8,
 }
 
-impl VulkanMountedPlacedResidentStreamTickDispatchExtensions<'_> {
-    fn with_sequence_variant(mut self, sequence_variant: u8) -> Self {
-        self.sequence_variant = sequence_variant;
-        self
-    }
-}
-
 pub struct VulkanMountedPlacedResidentInProcessStreamTickSlice<'a> {
     pub device: &'a VulkanComputeDevice,
     pub mounted: &'a VulkanMountedPlacedStreamCircuit,

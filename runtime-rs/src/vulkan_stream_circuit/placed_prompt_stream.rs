@@ -175,7 +175,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
-            speculative_execution_policy: self.speculative_execution_policy,
+            speculative_execution_policy: self.speculative_execution_policy.clone(),
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -567,7 +567,23 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 }
                 continue;
             }
-            if self.run_resident_feedback_window_with_output(&mut on_output_event)? {
+            let resident_tick_time_ns = self
+                .processor
+                .resident_feedback_estimated_tick_time_ns();
+            let resident_tick_limit = if self
+                .speculative_execution_policy
+                .requires_resident_probe(resident_tick_time_ns)
+            {
+                self.processor
+                    .resident_feedback_next_window_tick_count()
+                    .max(1)
+            } else {
+                usize::MAX
+            };
+            if self.run_resident_feedback_window_limited_with_output(
+                resident_tick_limit,
+                &mut on_output_event,
+            )? {
                 if self
                     .active_input_event
                     .as_ref()
@@ -743,16 +759,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
         }
     }
 
-    fn run_resident_feedback_window_with_output<F>(
-        &mut self,
-        on_output_event: &mut F,
-    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError>
-    where
-        F: FnMut(VulkanResidentTokenOutputEvent),
-    {
-        self.run_resident_feedback_window_limited_with_output(usize::MAX, on_output_event)
-    }
-
     fn submit_resident_feedback_window_limited(
         &mut self,
         max_feedback_ticks: usize,
@@ -895,19 +901,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 Ok(())
             },
         )?;
-        let elapsed_time_ns =
-            u64::try_from(pending.started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        processor
-            .resident_feedback_loop
-            .as_ref()
-            .expect("resident feedback loop is mounted")
-            .window_policy
-            .observe_completed_window(
-                planned_tick_count,
-                completion.executed_tick_count,
-                elapsed_time_ns,
-                completion.stop_reason != VULKAN_FEEDBACK_STOP_REASON_NONE,
-            );
         active_input_event
             .as_mut()
             .expect("resident feedback window requires an active input event")
@@ -963,6 +956,19 @@ impl VulkanResidentInProcessPlacedPromptStream {
             start_stream_tick,
             planned_tick_count,
         )?;
+        let elapsed_time_ns =
+            u64::try_from(pending.started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        processor
+            .resident_feedback_loop
+            .as_ref()
+            .expect("resident feedback loop is mounted")
+            .window_policy
+            .observe_completed_window(
+                planned_tick_count,
+                completion.executed_tick_count,
+                elapsed_time_ns,
+                completion.stop_reason != VULKAN_FEEDBACK_STOP_REASON_NONE,
+            );
         Ok(completion)
     }
 

@@ -58,15 +58,30 @@ impl VulkanSpeculativeDecodeStats {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+const VULKAN_SPECULATIVE_POLICY_OBSERVATION_WINDOW: usize = 32;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VulkanSpeculativeExecutionPolicy {
-    estimated_useful_token_time_ns: Option<u64>,
+    observations: VecDeque<(u64, usize)>,
+    observed_time_ns: u64,
+    observed_useful_token_count: usize,
 }
 
 impl VulkanSpeculativeExecutionPolicy {
+    fn estimated_useful_token_time_ns(&self) -> Option<u64> {
+        (self.observed_useful_token_count > 0 && self.observed_time_ns > 0).then(|| {
+            self.observed_time_ns
+                .div_ceil(
+                    u64::try_from(self.observed_useful_token_count)
+                        .unwrap_or(u64::MAX),
+                )
+                .max(1)
+        })
+    }
+
     fn should_use_speculative(&self, resident_tick_time_ns: Option<u64>) -> bool {
         match (
-            self.estimated_useful_token_time_ns,
+            self.estimated_useful_token_time_ns(),
             resident_tick_time_ns,
         ) {
             (None, _) => true,
@@ -75,25 +90,32 @@ impl VulkanSpeculativeExecutionPolicy {
         }
     }
 
+    fn requires_resident_probe(&self, resident_tick_time_ns: Option<u64>) -> bool {
+        self.estimated_useful_token_time_ns().is_some() && resident_tick_time_ns.is_none()
+    }
+
     fn observe_cycle(&mut self, cycle: &VulkanSpeculativeCycleRun) {
         let useful_token_count = cycle.verification.emitted_token_ids.len();
         if useful_token_count == 0 || cycle.total_time_ns == 0 {
             return;
         }
-        let observed = cycle
-            .total_time_ns
-            .div_ceil(u64::try_from(useful_token_count).unwrap_or(u64::MAX))
-            .max(1);
-        self.estimated_useful_token_time_ns = Some(
-            self.estimated_useful_token_time_ns
-                .map(|previous| {
-                    previous
-                        .saturating_mul(3)
-                        .saturating_add(observed)
-                        .div_ceil(4)
-                })
-                .unwrap_or(observed),
-        );
+        self.observations
+            .push_back((cycle.total_time_ns, useful_token_count));
+        self.observed_time_ns = self.observed_time_ns.saturating_add(cycle.total_time_ns);
+        self.observed_useful_token_count = self
+            .observed_useful_token_count
+            .saturating_add(useful_token_count);
+        while self.observations.len() > VULKAN_SPECULATIVE_POLICY_OBSERVATION_WINDOW {
+            let (elapsed_time_ns, emitted_token_count) = self
+                .observations
+                .pop_front()
+                .expect("speculative policy observation window is non-empty");
+            self.observed_time_ns =
+                self.observed_time_ns.saturating_sub(elapsed_time_ns);
+            self.observed_useful_token_count = self
+                .observed_useful_token_count
+                .saturating_sub(emitted_token_count);
+        }
     }
 }
 

@@ -353,9 +353,42 @@ fn speculative_execution_policy_probes_both_paths_before_selecting() {
         total_time_ns: 90,
     });
 
+    assert!(policy.requires_resident_probe(None));
     assert!(!policy.should_use_speculative(None));
+    assert!(!policy.requires_resident_probe(Some(40)));
     assert!(policy.should_use_speculative(Some(40)));
     assert!(!policy.should_use_speculative(Some(20)));
+}
+
+#[test]
+fn speculative_execution_policy_uses_rolling_useful_token_cost() {
+    let mut policy = VulkanSpeculativeExecutionPolicy::default();
+    let cycle = |accepted_draft_count, emitted_token_ids, total_time_ns| {
+        VulkanSpeculativeCycleRun {
+            decoder_id: "draft".to_string(),
+            initial_token_id: 1,
+            start_stream_tick: 0,
+            draft_token_ids: vec![2, 3],
+            target_token_ids: vec![2, 3, 4],
+            verification: VulkanSpeculativeVerificationResult {
+                accepted_draft_count,
+                committed_target_tick_count: accepted_draft_count + 1,
+                emitted_token_ids,
+            },
+            draft_time_ns: 10,
+            target_verification_time_ns: 60,
+            draft_catch_up_time_ns: 10,
+            total_time_ns,
+        }
+    };
+    for _ in 0..8 {
+        policy.observe_cycle(&cycle(2, vec![2, 3, 4], 120));
+    }
+    policy.observe_cycle(&cycle(0, vec![9], 120));
+
+    assert_eq!(policy.estimated_useful_token_time_ns(), Some(44));
+    assert!(policy.should_use_speculative(Some(70)));
+    assert!(!policy.should_use_speculative(Some(40)));
 }
 
 #[test]
@@ -451,6 +484,24 @@ fn component_batches_select_only_mode_compatible_kernels() {
     )
     .unwrap();
     assert_eq!(heterogeneous.lane_tile_width, 8);
+
+}
+
+#[test]
+fn causal_component_batches_use_bounded_power_of_two_capacity_classes() {
+    assert_eq!(causal_component_block_lane_capacity(1).unwrap(), 1);
+    assert_eq!(causal_component_block_lane_capacity(2).unwrap(), 2);
+    assert_eq!(causal_component_block_lane_capacity(3).unwrap(), 4);
+    assert_eq!(causal_component_block_lane_capacity(4).unwrap(), 4);
+    assert_eq!(causal_component_block_lane_capacity(5).unwrap(), 8);
+    assert_eq!(
+        causal_component_block_lane_capacity(VULKAN_BACKEND_LOOP_MAX_WINDOW).unwrap(),
+        VULKAN_BACKEND_LOOP_MAX_WINDOW,
+    );
+    assert!(causal_component_block_lane_capacity(0).is_err());
+    assert!(
+        causal_component_block_lane_capacity(VULKAN_BACKEND_LOOP_MAX_WINDOW + 1).is_err()
+    );
 }
 
 #[test]
@@ -556,6 +607,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                     local_size_x: 64,
                     workgroup_count_x: 1,
                     descriptor_bindings: Vec::new(),
+                    state_snapshot_binding: None,
                     control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
                         byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
                         binding: 31,
@@ -676,6 +728,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         local_size_x: 64,
         workgroup_count_x: 1,
         descriptor_bindings: Vec::new(),
+        state_snapshot_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
@@ -690,6 +743,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         local_size_x: 64,
         workgroup_count_x: 1,
         descriptor_bindings: Vec::new(),
+        state_snapshot_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
             binding: 7,
@@ -704,6 +758,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         local_size_x: 64,
         workgroup_count_x: 1,
         descriptor_bindings: Vec::new(),
+        state_snapshot_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
@@ -764,13 +819,23 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         component_batch_control_payload_bytes(
             VulkanResidentComponentBatchControlPayload::Width,
             &control,
+            false,
         ),
         64u32.to_le_bytes(),
     );
     assert_eq!(
         component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::WidthStateSnapshots,
+            &control,
+            true,
+        ),
+        [64u32.to_le_bytes(), 1u32.to_le_bytes()].concat(),
+    );
+    assert_eq!(
+        component_batch_control_payload_bytes(
             VulkanResidentComponentBatchControlPayload::WidthExpertStart,
             &control,
+            false,
         ),
         [64u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
     );
@@ -805,6 +870,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         component_batch_control_payload_bytes(
             VulkanResidentComponentBatchControlPayload::Temporal,
             &control,
+            false,
         ),
         control,
     );

@@ -578,7 +578,25 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 continue;
             }
 
-            if self.run_resident_feedback_window_limited_with_output(remaining, on_output_event)? {
+            let resident_tick_time_ns = self
+                .processor
+                .resident_feedback_estimated_tick_time_ns();
+            let resident_tick_limit = if self
+                .speculative_execution_policy
+                .requires_resident_probe(resident_tick_time_ns)
+            {
+                remaining.min(
+                    self.processor
+                        .resident_feedback_next_window_tick_count()
+                        .max(1),
+                )
+            } else {
+                remaining
+            };
+            if self.run_resident_feedback_window_limited_with_output(
+                resident_tick_limit,
+                on_output_event,
+            )? {
                 let generated_delta = self.scheduled_feedback_generated_delta(
                     generated_before,
                     remaining,

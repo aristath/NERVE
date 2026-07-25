@@ -112,7 +112,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .collect::<Vec<_>>();
             let target_start = Instant::now();
             let target_token_ids =
-                self.run_scalar_verification_window(devices, &target_inputs, start_stream_tick)?;
+                self.run_causal_verification_window(devices, &target_inputs, start_stream_tick)?;
             let target_verification_time_ns =
                 u64::try_from(target_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let mut verification =
@@ -120,23 +120,68 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             truncate_speculative_verification_at_stop(&mut verification, stop_token_ids);
             if verification.committed_target_tick_count < target_inputs.len() {
-                self.restore_verification_baseline()?;
-                self.sampler
-                    .restore_token_state()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
-                self.run_scalar_verification_window(
-                    devices,
-                    &target_inputs[..verification.committed_target_tick_count],
-                    start_stream_tick,
-                )?;
+                let verification_capacity =
+                    self.causal_block_lane_capacity(target_inputs.len())?;
+                let committed_from_snapshot = self
+                    .temporal_block_executions
+                    .borrow()
+                    .get(&(verification_capacity, true))
+                    .expect("speculative causal target window was initialized")
+                    .execution_graph
+                    .commit_causal_state_prefix(
+                        verification.committed_target_tick_count,
+                    )?;
+                if !committed_from_snapshot {
+                    self.restore_verification_baseline()?;
+                    self.sampler
+                        .restore_token_state()
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+                    self.run_causal_verification_window(
+                        devices,
+                        &target_inputs[..verification.committed_target_tick_count],
+                        start_stream_tick,
+                    )?;
+                }
             }
+            let committed_feedback_token_id = *verification
+                .emitted_token_ids
+                .last()
+                .expect("speculative verification always emits one target token");
+            let committed_tick_delta =
+                u64::try_from(verification.committed_target_tick_count).map_err(|_| {
+                    VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
+                })?;
+            let next_committed_stream_tick = start_stream_tick
+                .checked_add(committed_tick_delta)
+                .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+            self.commit_speculative_feedback_control(
+                committed_feedback_token_id,
+                next_committed_stream_tick,
+            )?;
+            let output_device = devices.get(&self.model.output_device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: self.model.output_device_id.clone(),
+                }
+            })?;
+            self.sampler
+                .record_input_tokens(
+                    output_device,
+                    &target_inputs[..verification.committed_target_tick_count],
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
             let catch_up_start = Instant::now();
             decoder.restore_baseline()?;
-            let scalar_verification = self.scalar_verification_execution.borrow();
-            let normalized_target_frames = &scalar_verification
+            let verification_capacity =
+                self.causal_block_lane_capacity(target_inputs.len())?;
+            let causal_verification = self.temporal_block_executions.borrow();
+            let normalized_target_frames = &causal_verification
+                .get(&(verification_capacity, true))
+                .expect("speculative causal target window was initialized")
+                .speculative_target_output
                 .as_ref()
-                .expect("speculative scalar target window was initialized")
-                .normalized_target_frames;
+                .expect("speculative causal target output was initialized")
+                .norm
+                .normalized_frames_buffer;
             let catch_up_input_token_ids = std::iter::once(initial_token_id)
                 .chain(draft_token_ids.iter().copied())
                 .take(verification.committed_target_tick_count)
