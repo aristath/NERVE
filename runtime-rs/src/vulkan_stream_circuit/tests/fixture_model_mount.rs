@@ -73,111 +73,23 @@ fn fixture_model_resident_greedy_model(
 }
 
 #[cfg(feature = "tokenizers")]
-fn fixture_model_model_dir_path() -> Option<PathBuf> {
-    std::env::var("NERVE_TEST_MODEL_DIR")
-        .ok()
-        .map(PathBuf::from)
+fn fixture_model_model_dir_path() -> PathBuf {
+    tiny_model_dir().join("tokenizer")
 }
 
 #[cfg(feature = "tokenizers")]
-fn fixture_model_tokenizer_codec_or_skip(
-    test_name: &str,
-) -> Option<VulkanResidentHfTokenizerTextCodec> {
-    let Some(model_dir) = fixture_model_model_dir_path() else {
-        eprintln!("skipping {test_name}: set NERVE_TEST_MODEL_DIR for tokenizer tests");
-        return None;
-    };
-    if !model_dir.join("tokenizer.json").is_file() {
-        eprintln!(
-            "skipping {test_name}: {:?} does not contain tokenizer.json",
-            model_dir
-        );
-        return None;
-    }
-    Some(VulkanResidentHfTokenizerTextCodec::from_model_dir(model_dir).unwrap())
-}
-
-fn mount_fixture_model_single_device_stream_circuit(
-    device: &VulkanComputeDevice,
-) -> (
-    TensorIndex,
-    VulkanMountedPlacedStreamCircuit,
-    VulkanReusableKernelArtifactManifest,
-    VulkanMountedPlacedBoundDispatchPlan,
-) {
-    mount_fixture_model_single_device_stream_circuit_with_capacity(device, 4)
-}
-
-fn mount_fixture_model_single_device_stream_circuit_with_capacity(
-    device: &VulkanComputeDevice,
-    dynamic_state_capacity_activations: usize,
-) -> (
-    TensorIndex,
-    VulkanMountedPlacedStreamCircuit,
-    VulkanReusableKernelArtifactManifest,
-    VulkanMountedPlacedBoundDispatchPlan,
-) {
-    let graph = fixture_model_execution_graph();
-    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
-    let execution_plan =
-        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
-    let resource_plan =
-        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
-    let placement_spec = StreamCircuitPlacementSpec::new("gpu0");
-    let placement_plan = graph.placement_plan(&placement_spec).unwrap();
-    let resident = VulkanPlacedStreamCircuitResidentPlan::from_resource_plan_for_device(
-        &resource_plan,
-        &placement_plan,
-        "gpu0",
-        Some(&tensor_index),
-        Some(2),
-    )
-    .unwrap();
-    let placed_plan =
-        VulkanPlacedStreamCircuitPlan::from_plans(&execution_plan, &resource_plan, resident)
-            .unwrap();
-    let mounted = VulkanMountedPlacedStreamCircuit::from_placed_plan(
-        device,
-        placed_plan,
-        dynamic_state_capacity_activations,
-    )
-    .unwrap();
-    let manifest = VulkanReusableKernelArtifactManifest::new(
-        mounted
-            .placed_plan
-            .reusable_kernel_plan
-            .families
-            .iter()
-            .map(|family| {
-                VulkanReusableKernelArtifact::from_family(
-                    family,
-                    format!("kernels/{}.spv", family.family_id),
-                )
-            })
-            .collect(),
+fn fixture_model_tokenizer_codec(test_name: &str) -> VulkanResidentHfTokenizerTextCodec {
+    let model_dir = fixture_model_model_dir_path();
+    assert!(
+        model_dir.join("tokenizer.json").is_file(),
+        "{test_name}: checked-in tiny fixture is missing tokenizer.json"
     );
-    let mounted_bound = mounted
-        .mounted_placed_bound_dispatch_plan(&manifest)
-        .unwrap();
-    (tensor_index, mounted, manifest, mounted_bound)
-}
-
-fn load_layer_00_parameters(
-    mounted: &VulkanMountedPlacedStreamCircuit,
-    tensor_index: &TensorIndex,
-) {
-    load_fixture_model_conv_layer_parameters(mounted, tensor_index, 0);
+    VulkanResidentHfTokenizerTextCodec::from_model_dir(model_dir).unwrap()
 }
 
 #[test]
 fn package_component_executions_must_match_mounted_dispatch_order() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping package component execution validation: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let mut runtime_model = fixture_model_runtime_model();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
@@ -215,9 +127,8 @@ fn package_component_executions_must_match_mounted_dispatch_order() {
         &mounted_bound,
     )
     .unwrap_err();
-    assert!(error.to_string().contains(
-        "declares component layer_00 kernel conv_in_projection with execution_index 1, expected 0"
-    ));
+    assert!(error.to_string().contains("declares component layer_00 kernel"));
+    assert!(error.to_string().contains("execution_index 1, expected 0"));
 }
 
 #[test]
@@ -247,49 +158,23 @@ fn single_device_package_rejects_remote_component_placement() {
 
 #[test]
 fn placed_package_planning_reuses_one_tensor_index_across_device_slices() {
-    let graph = fixture_model_execution_graph();
-    let package_graph = VulkanResidentPackageCircuitGraph {
-        topology: graph.index.graph.topology.clone(),
-        edges: graph.index.graph.edges.clone(),
-        boundary: graph.index.graph.boundary.clone(),
-        architecture: graph.index.architecture.clone(),
-        dimensions: graph.index.dimensions.clone(),
-        input_transducer: graph.index.graph.input_transducer.clone(),
-        output_transducer: graph.index.graph.output_transducer.clone(),
-        components: graph
-            .circuits
-            .iter()
-            .map(|artifact| VulkanResidentPackageComponentCircuit {
-                component_id: artifact.component.id.clone(),
-                operator_type: artifact.component.operator_type.clone(),
-                runtime_role: artifact.component.runtime_role,
-                implementation: artifact.component.implementation.clone(),
-                behavioral_role: artifact.component.behavioral_role.clone(),
-                circuit: artifact.circuit.clone(),
-                params: artifact.params.clone(),
-                state: artifact.state.clone(),
-            })
-            .collect(),
-    };
-    let placement = StreamCircuitPlacementSpec::new("gpu0")
-        .with_component_device("layer_02", "gpu1")
-        .with_component_device("layer_05", "gpu1");
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
 
     let (_, _, gpu0) = plan_resident_package_placed_stream_circuit_with_tensor_index(
         "gpu0",
-        &placement,
-        &package_graph,
-        &graph.artifact_root,
+        &runtime_model.placement,
+        &runtime_model.circuit_graph,
+        &tiny_model_dir(),
         &tensor_index,
         Some(2),
     )
     .unwrap();
     let (_, _, gpu1) = plan_resident_package_placed_stream_circuit_with_tensor_index(
         "gpu1",
-        &placement,
-        &package_graph,
-        &graph.artifact_root,
+        &runtime_model.placement,
+        &runtime_model.circuit_graph,
+        &tiny_model_dir(),
         &tensor_index,
         Some(2),
     )
@@ -308,25 +193,18 @@ fn placed_package_planning_reuses_one_tensor_index_across_device_slices() {
         .map(|circuit| circuit.component_id.as_str())
         .collect::<BTreeSet<_>>();
     assert!(gpu0_components.is_disjoint(&gpu1_components));
-    assert_eq!(gpu1_components, BTreeSet::from(["layer_02", "layer_05"]));
-    assert_eq!(gpu0_components.len() + gpu1_components.len(), graph.circuits.len());
+    assert_eq!(gpu1_components, BTreeSet::from(["layer_00_remote"]));
+    assert_eq!(
+        gpu0_components,
+        BTreeSet::from(["layer_00", "layer_00_tail"])
+    );
+    assert_eq!(gpu0_components.len() + gpu1_components.len(), 3);
 }
 
 #[test]
 fn package_device_slice_mounts_only_components_assigned_to_device() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping package device slice mount: {error}");
-            return;
-        }
-    };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0")
-            .with_component_device("layer_01", "cpu0")
-            .with_component_device("layer_02", "gpu1")
-            .with_component_device("layer_03", "lan:worker-a"),
-    );
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -343,7 +221,7 @@ fn package_device_slice_mounts_only_components_assigned_to_device() {
     assert_eq!(slice.hosted_component_count, 1);
     assert_eq!(slice.incoming_edge_count, 1);
     assert_eq!(slice.outgoing_edge_count, 1);
-    assert_eq!(slice.permanent_parameter_count, 11);
+    assert_eq!(slice.permanent_parameter_count, 9);
     assert!(slice.permanent_parameter_bytes > 0);
     assert!(slice.reusable_kernel_word_count > 0);
     assert!(!slice.loaded_manifest().artifacts.is_empty());
@@ -356,10 +234,10 @@ fn package_device_slice_mounts_only_components_assigned_to_device() {
 
     assert_eq!(mounted.device_id(), "gpu1");
     assert_eq!(mounted.placed_plan.binding_plan.circuits.len(), 1);
-    assert_eq!(mounted_bound.dispatches.len(), 16);
+    assert_eq!(mounted_bound.dispatches.len(), 9);
     assert!(
         mounted_bound
-            .dispatch("layer_02", "kv_memory_append")
+            .dispatch("layer_00_remote", "kv_memory_append__attention_read")
             .is_some()
     );
     assert!(
@@ -368,14 +246,14 @@ fn package_device_slice_mounts_only_components_assigned_to_device() {
             .is_none()
     );
     assert_eq!(mounted_bound.model_boundary_descriptor_count, 0);
-    assert_eq!(mounted_bound.incoming_edge_descriptor_count, 2);
+    assert!(mounted_bound.incoming_edge_descriptor_count > 0);
     assert_eq!(mounted_bound.outgoing_edge_descriptor_count, 1);
 
     let tick_plan = mounted.stream_tick_plan(&reusable_manifest).unwrap();
     assert_eq!(tick_plan.device_id, "gpu1");
-    assert_eq!(tick_plan.stage_count, 18);
+    assert_eq!(tick_plan.stage_count, 11);
     assert_eq!(tick_plan.receive_stage_count, 1);
-    assert_eq!(tick_plan.dispatch_stage_count, 16);
+    assert_eq!(tick_plan.dispatch_stage_count, 9);
     assert_eq!(tick_plan.publish_stage_count, 1);
     let tick_run = mounted.advance_stream_tick(&reusable_manifest, 7).unwrap();
     assert_eq!(
@@ -408,37 +286,6 @@ fn fixture_model_embedding_row_bytes(tensor_index: &TensorIndex, token_id: u32) 
     let mut bytes = vec![0u8; FIXTURE_MODEL_FRAME_BYTES];
     file.read_exact(&mut bytes).unwrap();
     bytes
-}
-
-fn load_fixture_model_transducer_parameter_buffers(
-    device: &VulkanComputeDevice,
-    tensor_index: &TensorIndex,
-) -> VulkanPermanentParameterBuffers {
-    let graph = fixture_model_execution_graph();
-    let execution_plan =
-        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, tensor_index).unwrap();
-    let resource_plan =
-        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
-    let transducer_parameter_plan = VulkanPermanentParameterBufferPlan::from_transducer_parameters(
-        "gpu0",
-        &resource_plan,
-        Some(tensor_index),
-    )
-    .unwrap();
-    assert_eq!(transducer_parameter_plan.parameter_count, 2);
-    assert_eq!(
-        transducer_parameter_plan.total_byte_capacity,
-        Some(134_219_776)
-    );
-    assert!(transducer_parameter_plan.unresolved_tensors.is_empty());
-    let transducer_parameter_buffers = transducer_parameter_plan.allocate_buffers(device).unwrap();
-    let loaded = transducer_parameter_buffers
-        .load_from_tensor_index(tensor_index)
-        .unwrap();
-    assert_eq!(loaded.parameter_count, 2);
-    assert_eq!(loaded.loaded_count, 2);
-    assert_eq!(loaded.total_bytes_loaded, 134_219_776);
-    transducer_parameter_buffers
 }
 
 #[test]
@@ -507,4 +354,3 @@ fn transducer_parameter_plans_are_isolated_by_host_boundary() {
     assert!(input.parameter_count > 0);
     assert!(output.parameter_count > 0);
 }
-

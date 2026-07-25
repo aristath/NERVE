@@ -58,17 +58,7 @@ mod tests {
 
     #[test]
     fn configured_package_editor_preserves_instances_while_reordering() {
-        let package = std::env::var("NERVE_TEST_PACKAGE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
-                    .join("packages")
-                    .join("model_7760f415")
-            });
-        if !package.join(RUNTIME_PACKAGE_MANIFEST_FILE).is_file() {
-            return;
-        }
+        let package = crate::test_support::tiny_model_dir();
         let mut editor = load_runtime_model_editor_without_hardware(&package).unwrap();
         let original_first = editor
             .instances()
@@ -78,34 +68,24 @@ mod tests {
             .instance_id
             .clone();
 
-        editor.replace_layer_sequence(&[0, 1, 1, 2]).unwrap();
+        editor.replace_layer_sequence(&[0, 0, 0]).unwrap();
 
         let instances = editor
             .instances()
             .into_iter()
             .filter(|instance| instance.layer_index.is_some())
             .collect::<Vec<_>>();
-        assert_eq!(editor.layer_sequence(), vec![0, 1, 1, 2]);
+        assert_eq!(editor.layer_sequence(), vec![0, 0, 0]);
         assert_eq!(instances[0].instance_id, original_first);
-        assert_eq!(instances[1].occurrence, 1);
-        assert_eq!(instances[2].occurrence, 2);
+        assert_eq!(instances[1].occurrence, 2);
+        assert_eq!(instances[2].occurrence, 3);
         assert_ne!(instances[1].instance_id, instances[2].instance_id);
         assert!(editor.validation().valid);
     }
 
     #[test]
     fn generic_editor_preserves_explicit_system_component_placement() {
-        let package = std::env::var("NERVE_TEST_PACKAGE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
-                    .join("packages")
-                    .join("model_7760f415")
-            });
-        if !package.join(RUNTIME_PACKAGE_MANIFEST_FILE).is_file() {
-            return;
-        }
+        let package = crate::test_support::tiny_model_dir();
         let initial = load_runtime_model_editor_without_hardware(&package).unwrap();
         let mut secondary = initial.available_devices()[0].clone();
         secondary.device_id = "gpu1".to_string();

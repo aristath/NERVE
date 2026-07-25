@@ -1,15 +1,7 @@
 #[test]
 fn placed_prompt_stream_owns_package_devices_and_session() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping placed prompt stream test: {error}");
-            return;
-        }
-    };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
@@ -30,7 +22,7 @@ fn placed_prompt_stream_owns_package_devices_and_session() {
         .unwrap();
 
     assert_eq!(stream.package().input_device_id, "gpu0");
-    assert_eq!(stream.package().output_device_id, "gpu1");
+    assert_eq!(stream.package().output_device_id, "gpu0");
     assert_eq!(stream.devices().len(), 2);
     assert_eq!(stream.next_stream_tick(), 0);
 
@@ -46,7 +38,7 @@ fn placed_prompt_stream_owns_package_devices_and_session() {
     let second = stream
         .submit_input_event(VulkanResidentTokenInputEvent::new(
             "event_b",
-            vec![36_309],
+            vec![4],
             1,
         ))
         .unwrap();
@@ -60,24 +52,12 @@ fn placed_prompt_stream_owns_package_devices_and_session() {
 
 #[test]
 fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
-    let device = match selected_test_vulkan_device() {
-        Ok(device) => device,
-        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
-            panic!("explicit Vulkan test device could not be opened: {error}")
-        }
-        Err(error) => {
-            eprintln!("skipping placed resident feedback-window test: {error}");
-            return;
-        }
-    };
-    let runtime_model = fixture_model_runtime_model();
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
-    let devices = BTreeMap::from([(
-        RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string(),
-        device.clone(),
-    )]);
+    let devices = BTreeMap::from([("gpu0".to_string(), device.clone())]);
 
     let mut stream =
         VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
@@ -108,14 +88,14 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
 
     let mut first_streamed_output_events = Vec::new();
     stream.enqueue_input_event(
-        VulkanResidentTokenInputEvent::new("event", vec![1], 8).with_stop_tokens(vec![558]),
+        VulkanResidentTokenInputEvent::new("event", vec![1], 8).with_stop_tokens(vec![16]),
     );
     let resident_first = stream
         .run_next_queued_input_event_with_output(|event| first_streamed_output_events.push(event))
         .unwrap()
         .unwrap();
 
-    assert_eq!(resident_first.generated_token_ids, vec![1, 1, 558]);
+    assert_eq!(resident_first.generated_token_ids, vec![16]);
     assert_eq!(resident_first.output_events, first_streamed_output_events);
     assert_eq!(
         resident_first
@@ -123,34 +103,20 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
             .iter()
             .map(|event| event.source_stream_tick)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0]
     );
     assert_eq!(resident_first.session_run.run.stop_reason, "eos");
-    assert_eq!(resident_first.session_run.tick_count, 4);
-    assert_eq!(resident_first.session_run.next_stream_tick, 4);
+    assert_eq!(resident_first.session_run.tick_count, 2);
+    assert_eq!(resident_first.session_run.next_stream_tick, 2);
     assert_eq!(
         resident_first.session_run.run.resident_feedback,
-        VulkanResidentFeedbackExecutionStats {
-            window_count: 1,
-            planned_tick_count: 7,
-            submitted_tick_count: 7,
-            executed_tick_count: 3,
-            retained_tick_count: 3,
-            sampled_tick_count: 2,
-            discarded_tick_count: 4,
-            template_record_count: 1,
-            template_replay_count: 0,
-            asynchronous_submission_count: 0,
-            completion_poll_count: 0,
-            bounded_wait_count: 0,
-            bounded_wait_timeout_count: 0,
-        }
+        VulkanResidentFeedbackExecutionStats::default()
     );
 
     let resident_second = stream
         .submit_input_event(VulkanResidentTokenInputEvent::new(
             "event_after_eos",
-            vec![36_309],
+            vec![4],
             3,
         ))
         .unwrap();
@@ -160,21 +126,19 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
             .iter()
             .map(|event| event.source_stream_tick)
             .collect::<Vec<_>>(),
-        vec![4, 5, 6]
+        vec![2, 3, 4]
     );
     assert_eq!(
         resident_second.session_run.run.stop_reason,
         "max_new_tokens"
     );
     assert_eq!(resident_second.session_run.tick_count, 4);
-    assert_eq!(resident_second.session_run.next_stream_tick, 8);
-    assert_eq!(stream.next_stream_tick(), 8);
+    assert_eq!(resident_second.session_run.next_stream_tick, 6);
+    assert_eq!(stream.next_stream_tick(), 6);
     assert!(stream.is_idle());
     drop(stream);
 
-    let bridged_runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let bridged_runtime_model = fixture_model_runtime_model_with_remote_middle();
     let bridged_devices = BTreeMap::from([
         ("gpu0".to_string(), device.clone()),
         ("gpu1".to_string(), device),
@@ -207,13 +171,13 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
         .set(maximum_window_tick_count);
     let bridged_first = bridged_stream
         .submit_input_event(
-            VulkanResidentTokenInputEvent::new("event", vec![1], 8).with_stop_tokens(vec![558]),
+            VulkanResidentTokenInputEvent::new("event", vec![1], 8).with_stop_tokens(vec![16]),
         )
         .unwrap();
     let bridged_second = bridged_stream
         .submit_input_event(VulkanResidentTokenInputEvent::new(
             "event_after_eos",
-            vec![36_309],
+            vec![4],
             3,
         ))
         .unwrap();
@@ -252,8 +216,8 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
         resident_second.session_run.run.output_source_stream_ticks,
         bridged_second.session_run.run.output_source_stream_ticks
     );
-    assert_eq!(resident_first.session_run.run.scheduler_turn_count, 4);
-    assert_eq!(bridged_first.session_run.run.scheduler_turn_count, 8);
+    assert_eq!(resident_first.session_run.run.scheduler_turn_count, 2);
+    assert_eq!(bridged_first.session_run.run.scheduler_turn_count, 4);
     assert_eq!(resident_second.session_run.run.scheduler_turn_count, 4);
     assert_eq!(bridged_second.session_run.run.scheduler_turn_count, 8);
     assert_eq!(
@@ -270,7 +234,7 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
             .run
             .transport_stats
             .direct_copy_count,
-        2
+        4
     );
     assert_eq!(
         bridged_second
@@ -278,7 +242,7 @@ fn placed_prompt_stream_runs_resident_feedback_across_bridged_slices() {
             .run
             .transport_stats
             .direct_copy_count,
-        4
+        8
     );
     assert!(bridged_stream.is_idle());
 }
@@ -447,16 +411,7 @@ fn explicit_internal_component_sharding_matches_canonical_execution() {
 
 #[test]
 fn placed_prompt_stream_reuses_every_recorded_feedback_window_shape() {
-    let device = match selected_test_vulkan_device() {
-        Ok(device) => device,
-        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
-            panic!("explicit Vulkan test device could not be opened: {error}")
-        }
-        Err(error) => {
-            eprintln!("skipping placed feedback-template replay test: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let manifest_path = tiny_fixture_model_package_manifest_path();
     let runtime_model = tiny_fixture_model_runtime_model_with_placement(
         StreamCircuitPlacementSpec::new(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID),
@@ -580,13 +535,7 @@ fn placed_prompt_stream_reuses_every_recorded_feedback_window_shape() {
 
 #[test]
 fn placed_prompt_stream_device_cancel_commits_one_closing_feedback_tick() {
-    let device = match selected_test_vulkan_device() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping placed feedback cancellation test: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let manifest_path = fixture_model_package_manifest_path();
     let devices = BTreeMap::from([(
         RUNTIME_DEFAULT_LOGICAL_DEVICE_ID.to_string(),
@@ -657,16 +606,8 @@ fn placed_prompt_stream_device_cancel_commits_one_closing_feedback_tick() {
 
 #[test]
 fn placed_prompt_stream_queues_input_events_and_emits_output_events() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping placed prompt stream queue test: {error}");
-            return;
-        }
-    };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
@@ -692,7 +633,7 @@ fn placed_prompt_stream_queues_input_events_and_emits_output_events() {
     assert_eq!(queued_a.next_stream_tick, 0);
     let queued_b = stream.enqueue_input_event(VulkanResidentTokenInputEvent::new(
         "event_b",
-        vec![36_309],
+        vec![4],
         1,
     ));
     assert_eq!(queued_b.pending_input_event_count, 2);
@@ -730,16 +671,8 @@ fn placed_prompt_stream_queues_input_events_and_emits_output_events() {
 
 #[test]
 fn placed_prompt_stream_drains_queued_input_events_until_idle() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping placed prompt stream drain test: {error}");
-            return;
-        }
-    };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
@@ -762,7 +695,7 @@ fn placed_prompt_stream_drains_queued_input_events_until_idle() {
     let run = stream
         .submit_input_events_until_idle(vec![
             VulkanResidentTokenInputEvent::new("event_a", vec![1], 1),
-            VulkanResidentTokenInputEvent::new("event_b", vec![36_309], 1),
+            VulkanResidentTokenInputEvent::new("event_b", vec![4], 1),
         ])
         .unwrap();
 

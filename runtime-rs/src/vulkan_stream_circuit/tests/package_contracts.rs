@@ -284,52 +284,52 @@ fn runtime_graph_duplicates_package_components_in_memory() {
         .unwrap();
     let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
         .unwrap()
-        .duplicate_after_instance(&source_graph, "layer_05", "layer_05_repeat")
+        .duplicate_after_instance(&source_graph, "layer_00", "layer_00_repeat")
         .unwrap()
-        .with_instance_device("layer_05_repeat", "gpu1")
+        .with_instance_device("layer_00_repeat", "gpu1")
         .unwrap();
 
     let runtime_mounted = manifest.clone().mount_runtime_graph(&runtime_graph).unwrap();
 
-    assert_eq!(manifest.circuit_graph.components.len(), 17);
-    assert_eq!(manifest.component_executions.len(), 14);
+    assert_eq!(manifest.circuit_graph.components.len(), 4);
+    assert_eq!(manifest.component_executions.len(), 1);
     assert!(
         manifest
             .circuit_graph
             .components
             .iter()
-            .all(|component| component.component_id != "layer_05_repeat")
+            .all(|component| component.component_id != "layer_00_repeat")
     );
 
-    assert_eq!(runtime_mounted.circuit_graph.components.len(), 18);
-    assert_eq!(runtime_mounted.component_executions.len(), 15);
+    assert_eq!(runtime_mounted.circuit_graph.components.len(), 5);
+    assert_eq!(runtime_mounted.component_executions.len(), 2);
     assert_eq!(runtime_mounted.package, manifest);
     assert!(
         runtime_mounted
             .runtime_graph
             .instances
             .iter()
-            .any(|instance| instance.instance_id == "layer_05_repeat")
+            .any(|instance| instance.instance_id == "layer_00_repeat")
     );
     assert_eq!(
-        runtime_mounted.placement.device_for_component("layer_05_repeat"),
+        runtime_mounted.placement.device_for_component("layer_00_repeat"),
         "gpu1"
     );
     let repeated_component = runtime_mounted
         .circuit_graph
         .components
         .iter()
-        .find(|component| component.component_id == "layer_05_repeat")
+        .find(|component| component.component_id == "layer_00_repeat")
         .unwrap();
     let source_component = manifest
         .circuit_graph
         .components
         .iter()
-        .find(|component| component.component_id == "layer_05")
+        .find(|component| component.component_id == "layer_00")
         .unwrap();
     assert_eq!(repeated_component.operator_type, source_component.operator_type);
     assert_eq!(repeated_component.circuit.id, source_component.circuit.id);
-    assert_eq!(repeated_component.circuit.source.component_id, "layer_05_repeat");
+    assert_eq!(repeated_component.circuit.source.component_id, "layer_00_repeat");
     assert_eq!(
         repeated_component.params.refs.keys().collect::<Vec<_>>(),
         source_component.params.refs.keys().collect::<Vec<_>>()
@@ -338,12 +338,12 @@ fn runtime_graph_duplicates_package_components_in_memory() {
     let repeated_execution = runtime_mounted
         .component_executions
         .iter()
-        .find(|execution| execution.component_id == "layer_05_repeat")
+        .find(|execution| execution.component_id == "layer_00_repeat")
         .unwrap();
     let source_execution = manifest
         .component_executions
         .iter()
-        .find(|execution| execution.component_id == "layer_05")
+        .find(|execution| execution.component_id == "layer_00")
         .unwrap();
     assert_eq!(repeated_execution.kernels, source_execution.kernels);
 }
@@ -357,7 +357,9 @@ fn runtime_model_coalesces_execution_placement_without_rewriting_the_patch() {
         .unwrap();
     let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
         .unwrap()
-        .with_instance_device("layer_05", "gpu1")
+        .duplicate_after_instance(&source_graph, "layer_00", "layer_00_repeat")
+        .unwrap()
+        .with_instance_device("layer_00_repeat", "gpu1")
         .unwrap();
     let runtime_model = manifest.mount_runtime_graph(&runtime_graph).unwrap();
     assert_eq!(
@@ -386,14 +388,14 @@ fn vulkan_lowering_extracts_signal_processors_from_the_full_execution_graph() {
         .to_signal_processor_graph(PathBuf::from("."))
         .unwrap();
 
-    assert_eq!(graph.circuits.len(), 14);
+    assert_eq!(graph.circuits.len(), 1);
     assert!(
         graph
             .circuits
             .iter()
             .all(|artifact| artifact.circuit.runtime_role.is_signal_processor())
     );
-    assert_eq!(graph.index.graph.edges.len(), 13);
+    assert_eq!(graph.index.graph.edges.len(), 0);
     assert_eq!(
         graph.index.graph.boundary.external_inputs[0]
             .endpoint
@@ -404,7 +406,7 @@ fn vulkan_lowering_extracts_signal_processors_from_the_full_execution_graph() {
         graph.index.graph.boundary.public_outputs[0]
             .endpoint
             .component_id,
-        "layer_13"
+        "layer_00"
     );
 }
 
@@ -416,20 +418,15 @@ fn placed_generation_endpoints_follow_topology_not_system_component_order() {
         .signal_processor_endpoint_component_ids()
         .unwrap();
     let placement = StreamCircuitPlacementSpec::new(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID)
-        .with_component_device(&input_component, "gpu-input")
-        .with_component_device(&output_component, "gpu-output");
+        .with_component_device(&input_component, "gpu-only");
 
     assert_eq!(input_component, "layer_00");
-    assert_eq!(output_component, "layer_13");
+    assert_eq!(output_component, "layer_00");
     assert_eq!(
         manifest
             .circuit_graph
             .signal_processor_device_ids(&placement),
-        vec![
-            "gpu-input".to_string(),
-            "gpu-output".to_string(),
-            "runtime_default".to_string(),
-        ]
+        vec!["gpu-only".to_string()]
     );
 }
 
@@ -485,9 +482,7 @@ fn fused_generation_components_follow_connected_processor_devices() {
     let runtime_graph = resolved
         .default_runtime_graph("gpu0")
         .unwrap()
-        .with_instance_device("layer_00", "gpu-input")
-        .unwrap()
-        .with_instance_device("layer_13", "gpu-output")
+        .with_instance_device("layer_00", "gpu-only")
         .unwrap();
     let runtime_graph = attach_generation_node_devices_for_vulkan(runtime_graph, &resolved).unwrap();
     let device_for = |instance_id: &str| {
@@ -500,9 +495,9 @@ fn fused_generation_components_follow_connected_processor_devices() {
             .as_str()
     };
 
-    assert_eq!(device_for("input_transducer"), "gpu-input");
-    assert_eq!(device_for("output_transducer"), "gpu-output");
-    assert_eq!(device_for("sampler"), "gpu-output");
+    assert_eq!(device_for("input_transducer"), "gpu-only");
+    assert_eq!(device_for("output_transducer"), "gpu-only");
+    assert_eq!(device_for("sampler"), "gpu-only");
 }
 
 #[test]
@@ -511,7 +506,7 @@ fn runtime_chain_control_preserves_generation_components_and_feedback() {
     let chain = vec![
         ("first".to_string(), "layer_00".to_string()),
         ("repeat".to_string(), "layer_00".to_string()),
-        ("last".to_string(), "layer_13".to_string()),
+        ("last".to_string(), "layer_00".to_string()),
     ];
 
     let runtime_graph = manifest

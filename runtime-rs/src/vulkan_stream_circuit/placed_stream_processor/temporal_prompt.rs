@@ -158,6 +158,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         Ok(width.max(1))
     }
 
+    fn supports_contiguous_device_batch_pipeline(&self) -> bool {
+        self.linear_pipeline_device_indices().is_ok()
+    }
+
     fn temporal_block_width(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
@@ -165,6 +169,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
         if available_token_count == 0 {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        // The causal batch runner currently owns one slice per device. A valid
+        // component graph may revisit a device (for example gpu0 -> gpu1 ->
+        // gpu0), but batching those two gpu0 regions as one slice would execute
+        // the tail before the remote middle. Keep that graph on the ordered
+        // scalar tick path until the batch plan can represent device segments.
+        if !self.supports_contiguous_device_batch_pipeline() {
+            return Ok(1);
         }
         Ok(available_token_count.min(self.temporal_block_lane_capacity(devices)?))
     }

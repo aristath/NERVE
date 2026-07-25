@@ -1,12 +1,6 @@
 #[test]
 fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping placed live state clone test: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let manifest = fixture_model_package_manifest();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
@@ -39,21 +33,21 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
         .buffers
         .state_buffers
         .iter()
-        .find(|state| state.component_id == "layer_05")
+        .find(|state| state.component_id == "layer_00")
         .unwrap();
     let state_id = source_state.state_id.clone();
     source_state.buffer.write_bytes(&[0xa5; 16]).unwrap();
 
     let mut clone_runtime_graph = source_runtime_graph
-        .duplicate_after_instance(&source_graph, "layer_05", "layer_05_repeat")
+        .duplicate_after_instance(&source_graph, "layer_00", "layer_00_repeat")
         .unwrap();
     clone_runtime_graph
         .instances
         .iter_mut()
-        .find(|instance| instance.instance_id == "layer_05_repeat")
+        .find(|instance| instance.instance_id == "layer_00_repeat")
         .unwrap()
         .state_policy = StreamCircuitNodeInstanceStatePolicy::CloneFrom {
-        instance_id: "layer_05".to_string(),
+        instance_id: "layer_00".to_string(),
     };
     clone_runtime_graph.validate_against_graph(&source_graph).unwrap();
     let clone_model = manifest.mount_runtime_graph(&clone_runtime_graph).unwrap();
@@ -72,10 +66,10 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
         .remount_model_preserving_state(clone_package.clone(), 0)
         .unwrap();
     let mounted = &stream.processor.device("gpu0").unwrap().mounted;
-    let inherited = mounted.buffers.state_buffer("layer_05", &state_id).unwrap();
+    let inherited = mounted.buffers.state_buffer("layer_00", &state_id).unwrap();
     let cloned = mounted
         .buffers
-        .state_buffer("layer_05_repeat", &state_id)
+        .state_buffer("layer_00_repeat", &state_id)
         .unwrap();
     assert_eq!(inherited.buffer.read_bytes(16).unwrap(), vec![0xa5; 16]);
     assert_eq!(cloned.buffer.read_bytes(16).unwrap(), vec![0xa5; 16]);
@@ -89,7 +83,7 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
     assert_eq!(
         remounted
             .buffers
-            .state_buffer("layer_05", &state_id)
+            .state_buffer("layer_00", &state_id)
             .unwrap()
             .buffer
             .read_bytes(16)
@@ -99,7 +93,7 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
     assert_eq!(
         remounted
             .buffers
-            .state_buffer("layer_05_repeat", &state_id)
+            .state_buffer("layer_00_repeat", &state_id)
             .unwrap()
             .buffer
             .read_bytes(16)
@@ -107,4 +101,3 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
         vec![0x5a; 16]
     );
 }
-

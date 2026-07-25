@@ -23,15 +23,10 @@ fn product(shape: &[usize]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::compiled_artifact_dir;
+    use crate::test_support::tiny_model_lowered_graph_path;
 
     fn fixture_model_index_path() -> PathBuf {
-        compiled_artifact_dir(
-            "NERVE_TEST_LOWERED_DIR",
-            "lowered",
-            "execution_graph.circuits.json",
-        )
-        .join("execution_graph.circuits.json")
+        tiny_model_lowered_graph_path()
     }
 
     include!("tests/circuit_contracts.rs");

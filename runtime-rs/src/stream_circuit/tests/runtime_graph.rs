@@ -68,8 +68,8 @@
         let resolved =
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let spec = StreamCircuitPlacementSpec::new("gpu0")
-            .with_component_device("layer_02", "gpu1")
-            .with_component_device("layer_07", "lan:worker-a");
+            .with_component_device("layer_00", "gpu1")
+            .with_component_device("output_transducer", "lan:worker-a");
 
         let runtime_graph = resolved.runtime_graph_from_placement(&spec).unwrap();
 
@@ -86,22 +86,13 @@
                 .find(|instance| instance.instance_id == "layer_00")
                 .unwrap()
                 .device_id,
-            "gpu0"
-        );
-        assert_eq!(
-            runtime_graph
-                .instances
-                .iter()
-                .find(|instance| instance.instance_id == "layer_02")
-                .unwrap()
-                .device_id,
             "gpu1"
         );
         assert_eq!(
             runtime_graph
                 .instances
                 .iter()
-                .find(|instance| instance.instance_id == "layer_07")
+                .find(|instance| instance.instance_id == "output_transducer")
                 .unwrap()
                 .device_id,
             "lan:worker-a"
@@ -116,9 +107,9 @@
         let runtime_graph = resolved
             .default_runtime_graph("gpu0")
             .unwrap()
-            .duplicate_after_instance(&resolved, "layer_05", "layer_05_repeat")
+            .duplicate_after_instance(&resolved, "layer_00", "layer_00_repeat")
             .unwrap()
-            .with_instance_device("layer_05_repeat", "gpu1")
+            .with_instance_device("layer_00_repeat", "gpu1")
             .unwrap();
 
         let instantiated = resolved.instantiate_runtime_graph(&runtime_graph).unwrap();
@@ -134,18 +125,18 @@
         let original_index = instantiated
             .circuits
             .iter()
-            .position(|artifact| artifact.component.id == "layer_05")
+            .position(|artifact| artifact.component.id == "layer_00")
             .unwrap();
         let duplicate_index = original_index + 1;
         let duplicate = &instantiated.circuits[duplicate_index];
         let source = resolved
             .circuits
             .iter()
-            .find(|artifact| artifact.component.id == "layer_05")
+            .find(|artifact| artifact.component.id == "layer_00")
             .unwrap();
 
-        assert_eq!(duplicate.component.id, "layer_05_repeat");
-        assert_eq!(duplicate.circuit.source.component_id, "layer_05");
+        assert_eq!(duplicate.component.id, "layer_00_repeat");
+        assert_eq!(duplicate.circuit.source.component_id, "layer_00");
         assert_eq!(
             duplicate.params.refs.keys().collect::<Vec<_>>(),
             source.params.refs.keys().collect::<Vec<_>>()
@@ -155,21 +146,21 @@
             instantiated.circuits[original_index].circuit.state_ports
         );
         assert_eq!(
-            placement.component("layer_05_repeat").unwrap().device_id,
+            placement.component("layer_00_repeat").unwrap().device_id,
             "gpu1"
         );
         let incoming = placement
             .edges
             .iter()
-            .find(|edge| edge.destination_component_id == "layer_05_repeat")
+            .find(|edge| edge.destination_component_id == "layer_00_repeat")
             .unwrap();
         let outgoing = placement
             .edges
             .iter()
-            .find(|edge| edge.source_component_id == "layer_05_repeat")
+            .find(|edge| edge.source_component_id == "layer_00_repeat")
             .unwrap();
-        assert_eq!(incoming.source_component_id, "layer_05");
-        assert_eq!(outgoing.destination_component_id, "layer_06");
+        assert_eq!(incoming.source_component_id, "layer_00");
+        assert_eq!(outgoing.destination_component_id, "output_transducer");
         assert_eq!(placement.cross_device_edge_count, 2);
     }
 
@@ -179,15 +170,15 @@
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let chain = vec![
             ("layer_00".to_string(), "layer_00".to_string()),
-            ("layer_01".to_string(), "layer_01".to_string()),
-            ("layer_05".to_string(), "layer_05".to_string()),
-            ("layer_05_repeat".to_string(), "layer_05".to_string()),
-            ("layer_06".to_string(), "layer_06".to_string()),
-            ("layer_13".to_string(), "layer_13".to_string()),
+            ("layer_00_second".to_string(), "layer_00".to_string()),
+            ("layer_00_third".to_string(), "layer_00".to_string()),
+            ("layer_00_repeat".to_string(), "layer_00".to_string()),
+            ("layer_00_fifth".to_string(), "layer_00".to_string()),
+            ("layer_00_sixth".to_string(), "layer_00".to_string()),
         ];
         let runtime_graph = StreamCircuitRuntimeGraph::from_source_chain(&resolved, "gpu0", &chain)
             .unwrap()
-            .with_instance_device("layer_05_repeat", "gpu1")
+            .with_instance_device("layer_00_repeat", "gpu1")
             .unwrap();
 
         assert_eq!(
@@ -201,11 +192,11 @@
                 .collect::<Vec<_>>(),
             vec![
                 ("layer_00", "layer_00"),
-                ("layer_01", "layer_01"),
-                ("layer_05", "layer_05"),
-                ("layer_05_repeat", "layer_05"),
-                ("layer_06", "layer_06"),
-                ("layer_13", "layer_13"),
+                ("layer_00_second", "layer_00"),
+                ("layer_00_third", "layer_00"),
+                ("layer_00_repeat", "layer_00"),
+                ("layer_00_fifth", "layer_00"),
+                ("layer_00_sixth", "layer_00"),
             ]
         );
 
@@ -219,7 +210,7 @@
             instantiated
                 .circuits
                 .iter()
-                .all(|artifact| artifact.component.id != "layer_02")
+                .all(|artifact| artifact.component.id != "output_transducer")
         );
         assert_eq!(
             placement
@@ -229,15 +220,15 @@
                 .collect::<Vec<_>>(),
             vec![
                 "layer_00",
-                "layer_01",
-                "layer_05",
-                "layer_05_repeat",
-                "layer_06",
-                "layer_13",
+                "layer_00_second",
+                "layer_00_third",
+                "layer_00_repeat",
+                "layer_00_fifth",
+                "layer_00_sixth",
             ]
         );
         assert_eq!(
-            placement.component("layer_05_repeat").unwrap().device_id,
+            placement.component("layer_00_repeat").unwrap().device_id,
             "gpu1"
         );
         assert_eq!(placement.cross_device_edge_count, 2);
@@ -251,7 +242,7 @@
         let chain = vec![
             ("first".to_string(), "layer_00".to_string()),
             ("repeat".to_string(), "layer_00".to_string()),
-            ("last".to_string(), "layer_13".to_string()),
+            ("last".to_string(), "layer_00".to_string()),
         ];
 
         let runtime_graph = original
@@ -299,7 +290,7 @@
         source.circuit.boundary.outputs.push(auxiliary);
         let chain = vec![
             ("first".to_string(), "layer_00".to_string()),
-            ("second".to_string(), "layer_01".to_string()),
+            ("second".to_string(), "layer_00".to_string()),
         ];
 
         let error =
@@ -332,8 +323,8 @@
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let chain = vec![
             ("first".to_string(), "layer_00".to_string()),
-            ("second".to_string(), "layer_01".to_string()),
-            ("third".to_string(), "layer_02".to_string()),
+            ("second".to_string(), "layer_00".to_string()),
+            ("third".to_string(), "layer_00".to_string()),
         ];
         let mut runtime_graph =
             StreamCircuitRuntimeGraph::from_source_chain(&resolved, "gpu0", &chain).unwrap();
@@ -358,15 +349,15 @@
         let mut runtime_graph = resolved
             .default_runtime_graph("gpu0")
             .unwrap()
-            .duplicate_after_instance(&resolved, "layer_05", "layer_05_repeat")
+            .duplicate_after_instance(&resolved, "layer_00", "layer_00_repeat")
             .unwrap();
         runtime_graph
             .instances
             .iter_mut()
-            .find(|instance| instance.instance_id == "layer_05_repeat")
+            .find(|instance| instance.instance_id == "layer_00_repeat")
             .unwrap()
             .state_policy = StreamCircuitNodeInstanceStatePolicy::ShareWith {
-            instance_id: "layer_05".to_string(),
+            instance_id: "layer_00".to_string(),
         };
         runtime_graph.validate_against_graph(&resolved).unwrap();
 
@@ -374,7 +365,7 @@
         cross_device_share
             .instances
             .iter_mut()
-            .find(|instance| instance.instance_id == "layer_05_repeat")
+            .find(|instance| instance.instance_id == "layer_00_repeat")
             .unwrap()
             .device_id = "gpu1".to_string();
         assert!(
@@ -389,10 +380,10 @@
         cycle
             .instances
             .iter_mut()
-            .find(|instance| instance.instance_id == "layer_05")
+            .find(|instance| instance.instance_id == "layer_00")
             .unwrap()
             .state_policy = StreamCircuitNodeInstanceStatePolicy::CloneFrom {
-            instance_id: "layer_05_repeat".to_string(),
+            instance_id: "layer_00_repeat".to_string(),
         };
         assert!(
             cycle
@@ -410,7 +401,7 @@
         let runtime_graph = resolved.default_runtime_graph("gpu0").unwrap();
 
         let mut disconnected = runtime_graph.clone();
-        disconnected.edges.remove(4);
+        disconnected.edges.remove(1);
         assert!(
             disconnected
                 .validate_against_graph(&resolved)
@@ -440,7 +431,7 @@
         let mut runtime_graph = resolved.default_runtime_graph("gpu0").unwrap();
         runtime_graph.instances.push(StreamCircuitNodeInstance {
             instance_id: "branch".to_string(),
-            source_component_id: "layer_01".to_string(),
+            source_component_id: "layer_00".to_string(),
             device_id: "gpu0".to_string(),
             enabled: true,
             control_values: BTreeMap::new(),

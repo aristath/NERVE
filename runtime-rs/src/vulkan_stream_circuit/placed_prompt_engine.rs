@@ -1501,6 +1501,12 @@ fn placed_prompt_streams_share_physical_batch_contract(
         && second.speculative_draft_tokens == 0
         && first.processor.speculative_decoder_count() == 0
         && second.processor.speculative_decoder_count() == 0
+        && first
+            .processor
+            .supports_contiguous_device_batch_pipeline()
+        && second
+            .processor
+            .supports_contiguous_device_batch_pipeline()
         && first.devices.len() == second.devices.len()
         && second.devices.iter().all(|(device_id, device)| {
             first

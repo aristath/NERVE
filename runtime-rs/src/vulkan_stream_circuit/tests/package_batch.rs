@@ -7,17 +7,15 @@ use crate::stream_circuit::{
     ResolvedLoweredExecutionGraph, StreamCircuitPlacementSpec, StreamCircuitRuntimeGraph,
 };
 use crate::stream_plan::{StreamCircuitExecutionPlan, StreamCircuitResourcePlan};
-use crate::test_support::compiled_artifact_dir;
+use crate::test_support::{
+    tiny_model_dir, tiny_model_lowered_graph_path, tiny_model_package_manifest_path,
+    tiny_model_tensor_index_path,
+};
 
-const FIXTURE_MODEL_TOKEN_EMBEDDING_TRANSDUCER_ID: &str = "input_transducer.token_embedding";
-const FIXTURE_MODEL_OUTPUT_EMBEDDING_NORM_TRANSDUCER_ID: &str = "output_transducer.embedding_norm";
-const FIXTURE_MODEL_TIED_OUTPUT_PROJECTION_TRANSDUCER_ID: &str =
-    "output_transducer.tied_output_projection";
 const FIXTURE_MODEL_GREEDY_SAMPLER_COMPONENT_ID: &str = "greedy_sampler";
 const FIXTURE_MODEL_EMBED_TOKENS_TENSOR: &str = "model.embed_tokens.weight";
 const FIXTURE_MODEL_INPUT_FRAME_SIGNAL: &str = "input_frame";
-const FIXTURE_MODEL_OUTPUT_FRAME_SIGNAL: &str = "output_frame";
-const FIXTURE_MODEL_HIDDEN_SIZE: usize = 1_024;
+const FIXTURE_MODEL_HIDDEN_SIZE: usize = 16;
 
 #[test]
 fn package_loader_rejects_stale_compiler_contracts_before_package_setup() {
@@ -289,9 +287,9 @@ fn component_batch_execution_marks_only_mutating_state_descriptors_as_commits() 
 }
 
 const FIXTURE_MODEL_FRAME_BYTES: usize = FIXTURE_MODEL_HIDDEN_SIZE * 2;
-const FIXTURE_MODEL_LOGITS_BYTES: usize = 65_536 * 4;
+const FIXTURE_MODEL_LOGITS_BYTES: usize = 32 * 4;
 const FIXTURE_MODEL_SAMPLER_OUTPUT_BYTES: usize = 16;
-const FIXTURE_MODEL_EMBED_TOKENS_BYTES: usize = 65_536 * FIXTURE_MODEL_FRAME_BYTES;
+const FIXTURE_MODEL_EMBED_TOKENS_BYTES: usize = 32 * FIXTURE_MODEL_FRAME_BYTES;
 
 #[test]
 fn speculative_verification_commits_through_the_first_mismatch() {

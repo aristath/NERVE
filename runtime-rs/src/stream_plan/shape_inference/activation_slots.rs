@@ -90,20 +90,14 @@ mod tests {
 
     use super::*;
     use crate::stream_circuit::ResolvedLoweredExecutionGraph;
-    use crate::test_support::compiled_artifact_dir;
+    use crate::test_support::{tiny_model_lowered_graph_path, tiny_model_tensor_index_path};
 
     fn fixture_model_index_path() -> PathBuf {
-        compiled_artifact_dir(
-            "NERVE_TEST_LOWERED_DIR",
-            "lowered",
-            "execution_graph.circuits.json",
-        )
-        .join("execution_graph.circuits.json")
+        tiny_model_lowered_graph_path()
     }
 
     fn fixture_model_tensor_index_path() -> PathBuf {
-        compiled_artifact_dir("NERVE_TEST_TRANSPILED_DIR", "transpiled", "tensors.json")
-            .join("tensors.json")
+        tiny_model_tensor_index_path()
     }
 
     #[test]
@@ -606,26 +600,26 @@ mod tests {
         let plan = StreamCircuitExecutionPlan::from_graph(&graph).unwrap();
 
         assert_eq!(plan.topology, "explicit_graph");
-        assert_eq!(plan.circuits.len(), 14);
-        assert_eq!(plan.total_node_count(), 242);
-        assert_eq!(plan.produced_signal_count(), 264);
-        assert_eq!(plan.temporary_signal_count(), 230);
-        assert_eq!(plan.state_view_signal_count(), 20);
-        assert_eq!(plan.layer_local_activation_slot_count(), 56);
-        assert_eq!(plan.operator_counts().get("linear"), Some(&82));
+        assert_eq!(plan.circuits.len(), 4);
+        assert_eq!(plan.total_node_count(), 21);
+        assert_eq!(plan.produced_signal_count(), 22);
+        assert_eq!(plan.temporary_signal_count(), 16);
+        assert_eq!(plan.state_view_signal_count(), 2);
+        assert_eq!(plan.layer_local_activation_slot_count(), 5);
+        assert_eq!(plan.operator_counts().get("linear"), Some(&7));
         assert_eq!(
             plan.state_type_counts().get("append_only_attention_memory"),
-            Some(&6)
+            Some(&1)
         );
 
-        let layer_00 = &plan.circuits[0];
+        let layer_00 = &plan.circuits[1];
         let layer_00_frame = layer_00.activation_frame_plan();
         assert_eq!(layer_00.component_id, "layer_00");
-        assert_eq!(layer_00.nodes.len(), 16);
-        assert_eq!(layer_00.temporary_signals.len(), 16);
+        assert_eq!(layer_00.nodes.len(), 17);
+        assert_eq!(layer_00.temporary_signals.len(), 15);
         assert_eq!(
             layer_00.state_view_signals,
-            vec!["temporal_window".to_string()]
+            vec!["k_memory".to_string(), "v_memory".to_string()]
         );
         assert_eq!(layer_00_frame.slot_count, 4);
         assert_eq!(layer_00.input_ports[0].id, "input_frame");
@@ -634,27 +628,19 @@ mod tests {
             layer_00
                 .nodes
                 .iter()
-                .find(|node| node.id == "temporal_memory_update")
+                .find(|node| node.id == "kv_memory_append")
                 .unwrap()
                 .state_writes,
-            vec!["temporal_memory".to_string()]
+            vec!["kv_memory".to_string()]
         );
-
-        let layer_02 = &plan.circuits[2];
-        assert_eq!(layer_02.temporary_signals.len(), 17);
-        assert_eq!(
-            layer_02.state_view_signals,
-            vec!["k_memory".to_string(), "v_memory".to_string()]
-        );
-        assert_eq!(layer_02.activation_frame_plan().slot_count, 4);
         assert!(
-            layer_02
+            layer_00
                 .nodes
                 .iter()
                 .any(|node| node.op == "append_state_update")
         );
         assert!(
-            layer_02
+            layer_00
                 .nodes
                 .iter()
                 .any(|node| node.op == "scaled_dot_product_attention")
@@ -671,49 +657,34 @@ mod tests {
         let resource_plan = StreamCircuitResourcePlan::from_graph_and_plan(&graph, &plan).unwrap();
 
         assert_eq!(tensor_index.schema, TENSOR_INDEX_SCHEMA);
-        assert_eq!(resource_plan.temporary_signal_count, 230);
-        assert_eq!(resource_plan.state_view_signal_count, 20);
+        assert_eq!(resource_plan.temporary_signal_count, 16);
+        assert_eq!(resource_plan.state_view_signal_count, 2);
         assert_eq!(resource_plan.unknown_temporary_shape_count, 0);
-        assert_eq!(resource_plan.unknown_state_view_shape_count, 12);
+        assert_eq!(resource_plan.unknown_state_view_shape_count, 2);
         assert!(resource_plan.intermediate_activation_shapes_known());
 
-        let layer_00 = &plan.circuits[0];
+        let layer_00 = &plan.circuits[1];
         assert_eq!(
-            layer_00.signal("conv_projected").unwrap().shape,
-            Some(vec![3072])
-        );
-        assert_eq!(layer_00.signal("gate_b").unwrap().shape, Some(vec![1024]));
-        assert_eq!(
-            layer_00.signal("temporal_window").unwrap().shape,
-            Some(vec![3, 1024])
+            layer_00.signal("q_projected").unwrap().shape,
+            Some(vec![16])
         );
         assert_eq!(
-            layer_00.signal("ffn_hidden").unwrap().shape,
-            Some(vec![2560])
+            layer_00.signal("k_projected").unwrap().shape,
+            Some(vec![8])
         );
-
-        let layer_02 = &plan.circuits[2];
+        assert_eq!(layer_00.signal("k_memory").unwrap().shape, None);
         assert_eq!(
-            layer_02.signal("q_projected").unwrap().shape,
-            Some(vec![1024])
-        );
-        assert_eq!(
-            layer_02.signal("k_projected").unwrap().shape,
-            Some(vec![512])
-        );
-        assert_eq!(layer_02.signal("k_memory").unwrap().shape, None);
-        assert_eq!(
-            layer_02.signal("k_memory").unwrap().storage,
+            layer_00.signal("k_memory").unwrap().storage,
             SignalStorage::StateView
         );
-        assert_eq!(layer_02.signal("v_memory").unwrap().shape, None);
+        assert_eq!(layer_00.signal("v_memory").unwrap().shape, None);
         assert_eq!(
-            layer_02.signal("v_memory").unwrap().storage,
+            layer_00.signal("v_memory").unwrap().storage,
             SignalStorage::StateView
         );
         assert_eq!(
-            layer_02.signal("attention_out").unwrap().shape,
-            Some(vec![1024])
+            layer_00.signal("attention_out").unwrap().shape,
+            Some(vec![16])
         );
 
         let layer_00_bank = resource_plan
@@ -728,22 +699,7 @@ mod tests {
                 .iter()
                 .map(|slot| slot.max_elements)
                 .collect::<Vec<_>>(),
-            vec![Some(2560), Some(3072), Some(2560), Some(2560)]
-        );
-
-        let layer_02_bank = resource_plan
-            .activation_banks
-            .iter()
-            .find(|bank| bank.component_id == "layer_02")
-            .unwrap();
-        assert_eq!(layer_02_bank.slot_count, 4);
-        assert_eq!(
-            layer_02_bank
-                .slots
-                .iter()
-                .map(|slot| slot.max_elements)
-                .collect::<Vec<_>>(),
-            vec![Some(1024), Some(2560), Some(2560), Some(2560)]
+            vec![Some(32), Some(16), Some(32), Some(32)]
         );
     }
 
@@ -783,33 +739,33 @@ mod tests {
         let resource_plan =
             StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
 
-        assert_eq!(resource_plan.circuit_count, 14);
-        assert_eq!(resource_plan.node_count, 242);
-        assert_eq!(resource_plan.parameter_ref_count, 130);
-        assert_eq!(resource_plan.unique_parameter_tensor_count(), 130);
+        assert_eq!(resource_plan.circuit_count, 4);
+        assert_eq!(resource_plan.node_count, 21);
+        assert_eq!(resource_plan.parameter_ref_count, 12);
+        assert_eq!(resource_plan.unique_parameter_tensor_count(), 11);
         assert_eq!(resource_plan.transducer_parameter_ref_count, 3);
         assert_eq!(resource_plan.unique_transducer_parameter_tensor_count(), 2);
-        assert_eq!(resource_plan.stream_state_count(), 14);
-        assert_eq!(resource_plan.temporary_signal_count, 230);
-        assert_eq!(resource_plan.state_view_signal_count, 20);
-        assert_eq!(resource_plan.layer_local_activation_slot_count, 56);
-        assert_eq!(resource_plan.unknown_temporary_shape_count, 172);
-        assert_eq!(resource_plan.unknown_state_view_shape_count, 12);
+        assert_eq!(resource_plan.stream_state_count(), 1);
+        assert_eq!(resource_plan.temporary_signal_count, 16);
+        assert_eq!(resource_plan.state_view_signal_count, 2);
+        assert_eq!(resource_plan.layer_local_activation_slot_count, 5);
+        assert_eq!(resource_plan.unknown_temporary_shape_count, 12);
+        assert_eq!(resource_plan.unknown_state_view_shape_count, 2);
         assert!(!resource_plan.intermediate_activation_shapes_known());
 
-        let conv_in = resource_plan
+        let q_projection = resource_plan
             .parameters
             .iter()
-            .find(|parameter| parameter.tensor == "model.layers.0.conv.in_proj.weight")
+            .find(|parameter| parameter.tensor == "model.layers.0.self_attn.q_proj.weight")
             .unwrap();
-        assert_eq!(conv_in.uses.len(), 1);
-        assert_eq!(conv_in.uses[0].component_id, "layer_00");
-        assert_eq!(conv_in.uses[0].param_id, "conv_in_projection");
+        assert_eq!(q_projection.uses.len(), 1);
+        assert_eq!(q_projection.uses[0].component_id, "layer_00");
+        assert_eq!(q_projection.uses[0].param_id, "q_projection");
         assert_eq!(
-            conv_in.uses[0].role.as_deref(),
-            Some("short_convolution_input_projection")
+            q_projection.uses[0].role.as_deref(),
+            Some("attention_query_projection")
         );
-        assert_eq!(conv_in.uses[0].storage, "source_tensor_refs");
+        assert_eq!(q_projection.uses[0].storage, "source_tensor_refs");
 
         let embed_tokens = resource_plan
             .transducer_parameters
@@ -842,7 +798,7 @@ mod tests {
         let embedding_norm = resource_plan
             .transducer_parameters
             .iter()
-            .find(|parameter| parameter.tensor == "model.embedding_norm.weight")
+            .find(|parameter| parameter.tensor == "model.norm.weight")
             .unwrap();
         assert_eq!(embedding_norm.uses.len(), 1);
         assert_eq!(
@@ -851,55 +807,31 @@ mod tests {
         );
         assert_eq!(embedding_norm.uses[0].role.as_deref(), Some("rms_norm"));
 
-        let rolling_states = resource_plan
-            .state_allocations
-            .iter()
-            .filter(|state| state.state_type == "rolling_frame_memory")
-            .count();
         let append_only_states = resource_plan
             .state_allocations
             .iter()
             .filter(|state| state.state_type == "append_only_attention_memory")
             .count();
-        assert_eq!(rolling_states, 8);
-        assert_eq!(append_only_states, 6);
+        assert_eq!(append_only_states, 1);
 
         let layer_00_state = resource_plan
             .state_allocations
             .iter()
             .find(|state| state.component_id == "layer_00")
             .unwrap();
-        assert_eq!(layer_00_state.state_id, "temporal_memory");
-        assert_eq!(layer_00_state.shape, Some(vec![3, 1024]));
-        assert_eq!(layer_00_state.elements_per_activation, None);
-        assert_eq!(layer_00_state.layout.as_deref(), Some("time_hidden"));
-
-        let layer_02_state = resource_plan
-            .state_allocations
-            .iter()
-            .find(|state| state.component_id == "layer_02")
-            .unwrap();
-        assert_eq!(layer_02_state.state_id, "kv_memory");
-        assert_eq!(layer_02_state.shape, None);
-        assert_eq!(layer_02_state.elements_per_activation, Some(1024));
-        assert_eq!(layer_02_state.layout.as_deref(), Some("append_only_kv"));
+        assert_eq!(layer_00_state.state_id, "kv_memory");
+        assert_eq!(layer_00_state.shape, None);
+        assert_eq!(layer_00_state.elements_per_activation, Some(16));
+        assert_eq!(layer_00_state.layout.as_deref(), Some("append_only_kv"));
 
         let layer_00_bank = resource_plan
             .activation_banks
             .iter()
             .find(|bank| bank.component_id == "layer_00")
             .unwrap();
-        assert_eq!(layer_00_bank.temporary_signal_count, 16);
+        assert_eq!(layer_00_bank.temporary_signal_count, 15);
         assert_eq!(layer_00_bank.slot_count, 4);
-        assert_eq!(layer_00_bank.assignments.len(), 16);
-
-        let layer_02_bank = resource_plan
-            .activation_banks
-            .iter()
-            .find(|bank| bank.component_id == "layer_02")
-            .unwrap();
-        assert_eq!(layer_02_bank.temporary_signal_count, 17);
-        assert_eq!(layer_02_bank.slot_count, 4);
+        assert_eq!(layer_00_bank.assignments.len(), 15);
     }
 
     #[test]
@@ -911,14 +843,14 @@ mod tests {
         let error =
             StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap_err();
 
-        assert!(error.to_string().contains("graph circuit count 14"));
+        assert!(error.to_string().contains("graph circuit count 4"));
     }
 
     #[test]
     fn activation_plan_tracks_signal_producers_and_consumers() {
         let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let plan = StreamCircuitExecutionPlan::from_graph(&graph).unwrap();
-        let layer_00 = &plan.circuits[0];
+        let layer_00 = &plan.circuits[1];
 
         let input_frame = layer_00.signal("input_frame").unwrap();
         assert_eq!(input_frame.producer, SignalProducer::BoundaryInput);
@@ -934,7 +866,14 @@ mod tests {
                 node_id: "operator_norm".to_string()
             }
         );
-        assert_eq!(norm_out.consumers, vec!["conv_in_projection".to_string()]);
+        assert_eq!(
+            norm_out.consumers,
+            vec![
+                "q_projection".to_string(),
+                "k_projection".to_string(),
+                "v_projection".to_string(),
+            ]
+        );
 
         let output_frame = layer_00.signal("output_frame").unwrap();
         assert!(output_frame.is_boundary_output);
@@ -943,11 +882,11 @@ mod tests {
             vec!["boundary.output:output_frame".to_string()]
         );
 
-        let temporal_window = layer_00.signal("temporal_window").unwrap();
-        assert_eq!(temporal_window.storage, SignalStorage::StateView);
+        let k_memory = layer_00.signal("k_memory").unwrap();
+        assert_eq!(k_memory.storage, SignalStorage::StateView);
         assert_eq!(
-            temporal_window.consumers,
-            vec!["depthwise_temporal_conv".to_string()]
+            k_memory.consumers,
+            vec!["attention_read".to_string()]
         );
     }
 
@@ -1030,7 +969,13 @@ mod tests {
     #[test]
     fn activation_plan_rejects_unscheduled_signal_dependency() {
         let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
-        let mut circuit = graph.circuits[0].circuit.clone();
+        let mut circuit = graph
+            .circuits
+            .iter()
+            .find(|artifact| artifact.component.id == "layer_00")
+            .unwrap()
+            .circuit
+            .clone();
         circuit.nodes[0].inputs = vec!["not_available_yet".to_string()];
 
         let error = CircuitActivationPlan::from_circuit("layer_00", &circuit).unwrap_err();

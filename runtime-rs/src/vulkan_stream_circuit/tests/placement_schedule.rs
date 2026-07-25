@@ -210,21 +210,21 @@ fn runtime_graph_state_policies_change_resident_state_allocation_and_binding() {
     let state_id = source_graph
         .circuits
         .iter()
-        .find(|artifact| artifact.component.id == "layer_05")
+        .find(|artifact| artifact.component.id == "layer_00")
         .and_then(|artifact| artifact.state.state_ports.first())
         .map(|state| state.id.clone())
         .unwrap();
     let mut shared_patch = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
         .unwrap()
-        .duplicate_after_instance(&source_graph, "layer_05", "layer_05_repeat")
+        .duplicate_after_instance(&source_graph, "layer_00", "layer_00_repeat")
         .unwrap();
     shared_patch
         .instances
         .iter_mut()
-        .find(|instance| instance.instance_id == "layer_05_repeat")
+        .find(|instance| instance.instance_id == "layer_00_repeat")
         .unwrap()
         .state_policy = StreamCircuitNodeInstanceStatePolicy::ShareWith {
-        instance_id: "layer_05".to_string(),
+        instance_id: "layer_00".to_string(),
     };
     let shared_runtime_model = manifest.clone().mount_runtime_graph(&shared_patch).unwrap();
     let shared_graph = shared_runtime_model
@@ -237,24 +237,24 @@ fn runtime_graph_state_policies_change_resident_state_allocation_and_binding() {
         VulkanStreamCircuitResidentPlan::from_resource_plan(&shared_resources, None, Some(2))
             .unwrap();
 
-    assert_eq!(shared_resident.stream_state_buffers.len(), 14);
+    assert_eq!(shared_resident.stream_state_buffers.len(), 1);
     let shared_bindings = state_binding_index(&shared_resources, &shared_resident).unwrap();
     assert_eq!(
         shared_bindings
-            .get(&("layer_05_repeat".to_string(), state_id.clone()))
+            .get(&("layer_00_repeat".to_string(), state_id.clone()))
             .unwrap()
             .component_id,
-        "layer_05"
+        "layer_00"
     );
 
     let mut cloned_patch = shared_patch;
     cloned_patch
         .instances
         .iter_mut()
-        .find(|instance| instance.instance_id == "layer_05_repeat")
+        .find(|instance| instance.instance_id == "layer_00_repeat")
         .unwrap()
         .state_policy = StreamCircuitNodeInstanceStatePolicy::CloneFrom {
-        instance_id: "layer_05".to_string(),
+        instance_id: "layer_00".to_string(),
     };
     let cloned_runtime_model = manifest.mount_runtime_graph(&cloned_patch).unwrap();
     let cloned_graph = cloned_runtime_model
@@ -269,10 +269,10 @@ fn runtime_graph_state_policies_change_resident_state_allocation_and_binding() {
     let cloned = cloned_resident
         .stream_state_buffers
         .iter()
-        .find(|state| state.component_id == "layer_05_repeat" && state.state_id == state_id)
+        .find(|state| state.component_id == "layer_00_repeat" && state.state_id == state_id)
         .unwrap();
-    assert_eq!(cloned.clone_from, Some(("layer_05".to_string(), state_id)));
-    assert_eq!(cloned_resident.stream_state_buffers.len(), 15);
+    assert_eq!(cloned.clone_from, Some(("layer_00".to_string(), state_id)));
+    assert_eq!(cloned_resident.stream_state_buffers.len(), 2);
 }
 
 #[test]
@@ -323,14 +323,6 @@ fn clone_state_copy_order_rejects_missing_sources_and_cycles() {
     assert!(cycle.contains("dependency cycle"));
 }
 
-fn fixture_model_input_embedding_transducer_spec() -> VulkanResidentInputEmbeddingTransducerSpec {
-    fixture_model_package_manifest().input_transducer.spec
-}
-
-fn fixture_model_output_transducer_spec() -> VulkanResidentOutputTransducerSpec {
-    fixture_model_package_manifest().output_transducer.spec
-}
-
 fn fixture_model_greedy_sampler_spec() -> VulkanResidentSamplerSpec {
     VulkanResidentSamplerSpec {
         sampler_id: FIXTURE_MODEL_GREEDY_SAMPLER_COMPONENT_ID.to_string(),
@@ -348,4 +340,3 @@ fn fixture_model_greedy_sampler_spec() -> VulkanResidentSamplerSpec {
         scratch_byte_capacity: 0,
     }
 }
-

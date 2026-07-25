@@ -31,48 +31,6 @@ void main() {
 }
 
 #[cfg(test)]
-pub(crate) fn compile_shader_words_from_source(shader_file: &str) -> Option<Vec<u32>> {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let shader_path = manifest_dir.join("shaders").join(shader_file);
-    if shader_path.exists() {
-        return compile_shader_words_from_source_path(&shader_path);
-    }
-
-    let shape = shader_file
-        .strip_prefix("linear_bf16_")?
-        .strip_suffix(".comp")?;
-    let (input_size, output_size) = shape.split_once('x')?;
-    if !input_size.bytes().all(|byte| byte.is_ascii_digit())
-        || !output_size.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-
-    let template = std::fs::read_to_string(
-        manifest_dir
-            .join("shaders")
-            .join("linear_bf16.comp.template"),
-    )
-    .ok()?;
-    let rendered = template
-        .replace("{{INPUT_SIZE}}", input_size)
-        .replace("{{OUTPUT_SIZE}}", output_size);
-    static SOURCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let source_id = SOURCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let rendered_path = std::env::temp_dir().join(format!(
-        "nerve-linear-{input_size}x{output_size}-{}-{source_id}.comp",
-        std::process::id()
-    ));
-    std::fs::write(&rendered_path, rendered).ok()?;
-    let words = compile_shader_words_from_source_path(&rendered_path);
-    let _ = std::fs::remove_file(rendered_path);
-    words
-}
-
-#[cfg(test)]
 pub(crate) fn compile_shader_words_from_source_path(shader: &Path) -> Option<Vec<u32>> {
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,11 +91,6 @@ pub(crate) fn compile_shader_words_from_source_path(shader: &Path) -> Option<Vec
 }
 
 #[cfg(test)]
-pub(crate) fn compile_test_shader_words_from_source(shader_file: &str) -> Option<Vec<u32>> {
-    compile_shader_words_from_source(shader_file)
-}
-
-#[cfg(test)]
 fn test_command_exists(command: &str) -> bool {
     use std::process::{Command, Stdio};
 
@@ -148,6 +101,28 @@ fn test_command_exists(command: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, VulkanError> {
+    match std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX") {
+        Ok(raw_index) => {
+            let index = raw_index.parse::<usize>().unwrap_or_else(|error| {
+                panic!("invalid NERVE_TEST_VULKAN_DEVICE_INDEX {raw_index:?}: {error}")
+            });
+            let device = VulkanComputeDevice::new_for_physical_device_index(index)
+                .unwrap_or_else(|error| {
+                    panic!("explicit Vulkan test device index {index} could not be opened: {error}")
+                });
+            Ok(device)
+        }
+        Err(std::env::VarError::NotPresent) => Err(VulkanError(
+            "NERVE_TEST_VULKAN_DEVICE_INDEX is required for every Vulkan test".to_string(),
+        )),
+        Err(error) => Err(VulkanError(format!(
+            "could not read NERVE_TEST_VULKAN_DEVICE_INDEX: {error}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -746,7 +721,7 @@ mod tests {
 
     #[test]
     fn resident_byte_buffer_can_be_reused_for_raw_model_memory() {
-        let device = match VulkanComputeDevice::new() {
+        let device = match selected_test_vulkan_device() {
             Ok(device) => device,
             Err(error) => {
                 eprintln!("skipping Vulkan smoke: {error}");
@@ -771,7 +746,7 @@ mod tests {
             eprintln!("skipping Vulkan smoke: no GLSL to SPIR-V compiler found");
             return;
         };
-        let device = match VulkanComputeDevice::new() {
+        let device = match selected_test_vulkan_device() {
             Ok(device) => device,
             Err(error) => {
                 eprintln!("skipping Vulkan smoke: {error}");
@@ -1048,7 +1023,7 @@ mod tests {
             eprintln!("skipping Vulkan smoke: no GLSL to SPIR-V compiler found");
             return;
         };
-        let device = match VulkanComputeDevice::new() {
+        let device = match selected_test_vulkan_device() {
             Ok(device) => device,
             Err(error) => {
                 eprintln!("skipping Vulkan smoke: {error}");
@@ -1393,7 +1368,7 @@ mod tests {
             eprintln!("skipping Vulkan smoke: no GLSL to SPIR-V compiler found");
             return;
         };
-        let device = match VulkanComputeDevice::new() {
+        let device = match selected_test_vulkan_device() {
             Ok(device) => device,
             Err(error) => {
                 eprintln!("skipping Vulkan smoke: {error}");
@@ -1421,7 +1396,7 @@ mod tests {
 
     #[test]
     fn resident_byte_buffers_can_copy_on_device() {
-        let device = match VulkanComputeDevice::new() {
+        let device = match selected_test_vulkan_device() {
             Ok(device) => device,
             Err(error) => {
                 eprintln!("skipping Vulkan smoke: {error}");
@@ -1442,7 +1417,7 @@ mod tests {
 
     #[test]
     fn resident_byte_copy_binding_can_be_reused() {
-        let device = match VulkanComputeDevice::new() {
+        let device = match selected_test_vulkan_device() {
             Ok(device) => device,
             Err(error) => {
                 eprintln!("skipping Vulkan smoke: {error}");

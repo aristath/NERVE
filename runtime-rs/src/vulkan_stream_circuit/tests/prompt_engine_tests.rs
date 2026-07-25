@@ -1,6 +1,6 @@
 #[test]
 fn placed_prompt_engine_owns_streams_and_submits_input_events() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed prompt engine test: {error}");
@@ -684,7 +684,7 @@ fn placed_prompt_engine_returns_completion_from_a_boundary_closing_drain() {
 
 #[test]
 fn placed_prompt_engine_single_submit_runs_the_engine_queue() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed prompt engine single-submit queue test: {error}");
@@ -877,16 +877,14 @@ fn placed_prompt_engine_batches_fairly_and_cancels_between_physical_batches() {
 
 #[test]
 fn placed_prompt_engine_runs_queued_streams_until_idle() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed prompt engine run-until-idle test: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
@@ -920,7 +918,7 @@ fn placed_prompt_engine_runs_queued_streams_until_idle() {
     engine
         .enqueue_input_event(
             "stream_b",
-            VulkanResidentTokenInputEvent::new("event_b", vec![36_309], 1),
+            VulkanResidentTokenInputEvent::new("event_b", vec![4], 1),
         )
         .unwrap();
     engine
@@ -932,7 +930,7 @@ fn placed_prompt_engine_runs_queued_streams_until_idle() {
     engine
         .enqueue_input_event(
             "stream_b",
-            VulkanResidentTokenInputEvent::new("event_b_repeat", vec![36_309], 1),
+            VulkanResidentTokenInputEvent::new("event_b_repeat", vec![4], 1),
         )
         .unwrap();
     let queued_snapshot = engine.snapshot();
@@ -968,6 +966,8 @@ fn placed_prompt_engine_runs_queued_streams_until_idle() {
     assert_eq!(run.output_events[2].stream_id, "stream_b");
     assert_eq!(run.output_events[2].output_event.source_stream_tick, 2);
     assert_eq!(run.generated_token_ids.len(), 3);
+    assert_eq!(run.physical_multi_stream_batch_count, 0);
+    assert_eq!(run.max_physical_multi_stream_batch_width, 0);
     assert!(!run.start_snapshot.idle);
     assert!(run.end_snapshot.idle);
     assert_eq!(run.end_snapshot.active_stream_count, 0);
@@ -1024,7 +1024,7 @@ fn placed_prompt_engine_batches_input_events_across_streams() {
             vec![
                 VulkanResidentInProcessPlacedPromptEngineInputRequest::new(
                     "stream_b",
-                    VulkanResidentTokenInputEvent::new("event_b", vec![36_309], 1),
+                    VulkanResidentTokenInputEvent::new("event_b", vec![4], 1),
                 ),
                 VulkanResidentInProcessPlacedPromptEngineInputRequest::new(
                     "stream_a",
@@ -1058,6 +1058,8 @@ fn placed_prompt_engine_batches_input_events_across_streams() {
     assert_eq!(batch.output_events[0].stream_id, "stream_b");
     assert_eq!(batch.output_events[1].stream_id, "stream_a");
     assert_eq!(batch.generated_token_ids.len(), 2);
+    assert!(batch.engine_run.physical_multi_stream_batch_count > 0);
+    assert_eq!(batch.engine_run.max_physical_multi_stream_batch_width, 2);
     assert!(engine.snapshot().idle);
 }
 
@@ -1141,16 +1143,14 @@ fn placed_prompt_engine_overlaps_resident_feedback_windows_across_streams() {
 
 #[test]
 fn placed_prompt_engine_preserves_queued_work_at_input_event_budget() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed prompt engine budget test: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let device = Rc::new(device);
@@ -1179,7 +1179,7 @@ fn placed_prompt_engine_preserves_queued_work_at_input_event_budget() {
     engine
         .enqueue_input_event(
             "main",
-            VulkanResidentTokenInputEvent::new("event_b", vec![36_309], 1),
+            VulkanResidentTokenInputEvent::new("event_b", vec![4], 1),
         )
         .unwrap();
 
@@ -1228,7 +1228,7 @@ fn placed_prompt_engine_preserves_queued_work_at_input_event_budget() {
 
 #[test]
 fn placed_model_package_runs_runtime_graphed_duplicate_layer() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed model package duplicate layer runtime graph: {error}");
@@ -1244,9 +1244,9 @@ fn placed_model_package_runs_runtime_graphed_duplicate_layer() {
         .unwrap();
     let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
         .unwrap()
-        .duplicate_after_instance(&source_graph, "layer_05", "layer_05_repeat")
+        .duplicate_after_instance(&source_graph, "layer_00", "layer_00_repeat")
         .unwrap()
-        .with_instance_device("layer_05_repeat", "gpu1")
+        .with_instance_device("layer_00_repeat", "gpu1")
         .unwrap();
     let runtime_model = manifest.mount_runtime_graph(&runtime_graph).unwrap();
 
@@ -1264,7 +1264,7 @@ fn placed_model_package_runs_runtime_graphed_duplicate_layer() {
         .unwrap();
     assert_eq!(placed_model.device_ids, vec!["gpu0", "gpu1"]);
     assert_eq!(placed_model.device_count, 2);
-    assert_eq!(placed_model.hosted_component_count, 15);
+    assert_eq!(placed_model.hosted_component_count, 2);
     assert_eq!(placed_package.device("gpu1").unwrap().hosted_component_count, 1);
 
     let run = placed_package
@@ -1275,6 +1275,7 @@ fn placed_model_package_runs_runtime_graphed_duplicate_layer() {
         run.tick_run.placed_run.status,
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed
     );
-    assert!(run.tick_run.placed_run.completed_stage_delta > 204);
+    // Nine component kernels per instance plus both logical-device boundary stages.
+    assert_eq!(run.tick_run.placed_run.completed_stage_delta, 20);
     assert_eq!(run.sampler_run.descriptor_count, 5);
 }

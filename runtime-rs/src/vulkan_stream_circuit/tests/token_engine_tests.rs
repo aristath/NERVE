@@ -1,12 +1,6 @@
 #[test]
 fn resident_token_runtime_queues_events_and_runs_bounded_cycles() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token runtime cycle: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
         "resident token runtime cycle",
@@ -30,7 +24,7 @@ fn resident_token_runtime_queues_events_and_runs_bounded_cycles() {
     assert_eq!(queued_first.pending_input_event_count, 1);
     let queued_second = runtime
         .enqueue_input_event(
-            VulkanResidentTokenInputEvent::new("event_1", vec![36_309], 1).with_origin("test_host"),
+            VulkanResidentTokenInputEvent::new("event_1", vec![4], 1).with_origin("test_host"),
         )
         .unwrap();
     assert_eq!(queued_second.pending_input_event_count, 2);
@@ -137,13 +131,7 @@ fn resident_token_runtime_queues_events_and_runs_bounded_cycles() {
 
 #[test]
 fn resident_token_runtime_scheduler_round_robins_registered_runtime() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token runtime scheduler: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
         "resident token runtime scheduler",
@@ -185,7 +173,7 @@ fn resident_token_runtime_scheduler_round_robins_registered_runtime() {
     let queued_second = scheduler
         .enqueue_input_event(
             "scheduler_stream_0",
-            VulkanResidentTokenInputEvent::new("event_1", vec![36_309], 1).with_origin("test_host"),
+            VulkanResidentTokenInputEvent::new("event_1", vec![4], 1).with_origin("test_host"),
         )
         .unwrap();
     assert_eq!(queued_second.pending_input_event_count, 2);
@@ -323,32 +311,23 @@ fn resident_token_id_text_codec_encodes_and_decodes_numeric_token_text() {
 #[cfg(feature = "tokenizers")]
 #[test]
 fn resident_hf_tokenizer_text_codec_loads_fixture_model_tokenizer_json() {
-    let Some(codec) = fixture_model_tokenizer_codec_or_skip("resident hf tokenizer text codec")
-    else {
-        return;
-    };
+    let codec = fixture_model_tokenizer_codec("resident hf tokenizer text codec");
 
     assert!(codec.add_special_tokens());
     assert!(codec.skip_special_tokens());
-    assert_eq!(codec.encode_text("Hello").unwrap(), vec![1, 36_309]);
-    assert_eq!(codec.decode_tokens(&[1, 36_309]).unwrap(), "Hello");
+    assert_eq!(codec.encode_text("token_04").unwrap(), vec![4]);
+    assert_eq!(codec.decode_tokens(&[4]).unwrap(), "token_04");
 
     let codec_with_specials = codec.with_skip_special_tokens(false);
     assert_eq!(
-        codec_with_specials.decode_tokens(&[1, 36_309]).unwrap(),
-        "<|startoftext|>Hello"
+        codec_with_specials.decode_tokens(&[1, 4]).unwrap(),
+        "[BOS] token_04"
     );
 }
 
 #[test]
 fn resident_token_engine_owns_device_scheduler_and_registered_stream() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token engine: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
         "resident token engine",
@@ -364,8 +343,11 @@ fn resident_token_engine_owns_device_scheduler_and_registered_stream() {
     assert!(!initial.device_name.is_empty());
     assert_eq!(initial.streams.len(), 1);
     assert_eq!(initial.streams[0].stream_id, "engine_stream_0");
-    assert_eq!(initial.streams[0].device_id, "gpu0");
-    assert_eq!(initial.streams[0].component_count, 14);
+    assert_eq!(
+        initial.streams[0].device_id,
+        RUNTIME_DEFAULT_LOGICAL_DEVICE_ID
+    );
+    assert_eq!(initial.streams[0].component_count, 1);
     assert_eq!(initial.streams[0].dynamic_state_capacity_activations, 8);
     assert_eq!(initial.scheduler.registered_runtime_count, 1);
     assert_eq!(initial.scheduler.active_runtime_count, 0);
@@ -384,12 +366,12 @@ fn resident_token_engine_owns_device_scheduler_and_registered_stream() {
     assert_eq!(submitted_text.input_event_id, "event_0");
     assert_eq!(submitted_text.input_text, "1");
     assert_eq!(submitted_text.encoded_token_ids, vec![1]);
-    assert_eq!(submitted_text.generated_text, "1 1");
+    assert_eq!(submitted_text.generated_text, "16 16");
     let submitted = submitted_text.submitted_tokens;
     assert_eq!(submitted.stream_id, "engine_stream_0");
     assert_eq!(submitted.input_event_id, "event_0");
     assert_eq!(submitted.queued_input_event.pending_input_event_count, 1);
-    assert_eq!(submitted.generated_token_ids, vec![1, 1]);
+    assert_eq!(submitted.generated_token_ids, vec![16, 16]);
     assert_eq!(submitted.output_events.len(), 2);
     assert!(
         submitted
@@ -420,13 +402,7 @@ fn resident_token_engine_owns_device_scheduler_and_registered_stream() {
 
 #[test]
 fn resident_token_engine_drains_text_output_cycle_by_cycle() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token text cycle engine: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
         "resident token text cycle engine",
@@ -453,8 +429,8 @@ fn resident_token_engine_drains_text_output_cycle_by_cycle() {
         first.scheduler_run.stop_condition,
         VulkanResidentTokenRuntimeSchedulerStopCondition::RuntimeCycleBudget
     );
-    assert_eq!(first.generated_token_ids, vec![1, 1]);
-    assert_eq!(first.generated_text, "1 1");
+    assert_eq!(first.generated_token_ids, vec![16, 16]);
+    assert_eq!(first.generated_text, "16 16");
     assert_eq!(
         first
             .output_events
@@ -470,8 +446,8 @@ fn resident_token_engine_drains_text_output_cycle_by_cycle() {
             })
             .collect::<Vec<_>>(),
         vec![
-            ("engine_text_cycle", "event_0", 0, 1, "1"),
-            ("engine_text_cycle", "event_0", 1, 1, "1")
+            ("engine_text_cycle", "event_0", 0, 16, "16"),
+            ("engine_text_cycle", "event_0", 1, 16, "16")
         ]
     );
 
@@ -488,13 +464,7 @@ fn resident_token_engine_drains_text_output_cycle_by_cycle() {
 
 #[test]
 fn resident_token_engine_live_text_turn_accumulates_filtered_outputs() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token live text turn engine: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
         "resident token live text turn engine",
@@ -528,9 +498,9 @@ fn resident_token_engine_live_text_turn_accumulates_filtered_outputs() {
     assert_eq!(turn.queued_input_event.encoded_token_ids, vec![1]);
     assert_eq!(turn.scheduler_turn_count(), 2);
     assert_eq!(turn.runtime_cycle_count, 2);
-    assert_eq!(turn.generated_token_ids, vec![1, 1]);
-    assert_eq!(turn.generated_text, "1 1");
-    assert_eq!(turn.output_text, "1 1 1");
+    assert_eq!(turn.generated_token_ids, vec![16, 16]);
+    assert_eq!(turn.generated_text, "16 16");
+    assert_eq!(turn.output_text, "1 16 16");
     assert_eq!(
         turn.stop_condition,
         VulkanResidentTokenEngineRunStopCondition::Idle
@@ -549,13 +519,7 @@ fn resident_token_engine_live_text_turn_accumulates_filtered_outputs() {
 
 #[test]
 fn resident_token_engine_live_text_batch_round_robins_shared_model_streams() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token live text batch streams: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let model = fixture_model_resident_greedy_model(&device, 8).unwrap();
     let mut engine = VulkanResidentTokenEngine::new(device);
     engine
@@ -596,19 +560,19 @@ fn resident_token_engine_live_text_batch_round_robins_shared_model_streams() {
     assert_eq!(batch.scheduler_turn_count(), 2);
     assert_eq!(batch.runtime_cycle_count, 4);
     assert_eq!(batch.output_events.len(), 4);
-    assert_eq!(batch.generated_token_ids, vec![1, 1, 1, 1]);
-    assert_eq!(batch.generated_text, "1 1 1 1");
+    assert_eq!(batch.generated_token_ids, vec![16, 16, 16, 16]);
+    assert_eq!(batch.generated_text, "16 16 16 16");
     assert_eq!(
         batch.stop_condition,
         VulkanResidentTokenEngineRunStopCondition::Idle
     );
     assert_eq!(
         batch.generated_token_ids_for("text_batch_stream_a", "event_a"),
-        vec![1, 1]
+        vec![16, 16]
     );
     assert_eq!(
         batch.generated_token_ids_for("text_batch_stream_b", "event_b"),
-        vec![1, 1]
+        vec![16, 16]
     );
     assert_eq!(
         batch
@@ -631,18 +595,8 @@ fn resident_token_engine_live_text_batch_round_robins_shared_model_streams() {
 #[cfg(feature = "tokenizers")]
 #[test]
 fn resident_token_engine_accepts_hf_tokenizer_text_input() {
-    let Some(codec) =
-        fixture_model_tokenizer_codec_or_skip("resident token engine hf tokenizer input")
-    else {
-        return;
-    };
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token engine hf tokenizer input: {error}");
-            return;
-        }
-    };
+    let codec = fixture_model_tokenizer_codec("resident token engine hf tokenizer input");
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
         "resident token engine hf tokenizer input",
@@ -659,7 +613,7 @@ fn resident_token_engine_accepts_hf_tokenizer_text_input() {
             VulkanResidentTokenEngineTextInputRequest::new(
                 "engine_text_stream",
                 "hello_event",
-                "Hello",
+                "token_04",
                 1,
             )
             .with_origin("test_host"),
@@ -670,8 +624,8 @@ fn resident_token_engine_accepts_hf_tokenizer_text_input() {
 
     assert_eq!(submitted.stream_id, "engine_text_stream");
     assert_eq!(submitted.input_event_id, "hello_event");
-    assert_eq!(submitted.input_text, "Hello");
-    assert_eq!(submitted.encoded_token_ids, vec![1, 36_309]);
+    assert_eq!(submitted.input_text, "token_04");
+    assert_eq!(submitted.encoded_token_ids, vec![4]);
     assert_eq!(submitted.submitted_tokens.generated_token_ids.len(), 1);
     assert_eq!(
         submitted.generated_text,
@@ -688,13 +642,7 @@ fn resident_token_engine_accepts_hf_tokenizer_text_input() {
 
 #[test]
 fn resident_token_engine_creates_two_streams_from_one_shared_model() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token shared model streams: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let model = fixture_model_resident_greedy_model(&device, 8).unwrap();
     let mut engine = VulkanResidentTokenEngine::new(device);
     let loaded_model = engine
@@ -774,11 +722,11 @@ fn resident_token_engine_creates_two_streams_from_one_shared_model() {
 
     assert_eq!(
         generated_by_stream.get("shared_stream_a"),
-        Some(&vec![1, 1])
+        Some(&vec![16, 16])
     );
     assert_eq!(
         generated_by_stream.get("shared_stream_b"),
-        Some(&vec![1, 1])
+        Some(&vec![16, 16])
     );
     let final_snapshot = run.end_snapshot;
     assert_eq!(final_snapshot.models[0].registered_stream_count, 2);
@@ -796,4 +744,3 @@ fn resident_token_engine_creates_two_streams_from_one_shared_model() {
     assert_eq!(runtime_a.pending_input_event_count, 0);
     assert_eq!(runtime_b.pending_input_event_count, 0);
 }
-

@@ -1,21 +1,23 @@
 #[test]
 fn placed_tick_plan_interleaves_cross_device_edges_with_hosted_components() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping interleaved placed tick plan: {error}");
             return;
         }
     };
-    let graph = fixture_model_execution_graph();
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
+    let graph = runtime_model
+        .circuit_graph
+        .to_signal_processor_graph(tiny_model_dir())
+        .unwrap();
     let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
     let execution_plan =
         StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
     let resource_plan =
         StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
-    let placement_spec =
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1");
-    let placement_plan = graph.placement_plan(&placement_spec).unwrap();
+    let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();
 
     let gpu0_resident = VulkanPlacedStreamCircuitResidentPlan::from_resource_plan_for_device(
         &resource_plan,
@@ -51,11 +53,10 @@ fn placed_tick_plan_interleaves_cross_device_edges_with_hosted_components() {
             matches!(
                 stage,
                 VulkanMountedPlacedStreamTickStage::PublishEdge {
-                    edge_index: 1,
                     remote_device_id,
                     remote_component_id,
                     ..
-                } if remote_device_id == "gpu1" && remote_component_id == "layer_02"
+                } if remote_device_id == "gpu1" && remote_component_id == "layer_00_remote"
             )
         })
         .unwrap();
@@ -66,15 +67,14 @@ fn placed_tick_plan_interleaves_cross_device_edges_with_hosted_components() {
             matches!(
                 stage,
                 VulkanMountedPlacedStreamTickStage::ReceiveEdge {
-                    edge_index: 2,
                     remote_device_id,
                     remote_component_id,
                     ..
-                } if remote_device_id == "gpu1" && remote_component_id == "layer_02"
+                } if remote_device_id == "gpu1" && remote_component_id == "layer_00_remote"
             )
         })
         .unwrap();
-    let first_layer_03_dispatch_index = tick_plan
+    let first_tail_dispatch_index = tick_plan
         .stages
         .iter()
         .position(|stage| {
@@ -83,7 +83,7 @@ fn placed_tick_plan_interleaves_cross_device_edges_with_hosted_components() {
                 VulkanMountedPlacedStreamTickStage::Dispatch {
                     dispatch,
                     ..
-                } if dispatch.component_id == "layer_03" && dispatch.node_id == "operator_norm"
+                } if dispatch.component_id == "layer_00_tail" && dispatch.node_id == "operator_norm"
             )
         })
         .unwrap();
@@ -95,23 +95,21 @@ fn placed_tick_plan_interleaves_cross_device_edges_with_hosted_components() {
         "gpu0 must publish its prefix output before waiting for the remote layer output"
     );
     assert!(
-        receive_from_gpu1_index < first_layer_03_dispatch_index,
+        receive_from_gpu1_index < first_tail_dispatch_index,
         "gpu0 must receive the remote layer output before running the downstream suffix"
     );
 }
 
 #[test]
 fn resident_stream_tick_executes_split_device_slice_and_publishes_output_edge() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping resident split-device stream tick: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -135,20 +133,24 @@ fn resident_stream_tick_executes_split_device_slice_and_publishes_output_edge() 
     let gpu1 = gpu1_slice.create_mounted_stream_circuit(&device).unwrap();
     gpu0.buffers.zero_state_buffers().unwrap();
     gpu1.buffers.zero_state_buffers().unwrap();
+    let outgoing_edge_index = gpu0.edge_io.outgoing_buffers[0].endpoint.edge_index;
+    let return_edge_index = gpu1.edge_io.outgoing_buffers[0].endpoint.edge_index;
 
-    let mut layer_01_to_02 = Vec::with_capacity(2_048);
-    for _ in 0..1_024 {
-        layer_01_to_02.extend_from_slice(&[0x80, 0x3f]);
+    let mut layer_00_to_remote = Vec::with_capacity(FIXTURE_MODEL_FRAME_BYTES);
+    for _ in 0..FIXTURE_MODEL_HIDDEN_SIZE {
+        layer_00_to_remote.extend_from_slice(&[0x80, 0x3f]);
     }
     gpu0.edge_io
-        .outgoing_buffer(1)
+        .outgoing_buffer(outgoing_edge_index)
         .unwrap()
         .buffer
-        .write_bytes(&layer_01_to_02)
+        .write_bytes(&layer_00_to_remote)
         .unwrap();
 
     let mut transport = VulkanInProcessPlacedEdgeTransport::new();
-    transport.publish_outgoing_edge(&gpu0, 1).unwrap();
+    transport
+        .publish_outgoing_edge(&gpu0, outgoing_edge_index)
+        .unwrap();
 
     let reusable_manifest = resident_package_reusable_kernel_manifest(&gpu1.placed_plan);
     let gpu1_bound = gpu1
@@ -170,21 +172,24 @@ fn resident_stream_tick_executes_split_device_slice_and_publishes_output_edge() 
         run.tick_run.status,
         VulkanMountedPlacedStreamTickRunStatus::Completed
     );
-    assert_eq!(run.tick_run.attempted_stage_count, 18);
-    assert_eq!(run.tick_run.completed_stage_count, 18);
+    assert_eq!(run.tick_run.attempted_stage_count, 11);
+    assert_eq!(run.tick_run.completed_stage_count, 11);
     assert_eq!(run.tick_run.pending_stage_count, 0);
     assert!(run.tick_run.can_execute);
-    assert_eq!(run.execution_graph_dispatch_count(), 16);
+    assert_eq!(run.execution_graph_dispatch_count(), 9);
     assert_eq!(
         run.execution_graph_run.as_ref().unwrap().component_ids(),
-        vec!["layer_02"]
+        vec!["layer_00_remote"]
     );
 
-    let kv_memory = gpu1.buffers.state_buffer("layer_02", "kv_memory").unwrap();
+    let kv_memory = gpu1
+        .buffers
+        .state_buffer("layer_00_remote", "kv_memory")
+        .unwrap();
     assert_ne!(kv_memory.buffer.read_bytes(16).unwrap(), vec![0; 16]);
 
     let output_packet_key = VulkanPlacedEdgePacketKey {
-        edge_index: 2,
+        edge_index: return_edge_index,
         from_device_id: "gpu1".to_string(),
         to_device_id: "gpu0".to_string(),
     };
@@ -194,22 +199,23 @@ fn resident_stream_tick_executes_split_device_slice_and_publishes_output_edge() 
     let received_back = transport.receive_available_incoming_edges(&gpu0).unwrap();
     assert_eq!(received_back.received.len(), 1);
     assert_eq!(received_back.received[0].key, output_packet_key);
-    assert_eq!(received_back.received[0].byte_count, 2_048);
+    assert_eq!(
+        received_back.received[0].byte_count,
+        FIXTURE_MODEL_FRAME_BYTES
+    );
     assert_eq!(received_back.missing_packets.len(), 0);
 }
 
 #[test]
 fn resident_stream_tick_cursor_resumes_split_prefix_and_suffix_without_rerunning_prefix() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping resident split cursor stream tick: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -233,9 +239,11 @@ fn resident_stream_tick_cursor_resumes_split_prefix_and_suffix_without_rerunning
     let gpu1 = gpu1_slice.create_mounted_stream_circuit(&device).unwrap();
     gpu0.buffers.zero_state_buffers().unwrap();
     gpu1.buffers.zero_state_buffers().unwrap();
+    let outgoing_edge_index = gpu0.edge_io.outgoing_buffers[0].endpoint.edge_index;
+    let return_edge_index = gpu1.edge_io.outgoing_buffers[0].endpoint.edge_index;
 
-    let mut input_frame = Vec::with_capacity(2_048);
-    for _ in 0..1_024 {
+    let mut input_frame = Vec::with_capacity(FIXTURE_MODEL_FRAME_BYTES);
+    for _ in 0..FIXTURE_MODEL_HIDDEN_SIZE {
         input_frame.extend_from_slice(&[0x80, 0x3f]);
     }
     gpu0.boundary_io
@@ -283,20 +291,22 @@ fn resident_stream_tick_cursor_resumes_split_prefix_and_suffix_without_rerunning
         }
         ref status => panic!("expected gpu0 prefix to block on remote return, got {status:?}"),
     };
-    assert_eq!(gpu0_prefix.completed_stage_delta, 27);
-    assert_eq!(gpu0_prefix_run.execution_graph_dispatch_count(), 26);
+    assert_eq!(gpu0_prefix.completed_stage_delta, 10);
+    assert_eq!(gpu0_prefix_run.execution_graph_dispatch_count(), 9);
     assert!(matches!(
         gpu0_prefix_run.tick_run.stages[blocked_stage_index].stage,
         VulkanMountedPlacedStreamTickStage::ReceiveEdge {
-            edge_index: 2,
+            edge_index,
             ref remote_device_id,
             ref remote_component_id,
             ..
-        } if remote_device_id == "gpu1" && remote_component_id == "layer_02"
+        } if edge_index == return_edge_index
+            && remote_device_id == "gpu1"
+            && remote_component_id == "layer_00_remote"
     ));
     assert_eq!(transport.packet_count(), 1);
     assert!(transport.contains_packet(&VulkanPlacedEdgePacketKey {
-        edge_index: 1,
+        edge_index: outgoing_edge_index,
         from_device_id: "gpu0".to_string(),
         to_device_id: "gpu1".to_string(),
     }));
@@ -312,10 +322,10 @@ fn resident_stream_tick_cursor_resumes_split_prefix_and_suffix_without_rerunning
         .unwrap();
     let gpu1_remote_run = gpu1_cursor.snapshot();
     assert!(gpu1_remote.completed);
-    assert_eq!(gpu1_remote_run.execution_graph_dispatch_count(), 16);
+    assert_eq!(gpu1_remote_run.execution_graph_dispatch_count(), 9);
     assert_eq!(transport.packet_count(), 1);
     assert!(transport.contains_packet(&VulkanPlacedEdgePacketKey {
-        edge_index: 2,
+        edge_index: return_edge_index,
         from_device_id: "gpu1".to_string(),
         to_device_id: "gpu0".to_string(),
     }));
@@ -335,16 +345,16 @@ fn resident_stream_tick_cursor_resumes_split_prefix_and_suffix_without_rerunning
         gpu0_suffix_run.tick_run.status,
         VulkanMountedPlacedStreamTickRunStatus::Completed
     );
-    assert_eq!(gpu0_suffix_run.tick_run.completed_stage_count, 186);
-    assert_eq!(gpu0_suffix_run.execution_graph_dispatch_count(), 184);
+    assert_eq!(gpu0_suffix_run.tick_run.completed_stage_count, 20);
+    assert_eq!(gpu0_suffix_run.execution_graph_dispatch_count(), 18);
     assert_eq!(transport.packet_count(), 0);
     assert_eq!(
         gpu0_cursor
             .component_runs
             .iter()
             .map(|run| run.component_id.as_str())
-            .collect::<Vec<_>>()[..3],
-        ["layer_00", "layer_01", "layer_03"]
+            .collect::<Vec<_>>(),
+        ["layer_00", "layer_00_tail"]
     );
 
     let output = gpu0
@@ -359,16 +369,14 @@ fn resident_stream_tick_cursor_resumes_split_prefix_and_suffix_without_rerunning
 
 #[test]
 fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping in-process resident split runner: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -393,8 +401,8 @@ fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
     gpu0.buffers.zero_state_buffers().unwrap();
     gpu1.buffers.zero_state_buffers().unwrap();
 
-    let mut input_frame = Vec::with_capacity(2_048);
-    for _ in 0..1_024 {
+    let mut input_frame = Vec::with_capacity(FIXTURE_MODEL_FRAME_BYTES);
+    for _ in 0..FIXTURE_MODEL_HIDDEN_SIZE {
         input_frame.extend_from_slice(&[0x80, 0x3f]);
     }
     gpu0.boundary_io
@@ -462,7 +470,7 @@ fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
     assert_eq!(run.scheduler_turn_count, 2);
     assert_eq!(run.completed_slice_count, 2);
     assert_eq!(run.pending_slice_count, 0);
-    assert_eq!(run.completed_stage_delta, 204);
+    assert_eq!(run.completed_stage_delta, 31);
     assert_eq!(run.transport_stats.pending_packet_count, 0);
     assert_eq!(run.transport_stats.pending_byte_count, 0);
     assert_eq!(run.transport_stats.pending_direct_edge_count, 0);
@@ -472,9 +480,15 @@ fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
     assert_eq!(run.transport_stats.received_packet_count, 0);
     assert_eq!(run.transport_stats.received_byte_count, 0);
     assert_eq!(run.transport_stats.direct_copy_count, 2);
-    assert_eq!(run.transport_stats.direct_copy_byte_count, 4096);
+    assert_eq!(
+        run.transport_stats.direct_copy_byte_count,
+        2 * FIXTURE_MODEL_FRAME_BYTES
+    );
     assert_eq!(run.transport_stats.direct_receive_count, 2);
-    assert_eq!(run.transport_stats.direct_receive_byte_count, 4096);
+    assert_eq!(
+        run.transport_stats.direct_receive_byte_count,
+        2 * FIXTURE_MODEL_FRAME_BYTES
+    );
     assert_eq!(transport.direct_edge_binding_count(), 2);
     assert_eq!(transport.packet_count(), 0);
 
@@ -488,10 +502,10 @@ fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
         .iter()
         .find(|run| run.tick_run.device_id == "gpu1")
         .unwrap();
-    assert_eq!(gpu0_run.tick_run.completed_stage_count, 186);
-    assert_eq!(gpu0_run.execution_graph_dispatch_count(), 184);
-    assert_eq!(gpu1_run.tick_run.completed_stage_count, 18);
-    assert_eq!(gpu1_run.execution_graph_dispatch_count(), 16);
+    assert_eq!(gpu0_run.tick_run.completed_stage_count, 20);
+    assert_eq!(gpu0_run.execution_graph_dispatch_count(), 18);
+    assert_eq!(gpu1_run.tick_run.completed_stage_count, 11);
+    assert_eq!(gpu1_run.execution_graph_dispatch_count(), 9);
 
     let output = gpu0
         .boundary_io
@@ -505,16 +519,14 @@ fn in_process_resident_stream_tick_runner_completes_split_package_slices() {
 
 #[test]
 fn placed_model_package_runs_split_stream_tick_in_process() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed model package split stream tick: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -532,15 +544,15 @@ fn placed_model_package_runs_split_stream_tick_in_process() {
         .unwrap();
     assert_eq!(placed_model.device_ids, vec!["gpu0", "gpu1"]);
     assert_eq!(placed_model.device_count, 2);
-    assert_eq!(placed_model.hosted_component_count, 14);
+    assert_eq!(placed_model.hosted_component_count, 3);
     assert_eq!(
         placed_package.device("gpu0").unwrap().hosted_component_count,
-        13
+        2
     );
     assert_eq!(placed_package.device("gpu1").unwrap().hosted_component_count, 1);
 
-    let mut input_frame = Vec::with_capacity(2_048);
-    for _ in 0..1_024 {
+    let mut input_frame = Vec::with_capacity(FIXTURE_MODEL_FRAME_BYTES);
+    for _ in 0..FIXTURE_MODEL_HIDDEN_SIZE {
         input_frame.extend_from_slice(&[0x80, 0x3f]);
     }
     placed_package
@@ -561,15 +573,21 @@ fn placed_model_package_runs_split_stream_tick_in_process() {
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed
     );
     assert_eq!(run.scheduler_turn_count, 2);
-    assert_eq!(run.completed_stage_delta, 204);
+    assert_eq!(run.completed_stage_delta, 31);
     assert_eq!(run.transport_stats.pending_packet_count, 0);
     assert_eq!(run.transport_stats.pending_direct_edge_count, 0);
     assert_eq!(run.transport_stats.published_packet_count, 0);
     assert_eq!(run.transport_stats.received_packet_count, 0);
     assert_eq!(run.transport_stats.direct_copy_count, 2);
-    assert_eq!(run.transport_stats.direct_copy_byte_count, 4096);
+    assert_eq!(
+        run.transport_stats.direct_copy_byte_count,
+        2 * FIXTURE_MODEL_FRAME_BYTES
+    );
     assert_eq!(run.transport_stats.direct_receive_count, 2);
-    assert_eq!(run.transport_stats.direct_receive_byte_count, 4096);
+    assert_eq!(
+        run.transport_stats.direct_receive_byte_count,
+        2 * FIXTURE_MODEL_FRAME_BYTES
+    );
 
     let output = placed_package
         .mounted_device("gpu0")
@@ -585,16 +603,14 @@ fn placed_model_package_runs_split_stream_tick_in_process() {
 
 #[test]
 fn placed_model_package_runs_split_single_token_tick_and_sampler() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed model package split token tick: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
     let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
@@ -612,18 +628,18 @@ fn placed_model_package_runs_split_single_token_tick_and_sampler() {
         .create_stream_processor_for_devices(&device, 0)
         .unwrap();
     assert_eq!(placed_model.input_device_id, "gpu0");
-    assert_eq!(placed_model.output_device_id, "gpu1");
-    assert_eq!(placed_model.transducer_parameter_count, 3);
+    assert_eq!(placed_model.output_device_id, "gpu0");
+    assert_eq!(placed_model.transducer_parameter_count, 2);
     assert_eq!(
         placed_model.transducer_parameter_bytes,
-        2 * FIXTURE_MODEL_EMBED_TOKENS_BYTES + 2_048
+        FIXTURE_MODEL_EMBED_TOKENS_BYTES + 2 * FIXTURE_MODEL_HIDDEN_SIZE
     );
 
     let run = placed_package
         .sample_token_id_stream_tick_in_process(&device, 1, 0)
         .unwrap();
     assert_eq!(run.tick_run.input_device_id, "gpu0");
-    assert_eq!(run.tick_run.output_device_id, "gpu1");
+    assert_eq!(run.tick_run.output_device_id, "gpu0");
     assert_eq!(run.tick_run.token_id, 1);
     assert_eq!(run.tick_run.stream_tick, 0);
     assert_eq!(run.tick_run.input_run.dispatch_count, 1);
@@ -631,11 +647,11 @@ fn placed_model_package_runs_split_single_token_tick_and_sampler() {
         run.tick_run.placed_run.status,
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed
     );
-    assert_eq!(run.tick_run.placed_run.completed_stage_delta, 204);
+    assert_eq!(run.tick_run.placed_run.completed_stage_delta, 31);
     assert_eq!(run.tick_run.output_run.as_ref().unwrap().dispatch_count, 2);
     assert_eq!(run.sampler_run.descriptor_count, 5);
-    assert_eq!(run.sampler_run.token_id, 1);
-    assert_eq!(run.sampler_run.selected_logit_bits, 1_100_541_195);
+    assert_eq!(run.sampler_run.token_id, 16);
+    assert_eq!(run.sampler_run.selected_logit_bits, 1_073_049_524);
 
     let input_frame = placed_package
         .mounted_device("gpu0")
@@ -654,16 +670,14 @@ fn placed_model_package_runs_split_single_token_tick_and_sampler() {
 
 #[test]
 fn placed_model_package_runs_split_greedy_feedback_loop() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed model package split feedback loop: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -684,44 +698,92 @@ fn placed_model_package_runs_split_greedy_feedback_loop() {
         .unwrap();
 
     assert_eq!(run.input_device_id, "gpu0");
-    assert_eq!(run.output_device_id, "gpu1");
+    assert_eq!(run.output_device_id, "gpu0");
     assert_eq!(run.initial_token_id, 1);
-    assert_eq!(run.sampled_token_ids, vec![1, 1]);
+    assert_eq!(run.sampled_token_ids, vec![16, 16]);
     assert_eq!(run.tick_runs.len(), 2);
     assert_eq!(run.tick_runs[0].stream_tick, 0);
     assert_eq!(run.tick_runs[0].input_token_id, 1);
-    assert_eq!(run.tick_runs[0].sampled_token_id, 1);
+    assert_eq!(run.tick_runs[0].sampled_token_id, 16);
     assert_eq!(run.tick_runs[1].stream_tick, 1);
-    assert_eq!(run.tick_runs[1].input_token_id, 1);
-    assert_eq!(run.tick_runs[1].sampled_token_id, 1);
+    assert_eq!(run.tick_runs[1].input_token_id, 16);
+    assert_eq!(run.tick_runs[1].sampled_token_id, 16);
     assert_eq!(
         run.tick_runs
             .iter()
             .map(|tick| tick.tick_run.sampler_run.selected_logit_bits)
             .collect::<Vec<_>>(),
-        vec![1_100_541_195, 1_101_457_177]
+        vec![1_073_049_524, 1_075_417_056]
     );
     assert_eq!(
         run.tick_runs
             .iter()
             .map(|tick| tick.tick_run.tick_run.placed_run.completed_stage_delta)
             .collect::<Vec<_>>(),
-        vec![204, 204]
+        vec![31, 31]
     );
+
+    let gpu0_states = &placed_package
+        .device("gpu0")
+        .unwrap()
+        .mounted
+        .buffers
+        .state_buffers;
+    let gpu1_states = &placed_package
+        .device("gpu1")
+        .unwrap()
+        .mounted
+        .buffers
+        .state_buffers;
+    assert_eq!(gpu0_states.len(), 2);
+    assert_eq!(gpu1_states.len(), 1);
+    assert_eq!(gpu0_states[0].component_id, "layer_00");
+    assert_eq!(gpu0_states[1].component_id, "layer_00_tail");
+    assert_eq!(gpu1_states[0].component_id, "layer_00_remote");
+    assert!(!std::ptr::eq(&gpu0_states[0].buffer, &gpu0_states[1].buffer));
+
+    let source_original = gpu0_states[0]
+        .buffer
+        .read_bytes(gpu0_states[0].byte_capacity)
+        .unwrap();
+    let tail_original = gpu0_states[1]
+        .buffer
+        .read_bytes(gpu0_states[1].byte_capacity)
+        .unwrap();
+    let remote_original = gpu1_states[0]
+        .buffer
+        .read_bytes(gpu1_states[0].byte_capacity)
+        .unwrap();
+    let mut source_mutated = source_original.clone();
+    *source_mutated.last_mut().unwrap() ^= 0xff;
+    gpu0_states[0].buffer.write_bytes(&source_mutated).unwrap();
+    assert_eq!(
+        gpu0_states[1]
+            .buffer
+            .read_bytes(gpu0_states[1].byte_capacity)
+            .unwrap(),
+        tail_original
+    );
+    assert_eq!(
+        gpu1_states[0]
+            .buffer
+            .read_bytes(gpu1_states[0].byte_capacity)
+            .unwrap(),
+        remote_original
+    );
+    gpu0_states[0].buffer.write_bytes(&source_original).unwrap();
 }
 
 #[test]
 fn placed_model_package_drains_split_prompt_event_before_feedback() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) => {
             eprintln!("skipping placed model package split prompt event: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
-    );
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
     let manifest_path = fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
 
@@ -743,29 +805,35 @@ fn placed_model_package_drains_split_prompt_event_before_feedback() {
     let submitted = stream
         .submit_input_event(VulkanResidentTokenInputEvent::new(
             "split_prompt",
-            vec![1, 36_309],
+            vec![1, 4],
             1,
         ))
         .unwrap();
     let run = &submitted.session_run.run;
 
     assert_eq!(run.input_device_id, "gpu0");
-    assert_eq!(run.output_device_id, "gpu1");
-    assert_eq!(run.prompt_token_ids, vec![1, 36_309]);
+    assert_eq!(run.output_device_id, "gpu0");
+    assert_eq!(run.prompt_token_ids, vec![1, 4]);
     assert_eq!(run.generated_token_ids.len(), 1);
     assert_eq!(
         run.output_token_ids,
-        vec![1, 36_309, run.generated_token_ids[0]]
+        vec![1, 4, run.generated_token_ids[0]]
     );
     assert_eq!(run.stop_reason, "max_new_tokens");
     assert_eq!(run.tick_count, 3);
     assert_eq!(run.scheduler_turn_count, 6);
-    assert_eq!(run.completed_stage_count, 612);
+    assert_eq!(run.completed_stage_count, 93);
     assert_eq!(run.output_source_stream_ticks, vec![1]);
     assert_eq!(run.transport_stats.pending_packet_count, 0);
     assert_eq!(run.transport_stats.pending_direct_edge_count, 0);
     assert_eq!(run.transport_stats.direct_copy_count, 6);
-    assert_eq!(run.transport_stats.direct_copy_byte_count, 12_288);
+    assert_eq!(
+        run.transport_stats.direct_copy_byte_count,
+        6 * FIXTURE_MODEL_FRAME_BYTES
+    );
     assert_eq!(run.transport_stats.direct_receive_count, 6);
-    assert_eq!(run.transport_stats.direct_receive_byte_count, 12_288);
+    assert_eq!(
+        run.transport_stats.direct_receive_byte_count,
+        6 * FIXTURE_MODEL_FRAME_BYTES
+    );
 }

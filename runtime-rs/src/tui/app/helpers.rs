@@ -277,9 +277,7 @@ mod tests {
 
     #[test]
     fn loaded_graph_visual_actions_keep_one_authoritative_numeric_sequence() {
-        let Some(package) = env::var_os("NERVE_TEST_PACKAGE_DIR") else {
-            return;
-        };
+        let package = crate::test_support::tiny_model_dir();
         let editor = crate::editor::load_runtime_model_editor_without_hardware(package).unwrap();
         let mut app = App::new();
         app.install_editor(editor);
@@ -290,7 +288,20 @@ mod tests {
         app.dispatch(AppAction::DuplicateSelected);
         assert_eq!(app.last_valid_sequence.len(), original.len() + 1);
         assert_eq!(app.last_valid_sequence[0..2], [original[0], original[0]]);
-        assert!(app.sequence.text().starts_with("[0,0,"));
+        assert_eq!(
+            parse_layer_sequence(
+                app.sequence.text(),
+                &app.editor
+                    .as_ref()
+                    .unwrap()
+                    .source_components()
+                    .iter()
+                    .filter_map(|component| component.layer_index)
+                    .collect()
+            )
+            .unwrap(),
+            app.last_valid_sequence
+        );
         assert_ne!(app.selected_instance_id, original_selected);
 
         app.dispatch(AppAction::RemoveSelected);

@@ -129,15 +129,13 @@ mod tests {
 
     #[test]
     fn loaded_workspace_renders_signal_chain_at_normal_and_small_sizes() {
-        let Some(package) = std::env::var_os("NERVE_TEST_PACKAGE_DIR") else {
-            return;
-        };
+        let package = crate::test_support::tiny_model_dir();
         let editor = crate::editor::load_runtime_model_editor_without_hardware(package).unwrap();
         let mut app = App::new();
         app.install_editor(editor);
         for (width, height) in [(80, 24), (40, 12)] {
             let rendered = rendered_text(&mut app, width, height);
-            assert!(rendered.contains("SIGNAL GRAPH"));
+            assert!(rendered.contains("STREAM GRAPH"));
             assert!(rendered.contains("EXECUTION GRAPH"));
             assert!(rendered.contains("ZERO-BASED"));
         }

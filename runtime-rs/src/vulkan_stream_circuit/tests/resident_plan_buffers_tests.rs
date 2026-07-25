@@ -6,18 +6,18 @@ fn resident_plan_infers_state_sizes_without_a_tensor_index() {
     let resident_plan =
         VulkanStreamCircuitResidentPlan::from_resource_plan(&resource_plan, None, None).unwrap();
 
-    assert_eq!(resident_plan.permanent_parameters.len(), 130);
+    assert_eq!(resident_plan.permanent_parameters.len(), 9);
     assert_eq!(resident_plan.permanent_parameter_bytes, None);
-    assert_eq!(resident_plan.unresolved_parameter_tensors.len(), 130);
-    assert_eq!(resident_plan.per_stream_static_state_elements, 8 * 3 * 1024);
+    assert_eq!(resident_plan.unresolved_parameter_tensors.len(), 9);
+    assert_eq!(resident_plan.per_stream_static_state_elements, 0);
     assert_eq!(
         resident_plan.per_stream_dynamic_state_elements_per_activation,
-        6 * 1024
+        16
     );
-    assert_eq!(resident_plan.per_stream_static_state_bytes, Some(49_152));
+    assert_eq!(resident_plan.per_stream_static_state_bytes, Some(0));
     assert_eq!(
         resident_plan.per_stream_dynamic_state_bytes_per_activation,
-        Some(12_288)
+        Some(32)
     );
     assert_eq!(resident_plan.per_stream_activation_slot_elements, None);
     assert_eq!(resident_plan.per_stream_activation_slot_bytes, None);
@@ -97,13 +97,7 @@ fn permanent_parameter_plan_excludes_physically_lowered_tensors() {
 
 #[test]
 fn allocates_fixture_model_per_stream_vulkan_buffers_from_resident_plan() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping Vulkan stream-circuit allocation: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let graph = fixture_model_execution_graph();
     let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
     let resource_plan =
@@ -118,50 +112,56 @@ fn allocates_fixture_model_per_stream_vulkan_buffers_from_resident_plan() {
     let buffers = resident_plan.allocate_stream_buffers(&device, 4).unwrap();
 
     assert_eq!(buffers.dynamic_state_capacity_activations, 4);
-    assert_eq!(buffers.state_buffers.len(), 14);
-    assert_eq!(buffers.activation_slot_buffers.len(), 56);
-    assert_eq!(buffers.total_byte_capacity, 49_152 + 12_288 * 4 + 276_480);
+    assert_eq!(buffers.state_buffers.len(), 1);
+    assert_eq!(buffers.activation_slot_buffers.len(), 4);
+    assert_eq!(
+        buffers.total_byte_capacity,
+        buffers
+            .state_buffers
+            .iter()
+            .map(|buffer| buffer.byte_capacity)
+            .chain(
+                buffers
+                    .activation_slot_buffers
+                    .iter()
+                    .map(|buffer| buffer.byte_capacity)
+            )
+            .sum::<usize>()
+    );
 
     let layer_00_state = buffers
         .state_buffers
         .iter()
         .find(|buffer| buffer.component_id == "layer_00")
         .unwrap();
-    assert_eq!(layer_00_state.state_id, "temporal_memory");
-    assert_eq!(layer_00_state.byte_capacity, 6_144);
-    assert_eq!(layer_00_state.buffer.byte_capacity(), 6_144);
+    assert_eq!(layer_00_state.state_id, "kv_memory");
+    assert_eq!(
+        layer_00_state.buffer.byte_capacity(),
+        layer_00_state.byte_capacity
+    );
 
-    let layer_02_state = buffers
-        .state_buffers
-        .iter()
-        .find(|buffer| buffer.component_id == "layer_02")
-        .unwrap();
-    assert_eq!(layer_02_state.state_id, "kv_memory");
-    assert_eq!(layer_02_state.byte_capacity, 8_192);
-    assert_eq!(layer_02_state.buffer.byte_capacity(), 8_192);
-
-    let layer_00_slot_1 = buffers
+    let layer_00_slot_0 = buffers
         .activation_slot_buffers
         .iter()
-        .find(|buffer| buffer.component_id == "layer_00" && buffer.slot == 1)
+        .find(|buffer| buffer.component_id == "layer_00" && buffer.slot == 0)
         .unwrap();
-    assert_eq!(layer_00_slot_1.byte_capacity, 6_144);
+    assert_eq!(layer_00_slot_0.byte_capacity, 64);
     assert!(
-        layer_00_slot_1
+        layer_00_slot_0
             .signal_ids
-            .contains(&"conv_projected".to_string())
+            .contains(&"operator_norm_out".to_string())
     );
     assert_eq!(
         buffers
-            .state_buffer("layer_02", "kv_memory")
+            .state_buffer("layer_00", "kv_memory")
             .map(|buffer| buffer.byte_capacity),
-        Some(8_192)
+        Some(layer_00_state.byte_capacity)
     );
     assert_eq!(
         buffers
-            .activation_slot_buffer("layer_02", 0)
+            .activation_slot_buffer("layer_00", 0)
             .map(|buffer| buffer.byte_capacity),
-        Some(2_048)
+        Some(64)
     );
 }
 
@@ -185,8 +185,8 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
             .unwrap();
 
     assert_eq!(binding_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
-    assert_eq!(binding_plan.circuits.len(), 14);
-    assert_eq!(binding_plan.total_node_count(), 242);
+    assert_eq!(binding_plan.circuits.len(), 1);
+    assert_eq!(binding_plan.total_node_count(), 17);
 
     let layer_00 = binding_plan.circuit("layer_00").unwrap();
     let operator_norm = layer_00.node("operator_norm").unwrap();
@@ -196,96 +196,73 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
     );
     assert_eq!(
         operator_norm.parameter("operator_norm").unwrap().tensor,
-        "model.layers.0.operator_norm.weight"
+        "model.layers.0.input_layernorm.weight"
     );
 
-    let conv_in = layer_00.node("conv_in_projection").unwrap();
+    let q_projection = layer_00.node("q_projection").unwrap();
     assert_eq!(
-        conv_in.parameter("conv_in_projection").unwrap().tensor,
-        "model.layers.0.conv.in_proj.weight"
+        q_projection.parameter("q_projection").unwrap().tensor,
+        "model.layers.0.self_attn.q_proj.weight"
     );
-    assert_eq!(
-        conv_in.output("conv_projected").unwrap().resource,
+    assert!(matches!(
+        q_projection.output("q_projected").unwrap().resource,
         VulkanSignalResource::ActivationSlot {
-            component_id: "layer_00".to_string(),
-            slot: 1,
-            bytes: Some(6144),
-            signal_bytes: Some(6144),
-        }
-    );
+            ref component_id,
+            signal_bytes: Some(32),
+            ..
+        } if component_id == "layer_00"
+    ));
 
-    let temporal_update = layer_00.node("temporal_memory_update").unwrap();
-    assert_eq!(
-        temporal_update.input("temporal_memory").unwrap().resource,
-        VulkanSignalResource::StateBuffer {
-            component_id: "layer_00".to_string(),
-            state_id: "temporal_memory".to_string(),
-            static_bytes: Some(6144),
-            bytes_per_activation: None,
-        }
-    );
-    assert_eq!(
-        temporal_update.output("temporal_window").unwrap().resource,
-        VulkanSignalResource::StateView {
-            component_id: "layer_00".to_string(),
-            state_id: "temporal_memory".to_string(),
-            static_bytes: Some(6144),
-            bytes_per_activation: None,
-        }
-    );
-
-    let layer_02 = binding_plan.circuit("layer_02").unwrap();
-    let kv_append = layer_02.node("kv_memory_append").unwrap();
+    let kv_append = layer_00.node("kv_memory_append").unwrap();
     assert_eq!(
         kv_append.input("kv_memory").unwrap().resource,
         VulkanSignalResource::StateBuffer {
-            component_id: "layer_02".to_string(),
+            component_id: "layer_00".to_string(),
             state_id: "kv_memory".to_string(),
             static_bytes: None,
-            bytes_per_activation: Some(2048),
+            bytes_per_activation: Some(32),
         }
     );
     assert_eq!(
         kv_append.output("k_memory").unwrap().resource,
         VulkanSignalResource::StateView {
-            component_id: "layer_02".to_string(),
+            component_id: "layer_00".to_string(),
             state_id: "kv_memory".to_string(),
             static_bytes: None,
-            bytes_per_activation: Some(2048),
+            bytes_per_activation: Some(32),
         }
     );
     assert_eq!(
         kv_append.output("v_memory").unwrap().resource,
         VulkanSignalResource::StateView {
-            component_id: "layer_02".to_string(),
+            component_id: "layer_00".to_string(),
             state_id: "kv_memory".to_string(),
             static_bytes: None,
-            bytes_per_activation: Some(2048),
+            bytes_per_activation: Some(32),
         }
     );
 
-    let attention = layer_02.node("attention_read").unwrap();
-    assert_eq!(
+    let attention = layer_00.node("attention_read").unwrap();
+    assert!(matches!(
         attention.input("q_positioned").unwrap().resource,
         VulkanSignalResource::ActivationSlot {
-            component_id: "layer_02".to_string(),
-            slot: 2,
-            bytes: Some(5120),
-            signal_bytes: Some(2048),
+            ref component_id,
+            signal_bytes: Some(32),
+            ..
         }
-    );
+        if component_id == "layer_00"
+    ));
     assert!(matches!(
         attention.input("k_memory").unwrap().resource,
         VulkanSignalResource::StateView { .. }
     ));
-    assert_eq!(
+    assert!(matches!(
         attention.output("attention_out").unwrap().resource,
         VulkanSignalResource::ActivationSlot {
-            component_id: "layer_02".to_string(),
-            slot: 0,
-            bytes: Some(2048),
-            signal_bytes: Some(2048),
+            ref component_id,
+            signal_bytes: Some(32),
+            ..
         }
-    );
+        if component_id == "layer_00"
+    ));
 }
-

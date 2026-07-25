@@ -81,11 +81,7 @@ fn temporal_prompt_block_matches_scalar_ticks_and_component_state() {
         eprintln!("skipping temporal prompt equivalence: NERVE_TEMPORAL_TEST_PACKAGE is unset");
         return;
     };
-    let device_index = std::env::var("NERVE_TEMPORAL_TEST_VULKAN_DEVICE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let device = match VulkanComputeDevice::new_for_physical_device_index(device_index) {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => Rc::new(device),
         Err(error) => {
             eprintln!("skipping temporal prompt equivalence: {error}");

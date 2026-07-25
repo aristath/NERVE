@@ -1,5 +1,4 @@
     #[test]
-    #[ignore = "requires a valid NERVE_TEST_LOWERED_DIR structural fixture"]
     fn placement_plan_keeps_every_stream_entity_as_a_deployable_component() {
         let resolved =
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
@@ -8,17 +7,17 @@
 
         assert_eq!(placement.schema, STREAM_CIRCUIT_PLACEMENT_SCHEMA);
         assert_eq!(placement.topology, "explicit_graph");
-        assert_eq!(placement.components.len(), 17);
-        assert_eq!(placement.edges.len(), 17);
-        assert_eq!(placement.local_edge_count, 17);
+        assert_eq!(placement.components.len(), 4);
+        assert_eq!(placement.edges.len(), 4);
+        assert_eq!(placement.local_edge_count, 4);
         assert_eq!(placement.cross_device_edge_count, 0);
         assert_eq!(
             placement.component("layer_00").unwrap(),
             &ComponentPlacement {
                 component_index: 1,
                 component_id: "layer_00".to_string(),
-                circuit_id: "layer_00_shortconv_circuit_v1".to_string(),
-                operator_type: "conv".to_string(),
+                circuit_id: "layer_00_gqa_attention_circuit_v1".to_string(),
+                operator_type: "full_attention".to_string(),
                 device_id: "gpu0".to_string(),
             }
         );
@@ -27,7 +26,7 @@
         assert_eq!(first_edge.source_component_id, "input_transducer");
         assert_eq!(first_edge.destination_component_id, "layer_00");
         assert_eq!(first_edge.signal, "frame");
-        assert_eq!(first_edge.shape, vec![1024]);
+        assert_eq!(first_edge.shape, vec![16]);
         assert_eq!(first_edge.source_port_id, "output_frame");
         assert_eq!(first_edge.destination_port_id, "input_frame");
         assert_eq!(first_edge.source_component_port.as_deref(), Some("frame"));
@@ -46,27 +45,27 @@
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source, "gpu0")
             .unwrap()
-            .with_instance_enabled("layer_01", false)
+            .with_instance_enabled("layer_00", false)
             .unwrap();
 
         let effective = source.instantiate_runtime_graph(&runtime_graph).unwrap();
         let placement = effective.placement_plan(&runtime_graph.placement_spec()).unwrap();
 
-        assert_eq!(runtime_graph.instances.len(), 17);
-        assert!(!runtime_graph.instances[2].enabled);
-        assert_eq!(effective.circuits.len(), 16);
+        assert_eq!(runtime_graph.instances.len(), 4);
+        assert!(!runtime_graph.instances[1].enabled);
+        assert_eq!(effective.circuits.len(), 3);
         assert!(
             effective
                 .circuits
                 .iter()
-                .all(|circuit| circuit.component.id != "layer_01")
+                .all(|circuit| circuit.component.id != "layer_00")
         );
         let bypass = placement
             .edges
             .iter()
-            .find(|edge| edge.source_component_id == "layer_00")
+            .find(|edge| edge.source_component_id == "input_transducer")
             .unwrap();
-        assert_eq!(bypass.destination_component_id, "layer_02");
+        assert_eq!(bypass.destination_component_id, "output_transducer");
     }
 
     #[test]
@@ -74,41 +73,38 @@
         let resolved =
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let spec = StreamCircuitPlacementSpec::new("gpu0")
-            .with_component_device("layer_01", "cpu0")
-            .with_component_device("layer_02", "gpu1")
-            .with_component_device("layer_03", "lan:worker-a");
+            .with_component_device("layer_00", "cpu0")
+            .with_component_device("output_transducer", "gpu1")
+            .with_component_device("sampler", "lan:worker-a");
 
         let placement = resolved.placement_plan(&spec).unwrap();
 
-        assert_eq!(placement.components.len(), 17);
-        assert_eq!(placement.edges.len(), 17);
-        assert_eq!(placement.local_edge_count, 13);
+        assert_eq!(placement.components.len(), 4);
+        assert_eq!(placement.edges.len(), 4);
+        assert_eq!(placement.local_edge_count, 0);
         assert_eq!(placement.cross_device_edge_count, 4);
         assert_eq!(
             placement
-                .component("layer_01")
+                .component("layer_00")
                 .map(|component| component.device_id.as_str()),
             Some("cpu0")
         );
         assert_eq!(
             placement
-                .component("layer_02")
+                .component("output_transducer")
                 .map(|component| component.device_id.as_str()),
             Some("gpu1")
         );
         assert_eq!(
             placement
-                .component("layer_03")
+                .component("sampler")
                 .map(|component| component.device_id.as_str()),
             Some("lan:worker-a")
         );
         assert_eq!(
-            placement
-                .component("layer_04")
-                .map(|component| component.device_id.as_str()),
-            Some("gpu0")
+            placement.cross_device_edges().len(),
+            4
         );
-
         let cross = placement.cross_device_edges();
         assert_eq!(cross.len(), 4);
         assert_eq!(
@@ -122,10 +118,10 @@
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                ("layer_00", "gpu0", "layer_01", "cpu0"),
-                ("layer_01", "cpu0", "layer_02", "gpu1"),
-                ("layer_02", "gpu1", "layer_03", "lan:worker-a"),
-                ("layer_03", "lan:worker-a", "layer_04", "gpu0"),
+                ("input_transducer", "gpu0", "layer_00", "cpu0"),
+                ("layer_00", "cpu0", "output_transducer", "gpu1"),
+                ("output_transducer", "gpu1", "sampler", "lan:worker-a"),
+                ("sampler", "lan:worker-a", "input_transducer", "gpu0"),
             ]
         );
         assert_eq!(
@@ -142,8 +138,8 @@
         let resolved =
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let spec = StreamCircuitPlacementSpec::new("gpu0")
-            .with_component_device("layer_01", "gpu1")
-            .with_component_device("layer_02", "gpu2");
+            .with_component_device("layer_00", "gpu1")
+            .with_component_device("output_transducer", "gpu2");
         let placement = resolved.placement_plan(&spec).unwrap();
 
         let routes = placement.runtime_edge_routes(|device_id| {
@@ -160,29 +156,29 @@
         });
 
         assert_eq!(routes.schema, RUNTIME_EDGE_ROUTES_SCHEMA);
-        assert_eq!(routes.edge_count, 17);
-        assert_eq!(routes.logical_local_edge_count, 14);
+        assert_eq!(routes.edge_count, 4);
+        assert_eq!(routes.logical_local_edge_count, 1);
         assert_eq!(routes.logical_cross_device_edge_count, 3);
         assert_eq!(routes.same_physical_target_edge_count, 1);
         assert_eq!(routes.cross_physical_target_edge_count, 2);
         assert_eq!(routes.unresolved_target_edge_count, 0);
         assert_eq!(
-            routes.routes[1].route_kind,
+            routes.routes[0].route_kind,
             RuntimeEdgeRouteKind::SamePhysicalTarget
         );
         assert_eq!(
-            routes.routes[2].route_kind,
+            routes.routes[1].route_kind,
             RuntimeEdgeRouteKind::CrossPhysicalTarget
         );
         assert_eq!(
-            routes.routes[0].route_kind,
+            routes.routes[3].route_kind,
             RuntimeEdgeRouteKind::LogicalLocal
         );
 
         let payload = serde_json::to_value(&routes).unwrap();
-        assert_eq!(payload["routes"][1]["route_kind"], "same_physical_target");
-        assert_eq!(payload["routes"][2]["route_kind"], "cross_physical_target");
-        assert_eq!(payload["routes"][0]["route_kind"], "logical_local");
+        assert_eq!(payload["routes"][0]["route_kind"], "same_physical_target");
+        assert_eq!(payload["routes"][1]["route_kind"], "cross_physical_target");
+        assert_eq!(payload["routes"][3]["route_kind"], "logical_local");
     }
 
     #[test]

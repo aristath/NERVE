@@ -1,291 +1,45 @@
-fn resident_single_token_tick_runs_input_graph_and_output_to_logits() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident single-token tick runner: {error}");
-            return;
-        }
-    };
-    let (tensor_index, mounted, _manifest, mounted_bound) =
-        mount_fixture_model_single_device_stream_circuit(&device);
-    let Some(loaded_manifest) =
-        fixture_model_level_1_loaded_kernel_pack_for_conv_and_attention_families(
-            &mounted,
-            &mounted_bound,
-        )
-    else {
-        eprintln!("skipping resident single-token tick runner: no GLSL to SPIR-V compiler found");
-        return;
-    };
-    let Some(input_transducer_spirv_words) =
-        crate::vulkan_compute::compile_test_shader_words_from_source(
-            "embedding_lookup_bf16_65536x1024.comp",
-        )
-    else {
-        eprintln!("skipping resident single-token tick runner: no GLSL to SPIR-V compiler found");
-        return;
-    };
-    let Some(embedding_norm_spirv_words) =
-        crate::vulkan_compute::compile_test_shader_words_from_source("rms_norm_bf16_serial.comp")
-    else {
-        eprintln!("skipping resident single-token tick runner: no GLSL to SPIR-V compiler found");
-        return;
-    };
-    let Some(tied_projection_spirv_words) =
-        crate::vulkan_compute::compile_test_shader_words_from_source(
-            "tied_output_projection_bf16_65536x1024_to_f32.comp",
-        )
-    else {
-        eprintln!("skipping resident single-token tick runner: no GLSL to SPIR-V compiler found");
-        return;
-    };
-
-    let transducer_parameter_buffers =
-        load_fixture_model_transducer_parameter_buffers(&device, &tensor_index);
-    let component_ids = prepare_fixture_model_resident_prefix(&mounted, &tensor_index, 13);
-    let input_transducer =
-        VulkanResidentInputEmbeddingTransducerRunner::from_mounted_token_embedding(
-            &device,
-            &mounted,
-            &transducer_parameter_buffers,
-            &input_transducer_spirv_words,
-            &fixture_model_input_embedding_transducer_spec(),
-        )
-        .unwrap();
-    let execution_graph = create_fixture_model_resident_prefix_runner(
-        &device,
-        &mounted,
-        &mounted_bound,
-        &loaded_manifest,
-        &component_ids,
-    );
-    let output_transducer = VulkanResidentOutputTransducerRunner::from_mounted_output_transducer(
-        &device,
-        &mounted,
-        &transducer_parameter_buffers,
-        &embedding_norm_spirv_words,
-        &tied_projection_spirv_words,
-        &fixture_model_output_transducer_spec(),
-    )
-    .unwrap();
-    let runner = VulkanResidentSingleTokenTickRunner::new(
-        &device,
-        input_transducer,
-        execution_graph,
-        output_transducer,
-    )
-    .unwrap();
-    assert_eq!(runner.device_id, "gpu0");
-    assert_eq!(runner.component_count, 14);
-    assert_eq!(runner.dispatch_count, 245);
-    assert_eq!(runner.total_descriptor_count, 827);
-    assert_eq!(runner.total_push_constant_byte_count, 0);
-
-    let token_id = 1u32;
-    let run = runner
-        .run_token_id_with_stream_control(
-            &device,
-            token_id,
-            fixture_model_stream_control(&mounted, 0),
-        )
-        .unwrap();
-    assert_eq!(run.device_id, "gpu0");
-    assert_eq!(run.token_id, token_id);
-    assert_eq!(run.dispatch_count, 245);
-    assert_eq!(run.total_descriptor_count, 827);
-    assert_eq!(run.total_push_constant_byte_count, 0);
-    assert_eq!(run.input_run.dispatch_count, 1);
-    assert_eq!(
-        run.input_run.output_signal_id,
-        FIXTURE_MODEL_INPUT_FRAME_SIGNAL
-    );
-    assert_fixture_model_resident_prefix_run(&run.execution_graph_run, &component_ids, 242);
-    assert_eq!(run.output_run.as_ref().unwrap().dispatch_count, 2);
-    assert_eq!(
-        run.output_run.as_ref().unwrap().logits_byte_capacity,
-        FIXTURE_MODEL_LOGITS_BYTES
-    );
-
-    let input_frame = mounted
-        .boundary_io
-        .input_buffer(FIXTURE_MODEL_INPUT_FRAME_SIGNAL)
-        .unwrap();
-    assert_eq!(
-        input_frame
-            .buffer
-            .read_bytes(FIXTURE_MODEL_FRAME_BYTES)
-            .unwrap(),
-        fixture_model_embedding_row_bytes(&tensor_index, token_id)
-    );
-    assert_bf16_bytes_close(
-        &runner.read_normalized_frame_bytes(16).unwrap(),
-        &[
-            0xb5, 0xbf, 0xee, 0xbf, 0x51, 0x3f, 0x99, 0xbf, 0x35, 0xbf, 0xc4, 0xbe, 0x7a, 0x3f,
-            0x94, 0xbf,
-        ],
-        0.02,
-    );
-    assert_f32_bytes_close(
-        &runner.read_logits_bytes(16).unwrap(),
-        &[
-            0xa3, 0xc8, 0x12, 0xc0, 0xf7, 0xc1, 0x9d, 0x41, 0x84, 0x92, 0x6a, 0x41, 0x16, 0x9c,
-            0x17, 0xc0,
-        ],
-        0.05,
-    );
-}
-
 fn create_fixture_model_resident_greedy_stream_processor(
     device: &VulkanComputeDevice,
-    skip_label: &str,
+    _label: &str,
 ) -> Option<VulkanResidentStreamProcessor> {
-    create_fixture_model_resident_greedy_stream_processor_with_capacity(
-        device,
-        skip_label,
-        4,
-        "gqa_attention_bf16_q16_kv8_d64.comp",
-    )
+    create_fixture_model_resident_greedy_stream_processor_with_capacity(device, _label, 4, "")
 }
 
 fn create_fixture_model_resident_greedy_stream_processor_with_capacity(
     device: &VulkanComputeDevice,
-    skip_label: &str,
+    _label: &str,
     dynamic_state_capacity_activations: usize,
-    attention_shader: &str,
+    _obsolete_attention_shader: &str,
 ) -> Option<VulkanResidentStreamProcessor> {
-    let (tensor_index, mounted, _manifest, mounted_bound) =
-        mount_fixture_model_single_device_stream_circuit_with_capacity(
-            device,
-            dynamic_state_capacity_activations,
-        );
-    let Some(loaded_manifest) =
-            fixture_model_level_1_loaded_kernel_pack_for_conv_and_attention_families_with_attention_shader(
-                &mounted,
-                &mounted_bound,
-                attention_shader,
-            )
-        else {
-            eprintln!("skipping {skip_label}: no GLSL to SPIR-V compiler found");
-            return None;
-        };
-    let Some(input_transducer_spirv_words) =
-        crate::vulkan_compute::compile_test_shader_words_from_source(
-            "embedding_lookup_bf16_65536x1024.comp",
-        )
-    else {
-        eprintln!("skipping {skip_label}: no GLSL to SPIR-V compiler found");
-        return None;
-    };
-    let Some(embedding_norm_spirv_words) =
-        crate::vulkan_compute::compile_test_shader_words_from_source("rms_norm_bf16_serial.comp")
-    else {
-        eprintln!("skipping {skip_label}: no GLSL to SPIR-V compiler found");
-        return None;
-    };
-    let Some(tied_projection_spirv_words) =
-        crate::vulkan_compute::compile_test_shader_words_from_source(
-            "tied_output_projection_bf16_65536x1024_to_f32.comp",
-        )
-    else {
-        eprintln!("skipping {skip_label}: no GLSL to SPIR-V compiler found");
-        return None;
-    };
-    let Some(sampler_spirv_words) = crate::vulkan_compute::compile_test_shader_words_from_source(
-        "greedy_sampler_f32_65536.comp",
-    ) else {
-        eprintln!("skipping {skip_label}: no GLSL to SPIR-V compiler found");
-        return None;
-    };
-    let Some(sampler_kernels) = greedy_sampler_test_kernels(sampler_spirv_words) else {
-        eprintln!("skipping resident feedback smoke: feedback control shader did not compile");
-        return None;
-    };
-
-    let transducer_parameter_buffers = Arc::new(load_fixture_model_transducer_parameter_buffers(
-        device,
-        &tensor_index,
-    ));
-    let component_ids = prepare_fixture_model_resident_prefix(&mounted, &tensor_index, 13);
-    let input_transducer =
-        VulkanResidentInputEmbeddingTransducerRunner::from_mounted_token_embedding(
-            device,
-            &mounted,
-            &transducer_parameter_buffers,
-            &input_transducer_spirv_words,
-            &fixture_model_input_embedding_transducer_spec(),
-        )
-        .unwrap();
-    let execution_graph = create_fixture_model_resident_prefix_runner(
-        device,
-        &mounted,
-        &mounted_bound,
-        &loaded_manifest,
-        &component_ids,
-    );
-    let output_transducer = VulkanResidentOutputTransducerRunner::from_mounted_output_transducer(
-        device,
-        &mounted,
-        &transducer_parameter_buffers,
-        &embedding_norm_spirv_words,
-        &tied_projection_spirv_words,
-        &fixture_model_output_transducer_spec(),
-    )
-    .unwrap();
-    let sampler = VulkanResidentSamplerRunner::from_output_transducer_with_spec(
-        device,
-        &mounted,
-        &output_transducer,
-        &sampler_kernels,
-        &fixture_model_greedy_sampler_spec(),
-        0,
-    )
-    .unwrap();
-    let tick_runner = VulkanResidentSingleTokenTickRunner::new(
-        device,
-        input_transducer,
-        execution_graph,
-        output_transducer,
-    )
-    .unwrap();
-    let loop_runner = VulkanResidentFeedbackLoopRunner::new(tick_runner, sampler).unwrap();
     Some(
-        VulkanResidentStreamProcessor::new(
-            device,
-            mounted,
-            transducer_parameter_buffers,
-            loop_runner,
-        )
+        fixture_model_resident_greedy_model(device, dynamic_state_capacity_activations)
+        .unwrap()
+        .create_stream_processor(device, 0)
         .unwrap(),
     )
 }
 
 #[test]
 fn resident_greedy_feedback_loop_runs_two_ticks() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident feedback loop: {error}");
-            return;
-        }
-    };
-    let Some(processor) =
-        create_fixture_model_resident_greedy_stream_processor(&device, "resident feedback loop")
-    else {
-        return;
-    };
-    assert_eq!(processor.device_id, "gpu0");
-    assert_eq!(processor.component_count, 14);
-    assert_eq!(processor.per_tick_dispatch_count, 247);
-    assert_eq!(processor.per_tick_descriptor_count, 834);
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor =
+        create_fixture_model_resident_greedy_stream_processor(&device, "feedback").unwrap();
+    assert_eq!(processor.device_id, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID);
+    assert_eq!(processor.component_count, 1);
+    assert_eq!(processor.per_tick_dispatch_count, 13);
+    assert!(processor.per_tick_descriptor_count > processor.per_tick_dispatch_count);
     assert_eq!(processor.per_tick_push_constant_byte_count, 0);
     assert_eq!(processor.dynamic_state_capacity_activations, 4);
 
     let run = processor.run_bounded(&device, 1, 0, 2).unwrap();
-    assert_eq!(run.device_id, "gpu0");
+    assert_eq!(run.device_id, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID);
     assert_eq!(run.initial_token_id, 1);
     assert_eq!(run.tick_runs.len(), 2);
-    assert_eq!(run.per_tick_dispatch_count, 247);
-    assert_eq!(run.per_tick_descriptor_count, 834);
+    assert_eq!(run.per_tick_dispatch_count, processor.per_tick_dispatch_count);
+    assert_eq!(
+        run.per_tick_descriptor_count,
+        processor.per_tick_descriptor_count
+    );
     assert_eq!(run.per_tick_push_constant_byte_count, 0);
     assert_eq!(run.tick_runs[0].stream_tick, 0);
     assert_eq!(run.tick_runs[0].input_token_id, 1);
@@ -294,18 +48,18 @@ fn resident_greedy_feedback_loop_runs_two_ticks() {
         run.tick_runs[1].input_token_id,
         run.tick_runs[0].sampled_token_id
     );
-    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 245);
+    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 12);
     assert_eq!(run.tick_runs[0].sampler_run.descriptor_count, 5);
-    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 245);
+    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 12);
     assert_eq!(run.tick_runs[1].sampler_run.descriptor_count, 5);
-    assert_eq!(run.sampled_token_ids, vec![1, 1]);
-    assert_eq!(run.tick_runs[0].sampler_run.token_id, 1);
-    assert_eq!(run.tick_runs[1].sampler_run.token_id, 1);
+    assert_eq!(run.sampled_token_ids, vec![16, 16]);
+    assert_eq!(run.tick_runs[0].sampler_run.token_id, 16);
+    assert_eq!(run.tick_runs[1].sampler_run.token_id, 16);
     for (actual, expected) in run
         .tick_runs
         .iter()
         .map(|tick| tick.sampler_run.selected_logit_bits)
-        .zip([1_100_857_847, 1_101_582_210])
+        .zip([1_067_658_104, 1_077_467_248])
     {
         assert_f32_bits_close(actual, expected, 0.01, 0.01);
     }
@@ -313,34 +67,25 @@ fn resident_greedy_feedback_loop_runs_two_ticks() {
 
 #[test]
 fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident prompt event: {error}");
-            return;
-        }
-    };
-    let Some(processor) =
-        create_fixture_model_resident_greedy_stream_processor(&device, "resident prompt event")
-    else {
-        return;
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor =
+        create_fixture_model_resident_greedy_stream_processor(&device, "prompt event").unwrap();
 
     let run = processor
-        .run_prompt_event_bounded(&device, &[1, 36_309], 0, 1, None)
+        .run_prompt_event_bounded(&device, &[1, 4], 0, 1, None)
         .unwrap();
 
-    assert_eq!(run.device_id, "gpu0");
-    assert_eq!(run.prompt_token_ids, vec![1, 36_309]);
+    assert_eq!(run.device_id, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID);
+    assert_eq!(run.prompt_token_ids, vec![1, 4]);
     assert_eq!(run.generated_token_ids.len(), 1);
     assert_eq!(
         run.output_token_ids,
-        vec![1, 36_309, run.generated_token_ids[0]]
+        vec![1, 4, run.generated_token_ids[0]]
     );
     assert_eq!(run.stop_reason, "max_new_tokens");
     assert_eq!(run.tick_runs.len(), 3);
-    assert_eq!(run.per_tick_dispatch_count, 247);
-    assert_eq!(run.per_tick_descriptor_count, 834);
+    assert_eq!(run.per_tick_dispatch_count, 13);
+    assert!(run.per_tick_descriptor_count > run.per_tick_dispatch_count);
     assert_eq!(run.per_tick_push_constant_byte_count, 0);
 
     assert_eq!(run.tick_runs[0].stream_tick, 0);
@@ -352,11 +97,11 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
     assert_eq!(run.tick_runs[0].public_output_token_id, None);
     assert_eq!(run.tick_runs[0].private_feedback_token_id, None);
     assert!(run.tick_runs[0].sampler_run.is_none());
-    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 243);
+    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 10);
     assert!(run.tick_runs[0].tick_run.output_run.is_none());
 
     assert_eq!(run.tick_runs[1].stream_tick, 1);
-    assert_eq!(run.tick_runs[1].input_token_id, 36_309);
+    assert_eq!(run.tick_runs[1].input_token_id, 4);
     assert_eq!(
         run.tick_runs[1].input_route,
         VulkanResidentPromptEventInputRoute::ExternalInput
@@ -377,7 +122,7 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
         run.tick_runs[1].sampler_run.as_ref().unwrap().token_id,
         run.generated_token_ids[0]
     );
-    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 245);
+    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 12);
     assert!(run.tick_runs[1].tick_run.output_run.is_some());
 
     assert_eq!(run.tick_runs[2].stream_tick, 2);
@@ -391,24 +136,15 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
     assert_eq!(run.tick_runs[2].public_output_token_id, None);
     assert_eq!(run.tick_runs[2].private_feedback_token_id, None);
     assert!(run.tick_runs[2].sampler_run.is_none());
-    assert_eq!(run.tick_runs[2].tick_run.dispatch_count, 243);
+    assert_eq!(run.tick_runs[2].tick_run.dispatch_count, 10);
     assert!(run.tick_runs[2].tick_run.output_run.is_none());
 }
 
 #[test]
 fn resident_greedy_running_stream_accepts_later_input_without_resetting_state() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident running stream: {error}");
-            return;
-        }
-    };
-    let Some(processor) =
-        create_fixture_model_resident_greedy_stream_processor(&device, "resident running stream")
-    else {
-        return;
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor =
+        create_fixture_model_resident_greedy_stream_processor(&device, "running stream").unwrap();
     let mut stream = processor.into_running_stream("stream_0");
     assert_eq!(stream.stream_id, "stream_0");
     assert_eq!(stream.next_stream_tick, 0);
@@ -460,12 +196,12 @@ fn resident_greedy_running_stream_accepts_later_input_without_resetting_state() 
     assert_eq!(stream.pending_external_input_count(), 0);
     assert_eq!(stream.pending_private_feedback_count(), 0);
 
-    let second = stream.run_prompt(&device, &[36_309], 1, None).unwrap();
-    assert_eq!(second.prompt_token_ids, vec![36_309]);
+    let second = stream.run_prompt(&device, &[4], 1, None).unwrap();
+    assert_eq!(second.prompt_token_ids, vec![4]);
     assert_eq!(second.generated_token_ids.len(), 1);
     assert_eq!(
         second.output_token_ids,
-        vec![36_309, second.generated_token_ids[0]]
+        vec![4, second.generated_token_ids[0]]
     );
     assert_eq!(second.stop_reason, "max_new_tokens");
     assert_eq!(second.start_stream_tick, 2);
@@ -474,7 +210,7 @@ fn resident_greedy_running_stream_accepts_later_input_without_resetting_state() 
     assert_eq!(second.ticks[0].stream_tick, Some(2));
     assert_eq!(
         second.ticks[0].input_signal.as_ref().unwrap().token_id(),
-        36_309
+        4
     );
     assert_eq!(
         second.ticks[0].input_signal.as_ref().unwrap().route(),
@@ -506,21 +242,11 @@ fn resident_greedy_running_stream_accepts_later_input_without_resetting_state() 
 
 #[test]
 fn resident_greedy_running_stream_uses_configured_capacity() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident running stream capacity: {error}");
-            return;
-        }
-    };
-    let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
-        &device,
-        "resident running stream capacity",
-        8,
-        "gqa_attention_bf16_q16_kv8_d64.comp",
-    ) else {
-        return;
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor = create_fixture_model_resident_greedy_stream_processor_with_capacity(
+        &device, "capacity", 8, "",
+    )
+    .unwrap();
     assert_eq!(processor.dynamic_state_capacity_activations, 8);
 
     let mut stream = processor.into_running_stream("stream_0");
@@ -547,7 +273,7 @@ fn resident_greedy_running_stream_uses_configured_capacity() {
     );
     assert_eq!(run.ticks[8].stream_tick, None);
 
-    stream.inject_prompt(&[36_309], 0, None).unwrap();
+    stream.inject_prompt(&[4], 0, None).unwrap();
     let rolled = stream.tick(&device).unwrap();
     assert_eq!(rolled.stream_tick, Some(8));
     assert_eq!(stream.pending_external_input_count(), 0);
@@ -556,21 +282,14 @@ fn resident_greedy_running_stream_uses_configured_capacity() {
 
 #[test]
 fn resident_token_stream_api_accepts_external_events_and_emits_public_events() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token stream API: {error}");
-            return;
-        }
-    };
-    let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
-        "resident token stream API",
+        "token events",
         8,
-        "gqa_attention_bf16_q16_kv8_d64.comp",
-    ) else {
-        return;
-    };
+        "",
+    )
+    .unwrap();
     let mut stream = processor.into_token_stream("host_stream_0");
     assert_eq!(stream.stream_id(), "host_stream_0");
     assert_eq!(stream.next_stream_tick(), 0);
@@ -615,7 +334,7 @@ fn resident_token_stream_api_accepts_external_events_and_emits_public_events() {
     );
 
     let second_event =
-        VulkanResidentTokenInputEvent::new("event_1", vec![36_309], 1).with_origin("test_host");
+        VulkanResidentTokenInputEvent::new("event_1", vec![4], 1).with_origin("test_host");
     let second = stream
         .submit_external_event(&device, second_event.clone())
         .unwrap();
@@ -642,21 +361,11 @@ fn resident_token_stream_api_accepts_external_events_and_emits_public_events() {
 
 #[test]
 fn resident_token_stream_can_be_pumped_one_tick_at_a_time() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token stream pump: {error}");
-            return;
-        }
-    };
-    let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
-        &device,
-        "resident token stream pump",
-        8,
-        "gqa_attention_bf16_q16_kv8_d64.comp",
-    ) else {
-        return;
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor = create_fixture_model_resident_greedy_stream_processor_with_capacity(
+        &device, "token pump", 8, "",
+    )
+    .unwrap();
     let mut stream = processor.into_token_stream("host_stream_0");
     let event = VulkanResidentTokenInputEvent::new("event_0", vec![1], 2).with_origin("test_host");
     let queued = stream.enqueue_external_event(event.clone()).unwrap();
@@ -721,21 +430,14 @@ fn resident_token_stream_can_be_pumped_one_tick_at_a_time() {
 
 #[test]
 fn resident_token_stream_can_pump_bounded_runtime_cycles() {
-    let device = match VulkanComputeDevice::new() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("skipping resident token stream bounded pump: {error}");
-            return;
-        }
-    };
-    let Some(processor) = create_fixture_model_resident_greedy_stream_processor_with_capacity(
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let processor = create_fixture_model_resident_greedy_stream_processor_with_capacity(
         &device,
-        "resident token stream bounded pump",
+        "bounded token pump",
         8,
-        "gqa_attention_bf16_q16_kv8_d64.comp",
-    ) else {
-        return;
-    };
+        "",
+    )
+    .unwrap();
     let mut stream = processor.into_token_stream("host_stream_0");
     stream
         .enqueue_external_event(
@@ -810,16 +512,7 @@ fn resident_token_stream_can_pump_bounded_runtime_cycles() {
 
 #[test]
 fn resident_feedback_cycle_restores_recurrent_state_when_eos_arrives_mid_cycle() {
-    let device = match selected_test_vulkan_device() {
-        Ok(device) => device,
-        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
-            panic!("requested Vulkan test device is unavailable: {error}")
-        }
-        Err(error) => {
-            eprintln!("skipping resident EOS feedback cycle: {error}");
-            return;
-        }
-    };
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let create_stream = |stream_id: &str| {
         fixture_model_resident_greedy_model(&device, 16)
             .unwrap()
@@ -827,8 +520,8 @@ fn resident_feedback_cycle_restores_recurrent_state_when_eos_arrives_mid_cycle()
             .unwrap()
             .into_token_stream(stream_id)
     };
-    let event = VulkanResidentTokenInputEvent::new("eos_event", vec![1, 50_471, 1_413], 8)
-        .with_stop_tokens(vec![510]);
+    let event =
+        VulkanResidentTokenInputEvent::new("eos_event", vec![1, 2, 3], 8).with_stop_tokens(vec![23]);
 
     let mut scalar = create_stream("scalar_stream");
     scalar.enqueue_external_event(event.clone()).unwrap();
@@ -889,7 +582,7 @@ fn resident_feedback_cycle_restores_recurrent_state_when_eos_arrives_mid_cycle()
         .collect::<Vec<_>>();
     let batched_snapshot = batched.snapshot();
 
-    assert_eq!(scalar_output, vec![510]);
+    assert_eq!(scalar_output, vec![23]);
     assert_eq!(batched_output, scalar_output);
     assert_eq!(
         batched_snapshot.next_stream_tick,

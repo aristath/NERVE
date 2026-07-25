@@ -19,41 +19,35 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
     let kernel_plan = VulkanKernelInterfacePlan::from_binding_plan(&binding_plan);
 
     assert_eq!(kernel_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
-    assert_eq!(kernel_plan.circuits.len(), 14);
-    assert_eq!(kernel_plan.total_kernel_count(), 242);
+    assert_eq!(kernel_plan.circuits.len(), 1);
+    assert_eq!(kernel_plan.total_kernel_count(), 17);
 
-    let conv_in = kernel_plan
-        .kernel("layer_00", "conv_in_projection")
-        .unwrap();
-    assert_eq!(conv_in.kernel_id, "layer_00.conv_in_projection");
-    assert_eq!(conv_in.op, "linear");
-    assert_eq!(conv_in.inputs.len(), 1);
-    assert_eq!(conv_in.outputs.len(), 1);
-    assert_eq!(conv_in.parameters.len(), 1);
-    assert!(conv_in.state_reads.is_empty());
-    assert!(conv_in.state_writes.is_empty());
-    assert!(conv_in.state_views.is_empty());
-    assert!(!conv_in.stream_metadata.uses_stream_tick);
+    let q_projection = kernel_plan.kernel("layer_00", "q_projection").unwrap();
+    assert_eq!(q_projection.kernel_id, "layer_00.q_projection");
+    assert_eq!(q_projection.op, "linear");
+    assert_eq!(q_projection.inputs.len(), 1);
+    assert_eq!(q_projection.outputs.len(), 1);
+    assert_eq!(q_projection.parameters.len(), 1);
+    assert!(!q_projection.stream_metadata.uses_stream_tick);
     assert_eq!(
-        conv_in.parameters[0],
+        q_projection.parameters[0],
         VulkanParameterBinding {
-            param_id: "conv_in_projection".to_string(),
-            tensor: "model.layers.0.conv.in_proj.weight".to_string(),
-            byte_count: Some(6_291_456),
-            shape: Some(vec![3072, 1024]),
+            param_id: "q_projection".to_string(),
+            tensor: "model.layers.0.self_attn.q_proj.weight".to_string(),
+            byte_count: Some(512),
+            shape: Some(vec![16, 16]),
         }
     );
-    assert_eq!(
-        conv_in.outputs[0].resource,
+    assert!(matches!(
+        q_projection.outputs[0].resource,
         VulkanSignalResource::ActivationSlot {
-            component_id: "layer_00".to_string(),
-            slot: 1,
-            bytes: Some(6144),
-            signal_bytes: Some(6144),
-        }
-    );
+            ref component_id,
+            signal_bytes: Some(32),
+            ..
+        } if component_id == "layer_00"
+    ));
 
-    let q_rope = kernel_plan.kernel("layer_02", "q_rope").unwrap();
+    let q_rope = kernel_plan.kernel("layer_00", "q_rope").unwrap();
     assert_eq!(q_rope.op, "rotary_position_embedding");
     assert!(q_rope.stream_metadata.uses_stream_tick);
     assert_eq!(
@@ -65,17 +59,16 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
         }
     );
     assert_eq!(q_rope.stream_metadata.control_flags.name, "control_flags");
-    assert_eq!(
+    assert!(matches!(
         q_rope.outputs[0].resource,
         VulkanSignalResource::ActivationSlot {
-            component_id: "layer_02".to_string(),
-            slot: 2,
-            bytes: Some(5120),
-            signal_bytes: Some(2048),
-        }
-    );
+            ref component_id,
+            signal_bytes: Some(32),
+            ..
+        } if component_id == "layer_00"
+    ));
 
-    let kv_append = kernel_plan.kernel("layer_02", "kv_memory_append").unwrap();
+    let kv_append = kernel_plan.kernel("layer_00", "kv_memory_append").unwrap();
     assert_eq!(kv_append.op, "append_state_update");
     assert!(kv_append.stream_metadata.uses_stream_tick);
     assert_eq!(kv_append.inputs.len(), 3);
@@ -83,15 +76,15 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
     assert_eq!(kv_append.state_reads.len(), 1);
     assert_eq!(kv_append.state_writes.len(), 1);
     assert_eq!(kv_append.state_views.len(), 2);
-    assert_eq!(
+    assert!(matches!(
         kv_append.inputs[2].resource,
         VulkanSignalResource::StateBuffer {
-            component_id: "layer_02".to_string(),
-            state_id: "kv_memory".to_string(),
-            static_bytes: None,
-            bytes_per_activation: Some(2048),
-        }
-    );
+            ref component_id,
+            ref state_id,
+            bytes_per_activation: Some(32),
+            ..
+        } if component_id == "layer_00" && state_id == "kv_memory"
+    ));
     assert!(
         kv_append
             .state_views
@@ -106,7 +99,6 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
         "dynamic_state_capacity_activations"
     );
 }
-
 #[test]
 fn stream_control_buffer_bytes_follow_kernel_abi_order() {
     let push_constants =
@@ -227,8 +219,8 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
     let dispatch_plan = VulkanKernelDispatchPlan::from_binding_plan(&binding_plan);
 
     assert_eq!(dispatch_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
-    assert_eq!(dispatch_plan.total_dispatch_count(), 242);
-    assert_eq!(dispatch_plan.op_counts().get("linear"), Some(&82));
+    assert_eq!(dispatch_plan.total_dispatch_count(), 17);
+    assert_eq!(dispatch_plan.op_counts().get("linear"), Some(&7));
 
     let first = &dispatch_plan.commands[0];
     assert_eq!(first.dispatch_index, 0);
@@ -254,11 +246,11 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
     assert!(!first.uses_stream_tick);
 
     let kv_append = dispatch_plan
-        .command("layer_02", "kv_memory_append")
+        .command("layer_00", "kv_memory_append")
         .unwrap();
-    assert_eq!(kv_append.dispatch_index, 40);
-    assert_eq!(kv_append.circuit_index, 2);
-    assert_eq!(kv_append.node_index, 8);
+    assert_eq!(kv_append.dispatch_index, 6);
+    assert_eq!(kv_append.circuit_index, 0);
+    assert_eq!(kv_append.node_index, 6);
     assert_eq!(kv_append.op, "append_state_update");
     assert!(kv_append.uses_stream_tick);
     assert_eq!(
@@ -283,37 +275,35 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
             (8, VulkanKernelDescriptorUsage::StateView, "v_memory"),
         ]
     );
-    assert_eq!(
+    assert!(matches!(
         kv_append.descriptor_bindings[2].resource,
         VulkanKernelDescriptorResource::Signal(VulkanSignalBinding {
-            signal_id: "kv_memory".to_string(),
             resource: VulkanSignalResource::StateBuffer {
-                component_id: "layer_02".to_string(),
-                state_id: "kv_memory".to_string(),
-                static_bytes: None,
-                bytes_per_activation: Some(2048),
+                ref component_id,
+                ref state_id,
+                bytes_per_activation: Some(32),
+                ..
             },
-        })
-    );
-    assert_eq!(
+            ..
+        }) if component_id == "layer_00" && state_id == "kv_memory"
+    ));
+    assert!(matches!(
         kv_append.descriptor_bindings[6].resource,
         VulkanKernelDescriptorResource::State {
-            component_id: "layer_02".to_string(),
+            ref component_id,
             binding: VulkanStateBinding {
-                component_id: "layer_02".to_string(),
-                state_id: "kv_memory".to_string(),
-                state_type: "append_only_attention_memory".to_string(),
-                static_bytes: None,
-                bytes_per_activation: Some(2048),
+                ref state_id,
+                bytes_per_activation: Some(32),
+                ..
             },
-        }
-    );
+        } if component_id == "layer_00" && state_id == "kv_memory"
+    ));
 
     let last = dispatch_plan.commands.last().unwrap();
-    assert_eq!(last.dispatch_index, 241);
-    assert_eq!(last.circuit_index, 13);
-    assert_eq!(last.kernel_id, "layer_13.ffn_residual");
-    assert_eq!(last.node_index, 15);
+    assert_eq!(last.dispatch_index, 16);
+    assert_eq!(last.circuit_index, 0);
+    assert_eq!(last.kernel_id, "layer_00.ffn_residual");
+    assert_eq!(last.node_index, 16);
     assert_eq!(
         last.descriptor_bindings.last().unwrap().resource,
         VulkanKernelDescriptorResource::Signal(VulkanSignalBinding {

@@ -22,8 +22,15 @@ fn descriptor_resource_plan_resolves_fixture_model_dispatch_patch_bay() {
 
     assert_eq!(descriptor_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
     assert_eq!(descriptor_plan.dynamic_state_capacity_activations, 4);
-    assert_eq!(descriptor_plan.dispatches.len(), 242);
-    assert_eq!(descriptor_plan.total_descriptor_count, 794);
+    assert_eq!(descriptor_plan.dispatches.len(), 17);
+    assert_eq!(
+        descriptor_plan.total_descriptor_count,
+        descriptor_plan
+            .dispatches
+            .iter()
+            .map(|dispatch| dispatch.descriptors.len())
+            .sum::<usize>()
+    );
 
     let first = descriptor_plan
         .dispatch("layer_00", "operator_norm")
@@ -42,59 +49,58 @@ fn descriptor_resource_plan_resolves_fixture_model_dispatch_patch_bay() {
             component_id: "layer_00".to_string(),
             signal_id: "operator_norm_out".to_string(),
             slot: 0,
-            byte_capacity: 5120,
-            signal_byte_capacity: 2048,
+            byte_capacity: 64,
+            signal_byte_capacity: 32,
         }
     );
     assert_eq!(
         first.descriptors[2].resource,
         VulkanDescriptorResourceAddress::PermanentParameter {
             param_id: "operator_norm".to_string(),
-            tensor: "model.layers.0.operator_norm.weight".to_string(),
-            byte_count: Some(2048),
+            tensor: "model.layers.0.input_layernorm.weight".to_string(),
+            byte_count: Some(32),
         }
     );
 
     let kv_append = descriptor_plan
-        .dispatch("layer_02", "kv_memory_append")
+        .dispatch("layer_00", "kv_memory_append")
         .unwrap();
     assert_eq!(kv_append.descriptors.len(), 9);
-    assert_eq!(
-        kv_append.descriptors[2].resource,
-        VulkanDescriptorResourceAddress::StateBuffer {
-            component_id: "layer_02".to_string(),
-            state_id: "kv_memory".to_string(),
-            state_type: "append_only_attention_memory".to_string(),
-            byte_capacity: 8192,
-            static_bytes: None,
-            bytes_per_activation: Some(2048),
-        }
-    );
-    assert_eq!(
-        kv_append.descriptors[6].resource,
-        VulkanDescriptorResourceAddress::StateBuffer {
-            component_id: "layer_02".to_string(),
-            state_id: "kv_memory".to_string(),
-            state_type: "append_only_attention_memory".to_string(),
-            byte_capacity: 8192,
-            static_bytes: None,
-            bytes_per_activation: Some(2048),
-        }
-    );
-    assert_eq!(
+    let state = resident_plan
+        .stream_state_buffers
+        .iter()
+        .find(|state| state.component_id == "layer_00" && state.state_id == "kv_memory")
+        .unwrap();
+    let expected_state_bytes = descriptor_state_byte_capacity(state, 4).unwrap();
+    for descriptor_index in [2, 6] {
+        assert!(matches!(
+            kv_append.descriptors[descriptor_index].resource,
+            VulkanDescriptorResourceAddress::StateBuffer {
+                ref component_id,
+                ref state_id,
+                byte_capacity,
+                bytes_per_activation: Some(32),
+                ..
+            } if component_id == "layer_00"
+                && state_id == "kv_memory"
+                && byte_capacity == expected_state_bytes
+        ));
+    }
+    assert!(matches!(
         kv_append.descriptors[7].resource,
         VulkanDescriptorResourceAddress::StateView {
-            component_id: "layer_02".to_string(),
-            state_id: "kv_memory".to_string(),
-            state_type: "append_only_attention_memory".to_string(),
-            byte_capacity: 8192,
-            static_bytes: None,
-            bytes_per_activation: Some(2048),
-        }
-    );
+            ref component_id,
+            ref state_id,
+            byte_capacity,
+            bytes_per_activation: Some(32),
+            ..
+        } if component_id == "layer_00"
+            && state_id == "kv_memory"
+            && byte_capacity == expected_state_bytes
+    ));
 
     let last = descriptor_plan
-        .dispatch("layer_13", "ffn_residual")
+        .dispatch("layer_00", "ffn_residual")
         .unwrap();
     assert_eq!(
         last.descriptors.last().unwrap().resource,
@@ -129,7 +135,6 @@ fn descriptor_resource_plan_requires_dynamic_capacity_for_kv_state() {
     assert!(
         error
             .to_string()
-            .contains("layer_02.kv_memory requires non-zero dynamic state capacity")
+            .contains("layer_00.kv_memory requires non-zero dynamic state capacity")
     );
 }
-

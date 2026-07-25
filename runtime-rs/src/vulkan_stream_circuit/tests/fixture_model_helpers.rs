@@ -1,14 +1,20 @@
 pub(super) fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, VulkanError> {
     match std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX") {
         Ok(raw_index) => {
-            let index = raw_index.parse::<usize>().map_err(|error| {
-                VulkanError(format!(
-                    "invalid NERVE_TEST_VULKAN_DEVICE_INDEX {raw_index:?}: {error}"
-                ))
-            })?;
-            VulkanComputeDevice::new_for_physical_device_index(index)
+            let index = raw_index.parse::<usize>().unwrap_or_else(|error| {
+                panic!("invalid NERVE_TEST_VULKAN_DEVICE_INDEX {raw_index:?}: {error}")
+            });
+            Ok(
+                VulkanComputeDevice::new_for_physical_device_index(index).unwrap_or_else(|error| {
+                    panic!(
+                        "explicit Vulkan test device index {index} could not be opened: {error}"
+                    )
+                }),
+            )
         }
-        Err(std::env::VarError::NotPresent) => VulkanComputeDevice::new(),
+        Err(std::env::VarError::NotPresent) => Err(VulkanError(
+            "NERVE_TEST_VULKAN_DEVICE_INDEX is required for every Vulkan test".to_string(),
+        )),
         Err(error) => Err(VulkanError(format!(
             "could not read NERVE_TEST_VULKAN_DEVICE_INDEX: {error}"
         ))),
@@ -409,41 +415,6 @@ fn cursor_completes_an_entire_matching_distributed_group() {
     assert_eq!(cursor.completed_stage_count, 2);
 }
 
-fn assert_bf16_bytes_close(actual: &[u8], expected: &[u8], max_absolute_error: f32) {
-    assert_eq!(actual.len(), expected.len());
-    assert_eq!(actual.len() % 2, 0);
-    for (index, (actual, expected)) in actual
-        .chunks_exact(2)
-        .zip(expected.chunks_exact(2))
-        .enumerate()
-    {
-        let actual = f32::from_bits(u32::from(u16::from_le_bytes([actual[0], actual[1]])) << 16);
-        let expected =
-            f32::from_bits(u32::from(u16::from_le_bytes([expected[0], expected[1]])) << 16);
-        assert!(
-            (actual - expected).abs() <= max_absolute_error,
-            "BF16 value {index} differs: actual={actual}, expected={expected}, tolerance={max_absolute_error}"
-        );
-    }
-}
-
-fn assert_f32_bytes_close(actual: &[u8], expected: &[u8], max_absolute_error: f32) {
-    assert_eq!(actual.len(), expected.len());
-    assert_eq!(actual.len() % 4, 0);
-    for (index, (actual, expected)) in actual
-        .chunks_exact(4)
-        .zip(expected.chunks_exact(4))
-        .enumerate()
-    {
-        let actual = f32::from_le_bytes([actual[0], actual[1], actual[2], actual[3]]);
-        let expected = f32::from_le_bytes([expected[0], expected[1], expected[2], expected[3]]);
-        assert!(
-            (actual - expected).abs() <= max_absolute_error,
-            "F32 value {index} differs: actual={actual}, expected={expected}, tolerance={max_absolute_error}"
-        );
-    }
-}
-
 fn numeric_state_error(actual: &[u8], expected: &[u8], dtype: &str) -> (f64, f64) {
     assert_eq!(actual.len(), expected.len());
     let (squared_error, squared_reference, max_absolute_error, count) = match dtype {
@@ -721,33 +692,19 @@ fn sampler_test_hash_u32(mut value: u32) -> u32 {
 }
 
 fn fixture_model_index_path() -> PathBuf {
-    compiled_artifact_dir(
-        "NERVE_TEST_LOWERED_DIR",
-        "lowered",
-        "execution_graph.circuits.json",
-    )
-    .join("execution_graph.circuits.json")
+    tiny_model_lowered_graph_path()
 }
 
 fn fixture_model_tensor_index_path() -> PathBuf {
-    compiled_artifact_dir("NERVE_TEST_TRANSPILED_DIR", "transpiled", "tensors.json")
-        .join("tensors.json")
+    tiny_model_tensor_index_path()
 }
 
 fn fixture_model_package_manifest_path() -> PathBuf {
-    compiled_artifact_dir(
-        "NERVE_TEST_PACKAGE_DIR",
-        "packages",
-        "vulkan_resident_package.json",
-    )
-    .join("vulkan_resident_package.json")
+    tiny_model_package_manifest_path()
 }
 
 fn tiny_fixture_model_package_manifest_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("test-fixtures")
-        .join("tiny_model")
-        .join("vulkan_resident_package.json")
+    tiny_model_package_manifest_path()
 }
 
 pub(super) fn tiny_fixture_model_runtime_model_with_placement(
@@ -778,18 +735,31 @@ fn fixture_model_runtime_model() -> VulkanResidentRuntimeModel {
         .unwrap()
 }
 
-fn fixture_model_runtime_model_with_placement(
-    placement: StreamCircuitPlacementSpec,
+fn fixture_model_runtime_model_with_three_layer_series(
+    middle_device_id: &str,
 ) -> VulkanResidentRuntimeModel {
     let manifest = fixture_model_package_manifest();
     let source_graph = manifest
         .circuit_graph
-        .to_resolved_lowered_execution_graph(PathBuf::from("."))
+        .to_resolved_lowered_execution_graph(tiny_model_dir())
         .unwrap();
-    let runtime_graph = source_graph
-        .runtime_graph_from_placement(&placement)
+    let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
+        .unwrap()
+        .duplicate_after_instance(&source_graph, "layer_00", "layer_00_remote")
+        .unwrap()
+        .duplicate_after_instance(&source_graph, "layer_00_remote", "layer_00_tail")
+        .unwrap()
+        .with_instance_device("layer_00_remote", middle_device_id)
         .unwrap();
     manifest.mount_runtime_graph(&runtime_graph).unwrap()
+}
+
+fn fixture_model_runtime_model_with_colocated_three_layer_series() -> VulkanResidentRuntimeModel {
+    fixture_model_runtime_model_with_three_layer_series("gpu0")
+}
+
+fn fixture_model_runtime_model_with_remote_middle() -> VulkanResidentRuntimeModel {
+    fixture_model_runtime_model_with_three_layer_series("gpu1")
 }
 
 fn fixture_model_execution_graph() -> ResolvedLoweredExecutionGraph {
@@ -854,4 +824,24 @@ fn copy_package_integrity_artifacts(
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::copy(source_root.join(relative_path), destination).unwrap();
     }
+}
+
+fn reusable_family_with_kernel<'a>(
+    reusable_plan: &'a VulkanReusableKernelPlan,
+    kernel_id: &str,
+) -> &'a VulkanReusableKernelFamily {
+    reusable_plan
+        .families
+        .iter()
+        .find(|family| {
+            family
+                .command_refs
+                .iter()
+                .any(|command| command.kernel_id == kernel_id)
+        })
+        .unwrap()
+}
+
+fn artifact_path_for_family(family: &VulkanReusableKernelFamily) -> String {
+    format!("kernels/{}.spv", family.family_id)
 }
