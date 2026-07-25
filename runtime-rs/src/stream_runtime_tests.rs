@@ -411,6 +411,79 @@ fn scheduler_forks_stream_transient_state_without_copying_blocks() {
 }
 
 #[test]
+fn scheduler_stream_checkpoint_restores_state_after_a_completed_branch() {
+    let mut scheduler = RuntimeStreamScheduler::new();
+    scheduler
+        .add_stream_with_state_declarations("stream", [(state_key(), state_shape())])
+        .unwrap();
+    scheduler
+        .enqueue_input_event(
+            "stream",
+            RuntimeStreamInputEvent::new("canonical", [1, 2], 0),
+        )
+        .unwrap();
+    let canonical = scheduler.schedule_step(budget(1)).unwrap().activations[0].clone();
+    scheduler
+        .complete_activation(
+            canonical.id,
+            RuntimeStreamActivationOutcome::generated_tokens([], false),
+        )
+        .unwrap();
+    let canonical_snapshot = scheduler.stream_transient_state_snapshot("stream").unwrap();
+    let canonical_stream = scheduler.snapshot().streams[0].clone();
+
+    let checkpoint = scheduler.checkpoint_stream_state("stream").unwrap();
+    scheduler
+        .enqueue_input_event(
+            "stream",
+            RuntimeStreamInputEvent::new("speculative_branch", [3, 4], 0),
+        )
+        .unwrap();
+    let branch = scheduler.schedule_step(budget(1)).unwrap().activations[0].clone();
+    scheduler
+        .complete_activation(
+            branch.id,
+            RuntimeStreamActivationOutcome::generated_tokens([], false),
+        )
+        .unwrap();
+    assert_eq!(
+        scheduler
+            .stream_transient_state_snapshot("stream")
+            .unwrap()
+            .logical_activation_count,
+        4
+    );
+
+    let restored = scheduler
+        .restore_stream_state_checkpoint(checkpoint)
+        .unwrap();
+
+    assert_eq!(
+        scheduler.stream_transient_state_snapshot("stream").unwrap(),
+        canonical_snapshot
+    );
+    assert_eq!(
+        restored.completed_input_event_count,
+        canonical_stream.completed_input_event_count
+    );
+    assert_eq!(
+        restored.scheduled_activation_count,
+        canonical_stream.scheduled_activation_count
+    );
+    assert_eq!(
+        scheduler
+            .transient_state_arena_snapshot()
+            .unwrap()
+            .live_block_count,
+        1
+    );
+    assert_eq!(
+        scheduler.transient_state_arena_snapshot().unwrap().blocks[0].ref_count,
+        1
+    );
+}
+
+#[test]
 fn scheduler_rejects_invalid_fork_before_retaining_blocks() {
     let mut scheduler = RuntimeStreamScheduler::new();
     scheduler

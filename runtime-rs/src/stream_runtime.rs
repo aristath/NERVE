@@ -248,6 +248,17 @@ pub struct RuntimeStreamSchedulerSnapshot {
     pub streams: Vec<RuntimeStreamSnapshot>,
 }
 
+pub struct RuntimeStreamStateCheckpoint {
+    stream_id: String,
+    execution_class_id: String,
+    status: RuntimeStreamStatus,
+    closing_after_current: bool,
+    completed_input_event_count: usize,
+    scheduled_activation_count: usize,
+    generated_token_count: usize,
+    transient_state_table: TransientStateTable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStreamSchedulerError(pub String);
 
@@ -536,6 +547,88 @@ impl RuntimeStreamScheduler {
         stream_id: &str,
     ) -> Result<TransientStateTableSnapshot, RuntimeStreamSchedulerError> {
         Ok(self.stream(stream_id)?.transient_state_table.snapshot())
+    }
+
+    pub fn checkpoint_stream_state(
+        &mut self,
+        stream_id: &str,
+    ) -> Result<RuntimeStreamStateCheckpoint, RuntimeStreamSchedulerError> {
+        let (
+            checkpoint_stream_id,
+            execution_class_id,
+            status,
+            closing_after_current,
+            completed_input_event_count,
+            scheduled_activation_count,
+            generated_token_count,
+            source_table,
+        ) = {
+            let stream = self.stream(stream_id)?;
+            if stream.has_pending_work() || stream.status != RuntimeStreamStatus::Idle {
+                return Err(RuntimeStreamSchedulerError(format!(
+                    "cannot checkpoint non-idle stream {stream_id:?}"
+                )));
+            }
+            (
+                stream.stream_id.clone(),
+                stream.execution_class_id.clone(),
+                stream.status,
+                stream.closing_after_current,
+                stream.completed_input_event_count,
+                stream.scheduled_activation_count,
+                stream.generated_token_count,
+                stream.transient_state_table.clone(),
+            )
+        };
+        let checkpoint_table = source_table.fork(&mut self.transient_state_arena, stream_id)?;
+        Ok(RuntimeStreamStateCheckpoint {
+            stream_id: checkpoint_stream_id,
+            execution_class_id,
+            status,
+            closing_after_current,
+            completed_input_event_count,
+            scheduled_activation_count,
+            generated_token_count,
+            transient_state_table: checkpoint_table,
+        })
+    }
+
+    pub fn restore_stream_state_checkpoint(
+        &mut self,
+        checkpoint: RuntimeStreamStateCheckpoint,
+    ) -> Result<RuntimeStreamSnapshot, RuntimeStreamSchedulerError> {
+        let stream_id = checkpoint.stream_id.clone();
+        let stream = self.stream(&stream_id)?;
+        if stream.has_pending_work() || stream.status != RuntimeStreamStatus::Idle {
+            return Err(RuntimeStreamSchedulerError(format!(
+                "cannot restore stream checkpoint into non-idle stream {stream_id:?}"
+            )));
+        }
+        if stream.execution_class_id != checkpoint.execution_class_id {
+            return Err(RuntimeStreamSchedulerError(format!(
+                "cannot restore stream checkpoint for execution class {:?} into {:?}",
+                checkpoint.execution_class_id, stream.execution_class_id
+            )));
+        }
+
+        let arena = &mut self.transient_state_arena;
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
+            .expect("checkpoint stream was validated");
+        stream.transient_state_table.reset_all(arena)?;
+        stream.transient_state_table = checkpoint.transient_state_table;
+        stream.status = checkpoint.status;
+        stream.closing_after_current = checkpoint.closing_after_current;
+        stream.completed_input_event_count = checkpoint.completed_input_event_count;
+        stream.scheduled_activation_count = checkpoint.scheduled_activation_count;
+        stream.generated_token_count = checkpoint.generated_token_count;
+        stream.queued_input_events.clear();
+        stream.current_event = None;
+        stream.in_flight_activation_ids.clear();
+        self.active_queue
+            .retain(|candidate| candidate != &stream_id);
+        Ok(stream.snapshot())
     }
 
     pub fn prefix_state_cache_snapshot(&self) -> RuntimePrefixStateCacheSnapshot {
