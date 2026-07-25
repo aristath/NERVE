@@ -2895,7 +2895,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     sparse_moe_fp8_shape = re.fullmatch(
-        r"sparse_moe_(gate_up|down)(?:_batch(\d+))?_fp8_e4m3_"
+        r"sparse_moe_(gate_up|down)(?:_batch(\d+))?(?:_(prequant))?_fp8_e4m3_"
         r"b(\d+)x(\d+)_h(\d+)_i(\d+)_e(\d+)_k(\d+)\.comp",
         shader_file,
     )
@@ -2903,6 +2903,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         (
             stage,
             batch_tile,
+            prequant,
             block_rows,
             block_columns,
             hidden_size,
@@ -2939,6 +2940,28 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         if not 0 < experts_per_token <= num_experts <= 4096:
             raise ModelCompileError(
                 f"invalid sparse expert routing e{num_experts} k{experts_per_token}"
+            )
+        if prequant is not None and stage != "gate_up":
+            raise ModelCompileError(
+                "only the sparse gate/up stage accepts a shared prequantized input"
+            )
+        if prequant is not None:
+            return render_shader_template(
+                source_dir,
+                (
+                    "sparse_moe_gate_up_prequant_fp8_e4m3.comp.template"
+                    if batch_tile is None
+                    else "sparse_moe_gate_up_prequant_batch1_fp8_e4m3.comp.template"
+                ),
+                {
+                    "BLOCK_ROWS": str(block_rows),
+                    "BLOCK_COLUMNS": str(block_columns),
+                    "HIDDEN_SIZE": str(hidden_size),
+                    "INTERMEDIATE_SIZE": str(intermediate_size),
+                    "NUM_EXPERTS": str(num_experts),
+                    "EXPERTS_PER_TOKEN": str(experts_per_token),
+                    "TILE_ROWS": str(FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS),
+                },
             )
         return render_shader_template(
             source_dir,

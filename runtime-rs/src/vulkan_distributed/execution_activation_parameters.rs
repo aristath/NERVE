@@ -15,9 +15,9 @@ use crate::vulkan_compute::{
 };
 use crate::vulkan_stream_circuit::{
     VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,
+    VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
     VulkanLoadedReusableKernelArtifact, VulkanLoadedReusableKernelArtifactManifest,
-    VulkanKernelScalarBinding, VulkanKernelScalarSource, VulkanPreparedDispatch,
-    VulkanPreparedDispatchPlan, VulkanResidentFeedbackControlPlane,
+    VulkanPreparedDispatch, VulkanPreparedDispatchPlan, VulkanResidentFeedbackControlPlane,
     VulkanReusableKernelArtifactManifest,
 };
 

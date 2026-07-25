@@ -62,11 +62,12 @@ use crate::vulkan_compute::{
 };
 use crate::vulkan_distributed::{
     VulkanDistributedActivationBufferPlan, VulkanDistributedActivationBuffers,
+    VulkanDistributedActivationSlot, VulkanDistributedDependencyClock,
     VulkanDistributedDispatchDistribution, VulkanDistributedDispatchGroup,
     VulkanDistributedDispatchRunnerError, VulkanDistributedDispatchRunners,
     VulkanDistributedDispatchSubmission, VulkanDistributedExecutionPlan,
     VulkanDistributedParameterAllocationPlan, VulkanDistributedParameterBuffers,
-    VulkanDistributedParameterExclusionPlan,
+    VulkanDistributedParameterExclusionPlan, VulkanDistributedQueueSynchronization,
 };
 
 mod package;
@@ -155,3 +156,6 @@ include!("vulkan_stream_circuit/bound_dispatch.rs");
 include!("vulkan_stream_circuit/kernel_descriptor_signature.rs");
 include!("vulkan_stream_circuit/circuit_binding_builder.rs");
 include!("vulkan_stream_circuit/resident_plan_math.rs");
+
+#[cfg(test)]
+mod tests;

@@ -343,19 +343,14 @@ impl VulkanResidentPlacedComponentBatchRunner {
             }
         })?;
         self.slice(device_index)?.run_causal_sequence(
+            devices,
             device,
+            owner_device_id,
+            &self.distributed_dispatches,
             mounted,
             input_token_ids,
             start_stream_tick,
             dynamic_state_capacity_activations,
-            |dispatch_index, batch_control| {
-                self.distributed_dispatches.run_dispatch(
-                    devices,
-                    owner_device_id,
-                    dispatch_index,
-                    batch_control,
-                )
-            },
         )
     }
 
@@ -377,20 +372,15 @@ impl VulkanResidentPlacedComponentBatchRunner {
             }
         })?;
         self.slice(device_index)?.run_independent_candidates(
+            devices,
             device,
+            owner_device_id,
+            &self.distributed_dispatches,
             mounted,
             transaction,
             input_token_ids,
             start_stream_tick,
             dynamic_state_capacity_activations,
-            |dispatch_index, batch_control| {
-                self.distributed_dispatches.run_dispatch(
-                    devices,
-                    owner_device_id,
-                    dispatch_index,
-                    batch_control,
-                )
-            },
         )
     }
 
@@ -411,19 +401,14 @@ impl VulkanResidentPlacedComponentBatchRunner {
             }
         })?;
         self.slice(device_index)?.run_independent_streams(
+            devices,
             device,
+            owner_device_id,
+            &self.distributed_dispatches,
             mounted,
             input_token_ids,
             stream_ticks,
             dynamic_state_capacity_activations,
-            |dispatch_index, batch_control| {
-                self.distributed_dispatches.run_dispatch(
-                    devices,
-                    owner_device_id,
-                    dispatch_index,
-                    batch_control,
-                )
-            },
         )
     }
 }

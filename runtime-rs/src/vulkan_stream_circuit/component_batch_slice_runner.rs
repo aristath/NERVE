@@ -166,6 +166,8 @@ impl VulkanResidentComponentBatchSliceRunner {
         }
         let (signal_buffer_indices, signal_buffer_plan) =
             component_batch_signal_buffer_plan(&slice.mounted, &slice.mounted_bound.dispatches)?;
+        let private_distributed_activations =
+            distributed_component_batch_private_activation_specs(distributed_execution_plan);
         let mut shared_device_ids_by_buffer = BTreeMap::<usize, BTreeSet<String>>::new();
         for dispatch in distributed_execution_plan
             .dispatches
@@ -176,6 +178,14 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .chain(&dispatch.auxiliary_input_activations)
                 .chain(std::iter::once(&dispatch.output_activation))
             {
+                if private_distributed_activations.contains_key(
+                    &distributed_component_batch_activation_key(
+                        &dispatch.owner_device_id,
+                        activation,
+                    ),
+                ) {
+                    continue;
+                }
                 let key = VulkanComponentBatchSignalKey::Activation {
                     component_id: activation.component_id.clone(),
                     signal_id: activation.signal_id.clone(),
@@ -393,7 +403,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     }
                 };
                 for stage in &batch_artifact.stages {
-                    let mut bindings = component_batch_bindings(
+                    let parent_bindings = component_batch_bindings(
                         &slice.mounted,
                         dispatch,
                         &signal_buffers,
@@ -402,6 +412,12 @@ impl VulkanResidentComponentBatchSliceRunner {
                         None,
                     )?;
                     let (binding, byte_count, payload) = stage.control.storage_buffer();
+                    let mut bindings = component_batch_stage_bindings(
+                        &parent_bindings,
+                        &stage.descriptor_bindings,
+                        binding,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                     let control_buffer = batch_control_buffers.get(&payload).ok_or_else(|| {
                         VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                             format!(
@@ -624,16 +640,15 @@ impl VulkanResidentComponentBatchSliceRunner {
     #[allow(clippy::too_many_arguments)]
     fn run_independent_candidates(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         device: &VulkanComputeDevice,
+        owner_device_id: &str,
+        distributed_dispatches: &VulkanDistributedComponentBatchRunners,
         mounted: &VulkanMountedPlacedStreamCircuit,
         transaction: &VulkanResidentStateTransactionBank,
         input_token_ids: &[u32],
         start_stream_tick: u64,
         dynamic_state_capacity_activations: u32,
-        run_distributed: impl FnMut(
-            usize,
-            &[u8],
-        ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError>,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let stream_ticks = consecutive_component_batch_stream_ticks(
             start_stream_tick,
@@ -647,21 +662,23 @@ impl VulkanResidentComponentBatchSliceRunner {
             &stream_ticks,
             start_stream_tick,
             dynamic_state_capacity_activations,
-            run_distributed,
+            devices,
+            owner_device_id,
+            distributed_dispatches,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_causal_sequence(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         device: &VulkanComputeDevice,
+        owner_device_id: &str,
+        distributed_dispatches: &VulkanDistributedComponentBatchRunners,
         mounted: &VulkanMountedPlacedStreamCircuit,
         input_token_ids: &[u32],
         start_stream_tick: u64,
         dynamic_state_capacity_activations: u32,
-        run_distributed: impl FnMut(
-            usize,
-            &[u8],
-        ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError>,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let stream_ticks = consecutive_component_batch_stream_ticks(
             start_stream_tick,
@@ -675,22 +692,23 @@ impl VulkanResidentComponentBatchSliceRunner {
             &stream_ticks,
             start_stream_tick,
             dynamic_state_capacity_activations,
-            run_distributed,
+            devices,
+            owner_device_id,
+            distributed_dispatches,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn run_independent_streams(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         device: &VulkanComputeDevice,
+        owner_device_id: &str,
+        distributed_dispatches: &VulkanDistributedComponentBatchRunners,
         mounted: &VulkanMountedPlacedStreamCircuit,
         input_token_ids: &[u32],
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
-        run_distributed: impl FnMut(
-            usize,
-            &[u8],
-        ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError>,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let start_stream_tick = stream_ticks.first().copied().ok_or(
             VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget,
@@ -703,7 +721,9 @@ impl VulkanResidentComponentBatchSliceRunner {
             stream_ticks,
             start_stream_tick,
             dynamic_state_capacity_activations,
-            run_distributed,
+            devices,
+            owner_device_id,
+            distributed_dispatches,
         )
     }
 
@@ -717,11 +737,9 @@ impl VulkanResidentComponentBatchSliceRunner {
         stream_ticks: &[u64],
         start_stream_tick: u64,
         dynamic_state_capacity_activations: u32,
-        mut run_distributed: impl FnMut(
-            usize,
-            &[u8],
-        )
-            -> Result<(), VulkanResidentInProcessPlacedRuntimeError>,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        owner_device_id: &str,
+        distributed_dispatches: &VulkanDistributedComponentBatchRunners,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let batch_width = input_token_ids.len();
         if batch_width == 0 || batch_width > self.lane_capacity {
@@ -790,6 +808,21 @@ impl VulkanResidentComponentBatchSliceRunner {
         let mut local_group_index = 0usize;
         let mut measurements = Vec::new();
         let mut local_submission_batch = VulkanResidentQueueSubmissionBatch::new();
+        let dependency_value = self
+            .execution_units
+            .iter()
+            .any(|unit| {
+                matches!(
+                    unit,
+                    VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
+                )
+            })
+            .then(|| distributed_dispatches.reserve_dependency_value(owner_device_id))
+            .transpose()?;
+        let timeline_value_offset = dependency_value
+            .map(|value| value - 1)
+            .unwrap_or_default();
+        let mut pending_owner_wait_points = Vec::new();
         for (unit_index, unit) in self.execution_units.iter().enumerate() {
             match unit {
                 VulkanComponentBatchExecutionUnit::LocalComponent {
@@ -806,6 +839,25 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 VulkanComponentBatchExecutionUnit::LocalComponent { .. }
                             )
                         });
+                    let wait_points = if local_submission_batch.pending_submission_count() == 0 {
+                        pending_owner_wait_points.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let signal_points = if flush_after_segment {
+                        match self.execution_units.get(unit_index + 1) {
+                            Some(VulkanComponentBatchExecutionUnit::DistributedDispatch {
+                                dispatch_index,
+                            }) => distributed_dispatches.owner_ready_signal_points(
+                                owner_device_id,
+                                *dispatch_index,
+                                1,
+                            )?,
+                            _ => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    };
                     self.run_segment(
                         device,
                         mounted,
@@ -820,8 +872,13 @@ impl VulkanResidentComponentBatchSliceRunner {
                         *step_start,
                         *step_end,
                         Some(&local_submission_batch),
+                        wait_points,
+                        &signal_points,
                         flush_after_segment,
                     )?;
+                    if !wait_points.is_empty() {
+                        pending_owner_wait_points.clear();
+                    }
                     sequence_index += 1;
                     if flush_after_segment {
                         self.submit_and_wait_local_batch(
@@ -837,6 +894,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 state_semantics,
                                 VulkanComponentBatchStateSemantics::IndependentCandidates(_)
                             ),
+                            timeline_value_offset,
                         )?
                         .into_iter()
                         .for_each(|measurement| measurements.push(measurement));
@@ -844,9 +902,43 @@ impl VulkanResidentComponentBatchSliceRunner {
                     }
                 }
                 VulkanComponentBatchExecutionUnit::DistributedDispatch { dispatch_index } => {
-                    run_distributed(*dispatch_index, &batch_control)?;
+                    let consume_owner_ready_signal = matches!(
+                        self.execution_units.get(unit_index.wrapping_sub(1)),
+                        Some(VulkanComponentBatchExecutionUnit::LocalComponent { .. })
+                    );
+                    let prepare_owner_continuation = matches!(
+                        self.execution_units.get(unit_index + 1),
+                        Some(VulkanComponentBatchExecutionUnit::LocalComponent { .. })
+                    );
+                    distributed_dispatches.run_dispatch(
+                        devices,
+                        owner_device_id,
+                        *dispatch_index,
+                        &batch_control,
+                        dependency_value.expect(
+                            "a distributed execution unit reserved a dependency value",
+                        ),
+                        consume_owner_ready_signal,
+                        prepare_owner_continuation,
+                    )?;
+                    if prepare_owner_continuation {
+                        pending_owner_wait_points =
+                            distributed_dispatches.owner_completion_wait_points(
+                                owner_device_id,
+                                *dispatch_index,
+                                1,
+                            )?;
+                    }
                 }
             }
+        }
+        if !pending_owner_wait_points.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "distributed component batch completed without consuming its owner continuation"
+                        .to_string(),
+                ),
+            ));
         }
         self.submit_and_wait_local_batch(
             local_submission_batch,
@@ -858,6 +950,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 state_semantics,
                 VulkanComponentBatchStateSemantics::IndependentCandidates(_)
             ),
+            timeline_value_offset,
         )?
         .into_iter()
         .for_each(|measurement| measurements.push(measurement));
@@ -889,6 +982,8 @@ impl VulkanResidentComponentBatchSliceRunner {
         step_start: usize,
         step_end: usize,
         submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_completion: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let mut push_constant_storage = Vec::<Vec<u8>>::new();
@@ -993,8 +1088,8 @@ impl VulkanResidentComponentBatchSliceRunner {
                     submission_batch.enqueue_recorded_sequence_with_execution_region(
                         device,
                         sequence,
-                        &[],
-                        &[],
+                        wait_points,
+                        signal_points,
                         signal_completion,
                         Some(execution_region),
                     )
@@ -1019,6 +1114,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         local_group_index: usize,
         shape_was_calibrated: bool,
         reusable: bool,
+        timeline_value_offset: u64,
     ) -> Result<
         Vec<VulkanResidentExecutionQuantumMeasurement>,
         VulkanResidentInProcessPlacedRuntimeError,
@@ -1034,7 +1130,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .get(&template_key)
         {
             return template
-                .submit_calibrated_quanta_and_wait(0)
+                .submit_calibrated_quanta_and_wait(timeline_value_offset)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop);
         }
         let template = {
@@ -1044,7 +1140,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
         };
         let measurements = template
-            .submit_calibrated_quanta_and_wait(0)
+            .submit_calibrated_quanta_and_wait(timeline_value_offset)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         if reusable && shape_was_calibrated {
             self.submission_template_catalog

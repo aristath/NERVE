@@ -12,6 +12,7 @@ def persistent_batch_control_stage(
     *,
     payload: str = "width",
     binding: int = 31,
+    descriptor_bindings: list[Json] | None = None,
 ) -> Json:
     byte_count = {
         "width": 4,
@@ -22,7 +23,7 @@ def persistent_batch_control_stage(
         shader_file,
         binding=binding,
     )
-    return {
+    stage = {
         "shader_path": f"shaders/{packaged_shader_file}",
         "local_size_x": local_size_x,
         "workgroup_count_x": workgroup_count_x,
@@ -33,6 +34,9 @@ def persistent_batch_control_stage(
             "payload": payload,
         },
     }
+    if descriptor_bindings is not None:
+        stage["descriptor_bindings"] = descriptor_bindings
+    return stage
 
 
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
@@ -45,7 +49,7 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     ):
         return shader_file.replace("moe_topk_", "moe_topk_batch1_", 1)
     if re.fullmatch(
-        r"sparse_moe_(?:gate_up|down)_(?:bf16|fp8_e4m3_b\d+x\d+|"
+        r"sparse_moe_(?:gate_up|down)_(?:bf16|(?:prequant_)?fp8_e4m3_b\d+x\d+|"
         r"int4_ct_s(?:f16|bf16)_g\d+)_"
         r"h\d+_i\d+_e\d+_k\d+\.comp",
         shader_file,
@@ -80,7 +84,7 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
 
 def sparse_moe_route_compaction_shader_file(shader_file: str) -> str | None:
     match = re.fullmatch(
-        r"sparse_moe_gate_up_(?:bf16|fp8_e4m3_b\d+x\d+|"
+        r"sparse_moe_gate_up_(?:bf16|(?:prequant_)?fp8_e4m3_b\d+x\d+|"
         r"int4_ct_s(?:f16|bf16)_g\d+)_"
         r"h\d+_i(\d+)_e\d+_k(\d+)\.comp",
         shader_file,
@@ -104,6 +108,35 @@ def sparse_moe_route_compaction_workgroup_count_x(shader_file: str) -> int:
             f"shader {shader_file!r} is not a sparse route-compaction kernel"
         )
     return int(match.group(1))
+
+
+def sparse_moe_route_compaction_descriptor_bindings(node: Json) -> list[Json]:
+    if node.get("op") != "sparse_moe_gate_up":
+        raise ModelCompileError(
+            "sparse route compaction requires a sparse_moe_gate_up node"
+        )
+    inputs = node.get("inputs")
+    outputs = node.get("outputs")
+    if (
+        not isinstance(inputs, list)
+        or len(inputs) < 2
+        or not all(isinstance(signal, str) and signal for signal in inputs)
+        or not isinstance(outputs, list)
+        or len(outputs) != 1
+    ):
+        raise ModelCompileError(
+            f"sparse gate node {node.get('id')!r} has no valid descriptor interface"
+        )
+    return [
+        {
+            "binding": 1,
+            "source_binding": len(inputs) - 1,
+        },
+        {
+            "binding": 2,
+            "source_binding": len(inputs),
+        },
+    ]
 
 
 def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] | None:

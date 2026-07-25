@@ -289,52 +289,19 @@ impl VulkanDistributedDispatchRunners {
                         planned_shard.device_id
                     ))
                 })?;
-                if !owner_device.supports_opaque_fd_timeline_semaphores()
-                    || !helper_device.supports_opaque_fd_timeline_semaphores()
-                {
-                    return Err(VulkanDistributedDispatchRunnerError(format!(
-                        "distributed dispatch {}.{} requires persistent opaque-file timeline semaphores on owner {:?} and helper {:?}",
-                        leader.component_id,
-                        leader.node_id,
-                        planned_group.owner_device_id,
-                        planned_shard.device_id
-                    )));
-                }
-                let ready_source = owner_device
-                    .create_opaque_fd_exportable_timeline_semaphore(0)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                let ready_wait = helper_device
-                    .create_timeline_semaphore(0)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                helper_device
-                    .import_timeline_semaphore_opaque_fd(
-                        &ready_wait,
-                        owner_device
-                            .export_timeline_semaphore_opaque_fd(&ready_source)
-                            .map_err(VulkanDistributedDispatchRunnerError::from)?,
+                helper_synchronization.push(
+                    VulkanDistributedQueueSynchronization::new(
+                        owner_device,
+                        helper_device,
+                        &planned_group.owner_device_id,
+                        &planned_shard.device_id,
+                        &format!(
+                            "distributed dispatch {}.{}",
+                            leader.component_id, leader.node_id
+                        ),
                     )
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                let done_source = helper_device
-                    .create_opaque_fd_exportable_timeline_semaphore(0)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                let done_wait = owner_device
-                    .create_timeline_semaphore(0)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                owner_device
-                    .import_timeline_semaphore_opaque_fd(
-                        &done_wait,
-                        helper_device
-                            .export_timeline_semaphore_opaque_fd(&done_source)
-                            .map_err(VulkanDistributedDispatchRunnerError::from)?,
-                    )
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                helper_synchronization.push(VulkanDistributedDispatchHelperSynchronization {
-                    device_id: planned_shard.device_id.clone(),
-                    ready_source,
-                    ready_wait,
-                    done_source,
-                    done_wait,
-                });
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?,
+                );
             }
             dispatches.push(VulkanDistributedDispatchRunner {
                 planned: planned_group.clone(),
@@ -506,7 +473,7 @@ impl VulkanDistributedDispatchRunners {
         Ok(dispatch
             .helper_synchronization
             .iter()
-            .map(|sync| VulkanTimelineSemaphorePoint::new(&sync.ready_source, dependency_value))
+            .map(|sync| sync.owner_ready(dependency_value))
             .collect())
     }
 
@@ -524,7 +491,7 @@ impl VulkanDistributedDispatchRunners {
         Ok(dispatch
             .helper_synchronization
             .iter()
-            .map(|sync| VulkanTimelineSemaphorePoint::new(&sync.done_wait, dependency_value))
+            .map(|sync| sync.owner_done(dependency_value))
             .collect())
     }
 
@@ -589,19 +556,13 @@ impl VulkanDistributedDispatchRunners {
             let wait_points = synchronization
                 .filter(|_| consume_owner_ready_signal)
                 .map(|sync| {
-                    vec![VulkanTimelineSemaphorePoint::new(
-                        &sync.ready_wait,
-                        dependency_value,
-                    )]
+                    vec![sync.helper_ready(dependency_value)]
                 })
                 .unwrap_or_default();
             let signal_points = synchronization
                 .filter(|_| prepare_owner_continuation)
                 .map(|sync| {
-                    vec![VulkanTimelineSemaphorePoint::new(
-                        &sync.done_source,
-                        dependency_value,
-                    )]
+                    vec![sync.helper_done(dependency_value)]
                 })
                 .unwrap_or_default();
             let submission = if let Some(submission_batch) = submission_batch {
@@ -774,58 +735,8 @@ pub struct VulkanDistributedDispatchRun {
 pub struct VulkanDistributedDispatchRunner {
     pub planned: VulkanDistributedDispatchGroup,
     pub shards: Vec<VulkanDistributedDispatchShardRunner>,
-    helper_synchronization: Vec<VulkanDistributedDispatchHelperSynchronization>,
+    helper_synchronization: Vec<VulkanDistributedQueueSynchronization>,
     dependency_clock: VulkanDistributedDependencyClock,
-}
-
-struct VulkanDistributedDependencyClock {
-    next_value: Cell<u64>,
-}
-
-impl VulkanDistributedDependencyClock {
-    fn new() -> Self {
-        Self {
-            next_value: Cell::new(1),
-        }
-    }
-
-    fn reserve(
-        &self,
-        owner_device_id: &str,
-        dispatch_index: usize,
-    ) -> Result<u64, VulkanDistributedDispatchRunnerError> {
-        let value = self.next_value.get();
-        let next = value.checked_add(1).ok_or_else(|| {
-            VulkanDistributedDispatchRunnerError(format!(
-                "distributed dispatch {dispatch_index} owned by {owner_device_id:?} exhausted its timeline semaphore values"
-            ))
-        })?;
-        self.next_value.set(next);
-        Ok(value)
-    }
-
-    fn validate_advance(
-        &self,
-        count: u64,
-        owner_device_id: &str,
-        dispatch_index: usize,
-    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
-        self.next_value.get().checked_add(count).ok_or_else(|| {
-            VulkanDistributedDispatchRunnerError(format!(
-                "distributed dispatch {dispatch_index} owned by {owner_device_id:?} exhausts its timeline semaphore values during replay"
-            ))
-        })?;
-        Ok(())
-    }
-
-    fn advance(&self, count: u64) {
-        self.next_value.set(
-            self.next_value
-                .get()
-                .checked_add(count)
-                .expect("distributed replay dependency advance was validated"),
-        );
-    }
 }
 
 pub struct VulkanDistributedDispatchShardRunner {
@@ -836,13 +747,6 @@ pub struct VulkanDistributedDispatchShardRunner {
     feedback_sequence: Option<VulkanResidentKernelSequence>,
 }
 
-struct VulkanDistributedDispatchHelperSynchronization {
-    device_id: String,
-    ready_source: VulkanTimelineSemaphore,
-    ready_wait: VulkanTimelineSemaphore,
-    done_source: VulkanTimelineSemaphore,
-    done_wait: VulkanTimelineSemaphore,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanDistributedDispatchRunnerError(pub String);

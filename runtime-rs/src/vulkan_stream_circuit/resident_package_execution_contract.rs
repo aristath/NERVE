@@ -1,3 +1,22 @@
+fn component_batch_stage_descriptor_contract_is_valid(
+    stage: &VulkanResidentComponentBatchStageSpec,
+) -> bool {
+    let (control_binding, _, _) = stage.control.storage_buffer();
+    let sources = stage
+        .descriptor_bindings
+        .iter()
+        .map(|binding| binding.source_binding)
+        .collect::<BTreeSet<_>>();
+    let destinations = stage
+        .descriptor_bindings
+        .iter()
+        .map(|binding| binding.binding)
+        .collect::<BTreeSet<_>>();
+    sources.len() == stage.descriptor_bindings.len()
+        && destinations.len() == stage.descriptor_bindings.len()
+        && !destinations.contains(&control_binding)
+}
+
 fn validate_component_executions(
     package_id: &str,
     component_executions: &[VulkanResidentComponentExecutionSpec],
@@ -61,6 +80,7 @@ fn validate_component_executions(
                                         stage.control.storage_buffer();
                                     byte_count == payload.byte_count()
                                 }
+                                && component_batch_stage_descriptor_contract_is_valid(stage)
                         })
                         && extensions.iter().all(|extension| !extension.is_empty())
                         && extensions.windows(2).all(|pair| pair[0] < pair[1])

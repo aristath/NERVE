@@ -564,6 +564,9 @@ def valid_batch_implementation(implementation: Any) -> bool:
 
 def valid_batch_stage(stage: Any) -> bool:
     control = stage.get("control") if isinstance(stage, dict) else None
+    descriptor_bindings = (
+        stage.get("descriptor_bindings") if isinstance(stage, dict) else None
+    )
     return (
         isinstance(stage, dict)
         and isinstance(stage.get("shader_path"), str)
@@ -575,6 +578,42 @@ def valid_batch_stage(stage: Any) -> bool:
         and not isinstance(stage.get("workgroup_count_x"), bool)
         and stage["workgroup_count_x"] > 0
         and valid_batch_control(control)
+        and valid_batch_descriptor_bindings(
+            descriptor_bindings,
+            control_binding=control["binding"],
+        )
+    )
+
+
+def valid_batch_descriptor_bindings(
+    descriptor_bindings: Any,
+    *,
+    control_binding: int,
+) -> bool:
+    if descriptor_bindings is None:
+        return True
+    if not isinstance(descriptor_bindings, list) or not descriptor_bindings:
+        return False
+    if any(
+        not isinstance(mapping, dict)
+        or set(mapping) != {"binding", "source_binding"}
+        or not isinstance(mapping["binding"], int)
+        or isinstance(mapping["binding"], bool)
+        or mapping["binding"] < 0
+        or not isinstance(mapping["source_binding"], int)
+        or isinstance(mapping["source_binding"], bool)
+        or mapping["source_binding"] < 0
+        or mapping["binding"] == control_binding
+        for mapping in descriptor_bindings
+    ):
+        return False
+    stage_bindings = [mapping["binding"] for mapping in descriptor_bindings]
+    source_bindings = [
+        mapping["source_binding"] for mapping in descriptor_bindings
+    ]
+    return (
+        len(stage_bindings) == len(set(stage_bindings))
+        and len(source_bindings) == len(set(source_bindings))
     )
 
 

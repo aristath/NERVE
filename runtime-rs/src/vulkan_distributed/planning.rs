@@ -449,9 +449,34 @@ fn plan_sparse_expert_dispatch(
         return Ok(None);
     }
 
-    let input_activation = activation_slot(dispatch, 0, 1, "primary input")?;
-    let routes_activation = activation_slot(dispatch, 1, 1, "expert routes")?;
-    let output_activation = activation_slot(dispatch, 2, 1, "output")?;
+    let mut input_activations = activation_slots_for_usage(
+        dispatch,
+        VulkanKernelDescriptorUsage::InputSignal,
+        "input",
+    )?;
+    if input_activations.len() < 2 {
+        return Err(dispatch_error(
+            dispatch,
+            "requires a primary expert input and route signal".to_string(),
+        ));
+    }
+    let output_activations = activation_slots_for_usage(
+        dispatch,
+        VulkanKernelDescriptorUsage::OutputSignal,
+        "output",
+    )?;
+    let [output_activation] = output_activations.as_slice() else {
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "requires exactly one output activation, found {}",
+                output_activations.len()
+            ),
+        ));
+    };
+    let input_activation = input_activations.remove(0);
+    let auxiliary_input_activations = input_activations;
+    let output_activation = output_activation.clone();
     let input_byte_capacity = input_activation.signal_byte_capacity;
     let output_byte_capacity = output_activation.signal_byte_capacity;
     let shard_device_ids = std::iter::once(owner_device_id)
@@ -519,7 +544,7 @@ fn plan_sparse_expert_dispatch(
         input_width: input_byte_capacity / BF16_BYTE_COUNT,
         row_alignment: expert_alignment,
         input_activation,
-        auxiliary_input_activations: vec![routes_activation],
+        auxiliary_input_activations,
         output_activation,
         distribution: VulkanDistributedDispatchDistribution::ExpertRange,
         distributed_parameter_byte_count,
@@ -630,6 +655,48 @@ fn activation_slot(
         ));
     }
     Ok(activation)
+}
+
+fn activation_slots_for_usage(
+    dispatch: &VulkanPreparedDispatch,
+    usage: VulkanKernelDescriptorUsage,
+    role: &str,
+) -> Result<Vec<VulkanDistributedActivationSlot>, VulkanDistributedPlanError> {
+    let activations = dispatch
+        .descriptors
+        .iter()
+        .filter(|descriptor| descriptor.usage == usage)
+        .map(|descriptor| match &descriptor.resource {
+            VulkanDescriptorResourceAddress::ActivationSlot {
+                component_id,
+                signal_id,
+                slot,
+                byte_capacity,
+                signal_byte_capacity,
+            } => Ok(VulkanDistributedActivationSlot {
+                binding: descriptor.binding,
+                component_id: component_id.clone(),
+                signal_id: signal_id.clone(),
+                slot: *slot,
+                byte_capacity: *byte_capacity,
+                signal_byte_capacity: *signal_byte_capacity,
+            }),
+            _ => Err(dispatch_error(
+                dispatch,
+                format!(
+                    "{role} descriptor {} is not a resident activation",
+                    descriptor.binding
+                ),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if activations.is_empty() {
+        return Err(dispatch_error(
+            dispatch,
+            format!("has no resident {role} activations"),
+        ));
+    }
+    Ok(activations)
 }
 
 fn distribute_rows(

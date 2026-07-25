@@ -33,6 +33,72 @@ fn component_batch_stages_replace_push_constants(
     })
 }
 
+fn component_batch_stage_bindings<'a>(
+    parent: &[VulkanResidentKernelBufferBinding<'a>],
+    descriptor_bindings: &[VulkanResidentComponentBatchDescriptorBindingSpec],
+    control_binding: u32,
+) -> Result<Vec<VulkanResidentKernelBufferBinding<'a>>, VulkanError> {
+    if descriptor_bindings.is_empty() {
+        if parent.iter().any(|binding| binding.binding == control_binding) {
+            return Err(VulkanError(format!(
+                "component batch control binding {control_binding} collides with the parent descriptor interface"
+            )));
+        }
+        return Ok(parent
+            .iter()
+            .map(|binding| VulkanResidentKernelBufferBinding {
+                binding: binding.binding,
+                buffer: binding.buffer,
+                byte_offset: binding.byte_offset,
+                byte_len: binding.byte_len,
+                access: binding.access,
+            })
+            .collect());
+    }
+
+    let mut source_bindings = BTreeSet::new();
+    let mut stage_bindings = BTreeSet::new();
+    descriptor_bindings
+        .iter()
+        .map(|mapping| {
+            if !source_bindings.insert(mapping.source_binding) {
+                return Err(VulkanError(format!(
+                    "component batch stage maps parent descriptor {} more than once",
+                    mapping.source_binding
+                )));
+            }
+            if mapping.binding == control_binding {
+                return Err(VulkanError(format!(
+                    "component batch stage descriptor binding {} collides with its control binding",
+                    mapping.binding
+                )));
+            }
+            if !stage_bindings.insert(mapping.binding) {
+                return Err(VulkanError(format!(
+                    "component batch stage descriptor binding {} is mapped more than once",
+                    mapping.binding
+                )));
+            }
+            let source = parent
+                .iter()
+                .find(|binding| binding.binding == mapping.source_binding)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch stage references absent parent descriptor {}",
+                        mapping.source_binding
+                    ))
+                })?;
+            Ok(VulkanResidentKernelBufferBinding {
+                binding: mapping.binding,
+                buffer: source.buffer,
+                byte_offset: source.byte_offset,
+                byte_len: source.byte_len,
+                access: source.access,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum VulkanComponentBatchStateSemantics<'a> {
     IndependentCandidates(&'a VulkanResidentStateTransactionBank),

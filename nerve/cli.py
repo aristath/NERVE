@@ -103,6 +103,13 @@ def main() -> None:
         help="assign one runtime node instance to a logical device in the runtime graph; may be repeated",
     )
     parser.add_argument(
+        "--shard-component",
+        action="append",
+        default=[],
+        metavar="COMPONENT=DEVICE,DEVICE",
+        help="split one component's supported internal work across logical devices; may be repeated",
+    )
+    parser.add_argument(
         "--bind-device",
         action="append",
         default=[],
@@ -359,6 +366,7 @@ def validate_action_options(
         ("--inspect-device-slice", args.inspect_device_slice is not None),
         ("--device", args.device is not None),
         ("--place-node", bool(args.place_node)),
+        ("--shard-component", bool(args.shard_component)),
         ("--bind-device", bool(args.bind_device)),
         ("--duplicate-after", bool(args.duplicate_after)),
         ("--chain", args.chain is not None),
@@ -504,6 +512,8 @@ def build_runtime_command(args: argparse.Namespace, package_manifest: Path) -> l
         runtime_args.extend(["--device", args.device])
     for raw_placement in args.place_node:
         runtime_args.extend(["--place-node", raw_placement])
+    for raw_sharding in args.shard_component:
+        runtime_args.extend(["--shard-component", raw_sharding])
     for raw_binding in args.bind_device:
         runtime_args.extend(["--bind-device", raw_binding])
     for raw_duplicate in args.duplicate_after:

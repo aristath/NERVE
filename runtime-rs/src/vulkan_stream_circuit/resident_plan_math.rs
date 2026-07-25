@@ -64,6 +64,3 @@ fn checked_mul(left: usize, right: usize, label: &str) -> Result<usize, VulkanRe
     left.checked_mul(right)
         .ok_or_else(|| VulkanResidentPlanError(format!("{label} overflowed")))
 }
-
-#[cfg(test)]
-mod tests;

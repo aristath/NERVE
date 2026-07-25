@@ -860,7 +860,9 @@ def shader_file_for_node(
                 circuit, node, tensor_index, stage=stage
             )
             return (
-                f"sparse_moe_{stage}_fp8_e4m3_b{block_rows}x{block_columns}_"
+                f"sparse_moe_{stage}"
+                f"{'_prequant' if uses_prequantized_fp8_input(node) else ''}"
+                f"_fp8_e4m3_b{block_rows}x{block_columns}_"
                 f"h{attrs['hidden_size']}_i{attrs['intermediate_size']}_"
                 f"e{attrs['num_experts']}_k{attrs['experts_per_token']}.comp"
             )
@@ -1045,9 +1047,14 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         attrs = node["attrs"]
         parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
         if parameter_dtype == "F8_E4M3":
+            tile_rows = (
+                FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS
+                if uses_prequantized_fp8_input(node)
+                else FP8_SPARSE_GATE_UP_TILE_ROWS
+            )
             return int(attrs["experts_per_token"]) * (
-                (int(attrs["intermediate_size"]) + FP8_SPARSE_GATE_UP_TILE_ROWS - 1)
-                // FP8_SPARSE_GATE_UP_TILE_ROWS
+                (int(attrs["intermediate_size"]) + tile_rows - 1)
+                // tile_rows
             )
         if parameter_dtype == "I32":
             return int(attrs["experts_per_token"]) * (
@@ -1101,6 +1108,8 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if shader_file.startswith("sparse_moe_gate_up_prequant_fp8_"):
+        return 64
     if shader_file.startswith(("sparse_moe_gate_up_fp8_", "sparse_moe_down_fp8_")):
         return 512
     if shader_file.startswith(

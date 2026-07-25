@@ -341,6 +341,7 @@ def build_vulkan_resident_package_manifest(
         binding=3,
     )
     output_scale = 1.0 / logits_scale
+    projection_tile_rows = 2
     if projection_dtype == "F8_E4M3":
         projection_tile_rows = FP8_OUTPUT_PROJECTION_TILE_ROWS
         projection_shader_file = (
@@ -378,8 +379,8 @@ def build_vulkan_resident_package_manifest(
             f"{projection_prefix}_batch{projection_batch_lane_tile_width}_bf16_"
             f"{vocab_size}x{hidden_size}_scale{shader_float_token(output_scale)}_to_f32.comp"
         )
-        # The BF16 projection shader collaboratively computes two vocabulary
-        # rows per workgroup.
+        # The generic BF16 projection shader collaboratively computes two
+        # vocabulary rows per workgroup.
         projection_workgroup_count_x = (vocab_size + 1) // 2
         projection_local_size_x = 64
     norm_shader_file = rms_norm_shader_file(hidden_size, norm_eps, norm_weight_offset)
@@ -475,6 +476,8 @@ def build_vulkan_resident_package_manifest(
         dimensions=dimensions,
         projection_shader_file=projection_shader_file,
         norm_shader_file=norm_shader_file,
+        projection_workgroup_count_x=projection_workgroup_count_x,
+        projection_local_size_x=projection_local_size_x,
         frame_bytes=frame_bytes,
         logits_bytes=logits_bytes,
         vocab_size=vocab_size,
@@ -794,6 +797,8 @@ def speculative_decoder_specs(
     dimensions: Json,
     projection_shader_file: str,
     norm_shader_file: str,
+    projection_workgroup_count_x: int,
+    projection_local_size_x: int,
     frame_bytes: int,
     logits_bytes: int,
     vocab_size: int,
@@ -902,9 +907,9 @@ def speculative_decoder_specs(
                     "logits_byte_capacity": logits_bytes,
                     "vocabulary_size": vocab_size,
                     "hidden_size": hidden_size,
-                    "projection_workgroup_count_x": (vocab_size + 1) // 2,
+                    "projection_workgroup_count_x": projection_workgroup_count_x,
                     "norm_local_size_x": 64,
-                    "projection_local_size_x": 64,
+                    "projection_local_size_x": projection_local_size_x,
                     "norm_shader_path": compiled_shader_path(
                         f"shaders/{norm_shader_file}"
                     ),
@@ -1101,6 +1106,9 @@ def component_kernel_spec(
                             route_compaction_shader_file
                         ),
                         payload="width_expert_start",
+                        descriptor_bindings=(
+                            sparse_moe_route_compaction_descriptor_bindings(node)
+                        ),
                     )
                 )
             frame_parallel_stages.append(

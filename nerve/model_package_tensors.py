@@ -663,6 +663,31 @@ def can_fuse_native_parallel_linears(
 def fp8_prequantization_spec(
     circuit: Json, node: Json, tensor_index: Json
 ) -> Json | None:
+    if node.get("op") == "sparse_moe_gate_up":
+        try:
+            if (
+                parameter_dtype_for_id(
+                    circuit, node["params"][0], tensor_index
+                )
+                != "F8_E4M3"
+            ):
+                return None
+            block_rows, block_columns = fp8_moe_block_shape_for_stage(
+                circuit,
+                node,
+                tensor_index,
+                stage="gate_up",
+            )
+            input_size = int(node["attrs"]["hidden_size"])
+        except (KeyError, ModelCompileError):
+            return None
+        if input_size <= 0 or input_size % block_columns:
+            return None
+        return {
+            "input_size": input_size,
+            "block_rows": block_rows,
+            "block_columns": block_columns,
+        }
     if node.get("op") not in {
         "linear",
         "linear_residual",

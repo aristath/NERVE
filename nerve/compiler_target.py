@@ -23,10 +23,17 @@ class CompilerTargetDevice:
     vendor_id: int
     device_id: int
     shader_features: frozenset[str]
+    subgroup_size: int
     max_compute_work_group_invocations: int
     max_compute_work_group_size_x: int
     cooperative_bfloat16_shapes: tuple[tuple[int, int, int], ...]
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...]
+
+    def __post_init__(self) -> None:
+        if self.subgroup_size <= 0 or self.subgroup_size & (self.subgroup_size - 1):
+            raise ModelCompileError(
+                f"runtime returned invalid Vulkan subgroup size {self.subgroup_size}"
+            )
 
     @classmethod
     def from_json(cls, payload: Json) -> CompilerTargetDevice:
@@ -39,6 +46,7 @@ class CompilerTargetDevice:
                 vendor_id=int(payload["vendor_id"]),
                 device_id=int(payload["device_id"]),
                 shader_features=frozenset(map(str, payload["shader_features"])),
+                subgroup_size=int(payload["subgroup_size"]),
                 max_compute_work_group_invocations=int(
                     payload["max_compute_work_group_invocations"]
                 ),
@@ -70,6 +78,7 @@ class CompilerTargetDevice:
             "vendor_id": self.vendor_id,
             "device_id": self.device_id,
             "shader_features": sorted(self.shader_features),
+            "subgroup_size": self.subgroup_size,
             "max_compute_work_group_invocations": (
                 self.max_compute_work_group_invocations
             ),
@@ -127,6 +136,7 @@ class CompilerTarget:
                 vendor_id=0,
                 device_id=index,
                 shader_features=frozenset(features),
+                subgroup_size=64,
                 max_compute_work_group_invocations=1024,
                 max_compute_work_group_size_x=1024,
                 cooperative_bfloat16_shapes=(),

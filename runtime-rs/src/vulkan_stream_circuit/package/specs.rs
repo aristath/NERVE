@@ -135,7 +135,15 @@ pub struct VulkanResidentComponentBatchStageSpec {
     pub shader_path: String,
     pub local_size_x: u32,
     pub workgroup_count_x: u32,
+    #[serde(default)]
+    pub descriptor_bindings: Vec<VulkanResidentComponentBatchDescriptorBindingSpec>,
     pub control: VulkanResidentComponentBatchControlSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanResidentComponentBatchDescriptorBindingSpec {
+    pub binding: u32,
+    pub source_binding: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
