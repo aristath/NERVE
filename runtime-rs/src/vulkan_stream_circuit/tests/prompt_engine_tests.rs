@@ -979,23 +979,22 @@ fn placed_prompt_engine_runs_queued_streams_until_idle() {
 
 #[test]
 fn placed_prompt_engine_batches_input_events_across_streams() {
-    let device = match VulkanComputeDevice::new() {
+    let device = match selected_test_vulkan_device() {
         Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for multi-stream batching was unavailable: {error}")
+        }
         Err(error) => {
             eprintln!("skipping placed prompt engine batch test: {error}");
             return;
         }
     };
-    let runtime_model = fixture_model_runtime_model_with_placement(
-        StreamCircuitPlacementSpec::new("gpu0").with_component_device("layer_02", "gpu1"),
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
     );
-    let manifest_path = fixture_model_package_manifest_path();
+    let manifest_path = tiny_fixture_model_package_manifest_path();
     let manifest_dir = manifest_path.parent().unwrap();
-    let device = Rc::new(device);
-    let devices = BTreeMap::from([
-        ("gpu0".to_string(), device.clone()),
-        ("gpu1".to_string(), device.clone()),
-    ]);
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
 
     let stream_a = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
         devices.clone(),
@@ -1066,6 +1065,9 @@ fn placed_prompt_engine_batches_input_events_across_streams() {
 fn placed_prompt_engine_overlaps_resident_feedback_windows_across_streams() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for cross-stream overlap was unavailable: {error}")
+        }
         Err(error) => {
             eprintln!("skipping placed prompt engine asynchronous feedback test: {error}");
             return;
@@ -1091,7 +1093,10 @@ fn placed_prompt_engine_overlaps_resident_feedback_windows_across_streams() {
         devices,
         manifest_dir,
         runtime_model,
-        Some(64),
+        // A distinct capacity gives this stream a distinct execution identity,
+        // deliberately exercising asynchronous overlap instead of the physical
+        // batch path covered by the adjacent batching tests.
+        Some(65),
         1,
         0,
     )
