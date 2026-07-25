@@ -74,6 +74,7 @@ Python compiler and CLI package.
 | `nerve/model_package_shader_selection.py` | Shader selection. |
 | `nerve/model_package_shader_templates.py` | Shader template rendering. |
 | `nerve/model_package_shader_compiler.py` | SPIR-V artifact creation. |
+| `nerve/conversation_gate.py` | Canonical resident multi-turn correctness and performance gate. |
 
 CLI examples:
 
@@ -106,6 +107,58 @@ Rust runtime crate.
 ### [`tests/`](tests/)
 
 Python compiler/package tests.
+
+## Validation
+
+Tests in this repository must run sequentially. The Python suite disables xdist,
+and Rust test invocations must always include `-- --test-threads=1`. Vulkan tests
+must be selected individually after binding an explicitly verified idle AMD
+device; an explicit device that cannot be opened is a test failure, never a
+passing skip.
+
+Compiler/package tests:
+
+```bash
+.venv/bin/python -m pytest -p no:xdist
+```
+
+Backend-neutral Rust tests:
+
+```bash
+cargo test --manifest-path runtime-rs/Cargo.toml --lib -- --test-threads=1
+```
+
+[`scripts/run_conversation_gate.py`](scripts/run_conversation_gate.py) drives the
+normal `nerve-runtime --chat` interface. It keeps each model resident, sends
+`hi` as the discarded warmup, sends the five canonical measured turns, retains
+the 65,536-token output allowance, parses the runtime's default statistics, and
+fails on malformed thinking boundaries, repeated output, turn contamination,
+incorrect cross-turn recall, or a missed throughput floor. It can repeat the
+whole conversation with multiple fixed sampler seeds and save both transcripts
+and a machine-readable aggregate:
+
+```bash
+.venv/bin/python scripts/run_conversation_gate.py \
+  --seeds 0,1 \
+  --minimum-decode-tps 20 \
+  --require-thinking \
+  --transcript-dir /tmp/nerve-conversation-gate \
+  --report /tmp/nerve-conversation-gate/report.json \
+  -- \
+  runtime-rs/target/release/nerve-runtime \
+  --package COMPILED_MODEL/vulkan_resident_package.json \
+  --chat \
+  --context-size 131072 \
+  --speculative-draft-tokens 3 \
+  --bind-device gpu0=vulkan-uuid:AMD_DEVICE_UUID \
+  --bind-device gpu1=vulkan-uuid:SECOND_AMD_DEVICE_UUID
+```
+
+The command and compiled package fingerprint, compiler target, compiled shader
+variant count, per-turn statistics, responses, and transcript hashes are
+captured in the report. Physical bindings are also printed in the normal chat
+readiness line, so a benchmark transcript identifies the devices it actually
+mounted.
 
 ## Concept to implementation
 
