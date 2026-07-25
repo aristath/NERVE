@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const COMPILER_FINGERPRINT_SCHEMA: &str = "nerve.package_compiler_sha256.v1";
+const COMPILER_FINGERPRINT_SCHEMA: &str = "nerve.package_compiler_sha256.v2";
+const COMPILER_SOURCE_MANIFEST: &str = "compiler_sources.txt";
 
 fn directory_files(path: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
     fs::read_dir(path)
@@ -22,17 +23,54 @@ fn main() {
     let repository_root = manifest_dir
         .parent()
         .expect("runtime crate must live inside the repository");
+    let compiler_dir = repository_root.join("nerve");
+    let compiler_source_manifest = compiler_dir.join(COMPILER_SOURCE_MANIFEST);
     println!(
         "cargo:rerun-if-changed={}",
-        repository_root.join("nerve").display()
+        compiler_source_manifest.display()
     );
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("shaders").display()
     );
-    let mut inputs = directory_files(&repository_root.join("nerve"), "nerve")
+    let source_manifest = fs::read_to_string(&compiler_source_manifest).unwrap_or_else(|error| {
+        panic!(
+            "failed to read compiler source manifest {:?}: {error}",
+            compiler_source_manifest
+        )
+    });
+    let relative_sources = source_manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let mut sorted_sources = relative_sources.clone();
+    sorted_sources.sort_unstable();
+    sorted_sources.dedup();
+    assert!(
+        !relative_sources.is_empty() && relative_sources == sorted_sources,
+        "compiler source manifest {:?} must contain unique sorted paths",
+        compiler_source_manifest
+    );
+    let mut inputs = relative_sources
         .into_iter()
-        .filter(|(relative, _)| relative.ends_with(".py"))
+        .map(|relative| {
+            let path = Path::new(relative);
+            assert!(
+                path.components().count() == 2
+                    && path.starts_with("nerve")
+                    && path.extension().and_then(|value| value.to_str()) == Some("py"),
+                "invalid compiler source path {relative:?} in {:?}",
+                compiler_source_manifest
+            );
+            let source = repository_root.join(path);
+            assert!(
+                source.is_file(),
+                "compiler source {relative:?} declared by {:?} is missing",
+                compiler_source_manifest
+            );
+            (relative.to_string(), source)
+        })
         .chain(directory_files(
             &manifest_dir.join("shaders"),
             "runtime-rs/shaders",
