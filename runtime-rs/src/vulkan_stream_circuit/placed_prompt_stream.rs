@@ -12,6 +12,7 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     active_input_event: Option<VulkanResidentInProcessPlacedActivePromptEvent>,
     pending_input_events: VecDeque<VulkanResidentTokenInputEvent>,
     speculative_draft_tokens: usize,
+    speculative_execution_policy: VulkanSpeculativeExecutionPolicy,
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
@@ -97,6 +98,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: 0,
+            speculative_execution_policy: VulkanSpeculativeExecutionPolicy::default(),
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -136,6 +138,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.session.transport = VulkanInProcessPlacedEdgeTransport::new();
         self.package = package;
         self.processor = processor;
+        self.speculative_execution_policy = VulkanSpeculativeExecutionPolicy::default();
         self.resident_feedback_template_catalog.clear();
         self.pending_scheduler_activation = None;
         Ok(())
@@ -172,6 +175,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
+            speculative_execution_policy: self.speculative_execution_policy,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -594,6 +598,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
         if self.speculative_draft_tokens == 0 || self.processor.speculative_decoder_count() == 0 {
             return Ok(false);
         }
+        if !self.speculative_execution_policy.should_use_speculative(
+            self.processor
+                .resident_feedback_estimated_tick_time_ns(),
+        ) {
+            return Ok(false);
+        }
         let Some(active) = self.active_input_event.as_ref() else {
             return Ok(false);
         };
@@ -626,6 +636,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             draft_token_count,
             &stop_token_ids,
         )?;
+        self.speculative_execution_policy.observe_cycle(&cycle);
         self.active_input_event
             .as_mut()
             .expect("speculative feedback cycle requires an active input event")
@@ -835,9 +846,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
         F: FnMut(VulkanResidentTokenOutputEvent),
     {
         let planned_tick_count = pending.window.tick_count;
+        let start_stream_tick = pending.window.start_stream_tick;
         let processor = &self.processor;
+        let devices = &self.devices;
         let active_input_event = &mut self.active_input_event;
         let session = &mut self.session;
+        let mut executed_input_token_ids = Vec::with_capacity(planned_tick_count);
         let completion = processor.complete_resident_feedback_window(
             pending.window,
             | _tick_index,
@@ -854,6 +868,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                     let activation = active_input_event.next_activation().ok_or(
                         VulkanResidentInProcessPlacedRuntimeError::MissingPrivateFeedback,
                     )?;
+                    executed_input_token_ids.push(activation.input_token_id);
                     let output_event = active_input_event.complete_activation(
                         &activation,
                         stream_tick,
@@ -919,6 +934,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                     ),
                 ));
             }
+            executed_input_token_ids.push(activation.input_token_id);
             active.complete_activation(
                 &activation,
                 stream_tick,
@@ -939,6 +955,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 .checked_add(1)
                 .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
         }
+        processor.synchronize_speculative_decoders_after_target_window(
+            devices,
+            &executed_input_token_ids,
+            start_stream_tick,
+            planned_tick_count,
+        )?;
         Ok(completion)
     }
 

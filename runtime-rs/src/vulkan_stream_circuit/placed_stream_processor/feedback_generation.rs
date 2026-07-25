@@ -91,6 +91,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             }
         })?;
 
+        let cycle_start = Instant::now();
         decoder.capture_baseline()?;
         self.capture_verification_baseline()?;
         self.sampler
@@ -98,23 +99,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let run = (|| {
             let draft_start = Instant::now();
-            let mut draft_token_ids = Vec::with_capacity(draft_token_count);
-            let mut draft_input_token_id = initial_token_id;
-            for draft_index in 0..draft_token_count {
-                let stream_tick = start_stream_tick
-                    .checked_add(u64::try_from(draft_index).map_err(|_| {
-                        VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
-                    })?)
-                    .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-                let token_id = decoder.run_draft_step(
-                    draft_device.as_ref(),
-                    draft_input_token_id,
-                    stream_tick,
-                    draft_index,
-                )?;
-                draft_token_ids.push(token_id);
-                draft_input_token_id = token_id;
-            }
+            let draft_token_ids = decoder.run_draft_window(
+                draft_device.as_ref(),
+                initial_token_id,
+                start_stream_tick,
+                draft_token_count,
+            )?;
             let draft_time_ns = u64::try_from(draft_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
             let target_inputs = std::iter::once(initial_token_id)
@@ -122,54 +112,44 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .collect::<Vec<_>>();
             let target_start = Instant::now();
             let target_token_ids =
-                self.run_batched_target_candidates(devices, &target_inputs, start_stream_tick)?;
+                self.run_scalar_verification_window(devices, &target_inputs, start_stream_tick)?;
             let target_verification_time_ns =
                 u64::try_from(target_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let mut verification =
                 verify_speculative_token_prefix(&draft_token_ids, &target_token_ids)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             truncate_speculative_verification_at_stop(&mut verification, stop_token_ids);
-            self.commit_verification_prefix(verification.committed_target_tick_count)?;
-            let output_device = devices.get(&self.model.output_device_id).ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                    device_id: self.model.output_device_id.clone(),
-                }
-            })?;
-            self.sampler
-                .record_input_tokens(
-                    output_device,
+            if verification.committed_target_tick_count < target_inputs.len() {
+                self.restore_verification_baseline()?;
+                self.sampler
+                    .restore_token_state()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+                self.run_scalar_verification_window(
+                    devices,
                     &target_inputs[..verification.committed_target_tick_count],
-                )
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
-            let catch_up_start = Instant::now();
-            decoder.restore_baseline()?;
-            let batched_output = self.batched_output_projection.borrow();
-            let normalized_target_frames = &batched_output
-                .as_ref()
-                .expect("speculative target output batch was initialized")
-                .normalized_frames_buffer;
-            for (catch_up_index, input_token_id) in std::iter::once(initial_token_id)
-                .chain(draft_token_ids.iter().copied())
-                .take(verification.committed_target_tick_count)
-                .enumerate()
-            {
-                let stream_tick = start_stream_tick
-                    .checked_add(u64::try_from(catch_up_index).map_err(|_| {
-                        VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
-                    })?)
-                    .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-                decoder.run_catch_up_step(
-                    draft_device.as_ref(),
-                    input_token_id,
-                    stream_tick,
-                    catch_up_index,
-                    verification.committed_target_tick_count,
-                    normalized_target_frames,
-                    self.model
-                        .output_transducer_spec
-                        .normalized_frame_byte_capacity,
+                    start_stream_tick,
                 )?;
             }
+            let catch_up_start = Instant::now();
+            decoder.restore_baseline()?;
+            let scalar_verification = self.scalar_verification_execution.borrow();
+            let normalized_target_frames = &scalar_verification
+                .as_ref()
+                .expect("speculative scalar target window was initialized")
+                .normalized_target_frames;
+            let catch_up_input_token_ids = std::iter::once(initial_token_id)
+                .chain(draft_token_ids.iter().copied())
+                .take(verification.committed_target_tick_count)
+                .collect::<Vec<_>>();
+            decoder.run_catch_up_window(
+                draft_device.as_ref(),
+                &catch_up_input_token_ids,
+                start_stream_tick,
+                normalized_target_frames,
+                self.model
+                    .output_transducer_spec
+                    .normalized_frame_byte_capacity,
+            )?;
             let draft_catch_up_time_ns =
                 u64::try_from(catch_up_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
@@ -183,6 +163,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 draft_time_ns,
                 target_verification_time_ns,
                 draft_catch_up_time_ns,
+                total_time_ns: u64::try_from(cycle_start.elapsed().as_nanos())
+                    .unwrap_or(u64::MAX),
             })
         })();
         if run.is_err() {

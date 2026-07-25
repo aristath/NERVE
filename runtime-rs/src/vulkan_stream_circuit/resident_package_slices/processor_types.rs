@@ -14,10 +14,20 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
         BTreeMap<String, Rc<RefCell<RuntimeExecutionQuantumCalibrator>>>,
     speculative_decoders: Vec<VulkanResidentSpeculativeDecoderProcessor>,
     verification_state_transactions: RefCell<Option<Vec<VulkanResidentStateTransactionBank>>>,
-    component_batch_execution: RefCell<Option<VulkanResidentPlacedComponentBatchRunner>>,
-    verification_input_embedding: RefCell<Option<VulkanResidentBatchedInputEmbeddingRunner>>,
+    scalar_verification_execution:
+        RefCell<Option<VulkanResidentScalarVerificationWindowRunner>>,
     temporal_block_execution: RefCell<Option<VulkanResidentPlacedTemporalBlockRunner>>,
-    batched_output_projection: RefCell<Option<VulkanResidentBatchedOutputProjectionRunner>>,
+}
+
+struct VulkanResidentScalarVerificationWindowRunner {
+    lane_capacity: usize,
+    _input_frames: VulkanResidentBuffer,
+    input_embedding: VulkanResidentBatchedInputEmbeddingRunner,
+    input_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
+    stream_control_sources: Vec<Vec<VulkanResidentBuffer>>,
+    stream_control_copies: Vec<Vec<VulkanResidentBufferCopy>>,
+    normalized_target_frames: VulkanResidentBuffer,
+    normalized_target_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {
@@ -93,16 +103,12 @@ struct VulkanResidentSpeculativeDecoderProcessor {
     sampler: VulkanResidentSamplerRunner,
     draft_sequence: VulkanResidentKernelSequence,
     state_sequence: VulkanResidentKernelSequence,
+    catch_up_sequence: VulkanResidentKernelSequence,
     hidden_input_signal_id: String,
-    recursive_hidden_copy: VulkanResidentBufferCopy,
     pending_hidden_input_copy: VulkanResidentBufferCopy,
     update_pending_hidden_copy: VulkanResidentBufferCopy,
     pending_target_hidden: VulkanResidentBuffer,
+    catch_up_controls: VulkanResidentBuffer,
+    catch_up_controls_initial_copy: VulkanResidentBufferCopy,
     state_transaction: VulkanResidentStateTransactionBank,
-}
-
-#[derive(Clone, Copy)]
-enum VulkanDraftHiddenSource {
-    PendingTarget,
-    Recursive,
 }

@@ -334,6 +334,61 @@ fn speculative_verification_stops_at_the_first_emitted_stop_token() {
 }
 
 #[test]
+fn speculative_execution_policy_probes_both_paths_before_selecting() {
+    let mut policy = VulkanSpeculativeExecutionPolicy::default();
+    assert!(policy.should_use_speculative(None));
+
+    policy.observe_cycle(&VulkanSpeculativeCycleRun {
+        decoder_id: "draft".to_string(),
+        initial_token_id: 1,
+        start_stream_tick: 0,
+        draft_token_ids: vec![2, 3],
+        target_token_ids: vec![2, 3, 4],
+        verification: VulkanSpeculativeVerificationResult {
+            accepted_draft_count: 2,
+            committed_target_tick_count: 3,
+            emitted_token_ids: vec![2, 3, 4],
+        },
+        draft_time_ns: 20,
+        target_verification_time_ns: 60,
+        draft_catch_up_time_ns: 10,
+        total_time_ns: 90,
+    });
+
+    assert!(!policy.should_use_speculative(None));
+    assert!(policy.should_use_speculative(Some(40)));
+    assert!(!policy.should_use_speculative(Some(20)));
+}
+
+#[test]
+fn speculative_decode_stats_report_rollbacks_and_total_cost() {
+    let mut stats = VulkanSpeculativeDecodeStats::default();
+    stats.record_cycle(&VulkanSpeculativeCycleRun {
+        decoder_id: "draft".to_string(),
+        initial_token_id: 1,
+        start_stream_tick: 0,
+        draft_token_ids: vec![2, 3],
+        target_token_ids: vec![2, 9, 4],
+        verification: VulkanSpeculativeVerificationResult {
+            accepted_draft_count: 1,
+            committed_target_tick_count: 2,
+            emitted_token_ids: vec![2, 9],
+        },
+        draft_time_ns: 20,
+        target_verification_time_ns: 60,
+        draft_catch_up_time_ns: 10,
+        total_time_ns: 100,
+    });
+
+    assert_eq!(stats.cycle_count, 1);
+    assert_eq!(stats.rollback_cycle_count, 1);
+    assert_eq!(stats.proposed_draft_token_count, 2);
+    assert_eq!(stats.accepted_draft_token_count, 1);
+    assert_eq!(stats.emitted_token_count, 2);
+    assert_eq!(stats.total_time_ns, 100);
+}
+
+#[test]
 fn component_batches_select_only_mode_compatible_kernels() {
     let artifact = |lane_tile_width,
                     independent_candidate_compatible,
@@ -355,17 +410,6 @@ fn component_batches_select_only_mode_compatible_kernels() {
         artifact(8, true, true),
         artifact(16, true, true),
     ];
-
-    let verification = select_component_batch_kernel_artifact(
-        &artifacts,
-        "processor",
-        "project",
-        VulkanComponentBatchExecutionMode::IndependentCandidates,
-        6,
-    )
-    .unwrap();
-    assert_eq!(verification.lane_tile_width, 8);
-    assert!(verification.independent_candidate_compatible);
 
     let independent_streams = select_component_batch_kernel_artifact(
         &artifacts,
@@ -437,7 +481,7 @@ fn component_batches_select_only_artifacts_for_the_requested_execution_domain() 
         &artifacts,
         "processor",
         "project",
-        VulkanComponentBatchExecutionMode::IndependentCandidates,
+        VulkanComponentBatchExecutionMode::IndependentStreams,
         4,
     )
     .unwrap();
@@ -457,9 +501,9 @@ fn component_batches_select_only_artifacts_for_the_requested_execution_domain() 
     .unwrap();
     assert_eq!(
         prefill.execution_domain,
-        VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill
+        VulkanResidentComponentKernelExecutionDomain::Prefill
     );
-    assert_eq!(prefill.lane_tile_width, 16);
+    assert_eq!(prefill.lane_tile_width, 4);
 }
 
 #[test]
@@ -481,7 +525,7 @@ fn component_batches_use_causal_compatibility_for_temporal_prefill_kernels() {
             &artifacts,
             "processor",
             "attention",
-            VulkanComponentBatchExecutionMode::IndependentCandidates,
+            VulkanComponentBatchExecutionMode::IndependentStreams,
             4,
         )
         .is_none()

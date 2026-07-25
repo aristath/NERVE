@@ -37,13 +37,16 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     }
 
     fn resident_feedback_next_window_tick_count(&self) -> usize {
-        if !self.speculative_decoders.is_empty() {
-            return 0;
-        }
         self.resident_feedback_loop
             .as_ref()
             .map(|feedback_loop| feedback_loop.window_policy.next_tick_count())
             .unwrap_or(0)
+    }
+
+    fn resident_feedback_estimated_tick_time_ns(&self) -> Option<u64> {
+        self.resident_feedback_loop
+            .as_ref()
+            .and_then(|feedback_loop| feedback_loop.window_policy.estimated_tick_time_ns.get())
     }
 
     fn mount_resident_feedback_submission_template(
@@ -158,6 +161,34 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::IncompleteTick(
                     run.status,
                 ));
+            }
+            if let Some(history) = &self
+                .resident_feedback_loop
+                .as_ref()
+                .expect("resident feedback template requires a mounted loop")
+                .speculative_target_frame_history
+            {
+                let output_device =
+                    devices.get(&self.model.output_device_id).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: self.model.output_device_id.clone(),
+                        }
+                    })?;
+                let copy = history.lane_copies.get(tick_index).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "resident feedback target-frame lane {tick_index} exceeds history capacity {}",
+                        history.lane_copies.len()
+                    )))
+                })?;
+                submission_batch
+                    .enqueue_resident_buffer_copy_batch(
+                        output_device,
+                        copy,
+                        &[],
+                        &[],
+                        completes_window,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             }
             transport_stats.accumulate(&run.transport_stats);
         }

@@ -16,22 +16,28 @@ pub struct VulkanSpeculativeCycleRun {
     pub draft_time_ns: u64,
     pub target_verification_time_ns: u64,
     pub draft_catch_up_time_ns: u64,
+    pub total_time_ns: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VulkanSpeculativeDecodeStats {
     pub cycle_count: usize,
+    pub rollback_cycle_count: usize,
     pub proposed_draft_token_count: usize,
     pub accepted_draft_token_count: usize,
     pub emitted_token_count: usize,
     pub draft_time_ns: u64,
     pub target_verification_time_ns: u64,
     pub draft_catch_up_time_ns: u64,
+    pub total_time_ns: u64,
 }
 
 impl VulkanSpeculativeDecodeStats {
     fn record_cycle(&mut self, cycle: &VulkanSpeculativeCycleRun) {
         self.cycle_count = self.cycle_count.saturating_add(1);
+        if cycle.verification.accepted_draft_count < cycle.draft_token_ids.len() {
+            self.rollback_cycle_count = self.rollback_cycle_count.saturating_add(1);
+        }
         self.proposed_draft_token_count = self
             .proposed_draft_token_count
             .saturating_add(cycle.draft_token_ids.len());
@@ -48,6 +54,46 @@ impl VulkanSpeculativeDecodeStats {
         self.draft_catch_up_time_ns = self
             .draft_catch_up_time_ns
             .saturating_add(cycle.draft_catch_up_time_ns);
+        self.total_time_ns = self.total_time_ns.saturating_add(cycle.total_time_ns);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VulkanSpeculativeExecutionPolicy {
+    estimated_useful_token_time_ns: Option<u64>,
+}
+
+impl VulkanSpeculativeExecutionPolicy {
+    fn should_use_speculative(&self, resident_tick_time_ns: Option<u64>) -> bool {
+        match (
+            self.estimated_useful_token_time_ns,
+            resident_tick_time_ns,
+        ) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(speculative), Some(resident)) => speculative < resident,
+        }
+    }
+
+    fn observe_cycle(&mut self, cycle: &VulkanSpeculativeCycleRun) {
+        let useful_token_count = cycle.verification.emitted_token_ids.len();
+        if useful_token_count == 0 || cycle.total_time_ns == 0 {
+            return;
+        }
+        let observed = cycle
+            .total_time_ns
+            .div_ceil(u64::try_from(useful_token_count).unwrap_or(u64::MAX))
+            .max(1);
+        self.estimated_useful_token_time_ns = Some(
+            self.estimated_useful_token_time_ns
+                .map(|previous| {
+                    previous
+                        .saturating_mul(3)
+                        .saturating_add(observed)
+                        .div_ceil(4)
+                })
+                .unwrap_or(observed),
+        );
     }
 }
 
@@ -103,4 +149,3 @@ fn truncate_speculative_verification_at_stop(
     verification.committed_target_tick_count = stop_index.saturating_add(1);
     verification.emitted_token_ids.truncate(stop_index + 1);
 }
-

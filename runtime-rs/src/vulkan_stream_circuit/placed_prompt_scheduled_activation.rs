@@ -187,7 +187,13 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 .run_runtime_scheduler_activation_with_output(activation, on_output_event)
                 .map(VulkanResidentInProcessPlacedScheduledActivationStart::Complete);
         };
-        if self.speculative_draft_tokens > 0 && self.processor.speculative_decoder_count() > 0 {
+        if self.speculative_draft_tokens > 0
+            && self.processor.speculative_decoder_count() > 0
+            && self.speculative_execution_policy.should_use_speculative(
+                self.processor
+                    .resident_feedback_estimated_tick_time_ns(),
+            )
+        {
             return self
                 .run_runtime_scheduler_activation_with_output(activation, on_output_event)
                 .map(VulkanResidentInProcessPlacedScheduledActivationStart::Complete);

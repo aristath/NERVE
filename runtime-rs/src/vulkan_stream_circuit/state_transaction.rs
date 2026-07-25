@@ -182,37 +182,6 @@ impl VulkanResidentStateTransactionBank {
             .collect()
     }
 
-    fn copies_for_state_buffers<'a>(
-        &'a self,
-        buffers: &'a VulkanStreamCircuitStreamBuffers,
-        after_step_index: usize,
-        tick_index: usize,
-        state_buffer_indices: &BTreeSet<usize>,
-    ) -> Result<Vec<VulkanResidentKernelSequenceSnapshotCopy<'a>>, VulkanError> {
-        if tick_index >= self.cycle_width {
-            return Err(VulkanError(format!(
-                "resident state transaction tick {tick_index} exceeds capacity {}",
-                self.cycle_width
-            )));
-        }
-        let snapshot_index = tick_index + usize::from(self.has_baseline);
-        self.entries
-            .iter()
-            .filter(|entry| state_buffer_indices.contains(&entry.state_buffer_index))
-            .map(|entry| {
-                let state = &buffers.state_buffers[entry.state_buffer_index];
-                VulkanResidentKernelSequenceSnapshotCopy::new(
-                    after_step_index,
-                    &state.buffer,
-                    &entry.snapshots,
-                    0,
-                    snapshot_index * entry.byte_capacity,
-                    entry.byte_capacity,
-                )
-            })
-            .collect()
-    }
-
     fn commit_prefix(
         &self,
         buffers: &VulkanStreamCircuitStreamBuffers,

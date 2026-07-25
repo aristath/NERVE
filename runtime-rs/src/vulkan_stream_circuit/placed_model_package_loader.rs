@@ -843,10 +843,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             execution_quantum_calibrators,
             speculative_decoders,
             verification_state_transactions: RefCell::new(None),
-            component_batch_execution: RefCell::new(None),
-            verification_input_embedding: RefCell::new(None),
+            scalar_verification_execution: RefCell::new(None),
             temporal_block_execution: RefCell::new(None),
-            batched_output_projection: RefCell::new(None),
         })
     }
 }

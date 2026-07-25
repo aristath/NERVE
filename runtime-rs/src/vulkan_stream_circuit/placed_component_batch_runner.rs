@@ -355,36 +355,6 @@ impl VulkanResidentPlacedComponentBatchRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_independent_candidates(
-        &self,
-        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
-        device_index: usize,
-        owner_device_id: &str,
-        mounted: &VulkanMountedPlacedStreamCircuit,
-        transaction: &VulkanResidentStateTransactionBank,
-        input_token_ids: &[u32],
-        start_stream_tick: u64,
-        dynamic_state_capacity_activations: u32,
-    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let device = devices.get(owner_device_id).ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                device_id: owner_device_id.to_string(),
-            }
-        })?;
-        self.slice(device_index)?.run_independent_candidates(
-            devices,
-            device,
-            owner_device_id,
-            &self.distributed_dispatches,
-            mounted,
-            transaction,
-            input_token_ids,
-            start_stream_tick,
-            dynamic_state_capacity_activations,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn run_independent_streams(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,

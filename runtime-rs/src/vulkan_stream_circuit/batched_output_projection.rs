@@ -1,6 +1,6 @@
 struct VulkanResidentBatchedOutputProjectionRunner {
     batch_capacity: usize,
-    normalized_frames_buffer: VulkanResidentBuffer,
+    _normalized_frames_buffer: VulkanResidentBuffer,
     _batched_logits_buffer: VulkanResidentBuffer,
     norm_dispatch: VulkanResidentKernelDispatch,
     projection_dispatch: VulkanResidentKernelDispatch,
@@ -11,41 +11,6 @@ struct VulkanResidentBatchedOutputProjectionRunner {
 }
 
 impl VulkanResidentBatchedOutputProjectionRunner {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        device: &VulkanComputeDevice,
-        batch_capacity: usize,
-        norm_batch_lane_tile_width: u32,
-        batch_lane_tile_width: u32,
-        raw_frames_buffer: &VulkanResidentBuffer,
-        norm_weight: &VulkanPermanentParameterBufferAllocation,
-        projection_weight: &VulkanPermanentParameterBufferAllocation,
-        projection_scale: Option<&VulkanPermanentParameterBufferAllocation>,
-        norm_spirv_words: &[u32],
-        projection_spirv_words: &[u32],
-        output_spec: &VulkanResidentOutputTransducerSpec,
-        sampler: &VulkanResidentSamplerRunner,
-        sampler_kernels: &[VulkanResidentSamplerKernelArtifact],
-        sampler_spec: &VulkanResidentSamplerSpec,
-    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let sampler_lanes = vec![sampler; batch_capacity];
-        Self::new_for_sampler_lanes(
-            device,
-            norm_batch_lane_tile_width,
-            batch_lane_tile_width,
-            raw_frames_buffer,
-            norm_weight,
-            projection_weight,
-            projection_scale,
-            norm_spirv_words,
-            projection_spirv_words,
-            output_spec,
-            &sampler_lanes,
-            sampler_kernels,
-            sampler_spec,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn new_for_sampler_lanes(
         device: &VulkanComputeDevice,
@@ -230,7 +195,7 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         }
         Ok(Self {
             batch_capacity,
-            normalized_frames_buffer,
+            _normalized_frames_buffer: normalized_frames_buffer,
             _batched_logits_buffer: batched_logits_buffer,
             norm_dispatch,
             projection_dispatch,
@@ -296,29 +261,6 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
         }
-    }
-
-    fn sample_batch(
-        &self,
-        device: &VulkanComputeDevice,
-        input_token_ids: &[u32],
-        start_stream_tick: u64,
-        dynamic_state_capacity_activations: u32,
-    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let batch_width = input_token_ids.len();
-        let stream_ticks =
-            consecutive_component_batch_stream_ticks(start_stream_tick, batch_width)?;
-        let dynamic_state_capacities =
-            vec![dynamic_state_capacity_activations; batch_width];
-        let token_prefixes = (0..batch_width)
-            .map(|batch_index| &input_token_ids[..=batch_index])
-            .collect::<Vec<_>>();
-        self.sample_lanes(
-            device,
-            &token_prefixes,
-            &stream_ticks,
-            &dynamic_state_capacities,
-        )
     }
 
     fn sample_independent_streams(

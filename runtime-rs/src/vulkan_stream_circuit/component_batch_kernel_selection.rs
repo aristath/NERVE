@@ -3,7 +3,6 @@ struct VulkanComponentBatchDispatchStep {
     push_constants: Vec<VulkanKernelScalarBinding>,
     lane_index: Option<usize>,
     commits_state: bool,
-    snapshot_state_buffer_indices: BTreeSet<usize>,
 }
 
 fn component_batch_control_buffer_access(
@@ -115,16 +114,8 @@ fn component_batch_stage_bindings<'a>(
         .collect()
 }
 
-#[derive(Clone, Copy)]
-enum VulkanComponentBatchStateSemantics<'a> {
-    IndependentCandidates(&'a VulkanResidentStateTransactionBank),
-    IndependentStreams,
-    CausalSequence,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VulkanComponentBatchExecutionMode {
-    IndependentCandidates,
     IndependentStreams,
     CausalSequence,
 }
