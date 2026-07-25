@@ -27,23 +27,7 @@ context/output limits, or benchmark-only shortcuts.
 
 ## Remaining work, in priority order
 
-### 1. Integrate MTP into the steady-state scheduler and device loop
-
-MTP compilation and transactional verification work, but speculative execution
-is not yet part of the optimized steady-state path.
-
-- Add scheduler-native lookahead slots and multi-draft routing.
-- Keep draft proposal, target verification, acceptance, rollback, and catch-up on
-  the device where practical.
-- Ensure enabling MTP does not disable resident feedback execution or introduce a
-  host synchronization point per token.
-- Keep thinking/reasoning behavior enabled normally during validation.
-- Report proposal count, acceptance, rollback, useful tokens, and timing in
-  normal chat output.
-- Enable MTP by default only where warmed, realistic workloads show a net
-  improvement.
-
-### 2. Finish long-context prefill and mixed-workload scheduling
+### 1. Finish long-context prefill and mixed-workload scheduling
 
 - Interleave prefill and decode fairly under memory pressure.
 - Pipeline independent streams across placed devices so serial layer placement
@@ -77,7 +61,7 @@ is not yet part of the optimized steady-state path.
   limits.
 - Report prefill and decode throughput separately by default.
 
-### 3. Maintain adversarial correctness and performance gates
+### 2. Maintain adversarial correctness and performance gates
 
 Every meaningful compiler, runtime, state, graph, or kernel change must be tested
 against the supported model set rather than optimized around one model.
