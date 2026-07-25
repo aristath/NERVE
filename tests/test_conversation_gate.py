@@ -13,6 +13,7 @@ from nerve.conversation_gate import (
     canonical_runtime_command,
     parse_conversation_transcript,
     repeated_suffix,
+    run_conversation_gate,
     run_resident_conversation,
     validate_conversation_turns,
 )
@@ -246,6 +247,19 @@ def test_runtime_command_rejects_noncanonical_output_limit() -> None:
                 "512",
             ],
             seed=0,
+        )
+
+
+def test_gate_requires_one_seed_per_gpu_residency_cycle(tmp_path) -> None:
+    package = tmp_path / "package.json"
+    package.write_text("{}")
+
+    with pytest.raises(ConversationGateError, match="exactly one seed"):
+        run_conversation_gate(
+            ["nerve-runtime", "--package", str(package), "--chat"],
+            seeds=(0, 1),
+            minimum_decode_tokens_per_second=0.0,
+            require_thinking=True,
         )
 
 

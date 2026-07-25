@@ -411,6 +411,11 @@ def run_conversation_gate(
 ) -> ConversationGateReport:
     if not seeds:
         raise ConversationGateError("at least one fixed sampler seed is required")
+    if len(seeds) != 1:
+        raise ConversationGateError(
+            "run exactly one seed per invocation so GPU residency can be verified "
+            "between model loads"
+        )
     package = _package_metadata(command)
     runs = []
     for seed in seeds:
@@ -466,7 +471,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "through nerve-runtime's normal resident chat mode."
         )
     )
-    parser.add_argument("--seeds", type=_parse_seeds, default=(0, 1))
+    parser.add_argument("--seeds", type=_parse_seeds, default=(0,))
     parser.add_argument("--minimum-decode-tps", type=float, default=0.0)
     parser.add_argument("--require-thinking", action="store_true")
     parser.add_argument("--report", type=Path)

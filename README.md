@@ -133,13 +133,13 @@ normal `nerve-runtime --chat` interface. It keeps each model resident, sends
 `hi` as the discarded warmup, sends the five canonical measured turns, retains
 the 65,536-token output allowance, parses the runtime's default statistics, and
 fails on malformed thinking boundaries, repeated output, turn contamination,
-incorrect cross-turn recall, or a missed throughput floor. It can repeat the
-whole conversation with multiple fixed sampler seeds and save both transcripts
-and a machine-readable aggregate:
+incorrect cross-turn recall, or a missed throughput floor. Each invocation runs
+exactly one fixed sampler seed. Repeat the command for other seeds only after
+verifying that every selected GPU returned to its idle baseline:
 
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \
-  --seeds 0,1 \
+  --seeds 0 \
   --minimum-decode-tps 20 \
   --require-thinking \
   --transcript-dir /tmp/nerve-conversation-gate \
