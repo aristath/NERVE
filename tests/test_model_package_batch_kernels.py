@@ -353,10 +353,11 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     assert conv_stages is not None
     assert conv_stages[0]["control"] == {
         "kind": "storage_buffer",
-        "byte_count": 4,
+        "byte_count": 8,
         "binding": 31,
-        "payload": "width",
+        "payload": "width_state_snapshots",
     }
+    assert conv_stages[0]["state_snapshot_binding"] == 30
     attention_spec = component_kernel_spec(
         execution_index=0,
         node={"id": "attention", "op": "append_scaled_dot_product_attention"},
@@ -369,6 +370,27 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     assert temporal["execution_domain"] == "prefill"
     assert temporal["independent_candidate_compatible"] is False
     assert temporal["causal_sequence_compatible"] is True
+
+
+def test_stateful_causal_scans_expose_transactional_snapshots(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "causal_conv1d_silu_temporal_bf16_c8192_k4__pbc31.comp",
+        "gated_delta_scan_k16x128_v32x128_af32_dtbf16_nf32_"
+        "eps1e-06__pbc31.comp",
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    for shader_file in shader_files:
+        source = (tmp_path / shader_file).read_text()
+        assert "binding = 30) buffer StateSnapshots" in source
+        assert "binding = 31) readonly buffer BatchControl" in source
+        assert "uint state_snapshots_enabled;" in source
+        assert "state_snapshots_enabled != 0u" in source
+        assert "layout(push_constant) uniform BatchControl" not in source
 
 
 def test_compiler_renders_temporal_attention_stages(tmp_path: Path) -> None:

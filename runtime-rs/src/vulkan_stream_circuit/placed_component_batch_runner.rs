@@ -9,6 +9,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         >,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
+        capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
@@ -24,6 +25,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             quantum_calibrators,
             lane_capacity,
             execution_mode,
+            capture_causal_state_snapshots,
             distributed_execution_plan,
             distributed_parameter_buffers,
         )
@@ -73,6 +75,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &first.execution_quantum_calibrators,
             lane_capacity,
             VulkanComponentBatchExecutionMode::IndependentStreams,
+            false,
             &first.model.distributed_execution_plan,
             &first.model.distributed_parameter_buffers,
         )
@@ -90,6 +93,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         >,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
+        capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
@@ -128,6 +132,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     lane_mounteds,
                     lane_capacity,
                     execution_mode,
+                    capture_causal_state_snapshots,
                     distributed_execution_plan,
                     quantum_calibrator,
                 )
@@ -303,6 +308,30 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 "placed component batch has no device slice {index}"
             )))
         })
+    }
+
+    fn commit_causal_state_prefix(
+        &self,
+        processed_tick_count: usize,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        if self
+            .slices
+            .iter()
+            .any(|slice| !slice.can_commit_causal_state_prefix())
+        {
+            return Ok(false);
+        }
+        for slice in &self.slices {
+            if !slice.commit_causal_state_prefix(processed_tick_count)? {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(
+                        "causal state snapshot capability changed during prefix commit"
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
+        Ok(true)
     }
 
     fn transfer_edge(

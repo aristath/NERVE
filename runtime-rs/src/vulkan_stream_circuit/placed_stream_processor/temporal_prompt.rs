@@ -1,3 +1,15 @@
+fn causal_component_block_lane_capacity(block_width: usize) -> Result<usize, VulkanError> {
+    if block_width == 0 || block_width > VULKAN_BACKEND_LOOP_MAX_WINDOW {
+        return Err(VulkanError(format!(
+            "causal component block width {block_width} exceeds resident window {}",
+            VULKAN_BACKEND_LOOP_MAX_WINDOW,
+        )));
+    }
+    block_width.checked_next_power_of_two().ok_or_else(|| {
+        VulkanError("causal component block capacity overflowed".to_string())
+    })
+}
+
 impl VulkanResidentInProcessPlacedStreamProcessor {
     fn linear_pipeline_device_indices(
         &self,
@@ -181,16 +193,26 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         Ok(available_token_count.min(self.temporal_block_lane_capacity(devices)?))
     }
 
+    fn causal_block_lane_capacity(
+        &self,
+        block_width: usize,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        causal_component_block_lane_capacity(block_width)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+    }
+
     fn ensure_temporal_block_execution(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         block_width: usize,
+        capture_causal_state_snapshots: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let block_width = self.causal_block_lane_capacity(block_width)?;
+        let execution_key = (block_width, capture_causal_state_snapshots);
         if self
-            .temporal_block_execution
+            .temporal_block_executions
             .borrow()
-            .as_ref()
-            .is_some_and(|runner| runner.execution_graph.lane_capacity >= block_width)
+            .contains_key(&execution_key)
         {
             return Ok(());
         }
@@ -207,6 +229,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             &self.execution_quantum_calibrators,
             block_width,
             VulkanComponentBatchExecutionMode::CausalSequence,
+            capture_causal_state_snapshots,
             &self.model.distributed_execution_plan,
             &self.model.distributed_parameter_buffers,
         )?;
@@ -255,7 +278,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 self.model.output_transducer_spec.input_signal_id.clone(),
             ),
         )?;
-        let speculative_target_norm = if self.speculative_decoders.is_empty() {
+        let speculative_target_output = if self.speculative_decoders.is_empty() {
             None
         } else {
             let norm_weight = self
@@ -273,14 +296,41 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         },
                     )
                 })?;
-            Some(VulkanResidentBatchedOutputNormRunner::new(
+            let projection_weight = self
+                .model
+                .output_transducer_parameter_buffers
+                .parameter_buffer(&self.model.output_transducer_spec.projection_parameter_tensor)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::OutputTransducer(
+                        VulkanResidentOutputTransducerRunnerError::MissingTransducerParameterBuffer {
+                            tensor: self
+                                .model
+                                .output_transducer_spec
+                                .projection_parameter_tensor
+                                .clone(),
+                        },
+                    )
+                })?;
+            let projection_scale = projection_scale_parameter_buffer(
+                &self.model.output_transducer_parameter_buffers,
+                &self.model.output_transducer_spec,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
+            let sampler_lanes = vec![&self.sampler; block_width];
+            Some(VulkanResidentBatchedOutputProjectionRunner::new_for_sampler_lanes(
                 output_device,
-                block_width,
                 self.model.embedding_norm_batch_lane_tile_width,
+                self.model.projection_batch_lane_tile_width,
                 &output_signal.buffer,
                 norm_weight,
+                projection_weight,
+                projection_scale,
                 &self.model.embedding_norm_batch_spirv_words,
+                &self.model.tied_projection_batch_spirv_words,
                 &self.model.output_transducer_spec,
+                &sampler_lanes,
+                &self.model.sampler_kernels,
+                &self.model.sampler_spec,
             )?)
         };
         let scalar_output = self.device_slices[last_device_index]
@@ -316,62 +366,64 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        *self.temporal_block_execution.borrow_mut() =
-            Some(VulkanResidentPlacedTemporalBlockRunner {
+        self.temporal_block_executions.borrow_mut().insert(
+            execution_key,
+            VulkanResidentPlacedTemporalBlockRunner {
                 execution_graph,
                 input_embedding,
                 output_frame_copies,
-                speculative_target_norm,
+                speculative_target_output,
                 pipeline,
-            });
+            },
+        );
         Ok(())
     }
 
-    fn run_temporal_prompt_block(
+    fn run_causal_component_block(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         input_token_ids: &[u32],
         start_stream_tick: u64,
-        sample_last: bool,
-    ) -> Result<VulkanResidentTemporalBlockRun, VulkanResidentInProcessPlacedRuntimeError> {
+        capture_causal_state_snapshots: bool,
+    ) -> Result<VulkanPlacedEdgeTransportStats, VulkanResidentInProcessPlacedRuntimeError> {
         if input_token_ids.is_empty() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
-        let tick_count = u64::try_from(input_token_ids.len())
-            .map_err(|_| VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-        let end_stream_tick = start_stream_tick
-            .checked_add(tick_count - 1)
-            .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
         self.ensure_temporal_block_execution(
             devices,
-            self.temporal_block_lane_capacity(devices)?,
+            input_token_ids.len(),
+            capture_causal_state_snapshots,
         )?;
+        let block_capacity = self.causal_block_lane_capacity(input_token_ids.len())?;
         let capacity =
             u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "temporal context capacity exceeds u32".to_string(),
+                    "causal component batch context capacity exceeds u32".to_string(),
                 ))
             })?;
-        let runner_guard = self.temporal_block_execution.borrow();
-        let runner = runner_guard.as_ref().ok_or_else(|| {
+        let runner_guard = self.temporal_block_executions.borrow();
+        let runner = runner_guard
+            .get(&(block_capacity, capture_causal_state_snapshots))
+            .ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                "temporal block execution is not mounted".to_string(),
+                "causal component batch execution is not mounted".to_string(),
             ))
         })?;
+        if input_token_ids.len() > runner.execution_graph.lane_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "causal component batch capacity {} cannot process {} tokens",
+                    runner.execution_graph.lane_capacity,
+                    input_token_ids.len(),
+                )),
+            ));
+        }
         let input_device = devices.get(&self.model.input_device_id).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                 device_id: self.model.input_device_id.clone(),
             }
         })?;
         runner.input_embedding.run(input_device, input_token_ids)?;
-        let output_device = devices.get(&self.model.output_device_id).ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                device_id: self.model.output_device_id.clone(),
-            }
-        })?;
-        self.sampler
-            .record_input_tokens(output_device, input_token_ids)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
 
         let mut transport_stats = VulkanPlacedEdgeTransportStats::default();
         for (pipeline_index, device_index) in runner.pipeline.iter().copied().enumerate() {
@@ -389,7 +441,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 let [outgoing] = slice.mounted.edge_io.outgoing_buffers.as_slice() else {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
-                            "temporal pipeline device {:?} has {} outgoing edges; expected one",
+                            "causal component batch device {:?} has {} outgoing edges; expected one",
                             slice.device_id,
                             slice.mounted.edge_io.outgoing_buffers.len()
                         )),
@@ -440,19 +492,65 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     });
             }
         }
+        Ok(transport_stats)
+    }
+
+    fn run_temporal_prompt_block(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        sample_last: bool,
+    ) -> Result<VulkanResidentTemporalBlockRun, VulkanResidentInProcessPlacedRuntimeError> {
+        if input_token_ids.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        let tick_count = u64::try_from(input_token_ids.len())
+            .map_err(|_| VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+        let end_stream_tick = start_stream_tick
+            .checked_add(tick_count - 1)
+            .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+        let transport_stats =
+            self.run_causal_component_block(
+                devices,
+                input_token_ids,
+                start_stream_tick,
+                false,
+            )?;
+        let block_capacity = self.causal_block_lane_capacity(input_token_ids.len())?;
+        let capacity =
+            u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "temporal context capacity exceeds u32".to_string(),
+                ))
+            })?;
+        let runner_guard = self.temporal_block_executions.borrow();
+        let runner = runner_guard.get(&(block_capacity, false)).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "temporal block execution is not mounted".to_string(),
+                ))
+            })?;
+        let output_device = devices.get(&self.model.output_device_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: self.model.output_device_id.clone(),
+            }
+        })?;
+        self.sampler
+            .record_input_tokens(output_device, input_token_ids)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
 
         if !self.speculative_decoders.is_empty() {
-            let target_norm = runner.speculative_target_norm.as_ref().ok_or_else(|| {
+            let target_output = runner.speculative_target_output.as_ref().ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "temporal MTP target normalization is not mounted".to_string(),
                 ))
             })?;
-            target_norm.run(output_device, input_token_ids.len())?;
+            target_output.norm.run(output_device, input_token_ids.len())?;
             self.catch_up_speculative_decoders_from_target_frames(
                 devices,
                 input_token_ids,
                 start_stream_tick,
-                &target_norm.normalized_frames_buffer,
+                &target_output.norm.normalized_frames_buffer,
                 self.model
                     .output_transducer_spec
                     .normalized_frame_byte_capacity,

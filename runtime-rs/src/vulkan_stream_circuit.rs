@@ -110,6 +110,7 @@ include!("vulkan_stream_circuit/single_token_tick.rs");
 include!("vulkan_stream_circuit/feedback_loop.rs");
 include!("vulkan_stream_circuit/speculative_decode.rs");
 include!("vulkan_stream_circuit/state_transaction.rs");
+include!("vulkan_stream_circuit/causal_state_snapshots.rs");
 include!("vulkan_stream_circuit/component_batch_buffers.rs");
 include!("vulkan_stream_circuit/component_batch_kernel_selection.rs");
 include!("vulkan_stream_circuit/component_batch_slice_runner.rs");

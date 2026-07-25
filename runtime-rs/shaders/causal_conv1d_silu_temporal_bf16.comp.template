@@ -22,7 +22,14 @@ layout(set = 0, binding = 4) buffer StateWrite {
     uint words[];
 } state_write;
 
-layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+layout(set = 0, binding = 30) buffer StateSnapshots {
+    uint words[];
+} state_snapshots;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint state_snapshots_enabled;
+} batch_control;
 
 const uint CHANNELS = {{CHANNELS}}u;
 const uint KERNEL_WIDTH = {{KERNEL_WIDTH}}u;
@@ -126,6 +133,18 @@ void main() {
         }
         output_frames.words[position * FRAME_WORDS + channel_pair] =
             result[0] | (result[1] << 16u);
+        if (batch_control.state_snapshots_enabled != 0u) {
+            uint snapshot_base = position * CHANNELS * KERNEL_WIDTH;
+            for (uint pair_lane = 0u; pair_lane < 2u; pair_lane++) {
+                uint state_base = channels[pair_lane] * KERNEL_WIDTH;
+                for (uint tap = 0u; tap < KERNEL_WIDTH; tap += 2u) {
+                    state_snapshots.words[
+                        (snapshot_base + state_base + tap) >> 1u
+                    ] = state[pair_lane][tap]
+                        | (state[pair_lane][tap + 1u] << 16u);
+                }
+            }
+        }
     }
 
     for (uint pair_lane = 0u; pair_lane < 2u; pair_lane++) {

@@ -113,10 +113,20 @@ fn component_batch_control_bytes(
 fn component_batch_control_payload_bytes(
     payload: VulkanResidentComponentBatchControlPayload,
     control: &[u8; VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY as usize],
+    state_snapshots_enabled: bool,
 ) -> Vec<u8> {
     match payload {
         VulkanResidentComponentBatchControlPayload::Width => {
             control[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize].to_vec()
+        }
+        VulkanResidentComponentBatchControlPayload::WidthStateSnapshots => {
+            let mut bytes =
+                Vec::with_capacity(2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize);
+            bytes.extend_from_slice(
+                &control[..VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize],
+            );
+            bytes.extend_from_slice(&u32::from(state_snapshots_enabled).to_le_bytes());
+            bytes
         }
         VulkanResidentComponentBatchControlPayload::WidthExpertStart => {
             let mut bytes =

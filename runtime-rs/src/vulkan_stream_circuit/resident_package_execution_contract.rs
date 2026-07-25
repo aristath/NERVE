@@ -1,7 +1,7 @@
 fn component_batch_stage_descriptor_contract_is_valid(
     stage: &VulkanResidentComponentBatchStageSpec,
 ) -> bool {
-    let (control_binding, _, _) = stage.control.storage_buffer();
+    let (control_binding, _, control_payload) = stage.control.storage_buffer();
     let sources = stage
         .descriptor_bindings
         .iter()
@@ -15,6 +15,14 @@ fn component_batch_stage_descriptor_contract_is_valid(
     sources.len() == stage.descriptor_bindings.len()
         && destinations.len() == stage.descriptor_bindings.len()
         && !destinations.contains(&control_binding)
+        && stage
+            .state_snapshot_binding
+            .is_none_or(|binding| {
+                binding != control_binding && !destinations.contains(&binding)
+            })
+        && (stage.state_snapshot_binding.is_some()
+            == (control_payload
+                == VulkanResidentComponentBatchControlPayload::WidthStateSnapshots))
 }
 
 fn validate_component_executions(

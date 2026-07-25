@@ -137,6 +137,8 @@ pub struct VulkanResidentComponentBatchStageSpec {
     pub workgroup_count_x: u32,
     #[serde(default)]
     pub descriptor_bindings: Vec<VulkanResidentComponentBatchDescriptorBindingSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_snapshot_binding: Option<u32>,
     pub control: VulkanResidentComponentBatchControlSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indirect_dispatch_byte_offset: Option<u32>,
@@ -193,6 +195,7 @@ pub enum VulkanResidentComponentBatchControlAccess {
 #[serde(rename_all = "snake_case")]
 pub enum VulkanResidentComponentBatchControlPayload {
     Width,
+    WidthStateSnapshots,
     WidthExpertStart,
     WidthExpertRangeIndirect,
     Temporal,
@@ -202,6 +205,9 @@ impl VulkanResidentComponentBatchControlPayload {
     pub(crate) fn byte_count(self) -> u32 {
         match self {
             Self::Width => VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            Self::WidthStateSnapshots => {
+                2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+            }
             Self::WidthExpertStart => 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             Self::WidthExpertRangeIndirect => {
                 7 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY

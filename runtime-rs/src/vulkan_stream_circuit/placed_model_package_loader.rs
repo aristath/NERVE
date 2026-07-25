@@ -863,8 +863,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             execution_quantum_calibrators,
             speculative_decoders,
             verification_state_transactions: RefCell::new(None),
-            scalar_verification_execution: RefCell::new(None),
-            temporal_block_execution: RefCell::new(None),
+            temporal_block_executions: RefCell::new(BTreeMap::new()),
         })
     }
 }

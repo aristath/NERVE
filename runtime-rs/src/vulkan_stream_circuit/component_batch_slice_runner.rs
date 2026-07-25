@@ -13,6 +13,7 @@ struct VulkanResidentComponentBatchSliceRunner {
         RefCell<BTreeMap<(usize, usize), VulkanResidentQueueSubmissionTemplate>>,
     execution_shape_class_catalog: RefCell<BTreeMap<usize, String>>,
     sequence_catalog: RefCell<BTreeMap<(usize, usize), VulkanResidentKernelSequence>>,
+    causal_state_snapshots: VulkanCausalStateSnapshotBank,
     quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
 }
 
@@ -139,6 +140,42 @@ fn component_batch_execution_units_for_distributed_groups(
     Ok(execution_units)
 }
 
+fn component_batch_static_state_write_indices(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    dispatch: &VulkanMountedPlacedBoundDispatch,
+) -> Result<Vec<usize>, VulkanResidentInProcessPlacedRuntimeError> {
+    let mut indices = BTreeSet::new();
+    for descriptor in &dispatch.descriptors {
+        if !matches!(
+            descriptor.usage,
+            VulkanKernelDescriptorUsage::StateWrite | VulkanKernelDescriptorUsage::StateView
+        ) {
+            continue;
+        }
+        let VulkanMountedPlacedBoundDescriptorTarget::Resident {
+            target:
+                VulkanBoundDescriptorTarget::StreamStateBuffer { buffer_index, .. }
+                | VulkanBoundDescriptorTarget::StreamStateView { buffer_index, .. },
+        } = &descriptor.target
+        else {
+            continue;
+        };
+        let state = mounted
+            .buffers
+            .state_buffers
+            .get(*buffer_index)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch state writer references absent buffer {buffer_index}"
+                )))
+            })?;
+        if state.layout.static_byte_capacity > 0 {
+            indices.insert(*buffer_index);
+        }
+    }
+    Ok(indices.into_iter().collect())
+}
+
 impl VulkanResidentComponentBatchSliceRunner {
     fn new(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
@@ -148,6 +185,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         lane_mounteds: &[&VulkanMountedPlacedStreamCircuit],
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
+        capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
@@ -303,6 +341,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             .collect::<Result<Vec<_>, _>>()?;
         let batch_control_buffers = [
             VulkanResidentComponentBatchControlPayload::Width,
+            VulkanResidentComponentBatchControlPayload::WidthStateSnapshots,
             VulkanResidentComponentBatchControlPayload::WidthExpertStart,
             VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
             VulkanResidentComponentBatchControlPayload::Temporal,
@@ -318,10 +357,21 @@ impl VulkanResidentComponentBatchSliceRunner {
             Ok::<_, VulkanResidentInProcessPlacedRuntimeError>((payload, buffer))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut causal_state_snapshots = VulkanCausalStateSnapshotBank::new(
+            device,
+            lane_capacity,
+            capture_causal_state_snapshots,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut steps = Vec::new();
         let mut dispatch_spans = Vec::with_capacity(slice.mounted_bound.dispatches.len());
         for dispatch in &slice.mounted_bound.dispatches {
             let dispatch_step_start = steps.len();
+            let static_state_write_indices =
+                component_batch_static_state_write_indices(&slice.mounted, dispatch)?;
+            for state_buffer_index in &static_state_write_indices {
+                causal_state_snapshots.require_state_buffer(*state_buffer_index);
+            }
             let commits_state = component_batch_descriptors_commit_state(
                 dispatch
                     .descriptors
@@ -419,6 +469,45 @@ impl VulkanResidentComponentBatchSliceRunner {
                         binding,
                     )
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                    if let Some(snapshot_binding) = stage.state_snapshot_binding {
+                        if bindings
+                            .iter()
+                            .any(|binding| binding.binding == snapshot_binding)
+                        {
+                            return Err(
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(format!(
+                                        "component batch state snapshot binding {snapshot_binding} collides in stage {}",
+                                        stage.shader_path,
+                                    )),
+                                ),
+                            );
+                        }
+                        let [state_buffer_index] = static_state_write_indices.as_slice() else {
+                            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                VulkanError(format!(
+                                    "component batch stage {} snapshots {} static state writers; expected one",
+                                    stage.shader_path,
+                                    static_state_write_indices.len(),
+                                )),
+                            ));
+                        };
+                        let snapshot_buffer = causal_state_snapshots
+                            .binding_buffer(
+                                device,
+                                &slice.mounted.buffers,
+                                *state_buffer_index,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                        bindings.push(
+                            VulkanResidentKernelBufferBinding::new(
+                                snapshot_binding,
+                                snapshot_buffer,
+                                snapshot_buffer.byte_capacity(),
+                            )
+                            .with_access(VulkanResidentKernelBufferAccess::Write),
+                        );
+                    }
                     let control_buffer = batch_control_buffers.get(&payload).ok_or_else(|| {
                         VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                             format!(
@@ -514,6 +603,9 @@ impl VulkanResidentComponentBatchSliceRunner {
                 distributed: false,
             });
         }
+        causal_state_snapshots
+            .mount_commit_batches(device, &slice.mounted.buffers)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let distributed_group_leaders = distributed_execution_plan
             .dispatch_groups
             .iter()
@@ -539,6 +631,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             submission_template_catalog: RefCell::new(BTreeMap::new()),
             execution_shape_class_catalog: RefCell::new(BTreeMap::new()),
             sequence_catalog: RefCell::new(BTreeMap::new()),
+            causal_state_snapshots,
             quantum_calibrator,
         })
     }
@@ -575,6 +668,19 @@ impl VulkanResidentComponentBatchSliceRunner {
                 VulkanComponentBatchExecutionUnit::DistributedDispatch { .. } => None,
             })
             .collect()
+    }
+
+    fn commit_causal_state_prefix(
+        &self,
+        processed_tick_count: usize,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        self.causal_state_snapshots
+            .commit_prefix(processed_tick_count)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+    }
+
+    fn can_commit_causal_state_prefix(&self) -> bool {
+        self.causal_state_snapshots.can_commit_prefix()
     }
 
     fn ensure_sequence_shapes(
@@ -713,6 +819,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .write_bytes(&component_batch_control_payload_bytes(
                     *payload,
                     &batch_control,
+                    self.causal_state_snapshots.enabled,
                 ))
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }

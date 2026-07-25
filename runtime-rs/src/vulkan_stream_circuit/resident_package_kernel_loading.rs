@@ -222,6 +222,7 @@ fn load_resident_component_batch_kernels(
                                 local_size_x: stage.local_size_x,
                                 workgroup_count_x: stage.workgroup_count_x,
                                 descriptor_bindings: stage.descriptor_bindings.clone(),
+                                state_snapshot_binding: stage.state_snapshot_binding,
                                 control: stage.control,
                                 indirect_dispatch_byte_offset: stage
                                     .indirect_dispatch_byte_offset,

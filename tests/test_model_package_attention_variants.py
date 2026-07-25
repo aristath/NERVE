@@ -151,15 +151,17 @@ def test_compiler_renders_hybrid_recurrent_and_gated_attention_components(
     assert "uintBitsToFloat(norm_weight.words[index])" in recurrence
     assert "unpack_bf16(a_log.words[index >> 1u], index)" in bf16_recurrence
     assert "unpack_bf16(norm_weight.words[index >> 1u], index)" in bf16_recurrence
-    assert "shared float raw_query[KEY_HEAD_WIDTH];" in temporal_recurrence
-    assert "shared float raw_key[KEY_HEAD_WIDTH];" in temporal_recurrence
-    assert "q_sum = subgroupAdd(q_sum);" in temporal_recurrence
-    assert "k_sum = subgroupAdd(k_sum);" in temporal_recurrence
-    assert "reduction[gl_SubgroupID] = q_sum;" in temporal_recurrence
-    assert "head_output[gl_SubgroupID] = k_sum;" in temporal_recurrence
-    assert "head_beta = 1.0 /" in temporal_recurrence
+    assert "shared float raw_query[KEY_HEAD_WIDTH];" not in temporal_recurrence
+    assert "shared float raw_key[KEY_HEAD_WIDTH];" not in temporal_recurrence
+    assert "for (uint key_dim = 0u; key_dim < KEY_HEAD_WIDTH; key_dim++)" in temporal_recurrence
+    assert "q_sum = fma(q, q, q_sum);" in temporal_recurrence
+    assert "k_sum = fma(k, k, k_sum);" in temporal_recurrence
+    assert "q_sum = subgroupAdd(q_sum);" not in temporal_recurrence
+    assert "k_sum = subgroupAdd(k_sum);" not in temporal_recurrence
+    assert "float beta = 1.0 /" in temporal_recurrence
+    assert "float decay = exp(decay_log);" in temporal_recurrence
     assert (
-        "float previous = recurrent_state[key_dim] * head_decay;" in temporal_recurrence
+        "float previous = recurrent_state[key_dim] * decay;" in temporal_recurrence
     )
     assert "recurrent_state[key_dim] = previous;" in temporal_recurrence
     assert "float next = recurrent_state[key_dim] + key * delta;" in temporal_recurrence

@@ -572,6 +572,11 @@ def valid_batch_stage(stage: Any) -> bool:
         if isinstance(stage, dict)
         else None
     )
+    state_snapshot_binding = (
+        stage.get("state_snapshot_binding")
+        if isinstance(stage, dict)
+        else None
+    )
     return (
         isinstance(stage, dict)
         and isinstance(stage.get("shader_path"), str)
@@ -583,6 +588,28 @@ def valid_batch_stage(stage: Any) -> bool:
         and not isinstance(stage.get("workgroup_count_x"), bool)
         and stage["workgroup_count_x"] > 0
         and valid_batch_control(control)
+        and (
+            (state_snapshot_binding is not None)
+            == (control.get("payload") == "width_state_snapshots")
+        )
+        and (
+            state_snapshot_binding is None
+            or (
+                isinstance(state_snapshot_binding, int)
+                and not isinstance(state_snapshot_binding, bool)
+                and state_snapshot_binding >= 0
+                and state_snapshot_binding != control["binding"]
+                and all(
+                    not isinstance(mapping, dict)
+                    or mapping.get("binding") != state_snapshot_binding
+                    for mapping in (
+                        descriptor_bindings
+                        if isinstance(descriptor_bindings, list)
+                        else []
+                    )
+                )
+            )
+        )
         and (
             indirect_offset is None
             or (
@@ -640,6 +667,7 @@ def valid_batch_control(control: Any) -> bool:
     access = control.get("access", "read") if isinstance(control, dict) else None
     payload_byte_counts = {
         "width": 4,
+        "width_state_snapshots": 8,
         "width_expert_start": 8,
         "width_expert_range_indirect": 28,
         "temporal": 16,

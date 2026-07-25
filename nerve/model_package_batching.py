@@ -13,11 +13,13 @@ def persistent_batch_control_stage(
     payload: str = "width",
     binding: int = 31,
     descriptor_bindings: list[Json] | None = None,
+    state_snapshot_binding: int | None = None,
     control_access: str = "read",
     indirect_dispatch_byte_offset: int | None = None,
 ) -> Json:
     byte_count = {
         "width": 4,
+        "width_state_snapshots": 8,
         "width_expert_start": 8,
         "width_expert_range_indirect": 28,
         "temporal": 16,
@@ -42,6 +44,8 @@ def persistent_batch_control_stage(
     }
     if descriptor_bindings is not None:
         stage["descriptor_bindings"] = descriptor_bindings
+    if state_snapshot_binding is not None:
+        stage["state_snapshot_binding"] = state_snapshot_binding
     if indirect_dispatch_byte_offset is not None:
         stage["indirect_dispatch_byte_offset"] = indirect_dispatch_byte_offset
     return stage
@@ -168,6 +172,10 @@ def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
 def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] | None:
     causal_scan_shader = causal_scan_batch_shader_file(shader_file)
     if causal_scan_shader is not None:
+        captures_static_state = (
+            causal_scan_shader.startswith("causal_conv1d_silu_temporal_")
+            or causal_scan_shader.startswith("gated_delta_scan_")
+        )
         temporal_binding = (
             6
             if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
@@ -188,6 +196,12 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
                 causal_scan_shader,
                 local_size_x,
                 causal_scan_workgroup_count_x(shader_file),
+                payload=(
+                    "width_state_snapshots"
+                    if captures_static_state
+                    else "width"
+                ),
+                state_snapshot_binding=30 if captures_static_state else None,
             )
         ]
 

@@ -1,4 +1,34 @@
 pub(super) fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, VulkanError> {
+    if let Some(raw_uuid) = std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID") {
+        let raw_uuid = raw_uuid.to_string_lossy();
+        if raw_uuid.len() != 32 {
+            panic!(
+                "invalid NERVE_TEST_VULKAN_DEVICE_UUID {raw_uuid:?}; expected 32 hexadecimal digits"
+            );
+        }
+        let mut uuid = [0u8; 16];
+        for (index, byte) in uuid.iter_mut().enumerate() {
+            let offset = index * 2;
+            *byte = u8::from_str_radix(&raw_uuid[offset..offset + 2], 16).unwrap_or_else(|error| {
+                panic!("invalid NERVE_TEST_VULKAN_DEVICE_UUID {raw_uuid:?}: {error}")
+            });
+        }
+        let available_devices = VulkanComputeDevice::available_compute_devices()?;
+        let device = available_devices
+            .iter()
+            .find(|device| device.device_uuid == uuid)
+            .unwrap_or_else(|| {
+                panic!("explicit Vulkan test device UUID {raw_uuid:?} is not available")
+            });
+        return Ok(
+            VulkanComputeDevice::new_for_physical_device_index(device.physical_device_index)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "explicit Vulkan test device UUID {raw_uuid:?} could not be opened: {error}"
+                    )
+                }),
+        );
+    }
     match std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX") {
         Ok(raw_index) => {
             let index = raw_index.parse::<usize>().unwrap_or_else(|error| {
@@ -13,7 +43,8 @@ pub(super) fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, Vulka
             )
         }
         Err(std::env::VarError::NotPresent) => Err(VulkanError(
-            "NERVE_TEST_VULKAN_DEVICE_INDEX is required for every Vulkan test".to_string(),
+            "NERVE_TEST_VULKAN_DEVICE_UUID or NERVE_TEST_VULKAN_DEVICE_INDEX is required for every Vulkan test"
+                .to_string(),
         )),
         Err(error) => Err(VulkanError(format!(
             "could not read NERVE_TEST_VULKAN_DEVICE_INDEX: {error}"

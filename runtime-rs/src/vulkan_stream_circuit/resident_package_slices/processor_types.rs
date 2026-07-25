@@ -14,20 +14,8 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
         BTreeMap<String, Rc<RefCell<RuntimeExecutionQuantumCalibrator>>>,
     speculative_decoders: Vec<VulkanResidentSpeculativeDecoderProcessor>,
     verification_state_transactions: RefCell<Option<Vec<VulkanResidentStateTransactionBank>>>,
-    scalar_verification_execution:
-        RefCell<Option<VulkanResidentScalarVerificationWindowRunner>>,
-    temporal_block_execution: RefCell<Option<VulkanResidentPlacedTemporalBlockRunner>>,
-}
-
-struct VulkanResidentScalarVerificationWindowRunner {
-    lane_capacity: usize,
-    _input_frames: VulkanResidentBuffer,
-    input_embedding: VulkanResidentBatchedInputEmbeddingRunner,
-    input_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
-    stream_control_sources: Vec<Vec<VulkanResidentBuffer>>,
-    stream_control_copies: Vec<Vec<VulkanResidentBufferCopy>>,
-    normalized_target_frames: VulkanResidentBuffer,
-    normalized_target_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
+    temporal_block_executions:
+        RefCell<BTreeMap<(usize, bool), VulkanResidentPlacedTemporalBlockRunner>>,
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {

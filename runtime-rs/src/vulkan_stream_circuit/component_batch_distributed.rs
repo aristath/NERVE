@@ -990,7 +990,7 @@ fn distributed_component_batch_control_payload_bytes(
     expert_start: u32,
     expert_count: u32,
 ) -> Vec<u8> {
-    let mut bytes = component_batch_control_payload_bytes(payload, control);
+    let mut bytes = component_batch_control_payload_bytes(payload, control, false);
     if matches!(
         payload,
         VulkanResidentComponentBatchControlPayload::WidthExpertStart
