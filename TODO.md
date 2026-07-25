@@ -27,22 +27,7 @@ context/output limits, or benchmark-only shortcuts.
 
 ## Remaining work, in priority order
 
-### 1. Complete route-native MoE execution
-
-Sparse components and selected-route kernels exist, but routing is not yet a
-fully optimized runtime signal path.
-
-- Group and batch selected routes across tokens and streams.
-- Execute only selected experts and prove this with runtime work counters.
-- Place or shard experts across devices without dense all-expert work.
-- Keep route weights and reduction on the device.
-- Make route signals participate in resident execution templates and feedback
-  control.
-- Validate output correctness and active-expert scaling on real MoE packages.
-- Make the 35B MoE model's performance reflect its active parameter count rather
-  than its full declared size.
-
-### 2. Integrate MTP into the steady-state scheduler and device loop
+### 1. Integrate MTP into the steady-state scheduler and device loop
 
 MTP compilation and transactional verification work, but speculative execution
 is not yet part of the optimized steady-state path.
@@ -58,7 +43,7 @@ is not yet part of the optimized steady-state path.
 - Enable MTP by default only where warmed, realistic workloads show a net
   improvement.
 
-### 3. Finish long-context prefill and mixed-workload scheduling
+### 2. Finish long-context prefill and mixed-workload scheduling
 
 - Interleave prefill and decode fairly under memory pressure.
 - Pipeline independent streams across placed devices so serial layer placement
@@ -92,7 +77,7 @@ is not yet part of the optimized steady-state path.
   limits.
 - Report prefill and decode throughput separately by default.
 
-### 4. Maintain adversarial correctness and performance gates
+### 3. Maintain adversarial correctness and performance gates
 
 Every meaningful compiler, runtime, state, graph, or kernel change must be tested
 against the supported model set rather than optimized around one model.
