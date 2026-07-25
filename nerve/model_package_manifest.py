@@ -1131,7 +1131,7 @@ def component_kernel_spec(
             )
             spec["batch_implementations"].append(
                 {
-                    "execution_domain": "prefill",
+                    "execution_domain": "decode_and_prefill",
                     "lane_tile_width": 1,
                     "independent_candidate_compatible": True,
                     "causal_sequence_compatible": True,

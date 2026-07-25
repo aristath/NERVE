@@ -182,7 +182,7 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
 
     frame_parallel, *portable = spec["batch_implementations"]
     assert spec["execution_domain"] == "decode"
-    assert frame_parallel["execution_domain"] == "prefill"
+    assert frame_parallel["execution_domain"] == "decode_and_prefill"
     assert frame_parallel["lane_tile_width"] == 1
     assert frame_parallel["independent_candidate_compatible"] is True
     assert frame_parallel["causal_sequence_compatible"] is True

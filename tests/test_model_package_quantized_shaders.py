@@ -537,7 +537,10 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
         for implementation in spec["batch_implementations"]
     ] == [1]
     assert spec["execution_domain"] == "decode"
-    assert spec["batch_implementations"][0]["execution_domain"] == "prefill"
+    assert (
+        spec["batch_implementations"][0]["execution_domain"]
+        == "decode_and_prefill"
+    )
     assert spec["batch_implementations"][0]["stages"] == [
         {
             "shader_path": (
