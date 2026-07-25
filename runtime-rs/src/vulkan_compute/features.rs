@@ -29,6 +29,8 @@ const VK_COMPONENT_TYPE_BFLOAT16_KHR: i32 = 1_000_141_000;
 const VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT: i32 = 1_000_491_002;
 const VULKAN_SHARED_HOST_MEMORY_HANDLE_TYPE: vk::ExternalMemoryHandleTypeFlags =
     vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+const VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE: vk::ExternalMemoryHandleTypeFlags =
+    vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
 const VULKAN_PERSISTENT_CROSS_DEVICE_SYNC_HANDLE_TYPE: vk::ExternalSemaphoreHandleTypeFlags =
     vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD;
 const SPIRV_MAGIC: u32 = 0x0723_0203;

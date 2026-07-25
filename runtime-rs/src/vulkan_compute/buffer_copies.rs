@@ -6,6 +6,7 @@ pub struct VulkanResidentBufferCopy {
     source: vk::Buffer,
     destination: vk::Buffer,
     byte_len: vk::DeviceSize,
+    completion_fence: vk::Fence,
 }
 
 pub struct VulkanResidentBufferCopyBatch {
@@ -114,17 +115,26 @@ impl VulkanResidentBufferCopy {
         }
 
         unsafe {
+            self.device
+                .reset_fences(&[self.completion_fence])
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to reset resident byte copy completion fence: {error:?}"
+                    ))
+                })?;
             let command_buffers = [self.command_buffer];
             let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
             self.device
-                .queue_submit(self.queue, &submit_info, vk::Fence::null())
+                .queue_submit(self.queue, &submit_info, self.completion_fence)
                 .map_err(|error| {
                     VulkanError(format!("failed to submit resident byte copy: {error:?}"))
                 })?;
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            self.device.queue_wait_idle(self.queue).map_err(|error| {
-                VulkanError(format!("failed waiting for resident byte copy: {error:?}"))
-            })?;
+            self.device
+                .wait_for_fences(&[self.completion_fence], true, u64::MAX)
+                .map_err(|error| {
+                    VulkanError(format!("failed waiting for resident byte copy: {error:?}"))
+                })?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -171,6 +181,7 @@ impl VulkanResidentBufferCopyBatch {
 impl Drop for VulkanResidentBufferCopy {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }
     }

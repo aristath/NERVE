@@ -188,8 +188,359 @@ impl VulkanComputeDevice {
                 persistent_mapping: Some(allocation.address),
                 persistent_mapping_requires_unmap: false,
                 _shared_host_allocation: Some(allocation),
+                _shared_device_memory_identity: None,
             })
         }
+    }
+
+    /// Creates one byte-identical resident buffer view on every participating
+    /// logical device. Device-local DMA-BUF storage is preferred. Shared host
+    /// memory is an explicit capability fallback, not the normal route.
+    pub fn create_shared_resident_buffers(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+    ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
+        let external_device_local_error =
+            match self.create_shared_device_resident_buffers(peer_devices, byte_capacity) {
+                Ok(buffers) => {
+                    return Ok(VulkanSharedResidentBufferSet {
+                        route: VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+                        buffers,
+                        external_device_local_error: None,
+                    });
+                }
+                Err(error) => error.to_string(),
+            };
+        let allocation = self
+            .create_shared_host_allocation(peer_devices, byte_capacity)
+            .map_err(|host_error| {
+                VulkanError(format!(
+                    "device-local external memory is unavailable ({external_device_local_error}); shared-host fallback is unavailable ({host_error})"
+                ))
+            })?;
+        let buffers = std::iter::once(self)
+            .chain(peer_devices.iter().copied())
+            .map(|device| {
+                device
+                    .import_shared_host_buffer(Arc::clone(&allocation))
+                    .map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(VulkanSharedResidentBufferSet {
+            route: VulkanSharedResidentBufferRoute::SharedHost,
+            buffers,
+            external_device_local_error: Some(external_device_local_error),
+        })
+    }
+
+    fn create_shared_device_resident_buffers(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+    ) -> Result<Vec<Arc<VulkanResidentBuffer>>, VulkanError> {
+        if byte_capacity == 0 {
+            return Err(VulkanError(
+                "shared device-local allocation capacity must not be zero".to_string(),
+            ));
+        }
+        let devices = std::iter::once(self)
+            .chain(peer_devices.iter().copied())
+            .collect::<Vec<_>>();
+        if devices
+            .iter()
+            .any(|device| !device.supports_shared_device_memory())
+        {
+            return Err(VulkanError(format!(
+                "shared device-local memory is not supported by every participating device: {:?}",
+                devices
+                    .iter()
+                    .filter(|device| !device.supports_shared_device_memory())
+                    .map(|device| device.device_name())
+                    .collect::<Vec<_>>()
+            )));
+        }
+        for (index, device) in devices.iter().enumerate() {
+            if devices[..index]
+                .iter()
+                .any(|existing| existing.shares_logical_device_with(device))
+            {
+                return Err(VulkanError(format!(
+                    "shared device-local allocation repeats logical device {:?}",
+                    device.device_name()
+                )));
+            }
+        }
+
+        struct RawExternalBuffer<'a> {
+            device: &'a VulkanComputeDevice,
+            buffer: vk::Buffer,
+            requirements: vk::MemoryRequirements,
+            requires_dedicated: bool,
+        }
+
+        let mut raw_buffers = Vec::<RawExternalBuffer<'_>>::with_capacity(devices.len());
+        let create_result = (|| {
+            for device in &devices {
+                unsafe {
+                    let mut external = vk::ExternalMemoryBufferCreateInfo::default()
+                        .handle_types(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE);
+                    let buffer_info = vk::BufferCreateInfo::default()
+                        .size(byte_capacity as vk::DeviceSize)
+                        .usage(resident_buffer_usage())
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .push_next(&mut external);
+                    let buffer = device
+                        .device
+                        .create_buffer(&buffer_info, None)
+                        .map_err(|error| {
+                            VulkanError(format!(
+                                "failed to create external device-local buffer on {:?}: {error:?}",
+                                device.device_name
+                            ))
+                        })?;
+                    let mut dedicated = vk::MemoryDedicatedRequirements::default();
+                    let mut requirements = vk::MemoryRequirements2::default()
+                        .push_next(&mut dedicated);
+                    let requirements_info =
+                        vk::BufferMemoryRequirementsInfo2::default().buffer(buffer);
+                    device
+                        .device
+                        .get_buffer_memory_requirements2(&requirements_info, &mut requirements);
+                    raw_buffers.push(RawExternalBuffer {
+                        device,
+                        buffer,
+                        requirements: requirements.memory_requirements,
+                        requires_dedicated: dedicated.requires_dedicated_allocation == vk::TRUE,
+                    });
+                }
+            }
+            Ok::<(), VulkanError>(())
+        })();
+        if let Err(error) = create_result {
+            unsafe {
+                for raw in raw_buffers {
+                    raw.device.device.destroy_buffer(raw.buffer, None);
+                }
+            }
+            return Err(error);
+        }
+
+        let dedicated = raw_buffers.iter().any(|raw| raw.requires_dedicated);
+        let allocation_size = if dedicated {
+            let required_size = raw_buffers[0].requirements.size;
+            if raw_buffers
+                .iter()
+                .any(|raw| raw.requirements.size != required_size)
+            {
+                unsafe {
+                    for raw in raw_buffers {
+                        raw.device.device.destroy_buffer(raw.buffer, None);
+                    }
+                }
+                return Err(VulkanError(
+                    "cross-device dedicated buffer requirements disagree on allocation size"
+                        .to_string(),
+                ));
+            }
+            required_size
+        } else {
+            raw_buffers
+                .iter()
+                .map(|raw| raw.requirements.size)
+                .max()
+                .expect("at least the owner external buffer exists")
+        };
+        let mut allocated_memories = vec![None; raw_buffers.len()];
+        let mut allocated_memory_type_indices = vec![None; raw_buffers.len()];
+        let allocation_result = (|| {
+            let owner = &raw_buffers[0];
+            let owner_memory_type = unsafe {
+                find_memory_type(
+                    &owner.device.context.instance,
+                    owner.device.physical_device,
+                    owner.requirements.memory_type_bits,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    vk::MemoryPropertyFlags::empty(),
+                )
+            }
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "no device-local exportable memory type on {:?}",
+                    owner.device.device_name
+                ))
+            })?;
+            allocated_memory_type_indices[0] = Some(owner_memory_type);
+            let mut export = vk::ExportMemoryAllocateInfo::default()
+                .handle_types(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE);
+            let mut owner_dedicated =
+                vk::MemoryDedicatedAllocateInfo::default().buffer(owner.buffer);
+            let mut owner_allocate = vk::MemoryAllocateInfo::default()
+                .allocation_size(allocation_size)
+                .memory_type_index(owner_memory_type)
+                .push_next(&mut export);
+            if dedicated {
+                owner_allocate = owner_allocate.push_next(&mut owner_dedicated);
+            }
+            let owner_memory = unsafe {
+                owner
+                    .device
+                    .device
+                    .allocate_memory(&owner_allocate, None)
+                    .map_err(|error| {
+                        VulkanError(format!(
+                            "failed to allocate exportable device-local memory on {:?}: {error:?}",
+                            owner.device.device_name
+                        ))
+                    })?
+            };
+            allocated_memories[0] = Some(owner_memory);
+            unsafe {
+                owner
+                    .device
+                    .device
+                    .bind_buffer_memory(owner.buffer, owner_memory, 0)
+                    .map_err(|error| {
+                        VulkanError(format!(
+                            "failed to bind exportable device-local memory on {:?}: {error:?}",
+                            owner.device.device_name
+                        ))
+                    })?;
+            }
+
+            let owner_fd_loader = ash::khr::external_memory_fd::Device::new(
+                &owner.device.context.instance,
+                &owner.device.device,
+            );
+            for (index, raw) in raw_buffers.iter().enumerate().skip(1) {
+                let fd = unsafe {
+                    owner_fd_loader
+                        .get_memory_fd(
+                            &vk::MemoryGetFdInfoKHR::default()
+                                .memory(owner_memory)
+                                .handle_type(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE),
+                        )
+                        .map_err(|error| {
+                            VulkanError(format!(
+                                "failed to export device-local DMA-BUF from {:?}: {error:?}",
+                                owner.device.device_name
+                            ))
+                        })?
+                };
+                let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                let peer_fd_loader = ash::khr::external_memory_fd::Device::new(
+                    &raw.device.context.instance,
+                    &raw.device.device,
+                );
+                let mut fd_properties = vk::MemoryFdPropertiesKHR::default();
+                unsafe {
+                    peer_fd_loader
+                        .get_memory_fd_properties(
+                            VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE,
+                            fd.as_raw_fd(),
+                            &mut fd_properties,
+                        )
+                        .map_err(|error| {
+                            VulkanError(format!(
+                                "failed to inspect imported DMA-BUF on {:?}: {error:?}",
+                                raw.device.device_name
+                            ))
+                        })?;
+                }
+                let compatible_memory_types =
+                    raw.requirements.memory_type_bits & fd_properties.memory_type_bits;
+                let memory_type = unsafe {
+                    find_memory_type(
+                        &raw.device.context.instance,
+                        raw.device.physical_device,
+                        compatible_memory_types,
+                        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                        vk::MemoryPropertyFlags::empty(),
+                    )
+                }
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "DMA-BUF from {:?} has no device-local import type on {:?}",
+                        owner.device.device_name, raw.device.device_name
+                    ))
+                })?;
+                allocated_memory_type_indices[index] = Some(memory_type);
+                let mut import = vk::ImportMemoryFdInfoKHR::default()
+                    .handle_type(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE)
+                    .fd(fd.as_raw_fd());
+                let mut peer_dedicated =
+                    vk::MemoryDedicatedAllocateInfo::default().buffer(raw.buffer);
+                let mut peer_allocate = vk::MemoryAllocateInfo::default()
+                    .allocation_size(allocation_size)
+                    .memory_type_index(memory_type)
+                    .push_next(&mut import);
+                if dedicated {
+                    peer_allocate = peer_allocate.push_next(&mut peer_dedicated);
+                }
+                let memory = unsafe {
+                    raw.device
+                        .device
+                        .allocate_memory(&peer_allocate, None)
+                        .map_err(|error| {
+                            VulkanError(format!(
+                                "failed to import device-local DMA-BUF on {:?}: {error:?}",
+                                raw.device.device_name
+                            ))
+                        })?
+                };
+                let _ = fd.into_raw_fd();
+                allocated_memories[index] = Some(memory);
+                unsafe {
+                    raw.device
+                        .device
+                        .bind_buffer_memory(raw.buffer, memory, 0)
+                        .map_err(|error| {
+                            VulkanError(format!(
+                                "failed to bind imported device-local DMA-BUF on {:?}: {error:?}",
+                                raw.device.device_name
+                            ))
+                        })?;
+                }
+            }
+            Ok::<(), VulkanError>(())
+        })();
+        if let Err(error) = allocation_result {
+            unsafe {
+                for (raw, memory) in raw_buffers.iter().zip(&allocated_memories) {
+                    raw.device.device.destroy_buffer(raw.buffer, None);
+                    if let Some(memory) = memory {
+                        raw.device.device.free_memory(*memory, None);
+                    }
+                }
+            }
+            return Err(error);
+        }
+
+        let identity = Arc::new(VulkanSharedDeviceMemoryIdentity);
+        Ok(raw_buffers
+            .into_iter()
+            .zip(allocated_memories.into_iter().zip(allocated_memory_type_indices))
+            .map(|(raw, (memory, memory_type_index))| {
+                let memory = memory.expect("every external buffer was allocated");
+                let memory_type_index =
+                    memory_type_index.expect("every external memory type was selected");
+                let memory_access = raw
+                    .device
+                    .resident_memory_access(memory_type_index)
+                    .expect("the selected external memory type has resident access");
+                Arc::new(VulkanResidentBuffer {
+                    device: raw.device.device.clone(),
+                    buffer: raw.buffer,
+                    memory,
+                    memory_access,
+                    byte_capacity: byte_capacity as vk::DeviceSize,
+                    persistent_mapping: None,
+                    persistent_mapping_requires_unmap: false,
+                    _shared_host_allocation: None,
+                    _shared_device_memory_identity: Some(Arc::clone(&identity)),
+                })
+            })
+            .collect())
     }
 
     pub fn create_timeline_semaphore(
@@ -463,6 +814,7 @@ impl VulkanComputeDevice {
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
+            _shared_device_memory_identity: None,
         })
     }
 
@@ -489,6 +841,7 @@ impl VulkanComputeDevice {
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
+            _shared_device_memory_identity: None,
         })
     }
 
@@ -673,6 +1026,15 @@ impl VulkanComputeDevice {
                         "failed to end resident byte copy binding command buffer: {error:?}"
                     ))
                 })?;
+            let completion_fence = self
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(|error| {
+                    self.device.destroy_command_pool(command_pool, None);
+                    VulkanError(format!(
+                        "failed to create resident byte copy completion fence: {error:?}"
+                    ))
+                })?;
 
             Ok(VulkanResidentBufferCopy {
                 device: self.device.clone(),
@@ -682,8 +1044,53 @@ impl VulkanComputeDevice {
                 source: source.buffer,
                 destination: destination.buffer,
                 byte_len,
+                completion_fence,
             })
         }
+    }
+
+    pub fn submit_resident_buffer_copy_with_timeline_semaphores(
+        &self,
+        binding: &VulkanResidentBufferCopy,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+    ) -> Result<(), VulkanError> {
+        if binding.device.handle() != self.device.handle() {
+            return Err(VulkanError(
+                "resident buffer copy belongs to another logical device".to_string(),
+            ));
+        }
+        self.submit_command_buffer_with_timeline_semaphores(
+            binding.command_buffer,
+            Some(binding.completion_fence),
+            wait_points,
+            signal_points,
+            "resident buffer copy",
+            false,
+        )?;
+        Ok(())
+    }
+
+    pub fn wait_resident_buffer_copy(
+        &self,
+        binding: &VulkanResidentBufferCopy,
+    ) -> Result<(), VulkanError> {
+        if binding.device.handle() != self.device.handle() {
+            return Err(VulkanError(
+                "resident buffer copy belongs to another logical device".to_string(),
+            ));
+        }
+        unsafe {
+            self.device
+                .wait_for_fences(&[binding.completion_fence], true, u64::MAX)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed waiting for resident buffer copy completion: {error:?}"
+                    ))
+                })?;
+        }
+        RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn create_resident_buffer_copy_batch(

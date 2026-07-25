@@ -8,6 +8,7 @@ pub struct VulkanComputeDevice {
     enabled_device_extensions: BTreeSet<String>,
     enabled_shader_features: BTreeSet<VulkanShaderFeature>,
     shared_host_memory_alignment: Option<usize>,
+    shared_device_memory_supported: bool,
     opaque_fd_timeline_semaphore_supported: bool,
     cooperative_bfloat16_shapes: BTreeSet<(u32, u32, u32)>,
     cooperative_float8_e4m3_shapes: BTreeSet<(u32, u32, u32)>,
@@ -237,6 +238,7 @@ pub struct VulkanResidentBuffer {
     persistent_mapping: Option<usize>,
     persistent_mapping_requires_unmap: bool,
     _shared_host_allocation: Option<Arc<VulkanSharedHostAllocation>>,
+    _shared_device_memory_identity: Option<Arc<VulkanSharedDeviceMemoryIdentity>>,
 }
 
 /// Page-aligned host memory imported into multiple Vulkan devices. GPUs access
@@ -245,6 +247,26 @@ pub struct VulkanSharedHostAllocation {
     address: usize,
     layout: Layout,
     byte_capacity: usize,
+}
+
+/// Identity shared by device-local buffers that import the same external
+/// memory payload. Each Vulkan logical device owns its buffer and memory
+/// handles; this identity only proves that their bytes alias.
+pub struct VulkanSharedDeviceMemoryIdentity;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanSharedResidentBufferRoute {
+    ExternalDeviceLocal,
+    SharedHost,
+}
+
+pub struct VulkanSharedResidentBufferSet {
+    pub route: VulkanSharedResidentBufferRoute,
+    /// The owner buffer is first, followed by one buffer for each peer in the
+    /// same order supplied to `create_shared_resident_buffers`.
+    pub buffers: Vec<Arc<VulkanResidentBuffer>>,
+    pub external_device_local_error: Option<String>,
 }
 
 pub struct VulkanTimelineSemaphore {
@@ -505,8 +527,56 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         for point in wait_points.iter().chain(signal_points) {
             device.validate_local_timeline_semaphore(point.semaphore)?;
         }
+        self.enqueue_command_buffer(
+            device,
+            sequence.command_buffer,
+            sequence.completion_fence,
+            wait_points,
+            signal_points,
+            signal_completion,
+            execution_region,
+        )
+    }
+
+    pub fn enqueue_resident_buffer_copy(
+        &self,
+        device: &'a VulkanComputeDevice,
+        binding: &VulkanResidentBufferCopy,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+    ) -> Result<(), VulkanError> {
+        if binding.device.handle() != device.device.handle() {
+            return Err(VulkanError(
+                "resident queue submission copy belongs to another logical device".to_string(),
+            ));
+        }
+        for point in wait_points.iter().chain(signal_points) {
+            device.validate_local_timeline_semaphore(point.semaphore)?;
+        }
+        self.enqueue_command_buffer(
+            device,
+            binding.command_buffer,
+            binding.completion_fence,
+            wait_points,
+            signal_points,
+            false,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_command_buffer(
+        &self,
+        device: &'a VulkanComputeDevice,
+        command_buffer: vk::CommandBuffer,
+        completion_fence: vk::Fence,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_completion: bool,
+        execution_region: Option<RuntimeExecutionRegion>,
+    ) -> Result<(), VulkanError> {
         let submission = VulkanPreparedResidentQueueSubmission {
-            command_buffer: sequence.command_buffer,
+            command_buffer,
             wait_points: wait_points
                 .iter()
                 .map(|point| (point.semaphore.semaphore, point.value))
@@ -515,7 +585,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                 .iter()
                 .map(|point| (point.semaphore.semaphore, point.value))
                 .collect(),
-            completion_fence: sequence.completion_fence,
+            completion_fence,
             signal_completion,
             execution_region,
         };

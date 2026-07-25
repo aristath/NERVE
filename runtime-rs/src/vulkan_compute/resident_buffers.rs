@@ -42,6 +42,21 @@ impl VulkanResidentBuffer {
             .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
     }
 
+    pub fn is_shared_device_memory_backed(&self) -> bool {
+        self._shared_device_memory_identity.is_some()
+    }
+
+    pub fn shares_device_memory_with(&self, other: &Self) -> bool {
+        self._shared_device_memory_identity
+            .as_ref()
+            .zip(other._shared_device_memory_identity.as_ref())
+            .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
+    }
+
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        self.shares_host_allocation_with(other) || self.shares_device_memory_with(other)
+    }
+
     pub fn is_persistently_mapped(&self) -> bool {
         self.persistent_mapping.is_some()
     }

@@ -39,6 +39,7 @@ impl VulkanComputeDevice {
             wait_points,
             signal_points,
             "resident kernel sequence",
+            true,
         )
     }
 
@@ -59,6 +60,7 @@ impl VulkanComputeDevice {
             wait_points,
             signal_points,
             "resident kernel sequence",
+            true,
         )
     }
 
@@ -80,6 +82,7 @@ impl VulkanComputeDevice {
             &[],
             &[],
             "resident kernel sequence",
+            true,
         )
     }
 
@@ -90,6 +93,7 @@ impl VulkanComputeDevice {
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         label: &str,
+        record_sequence_submission: bool,
     ) -> Result<(), VulkanError> {
         for point in wait_points.iter().chain(signal_points) {
             self.validate_local_timeline_semaphore(point.semaphore)?;
@@ -135,7 +139,11 @@ impl VulkanComputeDevice {
                     completion_fence.unwrap_or(vk::Fence::null()),
                 )
                 .map_err(|error| VulkanError(format!("failed to submit {label}: {error:?}")))?;
-            RESIDENT_SEQUENCE_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+            if record_sequence_submission {
+                RESIDENT_SEQUENCE_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+            }
         }
         Ok(())
     }

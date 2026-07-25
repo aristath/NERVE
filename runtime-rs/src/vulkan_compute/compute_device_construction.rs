@@ -77,6 +77,10 @@ impl VulkanComputeDevice {
         self.shared_host_memory_alignment.is_some()
     }
 
+    pub fn supports_shared_device_memory(&self) -> bool {
+        self.shared_device_memory_supported
+    }
+
     pub fn supports_opaque_fd_timeline_semaphores(&self) -> bool {
         self.opaque_fd_timeline_semaphore_supported
     }

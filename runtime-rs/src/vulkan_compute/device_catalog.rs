@@ -235,6 +235,15 @@ impl VulkanComputeDeviceCatalog {
                 } else {
                     None
                 };
+            let shared_device_memory_supported = physical_device_supports_extension(
+                instance,
+                physical_device,
+                ash::khr::external_memory_fd::NAME,
+            )? && physical_device_supports_extension(
+                instance,
+                physical_device,
+                ash::ext::external_memory_dma_buf::NAME,
+            )? && physical_device_supports_shared_device_buffer(instance, physical_device);
             let opaque_fd_timeline_semaphore_supported = physical_device_supports_extension(
                 instance,
                 physical_device,
@@ -395,6 +404,20 @@ impl VulkanComputeDeviceCatalog {
                         .into_owned(),
                 );
             }
+            if shared_device_memory_supported {
+                extension_names.push(ash::khr::external_memory_fd::NAME.as_ptr());
+                extension_names.push(ash::ext::external_memory_dma_buf::NAME.as_ptr());
+                enabled_device_extensions.insert(
+                    ash::khr::external_memory_fd::NAME
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                enabled_device_extensions.insert(
+                    ash::ext::external_memory_dma_buf::NAME
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
             if opaque_fd_timeline_semaphore_supported {
                 extension_names.push(ash::khr::external_semaphore_fd::NAME.as_ptr());
                 enabled_device_extensions.insert(
@@ -453,6 +476,7 @@ impl VulkanComputeDeviceCatalog {
                 enabled_device_extensions,
                 enabled_shader_features,
                 shared_host_memory_alignment,
+                shared_device_memory_supported,
                 opaque_fd_timeline_semaphore_supported,
                 cooperative_bfloat16_shapes,
                 cooperative_float8_e4m3_shapes,

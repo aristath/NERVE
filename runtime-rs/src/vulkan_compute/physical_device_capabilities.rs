@@ -178,6 +178,31 @@ fn physical_device_supports_shared_host_buffer(
             .contains(VULKAN_SHARED_HOST_MEMORY_HANDLE_TYPE)
 }
 
+fn physical_device_supports_shared_device_buffer(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> bool {
+    let info = vk::PhysicalDeviceExternalBufferInfo::default()
+        .flags(vk::BufferCreateFlags::empty())
+        .usage(resident_buffer_usage())
+        .handle_type(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE);
+    let mut properties = vk::ExternalBufferProperties::default();
+    unsafe {
+        instance.get_physical_device_external_buffer_properties(
+            physical_device,
+            &info,
+            &mut properties,
+        );
+    }
+    let external = properties.external_memory_properties;
+    external.external_memory_features.contains(
+        vk::ExternalMemoryFeatureFlags::EXPORTABLE
+            | vk::ExternalMemoryFeatureFlags::IMPORTABLE,
+    ) && external
+        .compatible_handle_types
+        .contains(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE)
+}
+
 fn physical_device_shared_host_memory_alignment(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,

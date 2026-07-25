@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_device_shared_host_memory_reuses_persistent_semaphore_dependencies() {
+    fn cross_device_shared_resident_memory_reuses_persistent_semaphore_dependencies() {
         let Some(spirv_words) = compile_test_shader_words() else {
             eprintln!("skipping cross-device Vulkan test: no GLSL to SPIR-V compiler found");
             return;
@@ -846,16 +846,24 @@ mod tests {
 
         let owner = VulkanComputeDevice::new_for_physical_device_index(owner_index).unwrap();
         let worker = VulkanComputeDevice::new_for_physical_device_index(worker_index).unwrap();
-        assert!(owner.supports_shared_host_memory());
-        assert!(worker.supports_shared_host_memory());
         assert!(owner.supports_opaque_fd_timeline_semaphores());
         assert!(worker.supports_opaque_fd_timeline_semaphores());
 
-        let allocation = owner.create_shared_host_allocation(&[&worker], 12).unwrap();
-        let owner_buffer = owner
-            .import_shared_host_buffer(Arc::clone(&allocation))
+        let shared = owner
+            .create_shared_resident_buffers(&[&worker], 12)
             .unwrap();
-        let worker_buffer = worker.import_shared_host_buffer(allocation).unwrap();
+        assert_eq!(shared.buffers.len(), 2);
+        match shared.route {
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                assert!(shared.external_device_local_error.is_none());
+            }
+            VulkanSharedResidentBufferRoute::SharedHost => {
+                assert!(shared.external_device_local_error.is_some());
+            }
+        }
+        let owner_buffer = &shared.buffers[0];
+        let worker_buffer = &shared.buffers[1];
+        assert!(owner_buffer.shares_storage_with(worker_buffer));
         owner_buffer.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
 
         let owner_dispatch = owner
