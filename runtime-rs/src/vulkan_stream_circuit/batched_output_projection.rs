@@ -1,33 +1,21 @@
-struct VulkanResidentBatchedOutputProjectionRunner {
+struct VulkanResidentBatchedOutputNormRunner {
     batch_capacity: usize,
-    _normalized_frames_buffer: VulkanResidentBuffer,
-    _batched_logits_buffer: VulkanResidentBuffer,
+    normalized_frames_buffer: VulkanResidentBuffer,
     norm_dispatch: VulkanResidentKernelDispatch,
-    projection_dispatch: VulkanResidentKernelDispatch,
-    projection_sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
-    sampler_submission_catalog:
-        RefCell<BTreeMap<usize, VulkanResidentQueueSubmissionTemplate>>,
-    sampler_views: Vec<VulkanResidentSamplerLogitsView>,
+    sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
 }
 
-impl VulkanResidentBatchedOutputProjectionRunner {
+impl VulkanResidentBatchedOutputNormRunner {
     #[allow(clippy::too_many_arguments)]
-    fn new_for_sampler_lanes(
+    fn new(
         device: &VulkanComputeDevice,
+        batch_capacity: usize,
         norm_batch_lane_tile_width: u32,
-        batch_lane_tile_width: u32,
         raw_frames_buffer: &VulkanResidentBuffer,
         norm_weight: &VulkanPermanentParameterBufferAllocation,
-        projection_weight: &VulkanPermanentParameterBufferAllocation,
-        projection_scale: Option<&VulkanPermanentParameterBufferAllocation>,
         norm_spirv_words: &[u32],
-        projection_spirv_words: &[u32],
         output_spec: &VulkanResidentOutputTransducerSpec,
-        sampler_lanes: &[&VulkanResidentSamplerRunner],
-        sampler_kernels: &[VulkanResidentSamplerKernelArtifact],
-        sampler_spec: &VulkanResidentSamplerSpec,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let batch_capacity = sampler_lanes.len();
         if batch_capacity == 0 {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
@@ -41,20 +29,6 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 VulkanError("batched output norm lane tile width is zero".to_string()),
             ));
         }
-        let tile_width = usize::try_from(batch_lane_tile_width).map_err(|_| {
-            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                "batched output projection lane tile width exceeds usize".to_string(),
-            ))
-        })?;
-        if tile_width == 0 {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError("batched output projection lane tile width is zero".to_string()),
-            ));
-        }
-        validate_output_projection_weight(projection_weight, output_spec)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
-        validate_output_projection_scale(projection_scale, output_spec)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
         validate_output_embedding_norm_weight(norm_weight, output_spec)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
         let normalized_frames_byte_capacity = output_spec
@@ -65,20 +39,6 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                     "batched normalized frame capacity overflowed".to_string(),
                 ))
             })?;
-        let batched_logits_byte_capacity = output_spec
-            .logits_byte_capacity
-            .checked_mul(batch_capacity)
-            .ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "batched logits capacity overflowed".to_string(),
-                ))
-            })?;
-        let normalized_frames_buffer = device
-            .create_resident_buffer(normalized_frames_byte_capacity)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let batched_logits_buffer = device
-            .create_resident_buffer(batched_logits_byte_capacity)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         if raw_frames_buffer.byte_capacity() < normalized_frames_byte_capacity {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError(format!(
@@ -87,6 +47,9 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 )),
             ));
         }
+        let normalized_frames_buffer = device
+            .create_resident_buffer(normalized_frames_byte_capacity)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let norm_workgroup_count_y = batch_capacity
             .checked_add(norm_tile_width - 1)
             .map(|width| width / norm_tile_width)
@@ -126,6 +89,131 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 std::mem::size_of::<u32>() as u32,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        Ok(Self {
+            batch_capacity,
+            normalized_frames_buffer,
+            norm_dispatch,
+            sequence_catalog: RefCell::new(BTreeMap::new()),
+        })
+    }
+
+    fn run(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if batch_width == 0 || batch_width > self.batch_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "batched output norm capacity {} cannot process {} frames",
+                    self.batch_capacity, batch_width
+                )),
+            ));
+        }
+        let control = u32::try_from(batch_width)
+            .map_err(|_| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "batched output norm width exceeds u32".to_string(),
+                ))
+            })?
+            .to_le_bytes();
+        if !self.sequence_catalog.borrow().contains_key(&batch_width) {
+            let sequence = device
+                .create_resident_kernel_sequence()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            self.sequence_catalog
+                .borrow_mut()
+                .insert(batch_width, sequence);
+        }
+        let catalog = self.sequence_catalog.borrow();
+        let sequence = catalog
+            .get(&batch_width)
+            .expect("batched output norm sequence was inserted");
+        if sequence.has_recorded_commands() {
+            device
+                .run_recorded_resident_kernel_sequence(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        } else {
+            device
+                .run_resident_kernel_sequence(
+                    sequence,
+                    &[VulkanResidentKernelSequenceStep::new(
+                        &self.norm_dispatch,
+                        &control,
+                    )],
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        }
+    }
+}
+
+struct VulkanResidentBatchedOutputProjectionRunner {
+    batch_capacity: usize,
+    norm: VulkanResidentBatchedOutputNormRunner,
+    _batched_logits_buffer: VulkanResidentBuffer,
+    projection_dispatch: VulkanResidentKernelDispatch,
+    projection_sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    sampler_submission_catalog:
+        RefCell<BTreeMap<usize, VulkanResidentQueueSubmissionTemplate>>,
+    sampler_views: Vec<VulkanResidentSamplerLogitsView>,
+}
+
+impl VulkanResidentBatchedOutputProjectionRunner {
+    #[allow(clippy::too_many_arguments)]
+    fn new_for_sampler_lanes(
+        device: &VulkanComputeDevice,
+        norm_batch_lane_tile_width: u32,
+        batch_lane_tile_width: u32,
+        raw_frames_buffer: &VulkanResidentBuffer,
+        norm_weight: &VulkanPermanentParameterBufferAllocation,
+        projection_weight: &VulkanPermanentParameterBufferAllocation,
+        projection_scale: Option<&VulkanPermanentParameterBufferAllocation>,
+        norm_spirv_words: &[u32],
+        projection_spirv_words: &[u32],
+        output_spec: &VulkanResidentOutputTransducerSpec,
+        sampler_lanes: &[&VulkanResidentSamplerRunner],
+        sampler_kernels: &[VulkanResidentSamplerKernelArtifact],
+        sampler_spec: &VulkanResidentSamplerSpec,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let batch_capacity = sampler_lanes.len();
+        if batch_capacity == 0 {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        let tile_width = usize::try_from(batch_lane_tile_width).map_err(|_| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "batched output projection lane tile width exceeds usize".to_string(),
+            ))
+        })?;
+        if tile_width == 0 {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError("batched output projection lane tile width is zero".to_string()),
+            ));
+        }
+        validate_output_projection_weight(projection_weight, output_spec)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
+        validate_output_projection_scale(projection_scale, output_spec)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
+        let norm = VulkanResidentBatchedOutputNormRunner::new(
+            device,
+            batch_capacity,
+            norm_batch_lane_tile_width,
+            raw_frames_buffer,
+            norm_weight,
+            norm_spirv_words,
+            output_spec,
+        )?;
+        let normalized_frames_byte_capacity = norm.normalized_frames_buffer.byte_capacity();
+        let batched_logits_byte_capacity = output_spec
+            .logits_byte_capacity
+            .checked_mul(batch_capacity)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "batched logits capacity overflowed".to_string(),
+                ))
+            })?;
+        let batched_logits_buffer = device
+            .create_resident_buffer(batched_logits_byte_capacity)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let workgroup_count_y = batch_capacity
             .checked_add(tile_width - 1)
             .map(|width| width / tile_width)
@@ -138,7 +226,7 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         let mut bindings = vec![
             VulkanResidentKernelBufferBinding::new(
                 0,
-                &normalized_frames_buffer,
+                &norm.normalized_frames_buffer,
                 normalized_frames_byte_capacity,
             )
             .with_access(VulkanResidentKernelBufferAccess::Read),
@@ -195,9 +283,8 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         }
         Ok(Self {
             batch_capacity,
-            _normalized_frames_buffer: normalized_frames_buffer,
+            norm,
             _batched_logits_buffer: batched_logits_buffer,
-            norm_dispatch,
             projection_dispatch,
             projection_sequence_catalog: RefCell::new(BTreeMap::new()),
             sampler_submission_catalog: RefCell::new(BTreeMap::new()),
@@ -249,8 +336,8 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 .run_resident_kernel_sequence(
                     sequence,
                     &[
-                        VulkanResidentKernelSequenceStep::new(
-                            &self.norm_dispatch,
+                            VulkanResidentKernelSequenceStep::new(
+                            &self.norm.norm_dispatch,
                             &batch_width.to_le_bytes(),
                         ),
                         VulkanResidentKernelSequenceStep::new(

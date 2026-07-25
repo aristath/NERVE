@@ -79,6 +79,23 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         output_device
             .wait_resident_buffer_copy_batch(&history.lane_copies[planned_tick_count - 1])
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        self.catch_up_speculative_decoders_from_target_frames(
+            devices,
+            input_token_ids,
+            start_stream_tick,
+            &history.frames,
+            history.frame_byte_capacity,
+        )
+    }
+
+    fn catch_up_speculative_decoders_from_target_frames(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        normalized_target_frames: &VulkanResidentBuffer,
+        frame_byte_capacity: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         for decoder in &self.speculative_decoders {
             let draft_device = devices.get(&decoder.device_id).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -89,8 +106,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 draft_device,
                 input_token_ids,
                 start_stream_tick,
-                &history.frames,
-                history.frame_byte_capacity,
+                normalized_target_frames,
+                frame_byte_capacity,
             )?;
         }
         Ok(())

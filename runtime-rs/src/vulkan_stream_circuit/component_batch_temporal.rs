@@ -1,8 +1,8 @@
 struct VulkanResidentPlacedTemporalBlockRunner {
     execution_graph: VulkanResidentPlacedComponentBatchRunner,
     input_embedding: VulkanResidentBatchedInputEmbeddingRunner,
-    input_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
     output_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
+    speculative_target_norm: Option<VulkanResidentBatchedOutputNormRunner>,
     pipeline: Vec<usize>,
 }
 

@@ -228,39 +228,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             self.model.input_transducer_batch_control,
             &self.model.input_transducer_spec,
         )?;
-        let scalar_input = self.device_slices[first_device_index]
-            .mounted
-            .boundary_io
-            .input_buffer(&self.model.input_transducer_spec.output_signal_id)
-            .ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                    "temporal input device has no boundary {:?}",
-                    self.model.input_transducer_spec.output_signal_id
-                )))
-            })?;
-        let input_frame_copies = (0..block_width)
-            .map(|frame_index| {
-                let source_offset = input_signal
-                    .frame_byte_capacity
-                    .checked_mul(frame_index)
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            "temporal input frame offset overflowed".to_string(),
-                        ))
-                    })?;
-                let copy = VulkanResidentBufferRangeCopy::new(
-                    &input_signal.buffer,
-                    &scalar_input.buffer,
-                    source_offset,
-                    0,
-                    input_signal.frame_byte_capacity,
-                )
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                input_device
-                    .create_resident_buffer_copy_batch(&[copy])
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let last_device_index = *pipeline.last().ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "temporal pipeline is empty".to_string(),
@@ -276,6 +243,34 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 self.model.output_transducer_spec.input_signal_id.clone(),
             ),
         )?;
+        let speculative_target_norm = if self.speculative_decoders.is_empty() {
+            None
+        } else {
+            let norm_weight = self
+                .model
+                .output_transducer_parameter_buffers
+                .parameter_buffer(&self.model.output_transducer_spec.norm_parameter_tensor)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::OutputTransducer(
+                        VulkanResidentOutputTransducerRunnerError::MissingTransducerParameterBuffer {
+                            tensor: self
+                                .model
+                                .output_transducer_spec
+                                .norm_parameter_tensor
+                                .clone(),
+                        },
+                    )
+                })?;
+            Some(VulkanResidentBatchedOutputNormRunner::new(
+                output_device,
+                block_width,
+                self.model.embedding_norm_batch_lane_tile_width,
+                &output_signal.buffer,
+                norm_weight,
+                &self.model.embedding_norm_batch_spirv_words,
+                &self.model.output_transducer_spec,
+            )?)
+        };
         let scalar_output = self.device_slices[last_device_index]
             .mounted
             .boundary_io
@@ -313,8 +308,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             Some(VulkanResidentPlacedTemporalBlockRunner {
                 execution_graph,
                 input_embedding,
-                input_frame_copies,
                 output_frame_copies,
+                speculative_target_norm,
                 pipeline,
             });
         Ok(())
@@ -435,41 +430,21 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         }
 
         if !self.speculative_decoders.is_empty() {
-            let last_device_index = *runner.pipeline.last().ok_or_else(|| {
+            let target_norm = runner.speculative_target_norm.as_ref().ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "temporal pipeline is empty".to_string(),
+                    "temporal MTP target normalization is not mounted".to_string(),
                 ))
             })?;
-            let output_slice = &self.device_slices[last_device_index];
-            let output_device = devices.get(&output_slice.device_id).ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                    device_id: output_slice.device_id.clone(),
-                }
-            })?;
-            for (frame_index, input_token_id) in input_token_ids.iter().copied().enumerate() {
-                runner.input_frame_copies[frame_index]
-                    .run()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                runner.output_frame_copies[frame_index]
-                    .run()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                let stream_tick = start_stream_tick
-                    .checked_add(u64::try_from(frame_index).map_err(|_| {
-                        VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
-                    })?)
-                    .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-                output_device
-                    .run_resident_kernel_dispatch(
-                        &self.output_transducer.embedding_norm_dispatch,
-                        &[],
-                    )
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                self.synchronize_speculative_decoders_after_target_tick(
-                    devices,
-                    input_token_id,
-                    stream_tick,
-                )?;
-            }
+            target_norm.run(output_device, input_token_ids.len())?;
+            self.catch_up_speculative_decoders_from_target_frames(
+                devices,
+                input_token_ids,
+                start_stream_tick,
+                &target_norm.normalized_frames_buffer,
+                self.model
+                    .output_transducer_spec
+                    .normalized_frame_byte_capacity,
+            )?;
         }
 
         let sampled_token_id = if sample_last {
