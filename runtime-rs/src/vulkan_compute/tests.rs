@@ -1341,21 +1341,22 @@ mod tests {
     }
 
     #[test]
-    fn resident_kernel_sequence_snapshots_state_between_dispatch_groups() {
-        let Some(spirv_words) = compile_test_shader_words() else {
-            eprintln!("skipping Vulkan smoke: no GLSL to SPIR-V compiler found");
-            return;
-        };
-        let device = match VulkanComputeDevice::new() {
-            Ok(device) => device,
-            Err(error) => {
-                eprintln!("skipping Vulkan smoke: {error}");
-                return;
-            }
-        };
+    fn resident_kernel_sequence_combines_input_and_intermediate_snapshot_copies() {
+        let spirv_words =
+            compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
+        let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let initial = device.create_resident_buffer(12).unwrap();
+        initial.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
         let state = device.create_resident_buffer(12).unwrap();
-        state.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        state.write_bytes(&[0; 12]).unwrap();
         let snapshots = device.create_host_visible_resident_buffer(24).unwrap();
+        let input_copy = device
+            .create_resident_buffer_copy(&initial, &state, 12)
+            .unwrap();
         let binding = VulkanResidentKernelBufferBinding::new(0, &state, 12);
         let dispatch = device
             .create_resident_kernel_dispatch(&spirv_words, &[binding], 1, 64, 0)
@@ -1372,7 +1373,12 @@ mod tests {
         ];
 
         device
-            .run_resident_kernel_sequence_with_snapshot_copies(&sequence, &steps, &copies)
+            .run_resident_kernel_sequence_with_input_and_snapshot_copies(
+                &sequence,
+                &[VulkanResidentKernelSequenceInputCopy::new(&input_copy)],
+                &steps,
+                &copies,
+            )
             .unwrap();
 
         assert_eq!(

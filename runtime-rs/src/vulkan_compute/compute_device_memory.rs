@@ -1093,6 +1093,28 @@ impl VulkanComputeDevice {
         Ok(())
     }
 
+    pub fn wait_resident_buffer_copy_batch(
+        &self,
+        binding: &VulkanResidentBufferCopyBatch,
+    ) -> Result<(), VulkanError> {
+        if binding.device.handle() != self.device.handle() {
+            return Err(VulkanError(
+                "resident buffer copy batch belongs to another logical device".to_string(),
+            ));
+        }
+        unsafe {
+            self.device
+                .wait_for_fences(&[binding.completion_fence], true, u64::MAX)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed waiting for resident buffer copy batch completion: {error:?}"
+                    ))
+                })?;
+        }
+        RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn create_resident_buffer_copy_batch(
         &self,
         copies: &[VulkanResidentBufferRangeCopy<'_>],

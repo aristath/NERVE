@@ -564,6 +564,34 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         )
     }
 
+    pub fn enqueue_resident_buffer_copy_batch(
+        &self,
+        device: &'a VulkanComputeDevice,
+        binding: &VulkanResidentBufferCopyBatch,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_completion: bool,
+    ) -> Result<(), VulkanError> {
+        if binding.device.handle() != device.device.handle() {
+            return Err(VulkanError(
+                "resident queue submission copy batch belongs to another logical device"
+                    .to_string(),
+            ));
+        }
+        for point in wait_points.iter().chain(signal_points) {
+            device.validate_local_timeline_semaphore(point.semaphore)?;
+        }
+        self.enqueue_command_buffer(
+            device,
+            binding.command_buffer,
+            binding.completion_fence,
+            wait_points,
+            signal_points,
+            signal_completion,
+            None,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn enqueue_command_buffer(
         &self,
