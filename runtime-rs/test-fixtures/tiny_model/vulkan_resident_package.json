@@ -1,7 +1,7 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
-  "package_id": "model_9aec2224_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:86c32d7f5d77f0b131a996655af9a5844f2158a76f25516b2c83bf9881bb5841",
+  "package_id": "model_d119caf1_vulkan_resident",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:5a31eb1bae3e602778b2b2c44c989a877cbba5946921f5242e57ce80be830a73",
   "compiler_target": {
     "schema": "nerve.compiler_target.v1",
     "devices": [
@@ -3120,8 +3120,8 @@
         "sha256": "eff6079e74481f7d8b9697a70e2090d74969ecdcf90b9c284ab2d82ad32c7477"
       },
       "transpiled/model.json": {
-        "byte_count": 3694,
-        "sha256": "39211d156e5c1356225a8a41b38ffb452468d012579ceec2a3f210a5ef9c3640"
+        "byte_count": 3667,
+        "sha256": "d38fd405a80035658cbc12bc1ea96d4f905576e0998e8de390f1cf277af13346"
       },
       "transpiled/tensors.json": {
         "byte_count": 7272,

@@ -124,8 +124,10 @@ def write_source_model(source: Path) -> None:
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="nerve-tiny-test-source-") as temporary:
-        source = Path(temporary) / "source"
+    temporary = Path(tempfile.gettempdir()) / "nerve-tiny-test-source"
+    shutil.rmtree(temporary, ignore_errors=True)
+    try:
+        source = temporary / "source"
         write_source_model(source)
         shutil.rmtree(DESTINATION, ignore_errors=True)
         compile_model(
@@ -134,6 +136,8 @@ def main() -> None:
             shader_source_dir=ROOT / "runtime-rs" / "shaders",
             target=CompilerTarget.for_features(("shader_bfloat16_type",)),
         )
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 if __name__ == "__main__":
