@@ -659,6 +659,76 @@ mod tests {
     }
 
     #[test]
+    fn moe_topk_uses_all_lanes_without_changing_tie_or_weight_semantics() {
+        let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let template = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("shaders")
+                .join("moe_topk_bf16.comp.template"),
+        )
+        .unwrap();
+        let rendered = template
+            .replace("{{NUM_EXPERTS}}", "128")
+            .replace("{{EXPERTS_PER_TOKEN}}", "4");
+        let source_path = std::env::temp_dir().join(format!(
+            "nerve-test-moe-topk-{}.comp",
+            std::process::id()
+        ));
+        std::fs::write(&source_path, rendered).unwrap();
+        let spirv_words = compile_shader_words_from_source_path(&source_path)
+            .expect("parallel MoE top-k shader must compile");
+        let _ = std::fs::remove_file(source_path);
+
+        let mut scores = vec![f32_to_bf16_bits(-10.0); 128];
+        scores[3] = f32_to_bf16_bits(10.0);
+        scores[64] = f32_to_bf16_bits(10.0);
+        scores[65] = f32_to_bf16_bits(9.0);
+        scores[7] = f32_to_bf16_bits(8.0);
+        scores[9] = f32_to_bf16_bits(8.0);
+
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let router_logits = device.create_resident_buffer(256).unwrap();
+        router_logits.write_bytes(&u16_bytes(&scores)).unwrap();
+        let expert_routes = device.create_resident_buffer(16).unwrap();
+        expert_routes.write_bytes(&[0; 16]).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[
+                    VulkanResidentKernelBufferBinding::new(0, &router_logits, 256)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(1, &expert_routes, 16)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                ],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&dispatch, &[])
+            .unwrap();
+
+        let routes = bytes_to_u32(&expert_routes.read_bytes(16).unwrap());
+        assert_eq!(
+            routes.iter().map(|route| route & 0xffff).collect::<Vec<_>>(),
+            vec![3, 7, 64, 65],
+        );
+        let weight_sum = routes
+            .iter()
+            .map(|route| bf16_bits_to_f32((route >> 16) as u16))
+            .sum::<f32>();
+        assert!(
+            (weight_sum - 1.0).abs() < 0.01,
+            "selected softmax weights sum to {weight_sum}"
+        );
+        assert_eq!(routes[0] >> 16, routes[2] >> 16);
+    }
+
+    #[test]
     fn persistently_mapped_copy_moves_exact_bound_bytes() {
         let source = [1u8, 2, 3, 4, 5, 6];
         let mut destination = [0u8; 6];

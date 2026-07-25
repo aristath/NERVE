@@ -1,5 +1,8 @@
 #version 450
 
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer RouterLogits { uint words[]; } router_logits;
@@ -12,6 +15,8 @@ const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
 const uint ROUTER_WORDS = (NUM_EXPERTS + 1u) / 2u;
 
 shared uint top_indices[EXPERTS_PER_TOKEN];
+shared float subgroup_best_scores[64];
+shared uint subgroup_best_experts[64];
 
 float bf16_to_f32(uint value) {
     return uintBitsToFloat((value & 0xffffu) << 16);
@@ -39,43 +44,77 @@ bool already_selected(uint expert, uint count) {
 
 void main() {
     uint batch_index = gl_WorkGroupID.y;
-    if (batch_index >= batch_control.batch_width || gl_LocalInvocationID.x != 0u) {
+    if (batch_index >= batch_control.batch_width) {
         return;
     }
+    uint lane = gl_LocalInvocationID.x;
 
     for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
         float best_score = -uintBitsToFloat(0x7f800000u);
-        uint best_expert = 0u;
-        for (uint expert = 0u; expert < NUM_EXPERTS; expert++) {
+        uint best_expert = 0xffffffffu;
+        for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
             float score = read_router(batch_index, expert);
-            if (!already_selected(expert, route) && score > best_score) {
+            if (
+                !already_selected(expert, route)
+                && (
+                    score > best_score
+                    || (score == best_score && expert < best_expert)
+                )
+            ) {
                 best_score = score;
                 best_expert = expert;
             }
         }
-        top_indices[route] = best_expert;
+        float subgroup_score = subgroupMax(best_score);
+        uint subgroup_expert = subgroupMin(
+            best_score == subgroup_score ? best_expert : 0xffffffffu
+        );
+        if (subgroupElect()) {
+            subgroup_best_scores[gl_SubgroupID] = subgroup_score;
+            subgroup_best_experts[gl_SubgroupID] = subgroup_expert;
+        }
+        barrier();
+        if (lane == 0u) {
+            float route_score = -uintBitsToFloat(0x7f800000u);
+            uint route_expert = 0xffffffffu;
+            for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                float score = subgroup_best_scores[subgroup];
+                uint expert = subgroup_best_experts[subgroup];
+                if (
+                    score > route_score
+                    || (score == route_score && expert < route_expert)
+                ) {
+                    route_score = score;
+                    route_expert = expert;
+                }
+            }
+            top_indices[route] = route_expert;
+        }
+        barrier();
     }
 
-    float maximum = read_router(batch_index, top_indices[0]);
-    float denominator = 0.0;
-    for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
-        denominator += exp(read_router(batch_index, top_indices[route]) - maximum);
-    }
-    for (uint route = 1u; route < EXPERTS_PER_TOKEN; route++) {
-        uint expert = top_indices[route];
-        uint insertion = route;
-        while (insertion > 0u && top_indices[insertion - 1u] > expert) {
-            top_indices[insertion] = top_indices[insertion - 1u];
-            insertion--;
+    if (lane == 0u) {
+        float maximum = read_router(batch_index, top_indices[0]);
+        float denominator = 0.0;
+        for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+            denominator += exp(read_router(batch_index, top_indices[route]) - maximum);
         }
-        top_indices[insertion] = expert;
-    }
-    for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
-        uint expert = top_indices[route];
-        uint weight = f32_to_bf16(
-            exp(read_router(batch_index, expert) - maximum) / denominator
-        );
-        expert_routes.words[batch_index * EXPERTS_PER_TOKEN + route] =
-            (weight << 16u) | expert;
+        for (uint route = 1u; route < EXPERTS_PER_TOKEN; route++) {
+            uint expert = top_indices[route];
+            uint insertion = route;
+            while (insertion > 0u && top_indices[insertion - 1u] > expert) {
+                top_indices[insertion] = top_indices[insertion - 1u];
+                insertion--;
+            }
+            top_indices[insertion] = expert;
+        }
+        for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+            uint expert = top_indices[route];
+            uint weight = f32_to_bf16(
+                exp(read_router(batch_index, expert) - maximum) / denominator
+            );
+            expert_routes.words[batch_index * EXPERTS_PER_TOKEN + route] =
+                (weight << 16u) | expert;
+        }
     }
 }
