@@ -663,6 +663,27 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             VulkanResidentComponentBatchControlPayload::WidthExpertStart,
         )
     );
+    let expert_start = [VulkanKernelScalarBinding {
+        name: "expert_start".to_string(),
+        scalar_type: "u32".to_string(),
+        source: VulkanKernelScalarSource::PushConstant,
+    }];
+    assert!(component_batch_stages_replace_push_constants(
+        std::slice::from_ref(&sparse),
+        &expert_start,
+    ));
+    assert!(!component_batch_stages_replace_push_constants(
+        std::slice::from_ref(&width_only),
+        &expert_start,
+    ));
+    assert!(!component_batch_stages_replace_push_constants(
+        std::slice::from_ref(&sparse),
+        &[VulkanKernelScalarBinding {
+            name: "model_specific_scalar".to_string(),
+            scalar_type: "u32".to_string(),
+            source: VulkanKernelScalarSource::PushConstant,
+        }],
+    ));
 
     let control = component_batch_control_bytes(64, 0x1122_3344_5566_7788, 65_536);
     assert_eq!(

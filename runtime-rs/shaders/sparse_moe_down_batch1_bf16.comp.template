@@ -21,6 +21,8 @@ const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
 const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
 const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
 const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
+const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint EXPERT_OUTPUT_WORDS = HIDDEN_SIZE * INTERMEDIATE_WORDS;
 
 shared float subgroup_lo[64];
@@ -37,13 +39,23 @@ uint f32_to_bf16(float value) {
 float round_bf16(float value) { return bf16_to_f32(f32_to_bf16(value)); }
 
 void main() {
-    uint batch_index = gl_WorkGroupID.y;
+    uint compact_batch = gl_WorkGroupID.y;
     uint group = gl_WorkGroupID.x;
-    uint route = group / HIDDEN_WORDS;
+    uint compact_route = group / HIDDEN_WORDS;
     uint word = group % HIDDEN_WORDS;
-    if (batch_index >= batch_control.batch_width || route >= EXPERTS_PER_TOKEN) {
+    if (
+        compact_batch >= batch_control.batch_width
+        || compact_route >= EXPERTS_PER_TOKEN
+    ) {
         return;
     }
+    uint route_index = expert_intermediates.words[
+        compact_batch * EXPERT_FRAME_WORDS
+            + EXPERT_DATA_WORDS
+            + compact_route
+    ];
+    uint batch_index = route_index / EXPERTS_PER_TOKEN;
+    uint route = route_index % EXPERTS_PER_TOKEN;
     uint packed_route = expert_routes.words[
         batch_index * EXPERTS_PER_TOKEN + route
     ];
@@ -64,8 +76,8 @@ void main() {
     uint hi_row = lo_row + 1u;
     uint lo_offset = (expert * HIDDEN_SIZE + lo_row) * INTERMEDIATE_WORDS;
     uint hi_offset = lo_offset + INTERMEDIATE_WORDS;
-    uint input_offset = (batch_index * EXPERTS_PER_TOKEN + route)
-        * INTERMEDIATE_WORDS;
+    uint input_offset = batch_index * EXPERT_FRAME_WORDS
+        + route * INTERMEDIATE_WORDS;
     float lo = 0.0;
     float hi = 0.0;
     for (uint column_word = lane; column_word < INTERMEDIATE_WORDS; column_word += 64u) {

@@ -22,6 +22,8 @@ const uint TILE_ROWS = {{TILE_ROWS}}u;
 const uint TILES_PER_ROUTE = (HIDDEN_SIZE + TILE_ROWS - 1u) / TILE_ROWS;
 const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
 const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
+const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint PACKED_COLUMNS = INTERMEDIATE_SIZE / 8u;
 const uint SCALE_COLUMNS = INTERMEDIATE_SIZE / GROUP_SIZE;
 const uint EXPERT_OUTPUT_WORDS = HIDDEN_SIZE * PACKED_COLUMNS;
@@ -47,8 +49,8 @@ float round_bf16(float value) {
     return bf16_to_f32(f32_to_bf16(value));
 }
 
-vec4 read_intermediatex4(uint route_index, uint column) {
-    uint offset = route_index * INTERMEDIATE_WORDS + (column >> 1u);
+vec4 read_intermediatex4(uint batch_index, uint route, uint column) {
+    uint offset = {{INTERMEDIATE_INPUT_OFFSET}} + (column >> 1u);
     uint lo = expert_intermediates.words[offset];
     uint hi = expert_intermediates.words[offset + 1u];
     return vec4(
@@ -88,6 +90,7 @@ void main() {
     uint route = group / TILES_PER_ROUTE;
     uint tile = group % TILES_PER_ROUTE;
     if (batch_index >= {{BATCH_WIDTH}} || route >= EXPERTS_PER_TOKEN) return;
+{{ROUTE_MAPPING}}
     uint route_offset = batch_index * EXPERTS_PER_TOKEN;
     uint route_index = route_offset + route;
     uint packed_route = expert_routes.words[route_index];
@@ -112,10 +115,10 @@ void main() {
                 uint scale_group = packed_column * 8u / GROUP_SIZE;
                 sum = fma(
                     dot(
-                        read_intermediatex4(route_index, packed_column * 8u),
+                        read_intermediatex4(batch_index, route, packed_column * 8u),
                         unpack_weight_lo(packed)
                     ) + dot(
-                        read_intermediatex4(route_index, packed_column * 8u + 4u),
+                        read_intermediatex4(batch_index, route, packed_column * 8u + 4u),
                         unpack_weight_hi(packed)
                     ),
                     read_scale(expert, row, scale_group),

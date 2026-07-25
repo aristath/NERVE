@@ -163,7 +163,18 @@ fn infer_node_output_shapes(
         "sparse_moe_gate_up" => {
             let output_shape = attr_usize(node, "experts_per_token")
                 .zip(attr_usize(node, "intermediate_size"))
-                .map(|(routes, intermediate)| vec![routes, intermediate]);
+                .and_then(|(routes, intermediate)| {
+                    routes
+                        .checked_mul(intermediate)
+                        .and_then(|data_elements| {
+                            routes
+                                .checked_mul(2)
+                                .and_then(|schedule_elements| {
+                                    data_elements.checked_add(schedule_elements)
+                                })
+                        })
+                        .map(|elements| vec![elements])
+                });
             Ok(repeat_shape(output_shape, outputs))
         }
         "sparse_moe_down" => {

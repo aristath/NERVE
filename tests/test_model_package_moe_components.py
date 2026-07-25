@@ -1,4 +1,5 @@
 from model_package_layout_common import *
+from nerve.model_package_shader_compiler import compile_shader_artifacts
 
 def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
@@ -33,6 +34,7 @@ def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> No
 def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
+        "moe_route_compact_batch1_i512_k8.comp",
         "scaled_add_bf16_1024_scale0.22.comp",
         "moe_topk_bf16_e32_k8.comp",
         "sparse_moe_gate_up_bf16_h1024_i512_e32_k8.comp",
@@ -63,6 +65,8 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert all(
         "{{" not in (tmp_path / shader_file).read_text() for shader_file in shader_files
     )
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / "moe_route_compact_batch1_i512_k8.spv").is_file()
 
 
 def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> None:
@@ -222,6 +226,7 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     down_file = "sparse_moe_down_int4_ct_sbf16_g32_h3072_i1024_e256_k10.comp"
     batch_gate = gate_file.replace("_int4_ct_", "_batch1_int4_ct_")
     batch_down = down_file.replace("_int4_ct_", "_batch1_int4_ct_")
+    route_compaction = "moe_route_compact_batch1_i1024_k10.comp"
 
     assert shader_file_for_node(circuit, gate_up, tensor_index, dimensions) == gate_file
     assert shader_file_for_node(circuit, down, tensor_index, dimensions) == down_file
@@ -232,7 +237,7 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     copy_shader_templates(
         shader_source_dir,
         tmp_path,
-        {gate_file, down_file, batch_gate, batch_down},
+        {gate_file, down_file, batch_gate, batch_down, route_compaction},
     )
 
     gate_source = (tmp_path / gate_file).read_text()
@@ -243,7 +248,10 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     assert "quantized_hidden" not in gate_source
     assert "read_hiddenx4(batch_index, packed_column * 8u)" in gate_source
     assert "quantized_intermediate" not in down_source
-    assert "read_intermediatex4(route_index, packed_column * 8u)" in down_source
+    assert (
+        "read_intermediatex4(batch_index, route, packed_column * 8u)"
+        in down_source
+    )
     assert "const uint GROUP_SIZE = 32u;" in gate_source
     assert "expert_input_scales.words[index >> 1u]" in gate_source
     assert "route_weight" in down_source
@@ -251,8 +259,16 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     assert "layout(push_constant) uniform BatchControl" in batch_source
     assert all(
         "{{" not in (tmp_path / shader_file).read_text()
-        for shader_file in {gate_file, down_file, batch_gate, batch_down}
+        for shader_file in {
+            gate_file,
+            down_file,
+            batch_gate,
+            batch_down,
+            route_compaction,
+        }
     )
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / route_compaction.replace(".comp", ".spv")).is_file()
 
 
 def test_compiler_rejects_mismatched_int4_sparse_expert_scales() -> None:

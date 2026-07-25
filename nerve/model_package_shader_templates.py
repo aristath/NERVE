@@ -2747,6 +2747,31 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    moe_route_compact_shape = re.fullmatch(
+        r"moe_route_compact_batch1_i(\d+)_k(\d+)\.comp",
+        shader_file,
+    )
+    if moe_route_compact_shape is not None:
+        intermediate_size, experts_per_token = map(
+            int, moe_route_compact_shape.groups()
+        )
+        if intermediate_size <= 0 or intermediate_size % 2:
+            raise ModelCompileError(
+                "route-native sparse expert batching requires an even intermediate size"
+            )
+        if experts_per_token <= 0:
+            raise ModelCompileError(
+                "route-native sparse expert batching requires selected experts"
+            )
+        return render_shader_template(
+            source_dir,
+            "moe_route_compact_batch1.comp.template",
+            {
+                "INTERMEDIATE_SIZE": str(intermediate_size),
+                "EXPERTS_PER_TOKEN": str(experts_per_token),
+            },
+        )
+
     sparse_moe_int4_shape = re.fullmatch(
         r"sparse_moe_(gate_up|down)(?:_batch(\d+))?_int4_ct_"
         r"s(f16|bf16)_g(\d+)_h(\d+)_i(\d+)_e(\d+)_k(\d+)\.comp",
@@ -2834,6 +2859,37 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "BATCH_WIDTH": (
                     "1u" if batch_tile is None else "batch_control.batch_width"
                 ),
+                "ROUTE_MAPPING": (
+                    ""
+                    if batch_tile is None
+                    else (
+                        "    uint compact_batch = batch_index;\n"
+                        "    uint compact_route = route;\n"
+                        "    uint compact_index = expert_intermediates.words[\n"
+                        "        compact_batch * EXPERT_FRAME_WORDS\n"
+                        "            + EXPERT_DATA_WORDS\n"
+                        "            + compact_route\n"
+                        "    ];\n"
+                        "    batch_index = compact_index / EXPERTS_PER_TOKEN;\n"
+                        "    route = compact_index % EXPERTS_PER_TOKEN;"
+                    )
+                ),
+                "INTERMEDIATE_OUTPUT_OFFSET": (
+                    "(route_offset + route) * INTERMEDIATE_WORDS"
+                    if batch_tile is None
+                    else (
+                        "batch_index * EXPERT_FRAME_WORDS"
+                        " + route * INTERMEDIATE_WORDS"
+                    )
+                ),
+                "INTERMEDIATE_INPUT_OFFSET": (
+                    "(batch_index * EXPERTS_PER_TOKEN + route) * INTERMEDIATE_WORDS"
+                    if batch_tile is None
+                    else (
+                        "batch_index * EXPERT_FRAME_WORDS"
+                        " + route * INTERMEDIATE_WORDS"
+                    )
+                ),
                 "READ_SCALE_BODY": read_scale_body,
             },
         )
@@ -2898,6 +2954,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "INTERMEDIATE_SIZE": str(intermediate_size),
                 "NUM_EXPERTS": str(num_experts),
                 "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "LOCAL_SIZE_X": "512",
                 "TILE_ROWS": str(
                     FP8_SPARSE_GATE_UP_TILE_ROWS
                     if stage == "gate_up"

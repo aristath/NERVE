@@ -727,6 +727,72 @@ mod tests {
     }
 
     #[test]
+    fn sparse_moe_route_compaction_groups_selected_routes_on_device() {
+        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+            eprintln!("skipping sparse MoE route compaction: explicit Vulkan device index unset");
+            return;
+        };
+        let device_index = raw_device_index
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let template = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("shaders")
+                .join("moe_route_compact_batch1.comp.template"),
+        )
+        .unwrap();
+        let rendered = template
+            .replace("{{INTERMEDIATE_SIZE}}", "4")
+            .replace("{{EXPERTS_PER_TOKEN}}", "2");
+        let source_path = std::env::temp_dir().join(format!(
+            "nerve-test-sparse-moe-route-compact-{}.comp",
+            std::process::id()
+        ));
+        std::fs::write(&source_path, rendered).unwrap();
+        let spirv_words = compile_shader_words_from_source_path(&source_path)
+            .expect("sparse MoE route compaction shader must compile");
+        let _ = std::fs::remove_file(source_path);
+
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let expert_routes = device.create_resident_buffer(24).unwrap();
+        expert_routes
+            .write_bytes(&u32_bytes(&[5, 1, 3, 1, 4, 2]))
+            .unwrap();
+        let expert_intermediates = device.create_resident_buffer(72).unwrap();
+        expert_intermediates.write_bytes(&[0; 72]).unwrap();
+        let batch_control = device.create_resident_buffer(8).unwrap();
+        batch_control.write_bytes(&u32_bytes(&[3, 0])).unwrap();
+
+        let dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &spirv_words,
+                &[
+                    VulkanResidentKernelBufferBinding::new(1, &expert_routes, 24)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(2, &expert_intermediates, 72)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(31, &batch_control, 8)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                ],
+                2,
+                3,
+                64,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&dispatch, &[])
+            .unwrap();
+
+        let words = bytes_to_u32(&expert_intermediates.read_bytes(72).unwrap());
+        let compact_source_indices = [4usize, 5, 10, 11, 16, 17]
+            .into_iter()
+            .map(|index| words[index])
+            .collect::<Vec<_>>();
+        assert_eq!(compact_source_indices, vec![1, 3, 5, 2, 4, 0]);
+    }
+
+    #[test]
     fn resident_kernel_sequence_records_and_replays_composed_dispatches() {
         let Some(spirv_words) = compile_test_shader_words() else {
             eprintln!("skipping Vulkan smoke: no GLSL to SPIR-V compiler found");

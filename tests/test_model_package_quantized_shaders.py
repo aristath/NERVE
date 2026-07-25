@@ -1,4 +1,5 @@
 from model_package_layout_common import *
+from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_tensors import can_fuse_native_parallel_linears
 
 
@@ -415,6 +416,7 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
+        "moe_route_compact_batch1_i512_k8.comp",
         "moe_topk_bf16_e256_k8.comp",
         "moe_topk_batch1_bf16_e256_k8.comp",
         "sparse_moe_gate_up_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
@@ -444,13 +446,21 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "ExpertOutputScaleInv" in down_shader
     assert "const uint TILE_ROWS = 32u;" in gate_up_shader
     assert "const uint TILE_ROWS = 64u;" in down_shader
+    assert "layout(local_size_x = 512" in down_shader
     assert "shared fe4m3vec4 quantized_hidden" in gate_up_shader
     assert "shared fe4m3vec4 quantized_intermediate" in down_shader
     assert "SPV_VALVE_mixed_float_dot_product" in gate_up_shader
     assert "fp8_dot4_acc32" in gate_up_shader
     assert "subgroupClusteredMax" in gate_up_shader
+    assert "layout(local_size_x = 512" in gate_up_shader
+    assert "local_row = gl_SubgroupID" in gate_up_shader
     assert "expert_routes.words[route] = (weight << 16u) | expert;" in router_shader
     assert "route < EXPERTS_PER_TOKEN" in reduce_shader
+    route_compaction = (
+        tmp_path / "moe_route_compact_batch1_i512_k8.comp"
+    ).read_text()
+    assert "candidate_expert < source_expert" in route_compaction
+    assert "EXPERT_FRAME_WORDS" in route_compaction
     assert all("{{" not in source for source in (gate_up_shader, down_shader))
     assert (
         "gl_WorkGroupID.y"
@@ -463,6 +473,8 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         "const uint HIDDEN_SIZE = 2048u;"
         in (tmp_path / "sigmoid_scalar_multiply_bf16_2048.comp").read_text()
     )
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / "moe_route_compact_batch1_i512_k8.spv").is_file()
 
 
 def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
@@ -496,7 +508,7 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
         node={"id": "sparse_moe_gate_up", "op": "sparse_moe_gate_up"},
         circuit={},
         shader_file=("sparse_moe_gate_up_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"),
-        local_size_x=64,
+        local_size_x=512,
         workgroup_count_x=128,
     )
     assert spec["batch_mode"] == "weight_shared"
@@ -509,10 +521,23 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
     assert spec["batch_implementations"][0]["stages"] == [
         {
             "shader_path": (
+                "shaders/moe_route_compact_batch1_i512_k8__pbc31.comp"
+            ),
+            "local_size_x": 64,
+            "workgroup_count_x": 8,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 8,
+                "binding": 31,
+                "payload": "width_expert_start",
+            },
+        },
+        {
+            "shader_path": (
                 "shaders/sparse_moe_gate_up_batch1_fp8_e4m3_b128x128_"
                 "h2048_i512_e256_k8__pbc31.comp"
             ),
-            "local_size_x": 64,
+            "local_size_x": 512,
             "workgroup_count_x": 128,
             "control": {
                 "kind": "storage_buffer",

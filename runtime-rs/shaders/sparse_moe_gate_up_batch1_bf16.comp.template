@@ -21,6 +21,8 @@ const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
 const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
 const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
 const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
+const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint EXPERT_INPUT_ROWS = INTERMEDIATE_SIZE * 2u;
 const uint EXPERT_INPUT_WORDS = EXPERT_INPUT_ROWS * HIDDEN_WORDS;
 
@@ -59,13 +61,23 @@ void accumulate_row_pair(
 }
 
 void main() {
-    uint batch_index = gl_WorkGroupID.y;
+    uint compact_batch = gl_WorkGroupID.y;
     uint group = gl_WorkGroupID.x;
-    uint route = group / INTERMEDIATE_WORDS;
+    uint compact_route = group / INTERMEDIATE_WORDS;
     uint word = group % INTERMEDIATE_WORDS;
-    if (batch_index >= batch_control.batch_width || route >= EXPERTS_PER_TOKEN) {
+    if (
+        compact_batch >= batch_control.batch_width
+        || compact_route >= EXPERTS_PER_TOKEN
+    ) {
         return;
     }
+    uint route_index = expert_intermediates.words[
+        compact_batch * EXPERT_FRAME_WORDS
+            + EXPERT_DATA_WORDS
+            + compact_route
+    ];
+    uint batch_index = route_index / EXPERTS_PER_TOKEN;
+    uint route = route_index % EXPERTS_PER_TOKEN;
     uint expert = expert_routes.words[
         batch_index * EXPERTS_PER_TOKEN + route
     ] & 0xffffu;
@@ -132,7 +144,7 @@ void main() {
         up_hi = round_bf16(up_hi);
         float hidden_lo = round_bf16(round_bf16(gate_lo / (1.0 + exp(-gate_lo))) * up_lo);
         float hidden_hi = round_bf16(round_bf16(gate_hi / (1.0 + exp(-gate_hi))) * up_hi);
-        uint output_offset = batch_index * EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+        uint output_offset = batch_index * EXPERT_FRAME_WORDS;
         expert_intermediates.words[output_offset + route * INTERMEDIATE_WORDS + word] =
             (f32_to_bf16(hidden_hi) << 16u) | f32_to_bf16(hidden_lo);
     }

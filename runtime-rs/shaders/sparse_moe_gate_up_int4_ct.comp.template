@@ -24,6 +24,8 @@ const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
 const uint PACKED_COLUMNS = HIDDEN_SIZE / 8u;
 const uint SCALE_COLUMNS = HIDDEN_SIZE / GROUP_SIZE;
 const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
+const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint EXPERT_INPUT_ROWS = INTERMEDIATE_SIZE * 2u;
 const uint EXPERT_INPUT_WORDS = EXPERT_INPUT_ROWS * PACKED_COLUMNS;
 
@@ -112,6 +114,7 @@ void main() {
     uint route = group / TILES_PER_ROUTE;
     uint tile = group % TILES_PER_ROUTE;
     if (batch_index >= {{BATCH_WIDTH}} || route >= EXPERTS_PER_TOKEN) return;
+{{ROUTE_MAPPING}}
     uint route_offset = batch_index * EXPERTS_PER_TOKEN;
     uint expert = expert_routes.words[route_offset + route] & 0xffffu;
     if (expert >= NUM_EXPERTS) return;
@@ -164,7 +167,7 @@ void main() {
                 ? f32_to_bf16(activated_rows[lane * 2u + 1u])
                 : 0u;
             expert_intermediates.words[
-                (route_offset + route) * INTERMEDIATE_WORDS + row / 2u
+                {{INTERMEDIATE_OUTPUT_OFFSET}} + row / 2u
             ] = (hi << 16u) | f32_to_bf16(activated_rows[lane * 2u]);
         }
     }

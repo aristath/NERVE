@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
+layout(set = 0, binding = 2) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
+layout(set = 0, binding = 31) readonly buffer BatchControl {
+    uint batch_width;
+    uint expert_start;
+} batch_control;
+
+const uint INTERMEDIATE_SIZE = {{INTERMEDIATE_SIZE}}u;
+const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
+const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
+const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
+
+void main() {
+    uint source_batch = gl_WorkGroupID.y;
+    uint source_route = gl_WorkGroupID.x;
+    if (
+        gl_LocalInvocationID.x != 0u
+        || source_batch >= batch_control.batch_width
+        || source_route >= EXPERTS_PER_TOKEN
+    ) {
+        return;
+    }
+
+    uint source_index = source_batch * EXPERTS_PER_TOKEN + source_route;
+    uint source_expert = expert_routes.words[source_index] & 0xffffu;
+    uint route_count = batch_control.batch_width * EXPERTS_PER_TOKEN;
+    uint rank = 0u;
+    for (uint candidate = 0u; candidate < route_count; candidate++) {
+        uint candidate_expert = expert_routes.words[candidate] & 0xffffu;
+        if (
+            candidate_expert < source_expert
+            || (candidate_expert == source_expert && candidate < source_index)
+        ) {
+            rank++;
+        }
+    }
+
+    uint compact_batch = rank / EXPERTS_PER_TOKEN;
+    uint compact_route = rank % EXPERTS_PER_TOKEN;
+    expert_intermediates.words[
+        compact_batch * EXPERT_FRAME_WORDS + EXPERT_DATA_WORDS + compact_route
+    ] = source_index;
+}

@@ -50,10 +50,11 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
         r"h\d+_i\d+_e\d+_k\d+\.comp",
         shader_file,
     ):
-        return (
-            shader_file.replace("_bf16_", "_batch1_bf16_", 1)
-            .replace("_fp8_e4m3_", "_batch1_fp8_e4m3_", 1)
-            .replace("_int4_ct_", "_batch1_int4_ct_", 1)
+        return re.sub(
+            r"^(sparse_moe_(?:gate_up|down))_",
+            r"\1_batch1_",
+            shader_file,
+            count=1,
         )
     if re.fullmatch(
         r"parallel_linear_[23]way_fp8_e4m3_b\d+x\d+_\d+x\d+_\d+(?:_\d+)?\.comp",
@@ -75,6 +76,34 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     ):
         return re.sub(r"_batch\d+_", "_batch1_", shader_file, count=1)
     return None
+
+
+def sparse_moe_route_compaction_shader_file(shader_file: str) -> str | None:
+    match = re.fullmatch(
+        r"sparse_moe_gate_up_(?:bf16|fp8_e4m3_b\d+x\d+|"
+        r"int4_ct_s(?:f16|bf16)_g\d+)_"
+        r"h\d+_i(\d+)_e\d+_k(\d+)\.comp",
+        shader_file,
+    )
+    if match is None:
+        return None
+    intermediate_size, experts_per_token = map(int, match.groups())
+    return (
+        "moe_route_compact_batch1_"
+        f"i{intermediate_size}_k{experts_per_token}.comp"
+    )
+
+
+def sparse_moe_route_compaction_workgroup_count_x(shader_file: str) -> int:
+    match = re.fullmatch(
+        r"moe_route_compact_batch1_i\d+_k(\d+)\.comp",
+        shader_file,
+    )
+    if match is None:
+        raise ModelCompileError(
+            f"shader {shader_file!r} is not a sparse route-compaction kernel"
+        )
+    return int(match.group(1))
 
 
 def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] | None:

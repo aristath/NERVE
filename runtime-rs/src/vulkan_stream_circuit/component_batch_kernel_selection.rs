@@ -17,6 +17,22 @@ fn component_batch_descriptors_commit_state<'a>(
     })
 }
 
+fn component_batch_stages_replace_push_constants(
+    stages: &[VulkanResidentComponentBatchStageArtifact],
+    push_constants: &[VulkanKernelScalarBinding],
+) -> bool {
+    push_constants.iter().all(|binding| {
+        binding.name == "expert_start"
+            && binding.scalar_type == "u32"
+            && binding.source == VulkanKernelScalarSource::PushConstant
+            && !stages.is_empty()
+            && stages.iter().all(|stage| {
+                stage.control.storage_buffer().2
+                    == VulkanResidentComponentBatchControlPayload::WidthExpertStart
+            })
+    })
+}
+
 #[derive(Clone, Copy)]
 enum VulkanComponentBatchStateSemantics<'a> {
     IndependentCandidates(&'a VulkanResidentStateTransactionBank),

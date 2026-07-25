@@ -266,7 +266,7 @@ mod tests {
                 None,
             )
             .unwrap(),
-            vec![Some(vec![8, 512])]
+            vec![Some(vec![4_112])]
         );
         assert_eq!(
             infer_node_output_shapes(

@@ -342,6 +342,12 @@ impl VulkanResidentComponentBatchSliceRunner {
                 lane_capacity,
             )
             .filter(|artifact| {
+                component_batch_stages_replace_push_constants(
+                    &artifact.stages,
+                    &dispatch.push_constants,
+                )
+            })
+            .filter(|artifact| {
                 execution_mode == VulkanComponentBatchExecutionMode::CausalSequence
                     || artifact.batch_mode != VulkanResidentComponentKernelBatchMode::WeightShared
                     || (!dispatch.uses_stream_tick
@@ -362,14 +368,6 @@ impl VulkanResidentComponentBatchSliceRunner {
                         VulkanError(format!(
                             "causal scan kernel {}.{} cannot execute {lane_capacity} lanes with tile width {}",
                             dispatch.component_id, dispatch.node_id, batch_artifact.lane_tile_width
-                        )),
-                    ));
-                }
-                if !dispatch.push_constants.is_empty() {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(format!(
-                            "component batch kernel {}.{} requires model-specific scalar values",
-                            dispatch.component_id, dispatch.node_id
                         )),
                     ));
                 }

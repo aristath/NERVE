@@ -1088,6 +1088,33 @@ def component_kernel_spec(
                 }
             )
         if frame_parallel_shader_file is not None:
+            frame_parallel_stages = []
+            route_compaction_shader_file = sparse_moe_route_compaction_shader_file(
+                shader_file
+            )
+            if route_compaction_shader_file is not None:
+                frame_parallel_stages.append(
+                    persistent_batch_control_stage(
+                        route_compaction_shader_file,
+                        64,
+                        sparse_moe_route_compaction_workgroup_count_x(
+                            route_compaction_shader_file
+                        ),
+                        payload="width_expert_start",
+                    )
+                )
+            frame_parallel_stages.append(
+                persistent_batch_control_stage(
+                    frame_parallel_shader_file,
+                    local_size_x,
+                    workgroup_count_x,
+                    payload=(
+                        "width_expert_start"
+                        if frame_parallel_shader_file.startswith("sparse_moe_")
+                        else "width"
+                    ),
+                )
+            )
             spec["batch_implementations"].append(
                 {
                     "execution_domain": "prefill",
@@ -1100,18 +1127,7 @@ def component_kernel_spec(
                         "subgroup_operations": [],
                         "subgroup_size": 64,
                     },
-                    "stages": [
-                        persistent_batch_control_stage(
-                            frame_parallel_shader_file,
-                            local_size_x,
-                            workgroup_count_x,
-                            payload=(
-                                "width_expert_start"
-                                if frame_parallel_shader_file.startswith("sparse_moe_")
-                                else "width"
-                            ),
-                        )
-                    ],
+                    "stages": frame_parallel_stages,
                 }
             )
         for tile_width in (
