@@ -12,6 +12,7 @@ from nerve.compilation import Json, ModelCompileError
 
 
 DEVICE_CAPABILITIES_SCHEMA = "nerve.device_capabilities.v1"
+COMPILER_TARGET_SCHEMA = "nerve.compiler_target.v1"
 
 
 @dataclass(frozen=True)
@@ -98,9 +99,26 @@ class CompilerTarget:
 
     @classmethod
     def from_json(cls, payload: Json) -> CompilerTarget:
-        if payload.get("schema") != DEVICE_CAPABILITIES_SCHEMA:
+        return cls._from_json_schema(payload, COMPILER_TARGET_SCHEMA, "compiler target")
+
+    @classmethod
+    def from_device_capabilities_json(cls, payload: Json) -> CompilerTarget:
+        return cls._from_json_schema(
+            payload,
+            DEVICE_CAPABILITIES_SCHEMA,
+            "device-capability",
+        )
+
+    @classmethod
+    def _from_json_schema(
+        cls,
+        payload: Json,
+        expected_schema: str,
+        source_name: str,
+    ) -> CompilerTarget:
+        if payload.get("schema") != expected_schema:
             raise ModelCompileError(
-                "runtime returned unsupported device-capability schema "
+                f"unsupported {source_name} schema "
                 f"{payload.get('schema')!r}"
             )
         raw_devices = payload.get("devices")
@@ -153,7 +171,7 @@ class CompilerTarget:
 
     def to_json(self) -> Json:
         return {
-            "schema": "nerve.compiler_target.v1",
+            "schema": COMPILER_TARGET_SCHEMA,
             "devices": [device.to_json() for device in self.devices],
         }
 
@@ -231,7 +249,7 @@ def discover_compiler_target(
         raise ModelCompileError(
             "runtime returned a non-object compiler capability report"
         )
-    return CompilerTarget.from_json(payload)
+    return CompilerTarget.from_device_capabilities_json(payload)
 
 
 def compiler_device_probe_command(*, runtime_bin: Path | None = None) -> list[str]:

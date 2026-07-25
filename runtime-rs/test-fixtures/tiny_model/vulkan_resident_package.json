@@ -1,7 +1,7 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
   "package_id": "model_d119caf1_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:a9e3348c7f09b9d24e2f7bffd96fe3c104929bb0bf55262b7e8812ddda3c6c03",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:ab13cc4702f50509f7400636b382bc61ac34ef971b8773a0a43fb653f1b745c3",
   "compiler_target": {
     "schema": "nerve.compiler_target.v1",
     "devices": [

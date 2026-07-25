@@ -38,7 +38,7 @@ def device_payload(
 
 
 def test_compiler_target_preserves_dtype_supported_by_any_gpu() -> None:
-    target = CompilerTarget.from_json(
+    target = CompilerTarget.from_device_capabilities_json(
         {
             "schema": "nerve.device_capabilities.v1",
             "devices": [
@@ -75,11 +75,12 @@ def test_compiler_target_preserves_dtype_supported_by_any_gpu() -> None:
     )
     assert target.devices[0].cooperative_bfloat16_shapes == ((16, 16, 16),)
     assert target.devices[0].cooperative_float8_e4m3_shapes == ((16, 16, 32),)
+    assert CompilerTarget.from_json(target.to_json()) == target
 
 
 def test_compiler_target_ignores_cpu_vulkan_devices_and_requires_a_gpu() -> None:
     with pytest.raises(ModelCompileError, match="at least one Vulkan GPU"):
-        CompilerTarget.from_json(
+        CompilerTarget.from_device_capabilities_json(
             {
                 "schema": "nerve.device_capabilities.v1",
                 "devices": [
@@ -98,7 +99,7 @@ def test_compiler_target_ignores_cpu_vulkan_devices_and_requires_a_gpu() -> None
 
 def test_compiler_target_rejects_malformed_device_entries() -> None:
     with pytest.raises(ModelCompileError, match="invalid compiler target device"):
-        CompilerTarget.from_json(
+        CompilerTarget.from_device_capabilities_json(
             {
                 "schema": "nerve.device_capabilities.v1",
                 "devices": ["not a device"],
