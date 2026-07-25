@@ -771,6 +771,7 @@
                 bounded_wait_count: 0,
                 bounded_wait_timeout_count: 0,
             },
+            sparse_moe: RuntimeSparseMoeWorkReport::default(),
         };
         let benchmark_transport = RuntimePromptBenchmarkTransportTotalsReport {
             published_packet_count: 0,

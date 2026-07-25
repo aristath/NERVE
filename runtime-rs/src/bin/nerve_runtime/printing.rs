@@ -163,6 +163,41 @@ fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) 
     );
 }
 
+fn print_runtime_sparse_moe_stats(stats: &RuntimeSparseMoeWorkReport) {
+    if stats.component_count == 0 {
+        return;
+    }
+    println!("sparse_moe:");
+    println!("  component_count={}", stats.component_count);
+    println!("  activation_count={}", stats.activation_count);
+    println!("  declared_expert_slots={}", stats.declared_expert_slots);
+    println!("  selected_expert_routes={}", stats.selected_expert_routes);
+    println!(
+        "  submitted_expert_route_slots={}",
+        stats.submitted_expert_route_slots
+    );
+    println!(
+        "  grouped_prefill_routes={}",
+        stats.grouped_prefill_routes
+    );
+    println!(
+        "  skipped_dense_expert_slots={}",
+        stats.skipped_dense_expert_slots
+    );
+    println!(
+        "  empty_shard_route_checks={}",
+        stats.empty_shard_route_checks
+    );
+    println!(
+        "  route_weights_device_resident={}",
+        stats.route_weights_device_resident
+    );
+    println!(
+        "  reduction_device_resident={}",
+        stats.reduction_device_resident
+    );
+}
+
 fn print_runtime_prefix_state_cache_stats(stats: &VulkanResidentPlacedPrefixStateCacheStats) {
     println!("prefix_state_cache:");
     println!("  hits={}", stats.hit_count);

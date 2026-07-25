@@ -18,7 +18,7 @@ use nerve_runtime::{
     RuntimeGraphSourceChainEntry, RuntimeComponentPortSummary, RuntimePlacedComponentTimingSummaryReport,
     RuntimePlacedPromptRunReport, RuntimePlacedTransportEdgeReport, RuntimePlacedTransportReport,
     RuntimePlacementReport, RuntimePromptTimingReport, RuntimeRemoteEdgeBufferReport, RuntimeSourceComponent,
-    RuntimeTokenizerOptionsReport, RuntimeTopologyReport, VulkanComputeDevice,
+    RuntimeSparseMoeWorkReport, RuntimeTokenizerOptionsReport, RuntimeTopologyReport, VulkanComputeDevice,
     VulkanComputeDeviceCatalog, VulkanComputeDeviceInfo, VulkanResidentExecutionCounters,
     VulkanComputeTargetCapabilities,
     VulkanResidentFeedbackExecutionStats,

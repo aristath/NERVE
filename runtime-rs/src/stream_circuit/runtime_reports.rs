@@ -466,6 +466,20 @@ pub struct RuntimeFeedbackExecutionReport {
     pub bounded_wait_timeout_count: usize,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSparseMoeWorkReport {
+    pub component_count: usize,
+    pub activation_count: usize,
+    pub declared_expert_slots: usize,
+    pub selected_expert_routes: usize,
+    pub submitted_expert_route_slots: usize,
+    pub grouped_prefill_routes: usize,
+    pub skipped_dense_expert_slots: usize,
+    pub empty_shard_route_checks: usize,
+    pub route_weights_device_resident: bool,
+    pub reduction_device_resident: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePlacedPromptRunReport {
     pub ok: bool,
@@ -505,4 +519,5 @@ pub struct RuntimePlacedPromptRunReport {
     pub speculative_target_verification_time_ns: u64,
     pub speculative_draft_catch_up_time_ns: u64,
     pub resident_feedback: RuntimeFeedbackExecutionReport,
+    pub sparse_moe: RuntimeSparseMoeWorkReport,
 }

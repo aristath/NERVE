@@ -269,6 +269,7 @@ struct RuntimeChatTurn {
     speculative_draft_catch_up_time_ns: u64,
     resident_feedback: RuntimeFeedbackExecutionReport,
     transport_edges: Vec<RuntimePlacedTransportEdgeReport>,
+    sparse_moe: RuntimeSparseMoeWorkReport,
 }
 
 fn run_chat_repl<C, T, F>(
@@ -385,6 +386,7 @@ where
                 turn.speculative_draft_catch_up_time_ns,
             );
             print_runtime_feedback_stats(&turn.resident_feedback);
+            print_runtime_sparse_moe_stats(&turn.sparse_moe);
             print_runtime_transport_edges(&turn.transport_edges);
             chat_session.commit_assistant_turn(input_text, &assistant_content);
             Ok(true)

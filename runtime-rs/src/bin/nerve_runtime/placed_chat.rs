@@ -18,6 +18,7 @@ fn run_placed_chat(
     )?;
     let transcript_codec = chat_transcript_codec(tokenizer_dir)?;
     let logical_device_ids = runtime_model.placement_device_ids();
+    let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
     let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(
         bound_devices.devices.clone(),
@@ -178,6 +179,10 @@ fn run_placed_chat(
                         .run
                         .resident_feedback,
                 ),
+                sparse_moe: sparse_moe_contract.work_report(
+                    run.engine_run.prefill_activation_count,
+                    run.engine_run.decode_activation_count,
+                ),
                 transport_edges: runtime_placed_transport_edge_reports(
                     &submitted_run
                         .submitted_run
@@ -216,6 +221,7 @@ fn execute_placed_prompt_run(
     } = context;
     let setup_start = Instant::now();
     let logical_device_ids = runtime_model.placement_device_ids();
+    let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let placement = runtime_model_placement(manifest_dir, &runtime_model)?;
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
     let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(
@@ -352,6 +358,10 @@ fn execute_placed_prompt_run(
         speculative_target_verification_time_ns: run.speculative_decode.target_verification_time_ns,
         speculative_draft_catch_up_time_ns: run.speculative_decode.draft_catch_up_time_ns,
         resident_feedback: runtime_feedback_execution_report(run.resident_feedback),
+        sparse_moe: sparse_moe_contract.work_report(
+            prefill_activation_count,
+            decode_activation_count,
+        ),
     })
 }
 
@@ -421,6 +431,7 @@ fn print_placed_prompt_report(
         print_runtime_timing_stats("stats", &report.timing);
         print_runtime_execution_counters(&vulkan_resident_execution_counters());
         print_runtime_feedback_stats(&report.resident_feedback);
+        print_runtime_sparse_moe_stats(&report.sparse_moe);
         print_runtime_transport_edges(&report.transport.edges);
         print_speculative_profile(report);
         print_placed_component_timing_profile(&report.component_timing_summaries, 5);
