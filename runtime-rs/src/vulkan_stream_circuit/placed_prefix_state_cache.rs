@@ -19,9 +19,44 @@ struct VulkanResidentPlacedPrefixStateRange {
 
 struct VulkanResidentPlacedPrefixStateEntry {
     key: RuntimePrefixStateCacheKey,
+    pending_copies: Vec<VulkanResidentPlacedPrefixPendingCopy>,
     device_buffers: BTreeMap<String, VulkanResidentPlacedPrefixDeviceBuffer>,
     ranges: Vec<VulkanResidentPlacedPrefixStateRange>,
     byte_count: usize,
+}
+
+struct VulkanResidentPlacedPrefixPendingCopy {
+    copy: Option<VulkanResidentBufferCopyBatch>,
+    device: Rc<VulkanComputeDevice>,
+}
+
+impl VulkanResidentPlacedPrefixPendingCopy {
+    fn wait(&mut self) -> Result<(), VulkanError> {
+        let Some(copy) = self.copy.as_ref() else {
+            return Ok(());
+        };
+        self.device.wait_resident_buffer_copy_batch(copy)?;
+        self.copy.take();
+        Ok(())
+    }
+}
+
+impl Drop for VulkanResidentPlacedPrefixPendingCopy {
+    fn drop(&mut self) {
+        if let Some(copy) = self.copy.take() {
+            let _ = self.device.wait_resident_buffer_copy_batch(&copy);
+        }
+    }
+}
+
+impl VulkanResidentPlacedPrefixStateEntry {
+    fn wait_for_capture(&mut self) -> Result<(), VulkanError> {
+        for pending in &mut self.pending_copies {
+            pending.wait()?;
+        }
+        self.pending_copies.clear();
+        Ok(())
+    }
 }
 
 struct VulkanResidentPlacedPrefixDeviceBuffer {
@@ -170,6 +205,7 @@ impl VulkanResidentPlacedPrefixStateCache {
                 },
             );
         }
+        let mut pending_copies = Vec::new();
         for (device_id, cache_device_buffer) in &device_buffers {
             let device = source.devices.get(device_id).expect("cache device was validated");
             let copies = ranges
@@ -203,16 +239,23 @@ impl VulkanResidentPlacedPrefixStateCache {
                 .collect::<Result<Vec<_>, VulkanError>>()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             if !copies.is_empty() {
-                device
+                let copy = device
                     .create_resident_buffer_copy_batch(&copies)
-                    .and_then(|copy| copy.run())
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                device
+                    .submit_resident_buffer_copy_batch(&copy)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                pending_copies.push(VulkanResidentPlacedPrefixPendingCopy {
+                    copy: Some(copy),
+                    device: Rc::clone(device),
+                });
             }
         }
 
         let byte_count = device_byte_counts.values().copied().sum();
         Ok(VulkanResidentPlacedPrefixStateEntry {
             key,
+            pending_copies,
             device_buffers,
             ranges,
             byte_count,
@@ -237,7 +280,7 @@ impl VulkanResidentPlacedPrefixStateCache {
         key: &RuntimePrefixStateCacheKey,
         target: &mut VulkanResidentInProcessPlacedPromptStream,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let entry = self.entries.get(key).ok_or_else(|| {
+        let entry = self.entries.get_mut(key).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
                     "logical prefix cache restored {:?}, but its resident pages were absent",
@@ -252,6 +295,9 @@ impl VulkanResidentPlacedPrefixStateCache {
                 ),
             ));
         }
+        entry
+            .wait_for_capture()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         Self::restore_entry(entry, target)?;
         self.stats.hit_count = self.stats.hit_count.saturating_add(1);
         self.stats.reused_token_count = self.stats.reused_token_count.saturating_add(key.token_count);

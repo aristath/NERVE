@@ -1115,6 +1115,37 @@ impl VulkanComputeDevice {
         Ok(())
     }
 
+    pub fn submit_resident_buffer_copy_batch(
+        &self,
+        binding: &VulkanResidentBufferCopyBatch,
+    ) -> Result<(), VulkanError> {
+        if binding.device.handle() != self.device.handle() {
+            return Err(VulkanError(
+                "resident buffer copy batch belongs to another logical device".to_string(),
+            ));
+        }
+        unsafe {
+            self.device
+                .reset_fences(&[binding.completion_fence])
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to reset resident buffer copy batch fence: {error:?}"
+                    ))
+                })?;
+            let command_buffers = [binding.command_buffer];
+            let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
+            self.device
+                .queue_submit(self.queue, &submit_info, binding.completion_fence)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to submit resident buffer copy batch: {error:?}"
+                    ))
+                })?;
+        }
+        RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn create_resident_buffer_copy_batch(
         &self,
         copies: &[VulkanResidentBufferRangeCopy<'_>],

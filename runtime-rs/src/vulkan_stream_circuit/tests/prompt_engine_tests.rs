@@ -345,16 +345,23 @@ fn placed_prompt_engine_restores_device_resident_prefix_pages_for_branches() {
     engine.add_stream("branch_a", branch_a).unwrap();
     engine.add_stream("branch_b", branch_b).unwrap();
 
+    reset_vulkan_resident_execution_counters();
     engine
         .submit_input_event_until_idle(
             "source",
             VulkanResidentTokenInputEvent::new(
                 "source_prompt",
                 (4..24).collect::<Vec<_>>(),
-                2,
+                0,
             ),
         )
         .unwrap();
+    let capture_counters = vulkan_resident_execution_counters();
+    assert!(capture_counters.resident_copy_queue_submits > 0);
+    assert_eq!(
+        capture_counters.resident_copy_waits, 0,
+        "prefix capture must not block the source stream"
+    );
     let branch_tokens = (4..25).collect::<Vec<_>>();
     let branch_a_run = engine
         .submit_input_event_until_idle(
@@ -362,6 +369,11 @@ fn placed_prompt_engine_restores_device_resident_prefix_pages_for_branches() {
             VulkanResidentTokenInputEvent::new("branch_a_prompt", branch_tokens.clone(), 1),
         )
         .unwrap();
+    assert!(
+        vulkan_resident_execution_counters().resident_copy_waits
+            > capture_counters.resident_copy_waits,
+        "the first cache consumer must establish capture completion"
+    );
     let branch_b_run = engine
         .submit_input_event_until_idle(
             "branch_b",
