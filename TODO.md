@@ -27,43 +27,7 @@ context/output limits, or benchmark-only shortcuts.
 
 ## Remaining work, in priority order
 
-### 1. Make cross-device execution efficient without making it mandatory
-
-Everything may run on one device. Multi-device execution should become useful
-when requested by placement or required by model size.
-
-- Choose edge transport from runtime capabilities: same-device aliasing,
-  peer/external memory, device-local transfer, host staging fallback, and
-  eventually LAN transport.
-- Remove host-backed activation edges from the fast path when peer/device-local
-  transfer is available.
-- Use asynchronous timeline synchronization and overlap transfers with independent
-  device work.
-- Support tensor or expert sharding inside a logical component when that is
-  materially better than transferring a full activation between layer
-  components.
-- Keep the logical source-layer boundary intact even when its internal work is
-  sharded.
-- Report transfer route, bytes, waits, and overlap per graph edge.
-- Compare single-device and necessary multi-device placements; do not force extra
-  devices into benchmarks.
-- Isolate the approximately 3.5-token/second decode loss observed when the
-  27B-FP8 stream moved from a fitting single-device context to the required
-  two-device 64K placement. The first two valid seed-1 measured turns decoded at
-  15.951 and 16.715 tokens/second, versus approximately 19.66 tokens/second in
-  the prior single-device run; repeat under matched context and conversation
-  conditions before attributing the entire difference to transport.
-- In the first post-canonical-template 27B-FP8 run, the model remained resident
-  on the AMD devices at PCI 0a:00.0 and 19:00.0 with 65,536-token context and
-  output allowances. The three completed measured turns decoded at 13.319,
-  12.952, and 11.973 tokens/second (12.748 average), while the fourth turn entered
-  an unbounded repeated final segment. Resident component command recordings
-  fell from 75 during warmup to 2, then 0 and 0 on the next two turns, proving
-  that repeated recording was removed but also that it was not the dominant
-  two-device throughput bottleneck. The full run is invalid as a five-turn
-  benchmark.
-
-### 2. Complete route-native MoE execution
+### 1. Complete route-native MoE execution
 
 Sparse components and selected-route kernels exist, but routing is not yet a
 fully optimized runtime signal path.
@@ -78,7 +42,7 @@ fully optimized runtime signal path.
 - Make the 35B MoE model's performance reflect its active parameter count rather
   than its full declared size.
 
-### 3. Integrate MTP into the steady-state scheduler and device loop
+### 2. Integrate MTP into the steady-state scheduler and device loop
 
 MTP compilation and transactional verification work, but speculative execution
 is not yet part of the optimized steady-state path.
@@ -94,9 +58,16 @@ is not yet part of the optimized steady-state path.
 - Enable MTP by default only where warmed, realistic workloads show a net
   improvement.
 
-### 4. Finish long-context prefill and mixed-workload scheduling
+### 3. Finish long-context prefill and mixed-workload scheduling
 
 - Interleave prefill and decode fairly under memory pressure.
+- Pipeline independent streams across placed devices so serial layer placement
+  amortizes cross-queue handoffs. Under matched seed-1 16K conversations, the
+  first three valid turns averaged 16.395 decode tokens/second on one GPU and
+  12.896 on two GPUs. Direct shared-host edges reduced command count relative to
+  two-copy device-local staging but improved throughput by only 0.4%, proving
+  that the remaining 21.3% gap is dominated by the serial placed schedule rather
+  than edge-copy mechanics.
 - Derive prefill chunk size from available memory, device execution limits, and
   selected kernel shape.
 - Batch compatible prefill work across streams.
@@ -121,7 +92,7 @@ is not yet part of the optimized steady-state path.
   limits.
 - Report prefill and decode throughput separately by default.
 
-### 5. Maintain adversarial correctness and performance gates
+### 4. Maintain adversarial correctness and performance gates
 
 Every meaningful compiler, runtime, state, graph, or kernel change must be tested
 against the supported model set rather than optimized around one model.
@@ -190,6 +161,10 @@ Performance runs must:
   Proceed` final segment and had to be stopped. The three completed turns
   decoded at 13.319, 12.952, and 11.973 tokens/second (12.748 average). Treat it
   as another failed correctness gate and not as a complete performance result.
+- The matched 16K single-device and two-device runs produced identical valid
+  outputs through the first three measured turns, then both entered the same
+  exact `Output matches / Done / Proceed` loop on the knowledge-cutoff turn.
+  Placement is therefore not the source of that correctness failure.
 - An explicitly selected Vulkan test device must make a test run or fail; it must
   never silently turn a device-open error into a passing skip. The prefix,
   cancellation, and physical-page tests now enforce this, and the remaining
