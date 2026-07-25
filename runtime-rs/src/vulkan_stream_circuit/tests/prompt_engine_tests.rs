@@ -172,6 +172,72 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
 }
 
 #[test]
+fn placed_prompt_engine_transaction_restores_after_backend_failure() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for failed stream transaction was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping failed resident stream transaction test: {error}");
+            return;
+        }
+    };
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(64),
+        7,
+        0,
+    )
+    .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("canonical", vec![4], 0),
+        )
+        .unwrap();
+    engine.streams.get_mut("main").unwrap().session.next_stream_tick = u64::MAX;
+    let stream_before = engine.snapshot().streams[0].clone();
+    let scheduler_before = engine
+        .runtime_scheduler
+        .stream_transient_state_snapshot("main")
+        .unwrap();
+
+    let error = engine
+        .submit_input_event_transactionally_until_idle_with_output(
+            "main",
+            VulkanResidentTokenInputEvent::new("failing_branch", vec![6], 0),
+            |_| {},
+        )
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("tick overflow"),
+        "unexpected transaction error: {error}"
+    );
+    assert_eq!(engine.snapshot().streams[0], stream_before);
+    assert_eq!(
+        engine
+            .runtime_scheduler
+            .stream_transient_state_snapshot("main")
+            .unwrap(),
+        scheduler_before
+    );
+    assert!(engine.snapshot().idle);
+    assert!(engine.active_transaction_stream_ids.is_empty());
+}
+
+#[test]
 fn placed_prompt_engine_reuses_physical_state_pages_beyond_context_capacity() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,

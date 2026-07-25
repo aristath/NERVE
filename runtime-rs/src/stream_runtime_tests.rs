@@ -484,6 +484,67 @@ fn scheduler_stream_checkpoint_restores_state_after_a_completed_branch() {
 }
 
 #[test]
+fn scheduler_stream_checkpoint_aborts_in_flight_branch_work() {
+    let mut scheduler = RuntimeStreamScheduler::new();
+    scheduler
+        .add_stream_with_state_declarations("stream", [(state_key(), state_shape())])
+        .unwrap();
+    scheduler
+        .enqueue_input_event(
+            "stream",
+            RuntimeStreamInputEvent::new("canonical", [1, 2], 0),
+        )
+        .unwrap();
+    let canonical = scheduler.schedule_step(budget(1)).unwrap().activations[0].clone();
+    scheduler
+        .complete_activation(
+            canonical.id,
+            RuntimeStreamActivationOutcome::generated_tokens([], false),
+        )
+        .unwrap();
+    let canonical_snapshot = scheduler.stream_transient_state_snapshot("stream").unwrap();
+    let checkpoint = scheduler.checkpoint_stream_state("stream").unwrap();
+
+    scheduler
+        .enqueue_input_event(
+            "stream",
+            RuntimeStreamInputEvent::new("speculative_branch", [3, 4], 1),
+        )
+        .unwrap();
+    let in_flight = scheduler.schedule_step(budget(1)).unwrap().activations[0].clone();
+    assert_eq!(scheduler.snapshot().in_flight_activation_count, 1);
+
+    let restored = scheduler
+        .restore_stream_state_checkpoint(checkpoint)
+        .unwrap();
+
+    assert_eq!(restored.status, RuntimeStreamStatus::Idle);
+    assert_eq!(restored.in_flight_activation_count, 0);
+    assert_eq!(scheduler.snapshot().in_flight_activation_count, 0);
+    assert_eq!(
+        scheduler.stream_transient_state_snapshot("stream").unwrap(),
+        canonical_snapshot
+    );
+    assert!(
+        scheduler
+            .schedule_step(budget(1))
+            .unwrap()
+            .activations
+            .is_empty()
+    );
+    assert!(
+        scheduler
+            .complete_activation(
+                in_flight.id,
+                RuntimeStreamActivationOutcome::generated_tokens([9], false),
+            )
+            .unwrap_err()
+            .0
+            .contains("unknown in-flight activation")
+    );
+}
+
+#[test]
 fn scheduler_rejects_invalid_fork_before_retaining_blocks() {
     let mut scheduler = RuntimeStreamScheduler::new();
     scheduler

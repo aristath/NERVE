@@ -109,6 +109,12 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 )),
             ));
         }
+        self.streams
+            .get_mut(&stream_id)
+            .ok_or_else(|| VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                stream_id: stream_id.clone(),
+            })?
+            .quiesce_and_discard_transaction_work()?;
         self.runtime_scheduler
             .restore_stream_state_checkpoint(transaction.scheduler_state)?;
         let stream = self.streams.get_mut(&stream_id).ok_or_else(|| {

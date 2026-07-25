@@ -599,16 +599,23 @@ impl RuntimeStreamScheduler {
     ) -> Result<RuntimeStreamSnapshot, RuntimeStreamSchedulerError> {
         let stream_id = checkpoint.stream_id.clone();
         let stream = self.stream(&stream_id)?;
-        if stream.has_pending_work() || stream.status != RuntimeStreamStatus::Idle {
-            return Err(RuntimeStreamSchedulerError(format!(
-                "cannot restore stream checkpoint into non-idle stream {stream_id:?}"
-            )));
-        }
         if stream.execution_class_id != checkpoint.execution_class_id {
             return Err(RuntimeStreamSchedulerError(format!(
                 "cannot restore stream checkpoint for execution class {:?} into {:?}",
                 checkpoint.execution_class_id, stream.execution_class_id
             )));
+        }
+
+        let in_flight_activations = stream
+            .in_flight_activation_ids
+            .iter()
+            .filter_map(|activation_id| self.in_flight.get(activation_id).cloned())
+            .collect::<Vec<_>>();
+        for activation in &in_flight_activations {
+            self.rollback_unused_activation_state(activation, 0)?;
+        }
+        for activation in in_flight_activations {
+            self.in_flight.remove(&activation.id);
         }
 
         let arena = &mut self.transient_state_arena;
