@@ -170,6 +170,11 @@ impl VulkanComputeDeviceCatalog {
                 .map(|heap| heap.size)
                 .max()
                 .unwrap_or(0);
+            let memory_budget_supported = physical_device_supports_extension(
+                instance,
+                physical_device,
+                ash::ext::memory_budget::NAME,
+            )?;
             let enabled_shader_features =
                 physical_device_supported_shader_features(instance, physical_device)?;
             let shader_float8_support = VulkanShaderFloat8Support {
@@ -485,8 +490,10 @@ impl VulkanComputeDeviceCatalog {
                 subgroup_supported_operations: subgroup_support.supported_operations,
                 max_compute_work_group_invocations: limits.max_compute_work_group_invocations,
                 max_compute_work_group_size_x: limits.max_compute_work_group_size[0],
+                max_compute_work_group_count_x: limits.max_compute_work_group_count[0],
                 min_storage_buffer_offset_alignment,
                 device_local_memory_bytes,
+                memory_budget_supported,
                 timestamp_period_ns: limits.timestamp_period,
                 generic_storage_pipelines: RefCell::new(HashMap::new()),
                 immediate_kernel_sequence: RefCell::new(None),

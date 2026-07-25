@@ -79,12 +79,18 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
 
     fn temporal_block_lane_capacity(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
-        const SIGNAL_MEMORY_BUDGET_PER_DEVICE: usize = 256 * 1024 * 1024;
+        const MINIMUM_DEVICE_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
         const RECORDED_DISPATCH_BUDGET_PER_SUBMISSION: usize = 65_536;
 
         let mut width = VULKAN_BACKEND_LOOP_MAX_WINDOW;
         for slice in &self.device_slices {
+            let device = devices.get(&slice.device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: slice.device_id.clone(),
+                }
+            })?;
             let (_, signal_buffer_plan) =
                 component_batch_signal_buffer_plan(&slice.mounted, &slice.mounted_bound.dispatches)?;
             let signal_bytes_per_lane =
@@ -99,23 +105,33 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                                 ))
                             })
                     })?;
-            if let Some(memory_width) =
-                SIGNAL_MEMORY_BUDGET_PER_DEVICE.checked_div(signal_bytes_per_lane)
-            {
+            if signal_bytes_per_lane > 0 {
+                let available = device.available_device_local_memory_bytes();
+                let headroom = (device.device_local_memory_bytes() / 32)
+                    .max(MINIMUM_DEVICE_HEADROOM_BYTES)
+                    .min(available / 2);
+                let usable = available.saturating_sub(headroom);
+                let memory_width = usize::try_from(usable)
+                    .unwrap_or(usize::MAX)
+                    .checked_div(signal_bytes_per_lane)
+                    .unwrap_or_default();
                 width = width.min(memory_width.max(1));
             }
 
-            if let Some(causal_scan_tile_width) = slice
-                .package_slice
-                .batch_kernels
-                .iter()
-                .filter(|artifact| {
-                    artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
-                })
-                .map(|artifact| artifact.lane_tile_width)
-                .min()
-            {
-                width = width.min(causal_scan_tile_width);
+            for artifact in slice.package_slice.batch_kernels.iter().filter(|artifact| {
+                artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
+            }) {
+                width = width.min(artifact.lane_tile_width);
+                for stage in &artifact.stages {
+                    let dispatch_width = u64::from(device.max_compute_work_group_count_x())
+                        .saturating_mul(
+                            u64::try_from(artifact.lane_tile_width).unwrap_or(u64::MAX),
+                        )
+                        .checked_div(u64::from(stage.workgroup_count_x.max(1)))
+                        .and_then(|value| usize::try_from(value).ok())
+                        .unwrap_or(usize::MAX);
+                    width = width.min(dispatch_width.max(1));
+                }
             }
 
             let mut scalar_dispatches_per_lane_by_component = BTreeMap::<&str, usize>::new();
@@ -144,12 +160,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
 
     fn temporal_block_width(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         available_token_count: usize,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
         if available_token_count == 0 {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
-        Ok(available_token_count.min(self.temporal_block_lane_capacity()?))
+        Ok(available_token_count.min(self.temporal_block_lane_capacity(devices)?))
     }
 
     fn ensure_temporal_block_execution(
@@ -318,7 +335,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let end_stream_tick = start_stream_tick
             .checked_add(tick_count - 1)
             .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-        self.ensure_temporal_block_execution(devices, self.temporal_block_lane_capacity()?)?;
+        self.ensure_temporal_block_execution(
+            devices,
+            self.temporal_block_lane_capacity(devices)?,
+        )?;
         let capacity =
             u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(

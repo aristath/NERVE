@@ -298,7 +298,9 @@ impl VulkanResidentInProcessPlacedPromptStream {
         if external_input_count < 2 || active.pending_feedback.is_some() {
             return Ok((false, None));
         }
-        let block_width = self.processor.temporal_block_width(external_input_count)?;
+        let block_width = self
+            .processor
+            .temporal_block_width(&self.devices, external_input_count)?;
         if block_width < 2 {
             return Ok((false, None));
         }

@@ -73,6 +73,35 @@ impl VulkanComputeDevice {
         self.device_local_memory_bytes
     }
 
+    pub fn available_device_local_memory_bytes(&self) -> u64 {
+        if !self.memory_budget_supported {
+            return self.device_local_memory_bytes;
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        unsafe {
+            self.context
+                .instance
+                .get_physical_device_memory_properties2(self.physical_device, &mut properties);
+        }
+        (0..properties.memory_properties.memory_heap_count)
+            .filter(|heap_index| {
+                properties.memory_properties.memory_heaps[*heap_index as usize]
+                    .flags
+                    .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+            })
+            .map(|heap_index| {
+                let index = heap_index as usize;
+                budget.heap_budget[index].saturating_sub(budget.heap_usage[index])
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn max_compute_work_group_count_x(&self) -> u32 {
+        self.max_compute_work_group_count_x
+    }
+
     pub fn supports_shared_host_memory(&self) -> bool {
         self.shared_host_memory_alignment.is_some()
     }
