@@ -31,9 +31,17 @@ fn run_placed_chat(
     )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;
+    let mounted_device_bindings = bound_devices
+        .physical_device_ids
+        .iter()
+        .map(|(logical_device_id, physical_device_id)| {
+            format!("{logical_device_id}={physical_device_id}")
+        })
+        .collect::<Vec<_>>();
     println!(
-        "nerve chat ready: placed_in_process, devices={:?}, context_size={}, setup_ms={:.3}",
+        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, setup_ms={:.3}",
         stream_snapshot.device_ids,
+        mounted_device_bindings,
         stream_snapshot.context_window_activations,
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
