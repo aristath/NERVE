@@ -22,6 +22,7 @@ from nerve.model_package import (
     render_shader_source,
     validate_compiled_package,
 )
+from nerve.model_package_validation import valid_batch_stage
 
 
 def minimal_package(root: Path) -> dict[str, object]:
@@ -590,6 +591,28 @@ def test_package_integrity_rejects_batch_requirements_that_do_not_match_spirv(
 
     with pytest.raises(ModelCompileError, match="compiled batch implementation"):
         validate_compiled_package(tmp_path, manifest)
+
+
+def test_batch_stage_descriptor_mapping_is_explicit_and_collision_free() -> None:
+    stage = {
+        "shader_path": "shaders/route_compact.spv",
+        "local_size_x": 64,
+        "workgroup_count_x": 8,
+        "descriptor_bindings": [
+            {"binding": 1, "source_binding": 2},
+            {"binding": 2, "source_binding": 3},
+        ],
+        "control": {
+            "kind": "storage_buffer",
+            "byte_count": 8,
+            "binding": 31,
+            "payload": "width_expert_start",
+        },
+    }
+
+    assert valid_batch_stage(stage)
+    stage["descriptor_bindings"][1]["binding"] = 1
+    assert not valid_batch_stage(stage)
 
 
 def test_shader_templates_compile_to_vulkan_1_4_spirv(tmp_path: Path) -> None:

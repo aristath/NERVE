@@ -513,6 +513,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                     shader_path,
                     local_size_x: 64,
                     workgroup_count_x: 1,
+                    descriptor_bindings: Vec::new(),
                     control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
                         byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
                         binding: 31,
@@ -592,6 +593,25 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
         };
     let control_error = validate_component_executions("fixture", &invalid_control).unwrap_err();
     assert!(control_error.to_string().contains("invalid WeightShared"));
+
+    let mut invalid_descriptor_mapping = execution(
+        VulkanResidentComponentKernelBatchMode::WeightShared,
+        Some("shaders/project_batch.spv".to_string()),
+    );
+    invalid_descriptor_mapping[0].kernels[0].batch_implementations[0].stages[0]
+        .descriptor_bindings = vec![
+        VulkanResidentComponentBatchDescriptorBindingSpec {
+            binding: 1,
+            source_binding: 0,
+        },
+        VulkanResidentComponentBatchDescriptorBindingSpec {
+            binding: 1,
+            source_binding: 2,
+        },
+    ];
+    let descriptor_error =
+        validate_component_executions("fixture", &invalid_descriptor_mapping).unwrap_err();
+    assert!(descriptor_error.to_string().contains("invalid WeightShared"));
 }
 
 #[test]
@@ -610,6 +630,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         spirv_words: Vec::new(),
         local_size_x: 64,
         workgroup_count_x: 1,
+        descriptor_bindings: Vec::new(),
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
@@ -621,6 +642,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         spirv_words: Vec::new(),
         local_size_x: 64,
         workgroup_count_x: 1,
+        descriptor_bindings: Vec::new(),
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
             binding: 7,
@@ -632,6 +654,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         spirv_words: Vec::new(),
         local_size_x: 64,
         workgroup_count_x: 1,
+        descriptor_bindings: Vec::new(),
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
@@ -701,11 +724,137 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         [64u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
     );
     assert_eq!(
+        distributed_component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::WidthExpertStart,
+            &control,
+            128,
+        ),
+        [64u32.to_le_bytes(), 128u32.to_le_bytes()].concat(),
+    );
+    assert_eq!(
         component_batch_control_payload_bytes(
             VulkanResidentComponentBatchControlPayload::Temporal,
             &control,
         ),
         control,
+    );
+}
+
+#[test]
+fn distributed_batch_group_retains_every_members_control_buffer_set() {
+    let shard = |expert_start| VulkanDistributedComponentBatchShardRunner {
+        device_id: "gpu0".to_string(),
+        dispatches: Vec::new(),
+        expert_start,
+        batch_control_buffer_sets: vec![BTreeMap::new()],
+        sequence_catalog: RefCell::new(BTreeMap::new()),
+    };
+    let mut grouped = shard(128);
+
+    grouped.append_group_member(shard(128)).unwrap();
+
+    assert_eq!(grouped.batch_control_buffer_sets.len(), 2);
+    let error = grouped.append_group_member(shard(0)).unwrap_err();
+    assert!(error.to_string().contains("changes expert start"));
+}
+
+#[test]
+fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
+    use crate::vulkan_distributed::{
+        VulkanDistributedDispatchPlan, VulkanDistributedDispatchShard,
+    };
+
+    let activation = |binding, signal_id: &str, slot| VulkanDistributedActivationSlot {
+        binding,
+        component_id: "layer".to_string(),
+        signal_id: signal_id.to_string(),
+        slot,
+        byte_capacity: 8_224,
+        signal_byte_capacity: 8_224,
+    };
+    let shards = || {
+        vec![
+            VulkanDistributedDispatchShard {
+                device_id: "gpu0".to_string(),
+                row_start: 0,
+                row_count: 128,
+                workgroup_count_x: 8,
+                base_workgroup_z: 0,
+                output_byte_offset: 0,
+                output_byte_count: 8_224,
+                parameters: Vec::new(),
+            },
+            VulkanDistributedDispatchShard {
+                device_id: "gpu1".to_string(),
+                row_start: 128,
+                row_count: 128,
+                workgroup_count_x: 8,
+                base_workgroup_z: 128,
+                output_byte_offset: 0,
+                output_byte_count: 8_224,
+                parameters: Vec::new(),
+            },
+        ]
+    };
+    let dispatch = |dispatch_index,
+                    node_id: &str,
+                    input_activation,
+                    output_activation| VulkanDistributedDispatchPlan {
+        owner_device_id: "gpu0".to_string(),
+        dispatch_index,
+        component_id: "layer".to_string(),
+        node_id: node_id.to_string(),
+        reusable_family_id: node_id.to_string(),
+        input_byte_capacity: 8_224,
+        output_byte_capacity: 8_224,
+        output_rows: 256,
+        input_width: 2_048,
+        row_alignment: 1,
+        input_activation,
+        auxiliary_input_activations: Vec::new(),
+        output_activation,
+        distribution: VulkanDistributedDispatchDistribution::ExpertRange,
+        distributed_parameter_byte_count: 0,
+        shards: shards(),
+    };
+    let gate = dispatch(
+        9,
+        "sparse_moe_gate_up",
+        activation(0, "normalized", 0),
+        activation(3, "expert_intermediates", 1),
+    );
+    let down = dispatch(
+        10,
+        "sparse_moe_down",
+        activation(0, "expert_intermediates", 1),
+        activation(2, "expert_outputs", 2),
+    );
+    let group = VulkanDistributedDispatchGroup {
+        owner_device_id: "gpu0".to_string(),
+        dispatches: vec![gate.clone(), down.clone()],
+    };
+    let plan = VulkanDistributedExecutionPlan {
+        device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
+        storage_buffer_offset_alignment: 256,
+        dispatches: vec![gate, down],
+        dispatch_groups: vec![group],
+        shared_input_byte_capacity: 8_224,
+        shared_output_byte_capacity: 8_224,
+        distributed_parameter_byte_count: 0,
+    };
+
+    let specs = distributed_component_batch_private_activation_specs(&plan);
+
+    assert_eq!(specs.len(), 1);
+    let (key, spec) = specs.first_key_value().unwrap();
+    assert_eq!(key.owner_device_id, "gpu0");
+    assert_eq!(key.component_id, "layer");
+    assert_eq!(key.signal_id, "expert_intermediates");
+    assert_eq!(key.slot, 1);
+    assert_eq!(spec.signal_byte_capacity, 8_224);
+    assert_eq!(
+        spec.device_ids,
+        BTreeSet::from(["gpu0".to_string(), "gpu1".to_string()])
     );
 }
 

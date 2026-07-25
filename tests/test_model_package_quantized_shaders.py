@@ -421,6 +421,8 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         "moe_topk_batch1_bf16_e256_k8.comp",
         "sparse_moe_gate_up_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
         "sparse_moe_gate_up_batch1_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
+        "sparse_moe_gate_up_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
+        "sparse_moe_gate_up_batch1_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
         "sparse_moe_down_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
         "sparse_moe_down_batch1_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp",
         "moe_reduce_bf16_h2048_k8_scale1.comp",
@@ -436,6 +438,10 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     down_shader = (
         tmp_path / "sparse_moe_down_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"
     ).read_text()
+    prequant_gate_up_shader = (
+        tmp_path
+        / "sparse_moe_gate_up_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"
+    ).read_text()
     router_shader = (tmp_path / "moe_topk_bf16_e256_k8.comp").read_text()
     reduce_shader = (tmp_path / "moe_reduce_bf16_h2048_k8_scale1.comp").read_text()
     assert "const uint NUM_EXPERTS = 256u;" in gate_up_shader
@@ -448,6 +454,12 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "const uint TILE_ROWS = 64u;" in down_shader
     assert "layout(local_size_x = 512" in down_shader
     assert "shared fe4m3vec4 quantized_hidden" in gate_up_shader
+    assert "shared fe4m3vec4 quantized_hidden" not in prequant_gate_up_shader
+    assert "readonly buffer QuantizedHidden" in prequant_gate_up_shader
+    assert "readonly buffer HiddenScales" in prequant_gate_up_shader
+    assert "const uint TILE_ROWS = 4u;" in prequant_gate_up_shader
+    assert "layout(local_size_x = 64" in prequant_gate_up_shader
+    assert "barrier();" in prequant_gate_up_shader
     assert "shared fe4m3vec4 quantized_intermediate" in down_shader
     assert "SPV_VALVE_mixed_float_dot_product" in gate_up_shader
     assert "fp8_dot4_acc32" in gate_up_shader
@@ -505,7 +517,12 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
 
     spec = component_kernel_spec(
         execution_index=0,
-        node={"id": "sparse_moe_gate_up", "op": "sparse_moe_gate_up"},
+        node={
+            "id": "sparse_moe_gate_up",
+            "op": "sparse_moe_gate_up",
+            "inputs": ["hidden", "routes"],
+            "outputs": ["intermediates"],
+        },
         circuit={},
         shader_file=("sparse_moe_gate_up_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"),
         local_size_x=512,
@@ -525,6 +542,10 @@ def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:
             ),
             "local_size_x": 64,
             "workgroup_count_x": 8,
+            "descriptor_bindings": [
+                {"binding": 1, "source_binding": 1},
+                {"binding": 2, "source_binding": 2},
+            ],
             "control": {
                 "kind": "storage_buffer",
                 "byte_count": 8,

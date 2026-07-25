@@ -67,6 +67,8 @@ def test_compiler_target_preserves_dtype_supported_by_any_gpu() -> None:
     assert not target.supports_native_dtype("Q8_0")
     assert target.devices[0].max_compute_work_group_invocations == 1024
     assert target.devices[0].max_compute_work_group_size_x == 1024
+    assert target.devices[0].subgroup_size == 32
+    assert target.to_json()["devices"][0]["subgroup_size"] == 32
     assert (
         target.to_json()["devices"][0]["max_compute_work_group_invocations"]
         == 1024

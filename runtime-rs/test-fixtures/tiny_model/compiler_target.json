@@ -11,6 +11,7 @@
       "shader_features": [
         "shader_bfloat16_type"
       ],
+      "subgroup_size": 64,
       "max_compute_work_group_invocations": 1024,
       "max_compute_work_group_size_x": 1024,
       "cooperative_bfloat16_shapes": [],

@@ -1,7 +1,7 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
-  "package_id": "model_adc752f6_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:e186d37688e68e4c55eca54002a5ed8ff0d13bb705ff361bb57de640f2cf3275",
+  "package_id": "model_9aec2224_vulkan_resident",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v1:86c32d7f5d77f0b131a996655af9a5844f2158a76f25516b2c83bf9881bb5841",
   "compiler_target": {
     "schema": "nerve.compiler_target.v1",
     "devices": [
@@ -15,6 +15,7 @@
         "shader_features": [
           "shader_bfloat16_type"
         ],
+        "subgroup_size": 64,
         "max_compute_work_group_invocations": 1024,
         "max_compute_work_group_size_x": 1024,
         "cooperative_bfloat16_shapes": [],
@@ -2847,8 +2848,8 @@
         "sha256": "96723c949cf71070a2ab741fbfab5119868dc656249b76357b38611258a4319a"
       },
       "compiler_target.json": {
-        "byte_count": 519,
-        "sha256": "757ace81def7a7b5b1c47a9fc2634f0022a0d09d5e1f0efd826dd9276970960c"
+        "byte_count": 546,
+        "sha256": "e3939d209ef07b9cce504df4559b15e8cf1b963ef3a850db8b1699f316e67a95"
       },
       "config.json": {
         "byte_count": 1080,
@@ -3120,7 +3121,7 @@
       },
       "transpiled/model.json": {
         "byte_count": 3694,
-        "sha256": "dc4222205896b7379f787e7b69af0b3449c20be18d909bc70f42b4329b3731ef"
+        "sha256": "39211d156e5c1356225a8a41b38ffb452468d012579ceec2a3f210a5ef9c3640"
       },
       "transpiled/tensors.json": {
         "byte_count": 7272,

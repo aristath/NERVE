@@ -264,6 +264,56 @@ mod tests {
             128 * 16 * 4 * 2
         );
 
+        let mut prequant = prepared.clone();
+        for descriptor in &mut prequant.dispatches[0].descriptors {
+            if descriptor.binding >= 1 {
+                descriptor.binding += 1;
+            }
+        }
+        prequant.dispatches[0].descriptors.insert(
+            1,
+            VulkanResolvedDescriptorBinding {
+                binding: 1,
+                usage: VulkanKernelDescriptorUsage::InputSignal,
+                name: "input-scale".to_string(),
+                resource: VulkanDescriptorResourceAddress::ActivationSlot {
+                    component_id: "moe".to_string(),
+                    signal_id: "input-scale".to_string(),
+                    slot: 3,
+                    byte_capacity: 64,
+                    signal_byte_capacity: 64,
+                },
+            },
+        );
+        prequant.total_descriptor_count = 6;
+        let prequant_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prequant)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("moe", &["owner", "helper"]),
+            256,
+        )
+        .unwrap();
+        let prequant_dispatch = &prequant_plan.dispatches[0];
+        assert_eq!(prequant_dispatch.input_activation.binding, 0);
+        assert_eq!(
+            prequant_dispatch
+                .auxiliary_input_activations
+                .iter()
+                .map(|activation| activation.binding)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(prequant_dispatch.output_activation.binding, 3);
+        assert_eq!(
+            prequant_dispatch.shards[0]
+                .parameters
+                .iter()
+                .map(|parameter| parameter.binding)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+
         prepared.dispatches[0].push_constants.clear();
         let legacy_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],

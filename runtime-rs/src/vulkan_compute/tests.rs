@@ -727,6 +727,165 @@ mod tests {
     }
 
     #[test]
+    fn sparse_moe_prequant_gate_matches_internal_quantization_byte_for_byte() {
+        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+            eprintln!("skipping sparse MoE prequant equivalence: explicit Vulkan device index unset");
+            return;
+        };
+        let device_index = raw_device_index
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let shader_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
+        let render = |template_name: &str, replacements: &[(&str, &str)]| {
+            let mut source =
+                std::fs::read_to_string(shader_dir.join(template_name)).unwrap();
+            for (pattern, value) in replacements {
+                source = source.replace(pattern, value);
+            }
+            let source_path = std::env::temp_dir().join(format!(
+                "nerve-test-{}-{}.comp",
+                template_name.replace(['/', '.'], "-"),
+                std::process::id()
+            ));
+            std::fs::write(&source_path, source).unwrap();
+            let words = compile_shader_words_from_source_path(&source_path)
+                .unwrap_or_else(|| panic!("{template_name} must compile"));
+            let _ = std::fs::remove_file(source_path);
+            words
+        };
+        let quantize_words = render(
+            "quantize_fp8_e4m3.comp.template",
+            &[("{{BLOCK_COLUMNS}}", "128"), ("{{ELEMENT_COUNT}}", "128")],
+        );
+        let gate_shape = [
+            ("{{BLOCK_ROWS}}", "128"),
+            ("{{BLOCK_COLUMNS}}", "128"),
+            ("{{HIDDEN_SIZE}}", "128"),
+            ("{{INTERMEDIATE_SIZE}}", "64"),
+            ("{{NUM_EXPERTS}}", "1"),
+            ("{{EXPERTS_PER_TOKEN}}", "1"),
+        ];
+        let mut legacy_shape = gate_shape.to_vec();
+        legacy_shape.extend([
+            ("{{LOCAL_SIZE_X}}", "512"),
+            ("{{TILE_ROWS}}", "32"),
+        ]);
+        let legacy_words = render(
+            "sparse_moe_gate_up_fp8_e4m3.comp.template",
+            &legacy_shape,
+        );
+        let mut prequant_shape = gate_shape.to_vec();
+        prequant_shape.push(("{{TILE_ROWS}}", "4"));
+        let prequant_words = render(
+            "sparse_moe_gate_up_prequant_fp8_e4m3.comp.template",
+            &prequant_shape,
+        );
+
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let hidden_values = (0..128)
+            .map(|index| {
+                let value = ((index as i32 % 19) - 9) as f32 * 0.125;
+                f32_to_bf16_bits(value)
+            })
+            .collect::<Vec<_>>();
+        let hidden = device.create_resident_buffer(256).unwrap();
+        hidden.write_bytes(&u16_bytes(&hidden_values)).unwrap();
+        let quantized = device.create_resident_buffer(128).unwrap();
+        quantized.write_bytes(&[0; 128]).unwrap();
+        let activation_scale = device.create_resident_buffer(4).unwrap();
+        activation_scale.write_bytes(&[0; 4]).unwrap();
+        let routes = device.create_resident_buffer(4).unwrap();
+        routes.write_bytes(&u32_bytes(&[0])).unwrap();
+        let weights = device.create_resident_buffer(16_384).unwrap();
+        weights
+            .write_bytes(&u32_bytes(&vec![0x3030_3030; 4_096]))
+            .unwrap();
+        let weight_scale = device.create_resident_buffer(4).unwrap();
+        weight_scale
+            .write_bytes(&u16_bytes(&[f32_to_bf16_bits(0.03125), 0]))
+            .unwrap();
+        let legacy_output = device.create_resident_buffer(128).unwrap();
+        legacy_output.write_bytes(&[0; 128]).unwrap();
+        let prequant_output = device.create_resident_buffer(128).unwrap();
+        prequant_output.write_bytes(&[0; 128]).unwrap();
+
+        let quantize = device
+            .create_resident_kernel_dispatch(
+                &quantize_words,
+                &[
+                    VulkanResidentKernelBufferBinding::new(0, &hidden, 256)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(1, &quantized, 128)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(2, &activation_scale, 4)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                ],
+                1,
+                32,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&quantize, &[])
+            .unwrap();
+
+        let legacy = device
+            .create_resident_kernel_dispatch(
+                &legacy_words,
+                &[
+                    VulkanResidentKernelBufferBinding::new(0, &hidden, 256)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(1, &routes, 4)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(2, &legacy_output, 128)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(3, &weights, 16_384)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(4, &weight_scale, 4)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                ],
+                2,
+                512,
+                4,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&legacy, &0u32.to_le_bytes())
+            .unwrap();
+
+        let prequant = device
+            .create_resident_kernel_dispatch(
+                &prequant_words,
+                &[
+                    VulkanResidentKernelBufferBinding::new(0, &quantized, 128)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(1, &activation_scale, 4)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(2, &routes, 4)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(3, &prequant_output, 128)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(4, &weights, 16_384)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(5, &weight_scale, 4)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                ],
+                16,
+                64,
+                4,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&prequant, &0u32.to_le_bytes())
+            .unwrap();
+
+        assert_eq!(
+            prequant_output.read_bytes(128).unwrap(),
+            legacy_output.read_bytes(128).unwrap()
+        );
+    }
+
+    #[test]
     fn sparse_moe_route_compaction_groups_selected_routes_on_device() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!("skipping sparse MoE route compaction: explicit Vulkan device index unset");
@@ -1038,9 +1197,55 @@ mod tests {
             owner.wait_resident_kernel_sequence(&owner_last).unwrap();
         }
 
+        let owner_ready_batch = VulkanResidentQueueSubmissionBatch::new();
+        owner_ready_batch
+            .enqueue_recorded_sequence(
+                &owner,
+                &owner_first,
+                &[],
+                &[VulkanTimelineSemaphorePoint::new(&ready_source, 1)],
+                false,
+            )
+            .unwrap();
+        let owner_ready_template = owner_ready_batch.mount().unwrap();
+        let owner_done_batch = VulkanResidentQueueSubmissionBatch::new();
+        owner_done_batch
+            .enqueue_recorded_sequence(
+                &owner,
+                &owner_last,
+                &[VulkanTimelineSemaphorePoint::new(&done_wait, 1)],
+                &[],
+                true,
+            )
+            .unwrap();
+        let owner_done_template = owner_done_batch.mount().unwrap();
+        for dependency_value in 3..=4 {
+            let timeline_value_offset = dependency_value - 1;
+            owner_ready_template
+                .submit_with_timeline_value_offset(timeline_value_offset)
+                .unwrap();
+            worker
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    &worker_sequence,
+                    &[VulkanTimelineSemaphorePoint::new(
+                        &ready_wait,
+                        dependency_value,
+                    )],
+                    &[VulkanTimelineSemaphorePoint::new(
+                        &done_source,
+                        dependency_value,
+                    )],
+                )
+                .unwrap();
+            owner_done_template
+                .submit_with_timeline_value_offset(timeline_value_offset)
+                .unwrap();
+            owner.wait_resident_kernel_sequence(&owner_last).unwrap();
+        }
+
         assert_eq!(
             bytes_to_u32(&owner_buffer.read_bytes(12).unwrap()),
-            vec![7, 8, 47]
+            vec![13, 14, 53]
         );
     }
 

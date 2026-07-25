@@ -1,5 +1,8 @@
 from model_package_layout_common import *
+from nerve.model_package_batching import sparse_moe_route_compaction_shader_file
+from nerve.model_package_shader_selection import local_size_x_for_shader_file
 from nerve.model_package_shader_compiler import compile_shader_artifacts
+from nerve.model_package_tensors import fp8_prequantization_spec
 
 def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
@@ -67,6 +70,85 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     )
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / "moe_route_compact_batch1_i512_k8.spv").is_file()
+
+
+def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
+    circuit = {
+        "parameters": {
+            "refs": {
+                "moe_input": {"tensor": "experts.gate_up"},
+                "moe_input_scale_inv": {"tensor": "experts.gate_up_scale"},
+            }
+        }
+    }
+    node = {
+        "id": "sparse_moe_gate_up",
+        "op": "sparse_moe_gate_up",
+        "inputs": ["normalized_fp8", "normalized_scale", "routes"],
+        "outputs": ["expert_intermediates"],
+        "params": ["moe_input", "moe_input_scale_inv"],
+        "attrs": {
+            "hidden_size": 2048,
+            "intermediate_size": 512,
+            "num_experts": 256,
+            "experts_per_token": 8,
+            "physical_input_contract": (
+                "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+            ),
+        },
+    }
+    tensor_index = {
+        "tensors": {
+            "experts.gate_up": {
+                "dtype": "F8_E4M3",
+                "shape": [256, 1024, 2048],
+                "layout": "row_major",
+            },
+            "experts.gate_up_scale": {
+                "dtype": "BF16",
+                "shape": [256, 8, 16],
+                "layout": "row_major",
+            },
+        }
+    }
+    expected = (
+        "sparse_moe_gate_up_prequant_fp8_e4m3_"
+        "b128x128_h2048_i512_e256_k8.comp"
+    )
+
+    assert fp8_prequantization_spec(circuit, node, tensor_index) == {
+        "input_size": 2048,
+        "block_rows": 128,
+        "block_columns": 128,
+    }
+    assert shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 2048, "intermediate_size": 512},
+    ) == expected
+    assert workgroup_count_x_for_node(circuit, node, tensor_index) == 1024
+    assert local_size_x_for_shader_file(expected, node) == 64
+    assert frame_parallel_batch_shader_file(expected) == expected.replace(
+        "_prequant_", "_batch1_prequant_", 1
+    )
+    assert sparse_moe_route_compaction_shader_file(expected) == (
+        "moe_route_compact_batch1_i512_k8.comp"
+    )
+    kernel = component_kernel_spec(
+        execution_index=0,
+        node=node,
+        circuit=circuit,
+        shader_file=expected,
+        local_size_x=64,
+        workgroup_count_x=1024,
+    )
+    assert kernel["batch_implementations"][0]["stages"][0][
+        "descriptor_bindings"
+    ] == [
+        {"binding": 1, "source_binding": 2},
+        {"binding": 2, "source_binding": 3},
+    ]
 
 
 def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> None:
