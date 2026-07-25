@@ -15,8 +15,7 @@ fn create_distributed_resident_dispatch(
     let input = activation_buffers
         .activation_buffer(
             &planned_dispatch.owner_device_id,
-            &planned_dispatch.input_activation.component_id,
-            planned_dispatch.input_activation.slot,
+            &planned_dispatch.input_activation,
             &planned_shard.device_id,
         )
         .ok_or_else(|| {
@@ -28,8 +27,7 @@ fn create_distributed_resident_dispatch(
     let output = activation_buffers
         .activation_buffer(
             &planned_dispatch.owner_device_id,
-            &planned_dispatch.output_activation.component_id,
-            planned_dispatch.output_activation.slot,
+            &planned_dispatch.output_activation,
             &planned_shard.device_id,
         )
         .ok_or_else(|| {
@@ -49,16 +47,32 @@ fn create_distributed_resident_dispatch(
                 )
             })?,
             input,
-            planned_dispatch.input_byte_capacity,
+            planned_shard.input_range.byte_count,
         )
+        .with_byte_offset(planned_shard.input_range.byte_offset)
         .with_access(VulkanResidentKernelBufferAccess::Read),
     );
-    for auxiliary in &planned_dispatch.auxiliary_input_activations {
+    if planned_shard.auxiliary_input_ranges.len()
+        != planned_dispatch.auxiliary_input_activations.len()
+    {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed dispatch {}.{} has {} auxiliary ranges for {} auxiliary inputs on {:?}",
+            planned_dispatch.component_id,
+            planned_dispatch.node_id,
+            planned_shard.auxiliary_input_ranges.len(),
+            planned_dispatch.auxiliary_input_activations.len(),
+            planned_shard.device_id,
+        )));
+    }
+    for (auxiliary, range) in planned_dispatch
+        .auxiliary_input_activations
+        .iter()
+        .zip(&planned_shard.auxiliary_input_ranges)
+    {
         let buffer = activation_buffers
             .activation_buffer(
                 &planned_dispatch.owner_device_id,
-                &auxiliary.component_id,
-                auxiliary.slot,
+                auxiliary,
                 &planned_shard.device_id,
             )
             .ok_or_else(|| {
@@ -78,8 +92,9 @@ fn create_distributed_resident_dispatch(
                     )
                 })?,
                 buffer,
-                auxiliary.signal_byte_capacity,
+                range.byte_count,
             )
+            .with_byte_offset(range.byte_offset)
             .with_access(VulkanResidentKernelBufferAccess::Read),
         );
     }

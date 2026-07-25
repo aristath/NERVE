@@ -73,7 +73,7 @@ impl VulkanPlacedEdgeIoBuffers {
 pub struct VulkanPlacedLocalEdgeBufferAllocation {
     pub edge: VulkanPlacedLocalEdge,
     pub byte_capacity: usize,
-    pub buffer: VulkanResidentBuffer,
+    pub buffer: Arc<VulkanResidentBuffer>,
 }
 
 pub struct VulkanPlacedEdgeBufferAllocation {
@@ -84,6 +84,11 @@ pub struct VulkanPlacedEdgeBufferAllocation {
 
 pub struct VulkanPlacedEdgeEndpointBufferOverride {
     pub direction: VulkanPlacedEdgeDirection,
+    pub edge_index: usize,
+    pub buffer: Arc<VulkanResidentBuffer>,
+}
+
+pub struct VulkanPlacedLocalEdgeBufferOverride {
     pub edge_index: usize,
     pub buffer: Arc<VulkanResidentBuffer>,
 }

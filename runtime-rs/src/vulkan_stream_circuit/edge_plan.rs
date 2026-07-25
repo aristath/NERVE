@@ -125,11 +125,63 @@ impl VulkanPlacedEdgeIoPlan {
         device: &VulkanComputeDevice,
         endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
     ) -> Result<VulkanPlacedEdgeIoBuffers, VulkanError> {
+        self.allocate_buffers_with_overrides(device, &[], endpoint_overrides)
+    }
+
+    pub fn allocate_buffers_with_overrides(
+        &self,
+        device: &VulkanComputeDevice,
+        local_overrides: &[VulkanPlacedLocalEdgeBufferOverride],
+        endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
+    ) -> Result<VulkanPlacedEdgeIoBuffers, VulkanError> {
         let mut local_buffers = Vec::with_capacity(self.local_edge_count);
         let mut incoming_buffers = Vec::with_capacity(self.incoming_endpoint_count);
         let mut outgoing_buffers = Vec::with_capacity(self.outgoing_endpoint_count);
         let mut total_byte_capacity = 0usize;
         let mut overrides = BTreeMap::new();
+        let mut local_override_by_edge = BTreeMap::new();
+
+        for local_override in local_overrides {
+            if local_override_by_edge
+                .insert(local_override.edge_index, local_override)
+                .is_some()
+            {
+                return Err(VulkanError(format!(
+                    "local edge buffer override repeats edge {} on {:?}",
+                    local_override.edge_index, self.device_id
+                )));
+            }
+            if !device.owns_resident_buffer(&local_override.buffer) {
+                return Err(VulkanError(format!(
+                    "local edge buffer override for edge {} on {:?} belongs to a different Vulkan logical device",
+                    local_override.edge_index, self.device_id
+                )));
+            }
+            let edge = self
+                .local_edges
+                .iter()
+                .find(|edge| edge.edge_index == local_override.edge_index)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "local edge buffer override does not address edge {} on {:?}",
+                        local_override.edge_index, self.device_id
+                    ))
+                })?;
+            let required_byte_capacity = edge.byte_capacity.ok_or_else(|| {
+                VulkanError(format!(
+                    "{} local edge {} has unknown byte capacity",
+                    self.device_id, edge.edge_index
+                ))
+            })?;
+            if local_override.buffer.byte_capacity() < required_byte_capacity {
+                return Err(VulkanError(format!(
+                    "local edge buffer override for edge {} on {:?} has {} bytes, needs {required_byte_capacity}",
+                    local_override.edge_index,
+                    self.device_id,
+                    local_override.buffer.byte_capacity()
+                )));
+            }
+        }
 
         for endpoint_override in endpoint_overrides {
             let key = (endpoint_override.direction, endpoint_override.edge_index);
@@ -184,7 +236,13 @@ impl VulkanPlacedEdgeIoPlan {
             local_buffers.push(VulkanPlacedLocalEdgeBufferAllocation {
                 edge: edge.clone(),
                 byte_capacity,
-                buffer: device.create_resident_buffer(byte_capacity)?,
+                buffer: if let Some(local_override) =
+                    local_override_by_edge.get(&edge.edge_index)
+                {
+                    Arc::clone(&local_override.buffer)
+                } else {
+                    Arc::new(device.create_resident_buffer(byte_capacity)?)
+                },
             });
         }
 
@@ -453,4 +511,3 @@ fn edge_byte_capacity(
         None => Ok(None),
     }
 }
-

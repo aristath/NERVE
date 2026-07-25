@@ -217,6 +217,29 @@ impl VulkanMountedPlacedStreamCircuit {
         edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
         stream_control_override: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Self, VulkanStreamCircuitMountError> {
+        Self::from_placed_plan_with_parameter_buffers_and_all_buffer_overrides(
+            device,
+            placed_plan,
+            dynamic_state_capacity_activations,
+            parameter_buffers,
+            activation_overrides,
+            &[],
+            edge_endpoint_overrides,
+            stream_control_override,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_placed_plan_with_parameter_buffers_and_all_buffer_overrides(
+        device: &VulkanComputeDevice,
+        placed_plan: VulkanPlacedStreamCircuitPlan,
+        dynamic_state_capacity_activations: usize,
+        parameter_buffers: Arc<VulkanPermanentParameterBuffers>,
+        activation_overrides: &[VulkanActivationSlotBufferOverride],
+        local_edge_overrides: &[VulkanPlacedLocalEdgeBufferOverride],
+        edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
+        stream_control_override: Option<Arc<VulkanResidentBuffer>>,
+    ) -> Result<Self, VulkanStreamCircuitMountError> {
         let buffers = placed_plan
             .placed_resident_plan
             .resident_plan
@@ -229,8 +252,11 @@ impl VulkanMountedPlacedStreamCircuit {
         let boundary_io = boundary_io_plan.allocate_buffers(device)?;
         let edge_io_plan =
             VulkanPlacedEdgeIoPlan::from_placed_resident_plan(&placed_plan.placed_resident_plan)?;
-        let edge_io = edge_io_plan
-            .allocate_buffers_with_endpoint_overrides(device, edge_endpoint_overrides)?;
+        let edge_io = edge_io_plan.allocate_buffers_with_overrides(
+            device,
+            local_edge_overrides,
+            edge_endpoint_overrides,
+        )?;
         let stream_control_buffer = if let Some(stream_control_buffer) = stream_control_override {
             if !device.owns_resident_buffer(&stream_control_buffer) {
                 return Err(VulkanStreamCircuitMountError::Vulkan(VulkanError(
@@ -555,7 +581,7 @@ impl VulkanMountedPlacedStreamCircuit {
                             buffer_index: edge.buffer_index,
                         }
                     })?;
-                (&allocation.buffer, edge.byte_capacity)
+                (allocation.buffer.as_ref(), edge.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { endpoint } => {
                 let allocation = self
@@ -682,4 +708,3 @@ impl VulkanMountedPlacedStreamCircuit {
         }
     }
 }
-

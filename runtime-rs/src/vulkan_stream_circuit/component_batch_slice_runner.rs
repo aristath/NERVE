@@ -186,10 +186,10 @@ impl VulkanResidentComponentBatchSliceRunner {
                 ) {
                     continue;
                 }
-                let key = VulkanComponentBatchSignalKey::Activation {
-                    component_id: activation.component_id.clone(),
-                    signal_id: activation.signal_id.clone(),
-                };
+                let key = distributed_component_batch_signal_key(
+                    activation,
+                    &signal_buffer_indices,
+                )?;
                 let buffer_index = *signal_buffer_indices.get(&key).ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
                         "distributed component batch has no signal buffer for {key:?}"

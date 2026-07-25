@@ -853,6 +853,7 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
 
 fn create_placed_device_links<'a, F>(
     device_slices: &[Arc<VulkanResidentModelPackageDeviceSlice>],
+    distributed_activation_buffers: &VulkanDistributedActivationBuffers,
     device_for: &F,
 ) -> Result<VulkanPlacedDeviceLinks, VulkanResidentInProcessPlacedRuntimeError>
 where
@@ -890,7 +891,47 @@ where
             source_device.supports_opaque_fd_timeline_semaphores()
                 && destination_device.supports_opaque_fd_timeline_semaphores();
         let mut resident_transfer = None;
-        let edge_buffers = if devices_share_queue {
+        let edge_buffers = if let Some(distributed) =
+            distributed_activation_buffers.edge_allocation(outgoing.edge_index)
+        {
+            if !devices_share_queue && !supports_cross_queue_timeline {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "distributed activation edge {} requires cross-queue timeline semaphore support",
+                        outgoing.edge_index
+                    )),
+                ));
+            }
+            let outgoing_buffer = distributed
+                .device_buffers
+                .get(&outgoing.local_device_id)
+                .cloned()
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "distributed activation edge {} is not imported on source {:?}",
+                        outgoing.edge_index, outgoing.local_device_id
+                    )))
+                })?;
+            let incoming_buffer = distributed
+                .device_buffers
+                .get(&incoming.local_device_id)
+                .cloned()
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "distributed activation edge {} is not imported on destination {:?}",
+                        incoming.edge_index, incoming.local_device_id
+                    )))
+                })?;
+            resident_transfer = (!devices_share_queue).then_some(match distributed.route {
+                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                }
+                VulkanSharedResidentBufferRoute::SharedHost => {
+                    VulkanPlacedEdgeTransferRoute::SharedHost
+                }
+            });
+            (outgoing_buffer, incoming_buffer, true)
+        } else if devices_share_queue {
                 let buffer = Arc::new(
                     source_device
                         .create_resident_buffer(outgoing_byte_capacity)

@@ -64,6 +64,53 @@ impl VulkanComputeDevice {
         )
     }
 
+    pub fn submit_timeline_semaphore_bridge(
+        &self,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+    ) -> Result<(), VulkanError> {
+        if wait_points.is_empty() && signal_points.is_empty() {
+            return Err(VulkanError(
+                "timeline semaphore bridge has no wait or signal points".to_string(),
+            ));
+        }
+        for point in wait_points.iter().chain(signal_points) {
+            self.validate_local_timeline_semaphore(point.semaphore)?;
+        }
+        let wait_infos = wait_points
+            .iter()
+            .map(|point| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(point.semaphore.semaphore)
+                    .value(point.value)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            })
+            .collect::<Vec<_>>();
+        let signal_infos = signal_points
+            .iter()
+            .map(|point| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(point.semaphore.semaphore)
+                    .value(point.value)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            })
+            .collect::<Vec<_>>();
+        unsafe {
+            let submit_info = [vk::SubmitInfo2::default()
+                .wait_semaphore_infos(&wait_infos)
+                .signal_semaphore_infos(&signal_infos)];
+            self.device
+                .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to submit timeline semaphore bridge: {error:?}"
+                    ))
+                })?;
+        }
+        RESIDENT_SEQUENCE_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn submit_resident_kernel_sequence_and_wait(
         &self,
         sequence: &VulkanResidentKernelSequence,
@@ -179,14 +226,18 @@ impl VulkanResidentQueueSubmitter {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let command_infos =
-            submissions
-                .iter()
-                .map(|submission| {
-                    [vk::CommandBufferSubmitInfo::default()
-                        .command_buffer(submission.command_buffer)]
-                })
-                .collect::<Vec<_>>();
+        let command_infos = submissions
+            .iter()
+            .map(|submission| {
+                submission
+                    .command_buffer
+                    .into_iter()
+                    .map(|command_buffer| {
+                        vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         let signal_infos = submissions
             .iter()
             .map(|submission| {

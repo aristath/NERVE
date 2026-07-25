@@ -5,6 +5,7 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use crate::stream_plan::{TensorIndex, TensorMetadata};
+use crate::stream_circuit::ComponentEdgePlacement;
 use crate::tensor_storage::{TensorStorage, TensorStorageRange};
 use crate::vulkan_compute::{
     VulkanComputeDevice, VulkanError, VulkanResidentBuffer, VulkanResidentKernelBufferAccess,
@@ -22,6 +23,7 @@ use crate::vulkan_stream_circuit::{
 };
 
 const DISTRIBUTABLE_PARALLEL_PROJECTION_OP: &str = "parallel_linear_silu_multiply";
+const DISTRIBUTABLE_RESIDUAL_PROJECTION_OP: &str = "linear_residual";
 const DISTRIBUTABLE_SPARSE_EXPERT_OPS: [&str; 2] = ["sparse_moe_gate_up", "sparse_moe_down"];
 const BF16_BYTE_COUNT: usize = 2;
 
@@ -51,6 +53,7 @@ impl VulkanDistributedExecutionPlan {
         tensor_index: &TensorIndex,
         artifact_manifest: &VulkanReusableKernelArtifactManifest,
         component_device_pools: &BTreeMap<String, Vec<String>>,
+        edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
     ) -> Result<Self, VulkanDistributedPlanError> {
         if storage_buffer_offset_alignment == 0
@@ -97,6 +100,7 @@ impl VulkanDistributedExecutionPlan {
                     )));
                 }
                 if dispatch.op != DISTRIBUTABLE_PARALLEL_PROJECTION_OP
+                    && dispatch.op != DISTRIBUTABLE_RESIDUAL_PROJECTION_OP
                     && !DISTRIBUTABLE_SPARSE_EXPERT_OPS.contains(&dispatch.op.as_str())
                 {
                     continue;
@@ -116,6 +120,7 @@ impl VulkanDistributedExecutionPlan {
                     dispatch,
                     tensor_index,
                     component_devices,
+                    edge_placements,
                     artifact.workgroup_count_x,
                     storage_buffer_offset_alignment,
                 )?
@@ -245,6 +250,7 @@ fn same_distributed_activation(
         && left.slot == right.slot
         && left.byte_capacity == right.byte_capacity
         && left.signal_byte_capacity == right.signal_byte_capacity
+        && left.storage == right.storage
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,6 +287,16 @@ pub struct VulkanDistributedActivationSlot {
     pub slot: usize,
     pub byte_capacity: usize,
     pub signal_byte_capacity: usize,
+    pub storage: VulkanDistributedActivationStorage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanDistributedActivationStorage {
+    ActivationSlot,
+    Edge {
+        edge_index: usize,
+        owner_device_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,15 +420,32 @@ impl VulkanDistributedActivationBufferPlan {
         slot: usize,
     ) -> Option<&VulkanDistributedActivationBufferAllocation> {
         self.allocations.iter().find(|allocation| {
-            allocation.owner_device_id == owner_device_id
+            allocation.storage == VulkanDistributedActivationStorage::ActivationSlot
+                && allocation.owner_device_id == owner_device_id
                 && allocation.component_id == component_id
                 && allocation.slot == slot
+        })
+    }
+
+    pub fn edge_allocation(
+        &self,
+        edge_index: usize,
+    ) -> Option<&VulkanDistributedActivationBufferAllocation> {
+        self.allocations.iter().find(|allocation| {
+            matches!(
+                allocation.storage,
+                VulkanDistributedActivationStorage::Edge {
+                    edge_index: candidate,
+                    ..
+                } if candidate == edge_index
+            )
         })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanDistributedActivationBufferAllocation {
+    pub storage: VulkanDistributedActivationStorage,
     pub owner_device_id: String,
     pub component_id: String,
     pub slot: usize,
@@ -550,17 +583,15 @@ impl VulkanDistributedActivationBuffers {
 
     pub fn activation_buffer(
         &self,
-        owner_device_id: &str,
-        component_id: &str,
-        slot: usize,
+        dispatch_owner_device_id: &str,
+        activation: &VulkanDistributedActivationSlot,
         device_id: &str,
     ) -> Option<&Arc<VulkanResidentBuffer>> {
+        let key = distributed_activation_allocation_key(dispatch_owner_device_id, activation);
         self.allocations
             .iter()
             .find(|allocation| {
-                allocation.planned.owner_device_id == owner_device_id
-                    && allocation.planned.component_id == component_id
-                    && allocation.planned.slot == slot
+                distributed_activation_buffer_allocation_key(&allocation.planned) == key
             })
             .and_then(|allocation| allocation.device_buffers.get(device_id))
     }
@@ -571,7 +602,11 @@ impl VulkanDistributedActivationBuffers {
     ) -> Vec<VulkanActivationSlotBufferOverride> {
         self.allocations
             .iter()
-            .filter(|allocation| allocation.planned.owner_device_id == owner_device_id)
+            .filter(|allocation| {
+                allocation.planned.storage
+                    == VulkanDistributedActivationStorage::ActivationSlot
+                    && allocation.planned.owner_device_id == owner_device_id
+            })
             .filter_map(|allocation| {
                 allocation
                     .device_buffers
@@ -583,6 +618,30 @@ impl VulkanDistributedActivationBuffers {
                     })
             })
             .collect()
+    }
+
+    pub fn edge_buffer(
+        &self,
+        edge_index: usize,
+        device_id: &str,
+    ) -> Option<&Arc<VulkanResidentBuffer>> {
+        self.edge_allocation(edge_index)
+            .and_then(|allocation| allocation.device_buffers.get(device_id))
+    }
+
+    pub(crate) fn edge_allocation(
+        &self,
+        edge_index: usize,
+    ) -> Option<&VulkanDistributedActivationBuffer> {
+        self.allocations.iter().find(|allocation| {
+            matches!(
+                allocation.planned.storage,
+                VulkanDistributedActivationStorage::Edge {
+                    edge_index: candidate,
+                    ..
+                } if candidate == edge_index
+            )
+        })
     }
 }
 
@@ -605,10 +664,59 @@ impl Display for VulkanDistributedActivationBufferError {
 impl Error for VulkanDistributedActivationBufferError {}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct VulkanDistributedActivationBufferAllocationKey {
-    owner_device_id: String,
-    component_id: String,
-    slot: usize,
+enum VulkanDistributedActivationBufferAllocationKey {
+    ActivationSlot {
+        owner_device_id: String,
+        component_id: String,
+        slot: usize,
+    },
+    Edge {
+        edge_index: usize,
+        owner_device_id: String,
+    },
+}
+
+fn distributed_activation_allocation_key(
+    dispatch_owner_device_id: &str,
+    activation: &VulkanDistributedActivationSlot,
+) -> VulkanDistributedActivationBufferAllocationKey {
+    match &activation.storage {
+        VulkanDistributedActivationStorage::ActivationSlot => {
+            VulkanDistributedActivationBufferAllocationKey::ActivationSlot {
+                owner_device_id: dispatch_owner_device_id.to_string(),
+                component_id: activation.component_id.clone(),
+                slot: activation.slot,
+            }
+        }
+        VulkanDistributedActivationStorage::Edge {
+            edge_index,
+            owner_device_id,
+        } => VulkanDistributedActivationBufferAllocationKey::Edge {
+            edge_index: *edge_index,
+            owner_device_id: owner_device_id.clone(),
+        },
+    }
+}
+
+fn distributed_activation_buffer_allocation_key(
+    allocation: &VulkanDistributedActivationBufferAllocation,
+) -> VulkanDistributedActivationBufferAllocationKey {
+    match &allocation.storage {
+        VulkanDistributedActivationStorage::ActivationSlot => {
+            VulkanDistributedActivationBufferAllocationKey::ActivationSlot {
+                owner_device_id: allocation.owner_device_id.clone(),
+                component_id: allocation.component_id.clone(),
+                slot: allocation.slot,
+            }
+        }
+        VulkanDistributedActivationStorage::Edge {
+            edge_index,
+            owner_device_id,
+        } => VulkanDistributedActivationBufferAllocationKey::Edge {
+            edge_index: *edge_index,
+            owner_device_id: owner_device_id.clone(),
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -624,9 +732,17 @@ pub struct VulkanDistributedDispatchShard {
     pub row_count: usize,
     pub workgroup_count_x: u32,
     pub base_workgroup_z: u32,
+    pub input_range: VulkanDistributedActivationRange,
+    pub auxiliary_input_ranges: Vec<VulkanDistributedActivationRange>,
     pub output_byte_offset: usize,
     pub output_byte_count: usize,
     pub parameters: Vec<VulkanDistributedParameterFragment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedActivationRange {
+    pub byte_offset: usize,
+    pub byte_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

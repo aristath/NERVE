@@ -63,7 +63,8 @@ use crate::vulkan_compute::{
 };
 use crate::vulkan_distributed::{
     VulkanDistributedActivationBufferPlan, VulkanDistributedActivationBuffers,
-    VulkanDistributedActivationSlot, VulkanDistributedDependencyClock,
+    VulkanDistributedActivationRange, VulkanDistributedActivationSlot,
+    VulkanDistributedActivationStorage, VulkanDistributedDependencyClock,
     VulkanDistributedDispatchDistribution, VulkanDistributedDispatchGroup,
     VulkanDistributedDispatchRunnerError, VulkanDistributedDispatchRunners,
     VulkanDistributedDispatchSubmission, VulkanDistributedExecutionPlan,

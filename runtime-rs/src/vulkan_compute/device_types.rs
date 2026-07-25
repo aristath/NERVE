@@ -450,7 +450,7 @@ impl VulkanTimelineValueTransform<'_> {
 }
 
 struct VulkanPreparedResidentQueueSubmission {
-    command_buffer: vk::CommandBuffer,
+    command_buffer: Option<vk::CommandBuffer>,
     wait_points: Vec<(vk::Semaphore, u64)>,
     signal_points: Vec<(vk::Semaphore, u64)>,
     completion_fence: vk::Fence,
@@ -505,6 +505,51 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
             signal_completion,
             None,
         )
+    }
+
+    pub fn enqueue_timeline_semaphore_bridge(
+        &self,
+        device: &'a VulkanComputeDevice,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+    ) -> Result<(), VulkanError> {
+        if wait_points.is_empty() && signal_points.is_empty() {
+            return Err(VulkanError(
+                "timeline semaphore bridge has no wait or signal points".to_string(),
+            ));
+        }
+        for point in wait_points.iter().chain(signal_points) {
+            device.validate_local_timeline_semaphore(point.semaphore)?;
+        }
+        let submission = VulkanPreparedResidentQueueSubmission {
+            command_buffer: None,
+            wait_points: wait_points
+                .iter()
+                .map(|point| (point.semaphore.semaphore, point.value))
+                .collect(),
+            signal_points: signal_points
+                .iter()
+                .map(|point| (point.semaphore.semaphore, point.value))
+                .collect(),
+            completion_fence: vk::Fence::null(),
+            signal_completion: false,
+            execution_region: None,
+        };
+        let mut groups = self.groups.borrow_mut();
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.device.shares_logical_device_with(device))
+        {
+            group.submissions.push(submission);
+        } else {
+            groups.push(VulkanResidentQueueSubmissionGroup {
+                device,
+                submissions: vec![submission],
+                quantum_ranges: Vec::new(),
+                quanta: Vec::new(),
+            });
+        }
+        Ok(())
     }
 
     pub fn enqueue_recorded_sequence_with_execution_region(
@@ -606,7 +651,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         execution_region: Option<RuntimeExecutionRegion>,
     ) -> Result<(), VulkanError> {
         let submission = VulkanPreparedResidentQueueSubmission {
-            command_buffer,
+            command_buffer: Some(command_buffer),
             wait_points: wait_points
                 .iter()
                 .map(|point| (point.semaphore.semaphore, point.value))

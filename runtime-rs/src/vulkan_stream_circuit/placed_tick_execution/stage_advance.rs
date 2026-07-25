@@ -126,7 +126,57 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             ),
                         );
                     }
+                    let completion_bridge = if dependencies.has_owner_continuation {
+                        None
+                    } else if let Some(VulkanMountedPlacedStreamTickStage::PublishEdge {
+                        edge_index,
+                        ..
+                    }) = slice.cursor.tick_plan.stages.get(
+                        slice
+                            .execution_plan
+                            .distributed_dispatch_group_at_stage(slice.cursor.next_stage_index)
+                            .expect("every distributed dispatch belongs to a stage group")
+                            .end_stage_index,
+                    ) {
+                        let outgoing = slice
+                            .mounted
+                            .edge_io
+                            .outgoing_buffer(*edge_index)
+                            .ok_or_else(|| {
+                                VulkanMountedPlacedResidentInProcessStreamTickError::StreamTick(
+                                    VulkanMountedPlacedResidentStreamTickError::Transport(
+                                        VulkanPlacedEdgeTransportError::MissingOutgoingEdge {
+                                            device_id: slice.device_id().to_string(),
+                                            edge_index: *edge_index,
+                                        },
+                                    ),
+                                )
+                            })?;
+                        let edge_key =
+                            VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
+                        if !transport.edge_uses_shared_storage(&edge_key) {
+                            None
+                        } else {
+                            let signal_point = edge_synchronizations
+                                .prepare_source_signal(&outgoing.endpoint)
+                                .map_err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                )?
+                                .ok_or_else(|| {
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
+                                        VulkanError(format!(
+                                            "distributed boundary edge {edge_key:?} has shared storage without queue synchronization"
+                                        )),
+                                    )
+                                })?;
+                            transport.record_queue_signal(&edge_key);
+                            Some(signal_point)
+                        }
+                    } else {
+                        None
+                    };
                     if !dependencies.has_owner_continuation
+                        && completion_bridge.is_none()
                         && (!submission_policy.signal_completion || submission_batch.is_some())
                     {
                         return Err(
@@ -154,7 +204,8 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         VulkanDistributedDispatchSubmission {
                             dependency_value,
                             consume_owner_ready_signal: consumes_ready,
-                            prepare_owner_continuation: dependencies.has_owner_continuation,
+                            prepare_owner_continuation: dependencies.has_owner_continuation
+                                || completion_bridge.is_some(),
                             signal_completion: submission_policy.signal_completion
                                 && submission_batch.is_none(),
                             use_feedback_indirect: submission_policy.feedback_lane.is_some(),
@@ -203,6 +254,38 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     if dependencies.has_owner_continuation {
                         completion_dependency =
                             Some((distributed.dispatch_index, dependency_value));
+                    } else if let Some(signal_point) = completion_bridge {
+                        let wait_points = distributed_runners
+                            .owner_completion_wait_points(
+                                slice.device_id(),
+                                distributed.dispatch_index,
+                                dependency_value,
+                            )
+                            .map_err(
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
+                            )?;
+                        let signal_points = [signal_point];
+                        if let Some(submission_batch) = submission_batch {
+                            submission_batch
+                                .enqueue_timeline_semaphore_bridge(
+                                    slice.device,
+                                    &wait_points,
+                                    &signal_points,
+                                )
+                                .map_err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                )?;
+                        } else {
+                            slice
+                                .device
+                                .submit_timeline_semaphore_bridge(
+                                    &wait_points,
+                                    &signal_points,
+                                )
+                                .map_err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                )?;
+                        }
                     } else {
                         distributed_runners
                             .wait_dispatch(

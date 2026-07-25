@@ -119,7 +119,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             manifest_dir,
             &runtime_model.package.tensor_index_path,
         );
-        let (tensor_index, resource_plan, _placement_plan, _boundary_placed_plan) =
+        let (tensor_index, resource_plan, placement_plan, _boundary_placed_plan) =
             plan_resident_package_placed_stream_circuit(
                 &input_device_id,
                 &runtime_model.placement,
@@ -258,6 +258,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &tensor_index,
             &distributed_artifact_manifest,
             &signal_processor_placement.component_shard_devices,
+            &placement_plan.edges,
             storage_buffer_offset_alignment,
         )
         .map_err(|error| {
@@ -550,16 +551,35 @@ impl VulkanResidentInProcessPlacedModelPackage {
             synchronizations: edge_synchronizations,
             stream_control_buffers,
             every_edge_is_resident_replayable,
-        } = create_placed_device_links(&self.device_slices, &device_for)?;
+        } = create_placed_device_links(
+            &self.device_slices,
+            &distributed_activation_buffers,
+            &device_for,
+        )?;
         let mut devices = Vec::with_capacity(self.device_slices.len());
         for package_slice in &self.device_slices {
             let device = device_for(&package_slice.device_id)?;
             let activation_overrides = distributed_activation_buffers
                 .activation_overrides_for_owner_device(&package_slice.device_id);
+            let local_edge_overrides = package_slice
+                .placed_plan
+                .placed_resident_plan
+                .local_edges
+                .iter()
+                .filter_map(|edge| {
+                    distributed_activation_buffers
+                        .edge_buffer(edge.edge_index, &package_slice.device_id)
+                        .map(|buffer| VulkanPlacedLocalEdgeBufferOverride {
+                            edge_index: edge.edge_index,
+                            buffer: Arc::clone(buffer),
+                        })
+                })
+                .collect::<Vec<_>>();
             let mounted = package_slice
-                .create_mounted_stream_circuit_with_buffer_overrides(
+                .create_mounted_stream_circuit_with_all_buffer_overrides(
                     device,
                     &activation_overrides,
+                    &local_edge_overrides,
                     shared_edge_endpoint_overrides
                         .get(&package_slice.device_id)
                         .map(Vec::as_slice)

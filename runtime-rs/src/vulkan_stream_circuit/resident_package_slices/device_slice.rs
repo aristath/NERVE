@@ -87,13 +87,31 @@ impl VulkanResidentModelPackageDeviceSlice {
         edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
         stream_control_override: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<VulkanMountedPlacedStreamCircuit, VulkanResidentTokenModelPackageError> {
+        self.create_mounted_stream_circuit_with_all_buffer_overrides(
+            device,
+            activation_overrides,
+            &[],
+            edge_endpoint_overrides,
+            stream_control_override,
+        )
+    }
+
+    pub fn create_mounted_stream_circuit_with_all_buffer_overrides(
+        &self,
+        device: &VulkanComputeDevice,
+        activation_overrides: &[VulkanActivationSlotBufferOverride],
+        local_edge_overrides: &[VulkanPlacedLocalEdgeBufferOverride],
+        edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
+        stream_control_override: Option<Arc<VulkanResidentBuffer>>,
+    ) -> Result<VulkanMountedPlacedStreamCircuit, VulkanResidentTokenModelPackageError> {
         VulkanMountedPlacedStreamCircuit::
-            from_placed_plan_with_parameter_buffers_and_buffer_overrides(
+            from_placed_plan_with_parameter_buffers_and_all_buffer_overrides(
             device,
             self.placed_plan.clone(),
             self.dynamic_state_capacity_activations,
             self.parameter_buffers.clone(),
             activation_overrides,
+            local_edge_overrides,
             edge_endpoint_overrides,
             stream_control_override,
         )

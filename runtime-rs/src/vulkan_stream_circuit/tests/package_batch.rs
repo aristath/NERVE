@@ -832,7 +832,8 @@ fn distributed_batch_group_retains_every_members_control_buffer_set() {
 #[test]
 fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
     use crate::vulkan_distributed::{
-        VulkanDistributedDispatchPlan, VulkanDistributedDispatchShard,
+        VulkanDistributedActivationRange, VulkanDistributedDispatchPlan,
+        VulkanDistributedDispatchShard,
     };
 
     let activation = |binding, signal_id: &str, slot| VulkanDistributedActivationSlot {
@@ -842,6 +843,7 @@ fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
         slot,
         byte_capacity: 8_224,
         signal_byte_capacity: 8_224,
+        storage: VulkanDistributedActivationStorage::ActivationSlot,
     };
     let shards = || {
         vec![
@@ -851,6 +853,11 @@ fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
                 row_count: 128,
                 workgroup_count_x: 8,
                 base_workgroup_z: 0,
+                input_range: VulkanDistributedActivationRange {
+                    byte_offset: 0,
+                    byte_count: 8_224,
+                },
+                auxiliary_input_ranges: Vec::new(),
                 output_byte_offset: 0,
                 output_byte_count: 8_224,
                 parameters: Vec::new(),
@@ -861,6 +868,11 @@ fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
                 row_count: 128,
                 workgroup_count_x: 8,
                 base_workgroup_z: 128,
+                input_range: VulkanDistributedActivationRange {
+                    byte_offset: 0,
+                    byte_count: 8_224,
+                },
+                auxiliary_input_ranges: Vec::new(),
                 output_byte_offset: 0,
                 output_byte_count: 8_224,
                 parameters: Vec::new(),

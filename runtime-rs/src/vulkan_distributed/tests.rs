@@ -22,6 +22,7 @@ mod tests {
             &fixture_tensor_index("row_major"),
             &fixture_artifact_manifest(),
             &BTreeMap::new(),
+            &[],
             256,
         )
         .unwrap();
@@ -217,6 +218,7 @@ mod tests {
             &tensor_index,
             &artifacts,
             &component_device_pools("moe", &["owner", "helper"]),
+            &[],
             256,
         )
         .unwrap();
@@ -291,6 +293,7 @@ mod tests {
             &tensor_index,
             &artifacts,
             &component_device_pools("moe", &["owner", "helper"]),
+            &[],
             256,
         )
         .unwrap();
@@ -320,6 +323,7 @@ mod tests {
             &tensor_index,
             &artifacts,
             &component_device_pools("moe", &["owner", "helper"]),
+            &[],
             256,
         )
         .unwrap_err();
@@ -387,6 +391,7 @@ mod tests {
             &tensor_index,
             &artifact_manifest,
             &component_device_pools("component", &["helper-a", "helper-b", "owner"]),
+            &[],
             4,
         )
         .unwrap();
@@ -411,6 +416,7 @@ mod tests {
             &tensor_index,
             &artifact_manifest,
             &component_device_pools("component", &["helper", "owner"]),
+            &[],
             1024,
         )
         .unwrap_err();
@@ -475,6 +481,7 @@ mod tests {
         assert_eq!(
             activation_plan.allocation("owner", "component", 0).unwrap(),
             &VulkanDistributedActivationBufferAllocation {
+                storage: VulkanDistributedActivationStorage::ActivationSlot,
                 owner_device_id: "owner".to_string(),
                 component_id: "component".to_string(),
                 slot: 0,
@@ -542,6 +549,41 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_distributed_component_boundaries_by_graph_edge() {
+        let mut execution_plan = fixture_plan("row_major");
+        let edge_storage = VulkanDistributedActivationStorage::Edge {
+            edge_index: 7,
+            owner_device_id: "owner".to_string(),
+        };
+        execution_plan.dispatches[0].output_activation.storage = edge_storage.clone();
+        let mut consumer = execution_plan.dispatches[0].clone();
+        consumer.dispatch_index = 8;
+        consumer.component_id = "consumer".to_string();
+        consumer.input_activation = execution_plan.dispatches[0].output_activation.clone();
+        consumer.input_activation.component_id = "consumer".to_string();
+        consumer.input_activation.signal_id = "consumer_input".to_string();
+        consumer.output_activation.component_id = "consumer".to_string();
+        consumer.output_activation.slot = 4;
+        consumer.output_activation.signal_id = "consumer_output".to_string();
+        consumer.output_activation.storage =
+            VulkanDistributedActivationStorage::ActivationSlot;
+        execution_plan.dispatches.push(consumer);
+
+        let activation_plan =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan).unwrap();
+
+        assert_eq!(activation_plan.allocation_count, 3);
+        let edge = activation_plan.edge_allocation(7).unwrap();
+        assert_eq!(edge.owner_device_id, "owner");
+        assert_eq!(edge.input_use_count, 1);
+        assert_eq!(edge.output_use_count, 1);
+        assert_eq!(
+            edge.signal_ids,
+            vec!["consumer_input".to_string(), "hidden".to_string()]
+        );
+    }
+
+    #[test]
     fn rejects_conflicting_capacities_for_the_same_activation_slot() {
         let mut execution_plan = fixture_plan("row_major");
         let mut repeated = execution_plan.dispatches[0].clone();
@@ -584,6 +626,7 @@ mod tests {
             &fixture_tensor_index("row_major"),
             &fixture_artifact_manifest(),
             &component_device_pools("component", &["owner", "helper"]),
+            &[],
             4,
         )
         .unwrap_err();
@@ -595,10 +638,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_requested_unsupported_quantized_parallel_projections() {
+    fn plans_block_scaled_fp8_parallel_projection_ranges() {
         let mut prepared_plan = fixture_prepared_plan();
-        let gate = prepared_plan.dispatches[0].descriptors[2].clone();
-        let up = prepared_plan.dispatches[0].descriptors[3].clone();
+        let activation =
+            |binding, usage, signal: &str, slot, bytes| VulkanResolvedDescriptorBinding {
+                binding,
+                usage,
+                name: signal.to_string(),
+                resource: VulkanDescriptorResourceAddress::ActivationSlot {
+                    component_id: "component".to_string(),
+                    signal_id: signal.to_string(),
+                    slot,
+                    byte_capacity: bytes,
+                    signal_byte_capacity: bytes,
+                },
+            };
         let parameter =
             |binding, param_id: &str, tensor: &str, byte_count| VulkanResolvedDescriptorBinding {
                 binding,
@@ -611,12 +665,31 @@ mod tests {
                 },
             };
         prepared_plan.dispatches[0].descriptors = vec![
-            prepared_plan.dispatches[0].descriptors[0].clone(),
-            prepared_plan.dispatches[0].descriptors[1].clone(),
-            VulkanResolvedDescriptorBinding { binding: 2, ..gate },
-            parameter(3, "gate_scale", "gate_scale", 2),
-            VulkanResolvedDescriptorBinding { binding: 4, ..up },
-            parameter(5, "up_scale", "up_scale", 2),
+            activation(
+                0,
+                VulkanKernelDescriptorUsage::InputSignal,
+                "normalized_fp8",
+                0,
+                4,
+            ),
+            activation(
+                1,
+                VulkanKernelDescriptorUsage::InputSignal,
+                "normalized_scale",
+                1,
+                4,
+            ),
+            activation(
+                2,
+                VulkanKernelDescriptorUsage::OutputSignal,
+                "hidden",
+                2,
+                24,
+            ),
+            parameter(3, "gate", "gate", 48),
+            parameter(4, "gate_scale", "gate_scale", 6),
+            parameter(5, "up", "up", 48),
+            parameter(6, "up_scale", "up_scale", 6),
         ];
         let mut tensor_index = fixture_tensor_index("row_major");
         for tensor in ["gate", "up"] {
@@ -626,11 +699,11 @@ mod tests {
         }
         let scale = TensorMetadata {
             dtype: "BF16".to_string(),
-            shape: vec![1, 1],
+            shape: vec![3, 1],
             logical_shape: None,
-            parameter_count: Some(1),
-            byte_count: Some(2),
-            data_offsets: Some(vec![0, 2]),
+            parameter_count: Some(3),
+            byte_count: Some(6),
+            data_offsets: Some(vec![0, 6]),
             source_file: Some("weights.safetensors".to_string()),
             data_sha256: None,
             layout: Some("row_major".to_string()),
@@ -645,13 +718,216 @@ mod tests {
             &tensor_index,
             &fixture_artifact_manifest(),
             &component_device_pools("component", &["owner", "helper"]),
+            &[],
             4,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            plan.to_string()
-                .contains("has no compatible distributable dispatch")
+        assert_eq!(plan.distributed_parameter_byte_count, 108);
+        let dispatch = &plan.dispatches[0];
+        assert_eq!(dispatch.row_alignment, 4);
+        assert_eq!(dispatch.input_byte_capacity, 4);
+        assert_eq!(dispatch.output_byte_capacity, 24);
+        assert_eq!(dispatch.auxiliary_input_activations.len(), 1);
+        assert_eq!(
+            dispatch
+                .shards
+                .iter()
+                .map(|shard| (
+                    shard.device_id.as_str(),
+                    shard.row_start,
+                    shard.row_count,
+                    shard.output_byte_offset,
+                    shard.output_byte_count,
+                ))
+                .collect::<Vec<_>>(),
+            vec![("owner", 0, 8, 0, 16), ("helper", 8, 4, 16, 8)]
+        );
+        assert_eq!(
+            dispatch.shards[1].auxiliary_input_ranges,
+            vec![VulkanDistributedActivationRange {
+                byte_offset: 0,
+                byte_count: 4,
+            }]
+        );
+        assert_eq!(
+            dispatch.shards[1]
+                .parameters
+                .iter()
+                .map(|fragment| (
+                    fragment.binding,
+                    fragment.tensor.as_str(),
+                    fragment.byte_offset,
+                    fragment.byte_count,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (3, "gate", 32, 16),
+                (4, "gate_scale", 4, 2),
+                (5, "up", 32, 16),
+                (6, "up_scale", 4, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_block_scaled_fp8_residual_projection_with_strided_residual_ranges() {
+        let activation =
+            |binding, usage, signal: &str, slot, bytes| VulkanResolvedDescriptorBinding {
+                binding,
+                usage,
+                name: signal.to_string(),
+                resource: VulkanDescriptorResourceAddress::ActivationSlot {
+                    component_id: "component".to_string(),
+                    signal_id: signal.to_string(),
+                    slot,
+                    byte_capacity: bytes,
+                    signal_byte_capacity: bytes,
+                },
+            };
+        let parameter =
+            |binding, tensor: &str, byte_count| VulkanResolvedDescriptorBinding {
+                binding,
+                usage: VulkanKernelDescriptorUsage::Parameter,
+                name: tensor.to_string(),
+                resource: VulkanDescriptorResourceAddress::PermanentParameter {
+                    param_id: tensor.to_string(),
+                    tensor: tensor.to_string(),
+                    byte_count: Some(byte_count),
+                },
+            };
+        let prepared = VulkanPreparedDispatchPlan {
+            backend_id: "vulkan_stream_circuit".to_string(),
+            reusable_family_count: 1,
+            dispatches: vec![VulkanPreparedDispatch {
+                dispatch_index: 9,
+                kernel_id: "component.residual".to_string(),
+                component_id: "component".to_string(),
+                circuit_id: "circuit".to_string(),
+                node_index: 4,
+                node_id: "residual".to_string(),
+                op: DISTRIBUTABLE_RESIDUAL_PROJECTION_OP.to_string(),
+                reusable_family_id: "residual-family".to_string(),
+                artifact_path: "residual.spv".to_string(),
+                entry_point: "main".to_string(),
+                local_size_x: 64,
+                descriptors: vec![
+                    activation(
+                        0,
+                        VulkanKernelDescriptorUsage::InputSignal,
+                        "hidden_fp8",
+                        0,
+                        4,
+                    ),
+                    activation(
+                        1,
+                        VulkanKernelDescriptorUsage::InputSignal,
+                        "hidden_scale",
+                        1,
+                        4,
+                    ),
+                    activation(
+                        2,
+                        VulkanKernelDescriptorUsage::InputSignal,
+                        "residual",
+                        2,
+                        24,
+                    ),
+                    activation(
+                        3,
+                        VulkanKernelDescriptorUsage::OutputSignal,
+                        "output",
+                        3,
+                        24,
+                    ),
+                    parameter(4, "weight", 48),
+                    parameter(5, "weight_scale", 6),
+                ],
+                push_constants: Vec::new(),
+                uses_stream_tick: false,
+            }],
+            total_descriptor_count: 6,
+        };
+        let weight = TensorMetadata {
+            dtype: "F8_E4M3".to_string(),
+            shape: vec![12, 4],
+            logical_shape: None,
+            parameter_count: Some(48),
+            byte_count: Some(48),
+            data_offsets: Some(vec![0, 48]),
+            source_file: Some("weights.safetensors".to_string()),
+            data_sha256: None,
+            layout: Some("row_major".to_string()),
+        };
+        let scale = TensorMetadata {
+            dtype: "BF16".to_string(),
+            shape: vec![3, 1],
+            logical_shape: None,
+            parameter_count: Some(3),
+            byte_count: Some(6),
+            data_offsets: Some(vec![0, 6]),
+            source_file: Some("weights.safetensors".to_string()),
+            data_sha256: None,
+            layout: Some("row_major".to_string()),
+        };
+        let tensor_index = TensorIndex {
+            schema: "nerve.tensor_index.v1".to_string(),
+            tensors: BTreeMap::from([
+                ("weight".to_string(), weight),
+                ("weight_scale".to_string(), scale),
+            ]),
+        };
+        let artifacts =
+            VulkanReusableKernelArtifactManifest::new(vec![VulkanReusableKernelArtifact {
+                family_id: "residual-family".to_string(),
+                op: DISTRIBUTABLE_RESIDUAL_PROJECTION_OP.to_string(),
+                path: "residual.spv".to_string(),
+                entry_point: "main".to_string(),
+                local_size_x: 64,
+                workgroup_count_x: 6,
+                descriptor_signature: Vec::new(),
+                push_constants: Vec::new(),
+                uses_stream_tick: false,
+            }]);
+
+        let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(plan.distributed_parameter_byte_count, 54);
+        let dispatch = &plan.dispatches[0];
+        assert_eq!(dispatch.auxiliary_input_activations.len(), 2);
+        assert_eq!(
+            dispatch.shards[1].auxiliary_input_ranges,
+            vec![
+                VulkanDistributedActivationRange {
+                    byte_offset: 0,
+                    byte_count: 4,
+                },
+                VulkanDistributedActivationRange {
+                    byte_offset: 16,
+                    byte_count: 8,
+                },
+            ]
+        );
+        assert_eq!(
+            dispatch.shards[1]
+                .parameters
+                .iter()
+                .map(|fragment| (
+                    fragment.binding,
+                    fragment.tensor.as_str(),
+                    fragment.byte_offset,
+                    fragment.byte_count,
+                ))
+                .collect::<Vec<_>>(),
+            vec![(4, "weight", 32, 16), (5, "weight_scale", 4, 2)]
         );
     }
 
@@ -796,6 +1072,7 @@ mod tests {
                 "component",
                 &["owner", "helper-a", "helper-b", "helper-c"],
             ),
+            &[],
             storage_buffer_offset_alignment,
         )
     }

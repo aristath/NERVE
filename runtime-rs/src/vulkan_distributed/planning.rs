@@ -44,16 +44,19 @@ fn accumulate_activation_allocation(
             activation.byte_capacity
         )));
     }
-    let key = VulkanDistributedActivationBufferAllocationKey {
-        owner_device_id: owner_device_id.to_string(),
-        component_id: activation.component_id.clone(),
-        slot: activation.slot,
+    let key = distributed_activation_allocation_key(owner_device_id, activation);
+    let allocation_owner_device_id = match &activation.storage {
+        VulkanDistributedActivationStorage::ActivationSlot => owner_device_id,
+        VulkanDistributedActivationStorage::Edge {
+            owner_device_id, ..
+        } => owner_device_id,
     };
     let allocation =
         allocations
             .entry(key)
             .or_insert_with(|| VulkanDistributedActivationBufferAllocation {
-                owner_device_id: owner_device_id.to_string(),
+                storage: activation.storage.clone(),
+                owner_device_id: allocation_owner_device_id.to_string(),
                 component_id: activation.component_id.clone(),
                 slot: activation.slot,
                 byte_capacity: activation.byte_capacity,
@@ -62,6 +65,14 @@ fn accumulate_activation_allocation(
                 input_use_count: 0,
                 output_use_count: 0,
             });
+    if allocation.storage != activation.storage
+        || allocation.owner_device_id != allocation_owner_device_id
+    {
+        return Err(VulkanDistributedPlanError(format!(
+            "distributed activation {}.slot_{} maps to conflicting storage",
+            activation.component_id, activation.slot
+        )));
+    }
     if allocation.byte_capacity != activation.byte_capacity {
         return Err(VulkanDistributedPlanError(format!(
             "distributed activation {}.slot_{} has conflicting capacities {} and {}",
@@ -83,6 +94,15 @@ fn accumulate_activation_allocation(
         {
             allocation.device_ids.push((*device_id).to_string());
         }
+    }
+    if !allocation
+        .device_ids
+        .iter()
+        .any(|existing| existing == allocation_owner_device_id)
+    {
+        allocation
+            .device_ids
+            .push(allocation_owner_device_id.to_string());
     }
     allocation.device_ids.sort();
     match access {
@@ -154,6 +174,7 @@ fn plan_dispatch(
     dispatch: &VulkanPreparedDispatch,
     tensor_index: &TensorIndex,
     device_ids: &[String],
+    edge_placements: &[ComponentEdgePlacement],
     artifact_workgroup_count_x: u32,
     storage_buffer_offset_alignment: usize,
 ) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
@@ -167,11 +188,24 @@ fn plan_dispatch(
             storage_buffer_offset_alignment,
         );
     }
+    if dispatch.op == DISTRIBUTABLE_RESIDUAL_PROJECTION_OP {
+        return plan_block_scaled_fp8_projection_dispatch(
+            owner_device_id,
+            dispatch,
+            tensor_index,
+            device_ids,
+            edge_placements,
+            artifact_workgroup_count_x,
+            storage_buffer_offset_alignment,
+            BlockScaledFp8ProjectionKind::Residual,
+        );
+    }
     plan_parallel_projection_dispatch(
         owner_device_id,
         dispatch,
         tensor_index,
         device_ids,
+        edge_placements,
         artifact_workgroup_count_x,
         storage_buffer_offset_alignment,
     )
@@ -182,6 +216,7 @@ fn plan_parallel_projection_dispatch(
     dispatch: &VulkanPreparedDispatch,
     tensor_index: &TensorIndex,
     device_ids: &[String],
+    edge_placements: &[ComponentEdgePlacement],
     artifact_workgroup_count_x: u32,
     storage_buffer_offset_alignment: usize,
 ) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
@@ -198,6 +233,18 @@ fn plan_parallel_projection_dispatch(
             _ => None,
         })
         .collect::<Vec<_>>();
+    if parameter_descriptors.len() == 4 {
+        return plan_block_scaled_fp8_projection_dispatch(
+            owner_device_id,
+            dispatch,
+            tensor_index,
+            device_ids,
+            edge_placements,
+            artifact_workgroup_count_x,
+            storage_buffer_offset_alignment,
+            BlockScaledFp8ProjectionKind::ParallelSiluMultiply,
+        );
+    }
     let [
         (first_binding, first_tensor),
         (second_binding, second_tensor),
@@ -316,6 +363,11 @@ fn plan_parallel_projection_dispatch(
                 row_count,
                 workgroup_count_x,
                 base_workgroup_z: 0,
+                input_range: VulkanDistributedActivationRange {
+                    byte_offset: 0,
+                    byte_count: input_byte_capacity,
+                },
+                auxiliary_input_ranges: Vec::new(),
                 output_byte_offset: row_start.checked_mul(BF16_BYTE_COUNT).ok_or_else(|| {
                     dispatch_error(dispatch, "shard output offset overflowed".to_string())
                 })?,
@@ -345,6 +397,431 @@ fn plan_parallel_projection_dispatch(
         distributed_parameter_byte_count,
         shards,
     }))
+}
+
+#[derive(Clone, Copy)]
+enum BlockScaledFp8ProjectionKind {
+    ParallelSiluMultiply,
+    Residual,
+}
+
+struct BlockScaledFp8Matrix {
+    weight_binding: usize,
+    weight_tensor: String,
+    scale_binding: usize,
+    scale_tensor: String,
+    output_rows: usize,
+    input_width: usize,
+    scale_rows: usize,
+    scale_columns: usize,
+    block_rows: usize,
+    block_columns: usize,
+    weight_row_bytes: usize,
+    scale_row_bytes: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_block_scaled_fp8_projection_dispatch(
+    owner_device_id: &str,
+    dispatch: &VulkanPreparedDispatch,
+    tensor_index: &TensorIndex,
+    device_ids: &[String],
+    edge_placements: &[ComponentEdgePlacement],
+    artifact_workgroup_count_x: u32,
+    storage_buffer_offset_alignment: usize,
+    kind: BlockScaledFp8ProjectionKind,
+) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
+    if !dispatch.push_constants.is_empty() {
+        return Ok(None);
+    }
+    let parameters = dispatch
+        .descriptors
+        .iter()
+        .filter_map(|descriptor| match &descriptor.resource {
+            VulkanDescriptorResourceAddress::PermanentParameter { tensor, .. } => {
+                Some((descriptor.binding, tensor.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let pairs = match kind {
+        BlockScaledFp8ProjectionKind::ParallelSiluMultiply => {
+            let [first_weight, first_scale, second_weight, second_scale] =
+                parameters.as_slice()
+            else {
+                return Ok(None);
+            };
+            vec![(*first_weight, *first_scale), (*second_weight, *second_scale)]
+        }
+        BlockScaledFp8ProjectionKind::Residual => {
+            let [weight, scale] = parameters.as_slice() else {
+                return Ok(None);
+            };
+            vec![(*weight, *scale)]
+        }
+    };
+    if pairs.iter().any(|((_, weight), (_, scale))| {
+        tensor_index
+            .tensors
+            .get(*weight)
+            .zip(tensor_index.tensors.get(*scale))
+            .is_none_or(|(weight, scale)| weight.dtype != "F8_E4M3" || scale.dtype != "BF16")
+    }) {
+        return Ok(None);
+    }
+    let matrices = pairs
+        .into_iter()
+        .map(|(weight, scale)| {
+            block_scaled_fp8_matrix(tensor_index, dispatch, weight, scale)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let leader = matrices
+        .first()
+        .expect("block-scaled projections contain at least one matrix");
+    if matrices.iter().any(|matrix| {
+        matrix.output_rows != leader.output_rows
+            || matrix.input_width != leader.input_width
+            || matrix.scale_rows != leader.scale_rows
+            || matrix.scale_columns != leader.scale_columns
+            || matrix.block_rows != leader.block_rows
+            || matrix.block_columns != leader.block_columns
+    }) {
+        return Err(dispatch_error(
+            dispatch,
+            "block-scaled FP8 projection branches have incompatible shapes".to_string(),
+        ));
+    }
+    let output_rows = leader.output_rows;
+    let input_width = leader.input_width;
+    let scale_columns = leader.scale_columns;
+    let block_rows = leader.block_rows;
+    let artifact_workgroup_count =
+        usize::try_from(artifact_workgroup_count_x).map_err(|_| {
+            dispatch_error(
+                dispatch,
+                "artifact workgroup count exceeds usize".to_string(),
+            )
+        })?;
+    if artifact_workgroup_count == 0 || !output_rows.is_multiple_of(artifact_workgroup_count) {
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "output row count {output_rows} is incompatible with artifact workgroup count {artifact_workgroup_count}"
+            ),
+        ));
+    }
+    let workgroup_row_count = output_rows / artifact_workgroup_count;
+    let output_row_alignment = storage_buffer_offset_alignment / BF16_BYTE_COUNT;
+    let row_alignment = least_common_multiple(workgroup_row_count, block_rows)
+        .and_then(|alignment| least_common_multiple(alignment, output_row_alignment))
+        .ok_or_else(|| dispatch_error(dispatch, "FP8 row alignment overflowed".to_string()))?;
+    let input_byte_capacity = input_width;
+    let input_scale_byte_capacity = scale_columns
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| dispatch_error(dispatch, "FP8 input scale size overflowed".to_string()))?;
+    let output_byte_capacity = output_rows
+        .checked_mul(BF16_BYTE_COUNT)
+        .ok_or_else(|| dispatch_error(dispatch, "output byte capacity overflowed".to_string()))?;
+    let (input_activation, auxiliary_input_activations, output_activation) = match kind {
+        BlockScaledFp8ProjectionKind::ParallelSiluMultiply => {
+            let Some(input) = distributed_activation(
+                dispatch,
+                0,
+                input_byte_capacity,
+                "quantized input",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(scale) = distributed_activation(
+                dispatch,
+                1,
+                input_scale_byte_capacity,
+                "input scale",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(output) = distributed_activation(
+                dispatch,
+                2,
+                output_byte_capacity,
+                "output",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            (input, vec![scale], output)
+        }
+        BlockScaledFp8ProjectionKind::Residual => {
+            let Some(input) = distributed_activation(
+                dispatch,
+                0,
+                input_byte_capacity,
+                "quantized input",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(scale) = distributed_activation(
+                dispatch,
+                1,
+                input_scale_byte_capacity,
+                "input scale",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(residual) = distributed_activation(
+                dispatch,
+                2,
+                output_byte_capacity,
+                "residual input",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(output) = distributed_activation(
+                dispatch,
+                3,
+                output_byte_capacity,
+                "output",
+                edge_placements,
+            )?
+            else {
+                return Ok(None);
+            };
+            (input, vec![scale, residual], output)
+        }
+    };
+    let raw_shards = distribute_rows(
+        output_rows,
+        device_ids.len(),
+        workgroup_row_count,
+        row_alignment,
+    )
+    .map_err(|error| dispatch_error(dispatch, error))?;
+    if raw_shards.len() < 2 {
+        return Ok(None);
+    }
+    let shard_device_ids = std::iter::once(owner_device_id)
+        .chain(
+            device_ids
+                .iter()
+                .map(String::as_str)
+                .filter(|device_id| *device_id != owner_device_id),
+        )
+        .take(raw_shards.len())
+        .collect::<Vec<_>>();
+    let mut distributed_parameter_byte_count = 0usize;
+    let shards = shard_device_ids
+        .into_iter()
+        .zip(raw_shards)
+        .map(|(device_id, (row_start, row_count))| {
+            let scale_row_start = row_start / block_rows;
+            let scale_row_count = row_count / block_rows;
+            let parameters = matrices
+                .iter()
+                .flat_map(|matrix| {
+                    [
+                        parameter_fragment(
+                            matrix.weight_binding,
+                            &matrix.weight_tensor,
+                            matrix.weight_row_bytes,
+                            row_start,
+                            row_count,
+                            dispatch,
+                        ),
+                        parameter_fragment(
+                            matrix.scale_binding,
+                            &matrix.scale_tensor,
+                            matrix.scale_row_bytes,
+                            scale_row_start,
+                            scale_row_count,
+                            dispatch,
+                        ),
+                    ]
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            distributed_parameter_byte_count = parameters.iter().try_fold(
+                distributed_parameter_byte_count,
+                |total, fragment| {
+                    total.checked_add(fragment.byte_count).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            "FP8 shard parameter byte count overflowed".to_string(),
+                        )
+                    })
+                },
+            )?;
+            let mut auxiliary_input_ranges = vec![VulkanDistributedActivationRange {
+                byte_offset: 0,
+                byte_count: input_scale_byte_capacity,
+            }];
+            if matches!(kind, BlockScaledFp8ProjectionKind::Residual) {
+                auxiliary_input_ranges.push(VulkanDistributedActivationRange {
+                    byte_offset: row_start.checked_mul(BF16_BYTE_COUNT).ok_or_else(|| {
+                        dispatch_error(dispatch, "residual shard offset overflowed".to_string())
+                    })?,
+                    byte_count: row_count.checked_mul(BF16_BYTE_COUNT).ok_or_else(|| {
+                        dispatch_error(dispatch, "residual shard size overflowed".to_string())
+                    })?,
+                });
+            }
+            Ok(VulkanDistributedDispatchShard {
+                device_id: device_id.to_string(),
+                row_start,
+                row_count,
+                workgroup_count_x: u32::try_from(row_count / workgroup_row_count).map_err(
+                    |_| dispatch_error(dispatch, "shard workgroup count exceeds u32".to_string()),
+                )?,
+                base_workgroup_z: 0,
+                input_range: VulkanDistributedActivationRange {
+                    byte_offset: 0,
+                    byte_count: input_byte_capacity,
+                },
+                auxiliary_input_ranges,
+                output_byte_offset: row_start.checked_mul(BF16_BYTE_COUNT).ok_or_else(|| {
+                    dispatch_error(dispatch, "shard output offset overflowed".to_string())
+                })?,
+                output_byte_count: row_count.checked_mul(BF16_BYTE_COUNT).ok_or_else(|| {
+                    dispatch_error(dispatch, "shard output size overflowed".to_string())
+                })?,
+                parameters,
+            })
+        })
+        .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+    Ok(Some(VulkanDistributedDispatchPlan {
+        owner_device_id: owner_device_id.to_string(),
+        dispatch_index: dispatch.dispatch_index,
+        component_id: dispatch.component_id.clone(),
+        node_id: dispatch.node_id.clone(),
+        reusable_family_id: dispatch.reusable_family_id.clone(),
+        input_byte_capacity,
+        output_byte_capacity,
+        output_rows,
+        input_width,
+        row_alignment,
+        input_activation,
+        auxiliary_input_activations,
+        output_activation,
+        distribution: VulkanDistributedDispatchDistribution::OutputRows,
+        distributed_parameter_byte_count,
+        shards,
+    }))
+}
+
+fn block_scaled_fp8_matrix(
+    tensor_index: &TensorIndex,
+    dispatch: &VulkanPreparedDispatch,
+    weight: (usize, &str),
+    scale: (usize, &str),
+) -> Result<BlockScaledFp8Matrix, VulkanDistributedPlanError> {
+    let weight_metadata =
+        block_scaled_fp8_matrix_metadata(tensor_index, dispatch, weight.1, "F8_E4M3")?;
+    let scale_metadata =
+        block_scaled_fp8_matrix_metadata(tensor_index, dispatch, scale.1, "BF16")?;
+    let [output_rows, input_width] = weight_metadata.shape.as_slice() else {
+        unreachable!("block-scaled FP8 weight metadata is rank two");
+    };
+    let [scale_rows, scale_columns] = scale_metadata.shape.as_slice() else {
+        unreachable!("block-scaled FP8 scale metadata is rank two");
+    };
+    if *scale_rows == 0
+        || *scale_columns == 0
+        || !output_rows.is_multiple_of(*scale_rows)
+        || !input_width.is_multiple_of(*scale_columns)
+    {
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "FP8 weight shape {:?} is incompatible with scale shape {:?}",
+                weight_metadata.shape, scale_metadata.shape
+            ),
+        ));
+    }
+    Ok(BlockScaledFp8Matrix {
+        weight_binding: weight.0,
+        weight_tensor: weight.1.to_string(),
+        scale_binding: scale.0,
+        scale_tensor: scale.1.to_string(),
+        output_rows: *output_rows,
+        input_width: *input_width,
+        scale_rows: *scale_rows,
+        scale_columns: *scale_columns,
+        block_rows: output_rows / scale_rows,
+        block_columns: input_width / scale_columns,
+        weight_row_bytes: exact_matrix_row_bytes(
+            dispatch,
+            weight.1,
+            weight_metadata,
+            1,
+        )?,
+        scale_row_bytes: exact_matrix_row_bytes(
+            dispatch,
+            scale.1,
+            scale_metadata,
+            BF16_BYTE_COUNT,
+        )?,
+    })
+}
+
+fn block_scaled_fp8_matrix_metadata<'a>(
+    tensor_index: &'a TensorIndex,
+    dispatch: &VulkanPreparedDispatch,
+    tensor: &str,
+    dtype: &str,
+) -> Result<&'a TensorMetadata, VulkanDistributedPlanError> {
+    let metadata = tensor_index.tensors.get(tensor).ok_or_else(|| {
+        dispatch_error(dispatch, format!("has no tensor metadata for {tensor:?}"))
+    })?;
+    if metadata.dtype != dtype
+        || metadata.shape.len() != 2
+        || metadata.layout.as_deref() != Some("row_major")
+    {
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "tensor {tensor:?} must be a rank-2 row-major {dtype} matrix, found {} {:?} layout {:?}",
+                metadata.dtype, metadata.shape, metadata.layout
+            ),
+        ));
+    }
+    Ok(metadata)
+}
+
+fn exact_matrix_row_bytes(
+    dispatch: &VulkanPreparedDispatch,
+    tensor: &str,
+    metadata: &TensorMetadata,
+    element_byte_count: usize,
+) -> Result<usize, VulkanDistributedPlanError> {
+    let expected = metadata
+        .shape
+        .iter()
+        .try_fold(element_byte_count, |bytes, dimension| {
+            bytes.checked_mul(*dimension)
+        })
+        .ok_or_else(|| {
+            dispatch_error(dispatch, format!("tensor {tensor:?} byte count overflowed"))
+        })?;
+    let byte_count = metadata.byte_count.unwrap_or(expected);
+    if byte_count != expected {
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "tensor {tensor:?} byte count {byte_count} does not match {}-byte shape {:?}",
+                element_byte_count, metadata.shape
+            ),
+        ));
+    }
+    Ok(byte_count / metadata.shape[0])
 }
 
 fn plan_sparse_expert_dispatch(
@@ -510,6 +987,17 @@ fn plan_sparse_expert_dispatch(
                 base_workgroup_z: u32::try_from(expert_start).map_err(|_| {
                     dispatch_error(dispatch, "expert start exceeds u32".to_string())
                 })?,
+                input_range: VulkanDistributedActivationRange {
+                    byte_offset: 0,
+                    byte_count: input_byte_capacity,
+                },
+                auxiliary_input_ranges: auxiliary_input_activations
+                    .iter()
+                    .map(|activation| VulkanDistributedActivationRange {
+                        byte_offset: 0,
+                        byte_count: activation.signal_byte_capacity,
+                    })
+                    .collect(),
                 output_byte_offset: 0,
                 output_byte_count: output_byte_capacity,
                 parameters,
@@ -621,6 +1109,7 @@ fn activation_slot(
                 slot: *slot,
                 byte_capacity: *byte_capacity,
                 signal_byte_capacity: *signal_byte_capacity,
+                storage: VulkanDistributedActivationStorage::ActivationSlot,
             }),
             _ => None,
         })
@@ -640,6 +1129,127 @@ fn activation_slot(
         ));
     }
     Ok(activation)
+}
+
+fn distributed_activation(
+    dispatch: &VulkanPreparedDispatch,
+    binding: usize,
+    required: usize,
+    role: &str,
+    edge_placements: &[ComponentEdgePlacement],
+) -> Result<Option<VulkanDistributedActivationSlot>, VulkanDistributedPlanError> {
+    let descriptor = dispatch
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.binding == binding)
+        .ok_or_else(|| {
+            dispatch_error(
+                dispatch,
+                format!("has no resident {role} descriptor at binding {binding}"),
+            )
+        })?;
+    let activation = match &descriptor.resource {
+        VulkanDescriptorResourceAddress::ActivationSlot {
+            component_id,
+            signal_id,
+            slot,
+            byte_capacity,
+            signal_byte_capacity,
+        } => VulkanDistributedActivationSlot {
+            binding,
+            component_id: component_id.clone(),
+            signal_id: signal_id.clone(),
+            slot: *slot,
+            byte_capacity: *byte_capacity,
+            signal_byte_capacity: *signal_byte_capacity,
+            storage: VulkanDistributedActivationStorage::ActivationSlot,
+        },
+        VulkanDescriptorResourceAddress::BoundaryInput { signal_id } => {
+            let matching = edge_placements
+                .iter()
+                .filter(|edge| {
+                    edge.destination_component_id == dispatch.component_id
+                        && (edge.destination_port_id == *signal_id
+                            || edge.destination_component_port.as_deref()
+                                == Some(signal_id.as_str()))
+                })
+                .collect::<Vec<_>>();
+            let [edge] = matching.as_slice() else {
+                if matching.is_empty() {
+                    return Ok(None);
+                }
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "{role} boundary signal {signal_id:?} maps to {} runtime edges",
+                        matching.len()
+                    ),
+                ));
+            };
+            VulkanDistributedActivationSlot {
+                binding,
+                component_id: dispatch.component_id.clone(),
+                signal_id: signal_id.clone(),
+                slot: edge.edge_index,
+                byte_capacity: required,
+                signal_byte_capacity: required,
+                storage: VulkanDistributedActivationStorage::Edge {
+                    edge_index: edge.edge_index,
+                    owner_device_id: edge.source_device_id.clone(),
+                },
+            }
+        }
+        VulkanDescriptorResourceAddress::BoundaryOutput { signal_id } => {
+            let matching = edge_placements
+                .iter()
+                .filter(|edge| {
+                    edge.source_component_id == dispatch.component_id
+                        && (edge.source_port_id == *signal_id
+                            || edge.source_component_port.as_deref() == Some(signal_id.as_str()))
+                })
+                .collect::<Vec<_>>();
+            let [edge] = matching.as_slice() else {
+                if matching.is_empty() {
+                    return Ok(None);
+                }
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "{role} boundary signal {signal_id:?} maps to {} runtime edges",
+                        matching.len()
+                    ),
+                ));
+            };
+            VulkanDistributedActivationSlot {
+                binding,
+                component_id: dispatch.component_id.clone(),
+                signal_id: signal_id.clone(),
+                slot: edge.edge_index,
+                byte_capacity: required,
+                signal_byte_capacity: required,
+                storage: VulkanDistributedActivationStorage::Edge {
+                    edge_index: edge.edge_index,
+                    owner_device_id: edge.source_device_id.clone(),
+                },
+            }
+        }
+        _ => {
+            return Err(dispatch_error(
+                dispatch,
+                format!("{role} binding {binding} is not a resident signal"),
+            ));
+        }
+    };
+    if activation.signal_byte_capacity < required {
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "{role} signal has {} bytes but requires {required}",
+                activation.signal_byte_capacity
+            ),
+        ));
+    }
+    Ok(Some(activation))
 }
 
 fn activation_slots_for_usage(
@@ -665,6 +1275,7 @@ fn activation_slots_for_usage(
                 slot: *slot,
                 byte_capacity: *byte_capacity,
                 signal_byte_capacity: *signal_byte_capacity,
+                storage: VulkanDistributedActivationStorage::ActivationSlot,
             }),
             _ => Err(dispatch_error(
                 dispatch,

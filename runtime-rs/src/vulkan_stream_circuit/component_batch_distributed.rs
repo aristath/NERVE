@@ -20,6 +20,7 @@ struct VulkanDistributedComponentBatchPrivateActivationKey {
     component_id: String,
     signal_id: String,
     slot: usize,
+    storage: VulkanDistributedActivationStorage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -43,6 +44,41 @@ fn distributed_component_batch_activation_key(
         component_id: activation.component_id.clone(),
         signal_id: activation.signal_id.clone(),
         slot: activation.slot,
+        storage: activation.storage.clone(),
+    }
+}
+
+fn distributed_component_batch_signal_key(
+    activation: &VulkanDistributedActivationSlot,
+    signal_buffer_indices: &BTreeMap<VulkanComponentBatchSignalKey, usize>,
+) -> Result<VulkanComponentBatchSignalKey, VulkanResidentInProcessPlacedRuntimeError> {
+    match &activation.storage {
+        VulkanDistributedActivationStorage::ActivationSlot => {
+            Ok(VulkanComponentBatchSignalKey::Activation {
+                component_id: activation.component_id.clone(),
+                signal_id: activation.signal_id.clone(),
+            })
+        }
+        VulkanDistributedActivationStorage::Edge { edge_index, .. } => {
+            let candidates = [
+                VulkanComponentBatchSignalKey::LocalEdge(*edge_index),
+                VulkanComponentBatchSignalKey::IncomingEdge(*edge_index),
+                VulkanComponentBatchSignalKey::OutgoingEdge(*edge_index),
+            ];
+            let matching = candidates
+                .into_iter()
+                .filter(|key| signal_buffer_indices.contains_key(key))
+                .collect::<Vec<_>>();
+            let [key] = matching.as_slice() else {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "distributed component batch edge {edge_index} maps to {} signal buffers",
+                        matching.len()
+                    )),
+                ));
+            };
+            Ok(key.clone())
+        }
     }
 }
 
@@ -254,22 +290,24 @@ impl VulkanDistributedComponentBatchRunners {
                     )),
                 ));
             }
-            let input_key = VulkanComponentBatchSignalKey::Activation {
-                component_id: planned.input_activation.component_id.clone(),
-                signal_id: planned.input_activation.signal_id.clone(),
-            };
+            let input_key = distributed_component_batch_signal_key(
+                &planned.input_activation,
+                &batch_slice.signal_buffer_indices,
+            )?;
             let auxiliary_input_keys = planned
                 .auxiliary_input_activations
                 .iter()
-                .map(|activation| VulkanComponentBatchSignalKey::Activation {
-                    component_id: activation.component_id.clone(),
-                    signal_id: activation.signal_id.clone(),
+                .map(|activation| {
+                    distributed_component_batch_signal_key(
+                        activation,
+                        &batch_slice.signal_buffer_indices,
+                    )
                 })
-                .collect::<Vec<_>>();
-            let output_key = VulkanComponentBatchSignalKey::Activation {
-                component_id: planned.output_activation.component_id.clone(),
-                signal_id: planned.output_activation.signal_id.clone(),
-            };
+                .collect::<Result<Vec<_>, _>>()?;
+            let output_key = distributed_component_batch_signal_key(
+                &planned.output_activation,
+                &batch_slice.signal_buffer_indices,
+            )?;
             let input_frame_capacity = batch_slice.signal_buffer(&input_key)?.frame_byte_capacity;
             let output_frame_capacity = batch_slice.signal_buffer(&output_key)?.frame_byte_capacity;
             if input_frame_capacity != planned.input_byte_capacity
@@ -298,14 +336,6 @@ impl VulkanDistributedComponentBatchRunners {
                     ));
                 }
             }
-            let input_byte_capacity = planned
-                .input_byte_capacity
-                .checked_mul(lane_capacity)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                        "distributed component batch input capacity overflowed".to_string(),
-                    ))
-                })?;
             let workgroup_count_y = u32::try_from(
                 lane_capacity
                     .checked_add(artifact.lane_tile_width - 1)
@@ -323,6 +353,20 @@ impl VulkanDistributedComponentBatchRunners {
             })?;
             let mut shards = Vec::with_capacity(planned.shards.len());
             for shard in &planned.shards {
+                if shard.auxiliary_input_ranges.len()
+                    != planned.auxiliary_input_activations.len()
+                {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "distributed component batch {}.{} has {} auxiliary ranges for {} auxiliary inputs on {:?}",
+                            planned.component_id,
+                            planned.node_id,
+                            shard.auxiliary_input_ranges.len(),
+                            planned.auxiliary_input_activations.len(),
+                            shard.device_id,
+                        )),
+                    ));
+                }
                 let device = devices.get(&shard.device_id).ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                         device_id: shard.device_id.clone(),
@@ -399,6 +443,12 @@ impl VulkanDistributedComponentBatchRunners {
                 let mut bindings = Vec::with_capacity(
                     2 + planned.auxiliary_input_activations.len() + shard.parameters.len(),
                 );
+                let (input_byte_offset, input_byte_capacity) =
+                    distributed_batch_shard_binding_range(
+                        planned.input_byte_capacity,
+                        lane_capacity,
+                        &shard.input_range,
+                    )?;
                 bindings.push(
                     VulkanResidentKernelBufferBinding::new(
                         u32::try_from(planned.input_activation.binding).map_err(|_| {
@@ -410,23 +460,22 @@ impl VulkanDistributedComponentBatchRunners {
                         input,
                         input_byte_capacity,
                     )
+                    .with_byte_offset(input_byte_offset)
                     .with_access(VulkanResidentKernelBufferAccess::Read),
                 );
-                for (activation, key) in planned
+                for ((activation, key), range) in planned
                     .auxiliary_input_activations
                     .iter()
                     .zip(&auxiliary_input_keys)
+                    .zip(&shard.auxiliary_input_ranges)
                 {
                     let buffer = batch_slice.distributed_signal_buffer(key, &shard.device_id)?;
-                    let byte_capacity = activation
-                        .signal_byte_capacity
-                        .checked_mul(lane_capacity)
-                        .ok_or_else(|| {
-                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                                "distributed component batch auxiliary input capacity overflowed"
-                                    .to_string(),
-                            ))
-                        })?;
+                    let (byte_offset, byte_capacity) =
+                        distributed_batch_shard_binding_range(
+                            activation.signal_byte_capacity,
+                            lane_capacity,
+                            range,
+                        )?;
                     bindings.push(
                         VulkanResidentKernelBufferBinding::new(
                             u32::try_from(activation.binding).map_err(|_| {
@@ -438,6 +487,7 @@ impl VulkanDistributedComponentBatchRunners {
                             buffer,
                             byte_capacity,
                         )
+                        .with_byte_offset(byte_offset)
                         .with_access(VulkanResidentKernelBufferAccess::Read),
                     );
                 }
@@ -998,6 +1048,19 @@ fn distributed_batch_shard_output_binding_range(
             ))
         })?;
     Ok((shard_byte_offset, binding_byte_capacity))
+}
+
+fn distributed_batch_shard_binding_range(
+    frame_byte_capacity: usize,
+    lane_capacity: usize,
+    range: &VulkanDistributedActivationRange,
+) -> Result<(usize, usize), VulkanResidentInProcessPlacedRuntimeError> {
+    distributed_batch_shard_output_binding_range(
+        frame_byte_capacity,
+        lane_capacity,
+        range.byte_offset,
+        range.byte_count,
+    )
 }
 
 fn distributed_batch_rows_per_workgroup(
