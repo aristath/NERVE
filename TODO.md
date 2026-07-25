@@ -27,41 +27,7 @@ context/output limits, or benchmark-only shortcuts.
 
 ## Remaining work, in priority order
 
-### 1. Finish long-context prefill and mixed-workload scheduling
-
-- Interleave prefill and decode fairly under memory pressure.
-- Pipeline independent streams across placed devices so serial layer placement
-  amortizes cross-queue handoffs. Under matched seed-1 16K conversations, the
-  first three valid turns averaged 16.395 decode tokens/second on one GPU and
-  12.896 on two GPUs. Direct shared-host edges reduced command count relative to
-  two-copy device-local staging but improved throughput by only 0.4%, proving
-  that the remaining 21.3% gap is dominated by the serial placed schedule rather
-  than edge-copy mechanics.
-- Derive prefill chunk size from available memory, device execution limits, and
-  selected kernel shape.
-- Batch compatible prefill work across streams.
-- Parallelize the stable online attention softmax and value reduction as context
-  grows. The current 256-wide attention-head kernel still executes tile score,
-  exponential, and carry updates through a serial lane-zero region; preserve
-  numerically stable online semantics while distributing that work.
-- Measure the device-page translation cost introduced by physical transient-state
-  paging. Hoist or specialize invariant page metadata and mapping reads without
-  returning to host-resolved flat offsets. On the first post-paging 27B-FP8
-  conversation, the four completed measured turns averaged 12.495 decode
-  tokens/second, below the pre-paging 15.862-token/second observation, although
-  the different generated lengths and accumulated context make this a lead to
-  isolate rather than a causal attribution.
-- Make resident prefix checkpoint capture asynchronous or incrementally
-  copy-on-write instead of synchronously copying the complete retained state. In
-  the first post-prefix-admission 27B-FP8 run, one checkpoint retained
-  167,510,016 device bytes and introduced two blocking resident copy waits.
-- Preallocate, reclaim, and compact physical state pages safely around long
-  prompts.
-- Validate 64K/128K context and long agentic outputs without arbitrary low token
-  limits.
-- Report prefill and decode throughput separately by default.
-
-### 2. Maintain adversarial correctness and performance gates
+### 1. Maintain adversarial correctness and performance gates
 
 Every meaningful compiler, runtime, state, graph, or kernel change must be tested
 against the supported model set rather than optimized around one model.
