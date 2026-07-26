@@ -59,26 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 8. Extend the IR for alternative representations and representation islands
-
-- Represent non-dense signals, parameters, state, and topology explicitly.
-- Describe transducers between representations as ordinary semantic entities
-  with measurable cost.
-- Allow adjacent scopes to share one alternative representation without
-  materializing the source activation format between them.
-- Allow the optimizer to absorb a basis or encoding change into adjacent
-  parameters where algebraically valid.
-- Preserve logical shapes and public port contracts separately from physical
-  representations.
-- Represent confidence, unresolved candidates, and correction requests where a
-  candidate uses verified approximation.
-- Keep provenance from every new node, state object, parameter artifact, and
-  physical kernel back to the replaced semantic scope.
-
-Completion requires validation and planning tests for heterogeneous
-representation graphs, explicit rejection of incompatible connections, and
-round-trip inspection through the runtime/editor schema.
-
 ### 9. Implement candidate synthesis and isolated staging
 
 - Construct candidate parameters, indexes, fields, graphs, programs, codebooks,

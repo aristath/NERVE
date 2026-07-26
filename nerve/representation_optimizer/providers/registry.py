@@ -29,6 +29,9 @@ from nerve.representation_optimizer.providers.types import (
     ProviderRegistryReport,
     StaticEstimate,
 )
+from nerve.representation_optimizer.representation_ir import (
+    RepresentationGraphDocument,
+)
 
 
 _REQUIRED_METHODS = (
@@ -236,22 +239,26 @@ def _candidate_plan(
             "candidate descriptor does not match synthesizing provider"
         )
     _validate_candidate_source(document, context, evidence)
-    representation_ir = _provider_document(
-        provider.emit_representation_ir(context, candidate.to_json()),
-        "representation IR",
+    representation_ir = RepresentationGraphDocument.from_json(
+        provider.emit_representation_ir(context, candidate.to_json())
+    )
+    _validate_representation_ir_source(
+        representation_ir.to_json(),
+        document,
+        context,
     )
     target_lowering = _provider_document(
         provider.lower_for_target(
             context,
             candidate.to_json(),
-            deepcopy(representation_ir),
+            representation_ir.to_json(),
         ),
         "target lowering",
     )
     estimate = provider.estimate_static_cost(
         context,
         candidate.to_json(),
-        deepcopy(representation_ir),
+        representation_ir.to_json(),
         deepcopy(target_lowering),
     )
     if not isinstance(estimate, StaticEstimate):
@@ -333,6 +340,56 @@ def _validate_candidate_source(
     if set(candidate["evidence_refs"]) != set(evidence.evidence_ids):
         raise ContractValidationError(
             "candidate must retain the exact accepted evidence references"
+        )
+
+
+def _validate_representation_ir_source(
+    representation_ir: Json,
+    candidate: Json,
+    context: ProviderContext,
+) -> None:
+    if representation_ir["candidate_id"] != candidate["candidate_id"]:
+        raise ContractValidationError(
+            "representation graph candidate_id does not match its candidate"
+        )
+    if representation_ir["scope_ids"] != candidate["scope_ids"]:
+        raise ContractValidationError(
+            "representation graph scopes do not match its candidate"
+        )
+    expected_digests = dict(
+        zip(
+            candidate["scope_ids"],
+            candidate["source_contract_digests"],
+            strict=True,
+        )
+    )
+    if representation_ir["source_contract_digests"] != expected_digests:
+        raise ContractValidationError(
+            "representation graph source contracts do not match its candidate"
+        )
+    candidate_mode = candidate["behavioral_contract"]["mode"]
+    representation_mode = representation_ir["confidence"]["mode"]
+    if (candidate_mode == "exact") != (representation_mode == "exact"):
+        raise ContractValidationError(
+            "representation graph confidence disagrees with candidate behavior"
+        )
+    context_evidence = {evidence["evidence_id"] for evidence in context.evidence}
+    cited_evidence = set(representation_ir["confidence"]["evidence_refs"])
+    for collection in (
+        "signals",
+        "resources",
+        "nodes",
+        "absorbed_transforms",
+        "physical_kernels",
+        "unresolved",
+        "correction_requests",
+    ):
+        for record in representation_ir[collection]:
+            cited_evidence.update(record["provenance"]["evidence_refs"])
+            cited_evidence.update(record.get("evidence_refs", []))
+    if not cited_evidence <= context_evidence:
+        raise ContractValidationError(
+            "representation graph cites evidence outside the provider problem"
         )
 
 

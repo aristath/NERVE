@@ -41,6 +41,15 @@ from nerve.representation_optimizer.lifecycle import (
     CandidateState,
     OptimizationSession,
 )
+from nerve.representation_optimizer.representation_ir import (
+    REPRESENTATION_GRAPH_SCHEMA,
+    RepresentationGraphDocument,
+    RepresentationGraphPlan,
+    finalize_representation_graph,
+    plan_representation_graph,
+    representation_graph_id,
+    validate_representation_graph,
+)
 
 __all__ = [
     "ALGEBRAIC_EVIDENCE_SCHEMA",
@@ -55,6 +64,7 @@ __all__ = [
     "RELOWERING_REQUEST_SCHEMA",
     "REPRESENTATION_CANDIDATE_SCHEMA",
     "REPRESENTATION_DESCRIPTOR_SCHEMA",
+    "REPRESENTATION_GRAPH_SCHEMA",
     "SOURCE_BEHAVIOR_CONTRACT_SCHEMA",
     "VALIDATION_RECORD_SCHEMA",
     "CandidateLifecycle",
@@ -63,14 +73,20 @@ __all__ = [
     "ContractValidationError",
     "OptimizationSession",
     "RepresentationDescriptorRegistry",
+    "RepresentationGraphDocument",
+    "RepresentationGraphPlan",
     "algebraic_evidence_id",
     "canonical_json_bytes",
     "contract_digest",
+    "finalize_representation_graph",
     "load_builtin_representation_descriptors",
     "optimization_scope_catalog_id",
+    "plan_representation_graph",
     "representation_candidate_equivalence_key",
     "representation_candidate_id",
     "representation_descriptor_id",
+    "representation_graph_id",
     "stable_contract_id",
     "validate_contract",
+    "validate_representation_graph",
 ]

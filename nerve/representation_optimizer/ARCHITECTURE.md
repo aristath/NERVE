@@ -53,6 +53,7 @@ non-finite number, or internally inconsistent contract.
 | `hardware_process_profile.v1` | Target identity, processes, measurements, and provenance |
 | `representation_descriptor.v1` | Open representation-family vocabulary, evidence requirements, physical forms, costs, and correction paths |
 | `representation_candidate.v1` | Proposed representation, target predicate, and error contract |
+| `representation_graph.v1` | Logical contracts, physical forms, resources, transducers, islands, corrections, and provenance |
 | `candidate_construction.v1` | Isolated construction result, artifacts, resources, and diagnostics |
 | `benchmark_record.v1` | Matched workload, raw samples, summary, and speed decision |
 | `validation_record.v1` | Proof or behavioral-validation stages and counterexamples |
@@ -185,6 +186,36 @@ retaining an audit record of the kept and discarded identities. Candidate
 plans retain the provider's representation IR, target lowering, estimates,
 requirements, benchmark workloads, and validation obligations for subsequent
 staging.
+
+## Physical representation graph
+
+Provider IR is one shared `representation_graph.v1` contract rather than an
+opaque provider-owned document. It preserves the public logical signal, shape,
+and dtype separately from every physical encoding. Signals, parameters,
+transient state, and topology can therefore use dense tensors, sparse records,
+fields, codebooks, programs, graphs, or future provider-defined forms without
+changing the semantic boundary seen by graph editing.
+
+The graph makes conversions ordinary `transducer` nodes. Their physical input
+and output representations and estimated or measured cost are explicit; an
+incompatible connection cannot imply a hidden conversion. A representation
+island binds adjacent semantic scopes, physical nodes, native connections, and
+boundary ports so intermediate source-format activations need not be
+materialized. Proven basis or encoding transforms can instead be absorbed into
+adjacent parameter artifacts.
+
+Every signal, physical resource, node, transform, and kernel retains source
+scope, source-node, transformation, and evidence provenance. Confidence is
+explicitly exact, verified approximation, or unresolved. Approximate graphs
+must expose correction requests and their error contracts, while unresolved
+graphs retain the subjects and evidence that prevent promotion.
+
+The generic planner validates the graph, rejects executable cycles and
+incompatible physical edges, derives a deterministic execution order, accounts
+for transducer and kernel costs, and identifies native cross-scope connections
+versus source materializations. Rust consumes the same versioned schema and
+provides a lossless editor inspection view; execution and package publication
+remain later lifecycle decisions.
 
 ## Candidate lifecycle
 

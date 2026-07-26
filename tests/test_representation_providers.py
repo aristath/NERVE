@@ -20,6 +20,7 @@ from nerve.representation_optimizer.providers import (
     ProviderRegistry,
     StaticEstimate,
 )
+from tests.representation_graph_fixtures import exact_representation_graph
 from tests.test_representation_optimizer_contracts import (
     contract_fixtures,
     hardware_profile_contract,
@@ -112,10 +113,12 @@ class FixtureProvider:
 
     def emit_representation_ir(self, context, candidate):
         self._called("emit_representation_ir")
-        return {
-            "schema": "nerve.optimizer.fixture_representation_ir.v1",
-            "candidate_id": candidate["candidate_id"],
-        }
+        return exact_representation_graph(
+            candidate_id=candidate["candidate_id"],
+            scope_ids=context.scope_ids,
+            source_contract_digests=context.source_contract_digests,
+            evidence_ref=context.evidence[0]["evidence_id"],
+        )
 
     def lower_for_target(self, context, candidate, representation_ir):
         self._called("lower_for_target")
@@ -214,6 +217,10 @@ def test_provider_registry_executes_the_complete_interface_deterministically():
     assert len(first.candidates) == 1
     assert first.candidates[0].candidate_id == second.candidates[0].candidate_id
     assert first.candidates[0].static_estimate.feasible is True
+    assert (
+        first.candidates[0].representation_ir.to_json()["candidate_id"]
+        == first.candidates[0].candidate_id
+    )
     expected_calls = {
         "match_semantics",
         "match_structure",
@@ -358,3 +365,45 @@ def test_candidate_content_mutation_invalidates_deterministic_identity():
         match="canonical representation candidate",
     ):
         validate_contract(candidate)
+
+
+def test_provider_cannot_emit_opaque_or_malformed_representation_ir():
+    class OpaqueProvider(FixtureProvider):
+        def emit_representation_ir(self, context, candidate):
+            self._called("emit_representation_ir")
+            return {
+                "schema": "nerve.optimizer.provider_private_graph.v1",
+                "candidate_id": candidate["candidate_id"],
+            }
+
+    provider = OpaqueProvider("fixture.opaque", _descriptor_id())
+    report = ProviderRegistry.from_providers(
+        descriptors=_descriptors(),
+        providers=[provider],
+    ).run(_problem())
+
+    assert report.candidates == ()
+    assert report.evaluations[0].status == "failed"
+    assert "fields are invalid" in report.evaluations[0].error["message"]
+
+
+def test_representation_graph_must_bind_to_candidate_scope_and_evidence():
+    class MisboundProvider(FixtureProvider):
+        def emit_representation_ir(self, context, candidate):
+            self._called("emit_representation_ir")
+            return exact_representation_graph(
+                candidate_id="candidate_not_the_synthesized_candidate",
+                scope_ids=context.scope_ids,
+                source_contract_digests=context.source_contract_digests,
+                evidence_ref=context.evidence[0]["evidence_id"],
+            )
+
+    provider = MisboundProvider("fixture.misbound", _descriptor_id())
+    report = ProviderRegistry.from_providers(
+        descriptors=_descriptors(),
+        providers=[provider],
+    ).run(_problem())
+
+    assert report.candidates == ()
+    assert report.evaluations[0].status == "failed"
+    assert "candidate_id does not match" in report.evaluations[0].error["message"]

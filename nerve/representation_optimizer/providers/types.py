@@ -15,6 +15,9 @@ from nerve.representation_optimizer.contracts import (
     ContractValidationError,
     canonical_json_bytes,
 )
+from nerve.representation_optimizer.representation_ir.contracts import (
+    RepresentationGraphDocument,
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -260,7 +263,7 @@ class ProviderProblem:
 class ProviderCandidatePlan:
     provider: ProviderIdentity
     candidate: ContractDocument
-    representation_ir: Json
+    representation_ir: RepresentationGraphDocument
     target_lowering: Json
     static_estimate: StaticEstimate
     construction_requirements: Json

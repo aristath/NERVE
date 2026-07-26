@@ -36,6 +36,28 @@ pub struct RuntimeEditorSourceComponent {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeEditorRepresentationGraph {
+    pub schema: String,
+    pub graph_id: String,
+    pub candidate_id: String,
+    pub scope_ids: Vec<String>,
+    pub source_contract_digests: BTreeMap<String, String>,
+    pub logical_contracts: Vec<crate::RepresentationLogicalContract>,
+    pub physical_representations: Vec<crate::PhysicalRepresentation>,
+    pub signals: Vec<crate::RepresentationSignal>,
+    pub resources: Vec<crate::RepresentationResource>,
+    pub nodes: Vec<crate::RepresentationNode>,
+    pub connections: Vec<crate::RepresentationConnection>,
+    pub public_ports: Vec<crate::RepresentationPublicPort>,
+    pub islands: Vec<crate::RepresentationIsland>,
+    pub absorbed_transforms: Vec<crate::RepresentationAbsorbedTransform>,
+    pub physical_kernels: Vec<crate::RepresentationPhysicalKernel>,
+    pub confidence: crate::RepresentationConfidence,
+    pub unresolved: Vec<crate::RepresentationUnresolved>,
+    pub correction_requests: Vec<crate::RepresentationCorrectionRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeEditorControlChoice {
     pub value: Value,
     pub label: String,
