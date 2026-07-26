@@ -6,6 +6,7 @@ pub struct VulkanResidentModelPackageManifest {
     pub circuit_graph: VulkanResidentPackageCircuitGraph,
     pub tensor_index_path: String,
     pub behavioral_validation_path: String,
+    pub representation_optimization_path: String,
     pub config_path: String,
     pub tokenizer: VulkanResidentTokenizerPackageSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]

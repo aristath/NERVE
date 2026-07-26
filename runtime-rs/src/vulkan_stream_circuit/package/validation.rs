@@ -590,6 +590,7 @@ fn validate_resident_package_artifact_integrity(
     let required = [
         manifest.tensor_index_path.clone(),
         manifest.behavioral_validation_path.clone(),
+        manifest.representation_optimization_path.clone(),
         manifest.config_path.clone(),
         manifest.input_transducer.shader_path.clone(),
         manifest.input_transducer.batch_shader_path.clone(),

@@ -1,0 +1,33 @@
+{
+  "schema": "nerve.optimizer.stage.v1",
+  "stage": "behavioral_representation_optimization",
+  "compiler_position": {
+    "after": "exact_semantic_lowering",
+    "before": "physical_package_publication"
+  },
+  "status": "exact_baseline_retained",
+  "exact_baseline": {
+    "artifact_ref": "lowered/execution_graph.circuits.json",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:14da5baf80fde6adb806ffea252169ce40e48c61e81dfc4ae117db7775c47465",
+    "mutable": false
+  },
+  "session": {
+    "schema": "nerve.optimizer.session.v1",
+    "session_id": "optimization_session_b27eeebb0c361f970e378da893f2356a",
+    "package_id": "model_d119caf1_vulkan_resident",
+    "exact_baseline_digest": "nerve.optimizer.canonical_json_sha256.v1:14da5baf80fde6adb806ffea252169ce40e48c61e81dfc4ae117db7775c47465",
+    "candidates": []
+  },
+  "contract_schemas": [
+    "nerve.optimizer.optimization_scope.v1",
+    "nerve.optimizer.source_behavior_contract.v1",
+    "nerve.optimizer.algebraic_evidence.v1",
+    "nerve.optimizer.hardware_process_profile.v1",
+    "nerve.optimizer.representation_candidate.v1",
+    "nerve.optimizer.candidate_construction.v1",
+    "nerve.optimizer.benchmark_record.v1",
+    "nerve.optimizer.validation_record.v1",
+    "nerve.optimizer.promotion_decision.v1",
+    "nerve.optimizer.relowering_request.v1"
+  ]
+}

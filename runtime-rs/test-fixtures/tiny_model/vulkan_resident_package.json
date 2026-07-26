@@ -1,7 +1,7 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
   "package_id": "model_d119caf1_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:ab13cc4702f50509f7400636b382bc61ac34ef971b8773a0a43fb653f1b745c3",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:191b5ea7cc8cb189582ff1e394457b2bdbe900a2b414c251e295f170a7a9de70",
   "compiler_target": {
     "schema": "nerve.compiler_target.v1",
     "devices": [
@@ -2839,6 +2839,7 @@
     }
   ],
   "speculative_decoders": [],
+  "representation_optimization_path": "optimization/stage.json",
   "artifact_integrity": {
     "schema": "nerve.package_artifact_integrity.v1",
     "algorithm": "sha256",
@@ -2906,6 +2907,10 @@
       "lowered/sampler/state.json": {
         "byte_count": 97,
         "sha256": "1722b53d01285e75090e6b44f3d2199d1de1294d7a6687bbf08267d20ec8b222"
+      },
+      "optimization/stage.json": {
+        "byte_count": 1338,
+        "sha256": "0c5e6d9eb00e71e6cfe901c9c57f9fa8a57a4b1fef15b0745238f92eecf7b4b2"
       },
       "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv": {
         "byte_count": 23748,

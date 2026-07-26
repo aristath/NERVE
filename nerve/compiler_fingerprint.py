@@ -33,9 +33,11 @@ def compiler_source_inputs(compiler_dir: Path | None = None) -> tuple[tuple[str,
     for relative_path in relative_paths:
         parts = Path(relative_path).parts
         if (
-            len(parts) != 2
+            len(parts) < 2
             or parts[0] != "nerve"
-            or not parts[1].endswith(".py")
+            or parts[-1] in {"", ".", ".."}
+            or not parts[-1].endswith(".py")
+            or any(part in {"", ".", ".."} for part in parts)
         ):
             raise RuntimeError(
                 f"invalid compiler source path {relative_path!r} in {manifest_path}"

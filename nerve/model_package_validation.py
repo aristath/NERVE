@@ -3,6 +3,7 @@ from nerve.model_package_common import *
 from nerve.model_package_assets import *
 from nerve.model_package_shaders import *
 from nerve.model_package_tensors import *
+from nerve.representation_optimizer.stage import load_optimizer_stage
 
 
 def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
@@ -992,6 +993,17 @@ def validate_compiled_package(package_dir: Path, manifest: Json) -> None:
             f"compiled package is missing behavioral validation artifact {behavioral_path}"
         )
     behavioral = read_json(behavioral_path)
+    optimizer_path = package_artifact_path(
+        package_dir,
+        manifest.get("representation_optimization_path"),
+        "representation optimization",
+    )
+    if not optimizer_path.is_file():
+        raise ModelCompileError(
+            f"compiled package is missing representation optimization artifact "
+            f"{optimizer_path}"
+        )
+    load_optimizer_stage(optimizer_path, package_dir=package_dir)
     candidate_circuits = validate_compiled_circuit_graph(manifest)
     auxiliary_circuits = validate_compiled_speculative_decoders(manifest)
     duplicate_circuits = set(candidate_circuits).intersection(auxiliary_circuits)

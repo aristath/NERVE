@@ -12,6 +12,7 @@ from nerve.model_package_validation import *
 from nerve.model_package_tensors import *
 from nerve.model_package_derived_tensors import *
 from nerve.compiler_target import CompilerTarget
+from nerve.representation_optimizer.stage import initialize_optimizer_stage
 
 def compile_model_package(
     model_dir: Path,
@@ -83,6 +84,23 @@ def compile_model_package(
     )
 
     emit_compile_event(
+        event_sink,
+        "RepresentationOptimizationStarted",
+        exact_baseline=str(lowered["index_path"]),
+    )
+    optimizer_stage = initialize_optimizer_stage(
+        package_id=f"{slug}_vulkan_resident",
+        package_dir=package_dir,
+        lowered_index=lowered["index"],
+        lowered_index_path=lowered["index_path"],
+    )
+    emit_compile_event(
+        event_sink,
+        "RepresentationOptimizationCompleted",
+        status=optimizer_stage.document["status"],
+        artifact=optimizer_stage.package_reference(package_dir),
+    )
+    emit_compile_event(
         event_sink, "ArtifactWritingStarted", package_dir=str(package_dir)
     )
     write_runtime_config_package(model_graph, package_dir)
@@ -114,6 +132,9 @@ def compile_model_package(
         compiler_target=target.to_json(),
         event_sink=event_sink,
         cancel_requested=cancel_requested,
+    )
+    package_manifest["representation_optimization_path"] = (
+        optimizer_stage.package_reference(package_dir)
     )
     package_manifest["artifact_integrity"] = build_package_artifact_integrity(
         package_dir

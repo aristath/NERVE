@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -57,8 +57,11 @@ fn main() {
         .map(|relative| {
             let path = Path::new(relative);
             assert!(
-                path.components().count() == 2
-                    && path.starts_with("nerve")
+                path.components().count() >= 2
+                    && path.components().next() == Some(Component::Normal("nerve".as_ref()))
+                    && path
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
                     && path.extension().and_then(|value| value.to_str()) == Some("py"),
                 "invalid compiler source path {relative:?} in {:?}",
                 compiler_source_manifest

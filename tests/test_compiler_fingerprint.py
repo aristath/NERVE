@@ -11,6 +11,16 @@ from nerve.compiler_fingerprint import (
 )
 
 
+def _module_source(compiler_dir: Path, module: str) -> Path:
+    module_path = compiler_dir.joinpath(*module.split("."))
+    source = module_path.with_suffix(".py")
+    if source.is_file():
+        return source
+    package_source = module_path / "__init__.py"
+    assert package_source.is_file(), f"compiler dependency nerve.{module} is missing"
+    return package_source
+
+
 def _transitive_compiler_sources(compiler_dir: Path) -> set[str]:
     pending = ["model_compiler"]
     visited = set()
@@ -18,9 +28,13 @@ def _transitive_compiler_sources(compiler_dir: Path) -> set[str]:
         module = pending.pop()
         if module in visited:
             continue
-        source = compiler_dir / f"{module}.py"
-        assert source.is_file(), f"compiler dependency nerve.{module} is missing"
+        source = _module_source(compiler_dir, module)
         visited.add(module)
+        parts = module.split(".")
+        pending.extend(
+            ".".join(parts[:parent_depth])
+            for parent_depth in range(1, len(parts))
+        )
         tree = ast.parse(source.read_text(), filename=str(source))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
@@ -31,10 +45,15 @@ def _transitive_compiler_sources(compiler_dir: Path) -> set[str]:
                 continue
             for name in imported:
                 if name.startswith("nerve."):
-                    dependency = name.split(".", 1)[1].split(".", 1)[0]
+                    dependency = name.split(".", 1)[1]
                     if dependency not in visited:
                         pending.append(dependency)
-    return {f"nerve/{module}.py" for module in visited}
+    return {
+        _module_source(compiler_dir, module)
+        .relative_to(compiler_dir.parent)
+        .as_posix()
+        for module in visited
+    }
 
 
 def test_compiler_source_manifest_is_the_exact_transitive_compile_closure() -> None:
@@ -59,7 +78,10 @@ def test_fingerprint_ignores_noncompiler_modules_but_tracks_compiler_dependencie
         compiler_dir / "compiler_sources.txt",
     )
     for _relative, source in compiler_source_inputs():
-        shutil.copy(source, compiler_dir / source.name)
+        relative = source.relative_to(repository_root / "nerve")
+        destination = compiler_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, destination)
     (shader_dir / "kernel.comp").write_text("original shader")
     (compiler_dir / "conversation_gate.py").write_text("unrelated = 1\n")
 

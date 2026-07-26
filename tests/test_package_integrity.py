@@ -23,6 +23,7 @@ from nerve.model_package import (
     validate_compiled_package,
 )
 from nerve.model_package_validation import valid_batch_stage
+from nerve.representation_optimizer.stage import initialize_optimizer_stage
 
 
 def minimal_package(root: Path) -> dict[str, object]:
@@ -436,6 +437,22 @@ def minimal_package(root: Path) -> dict[str, object]:
             }
         ],
     }
+    lowered_index = {
+        "schema": "nerve.lowered_execution_graph.v1",
+        "graph": manifest["circuit_graph"],
+    }
+    lowered_index_path = root / "lowered" / "execution_graph.circuits.json"
+    lowered_index_path.parent.mkdir(parents=True)
+    lowered_index_path.write_text(json.dumps(lowered_index))
+    optimizer_stage = initialize_optimizer_stage(
+        package_id=str(manifest["package_id"]),
+        package_dir=root,
+        lowered_index=lowered_index,
+        lowered_index_path=lowered_index_path,
+    )
+    manifest["representation_optimization_path"] = (
+        optimizer_stage.package_reference(root)
+    )
     manifest["artifact_integrity"] = build_package_artifact_integrity(root)
     return manifest
 
