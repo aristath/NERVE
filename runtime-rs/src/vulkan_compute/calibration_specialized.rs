@@ -12,6 +12,8 @@ pub struct VulkanTextureCalibration {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     completion_fence: vk::Fence,
+    timestamp_query_pool: vk::QueryPool,
+    timestamp_period_ns: f32,
     queue: vk::Queue,
     _source: VulkanResidentBuffer,
     output: VulkanResidentBuffer,
@@ -295,6 +297,19 @@ impl VulkanComputeDevice {
                 .device
                 .create_fence(&vk::FenceCreateInfo::default(), None)
                 .map_err(|error| VulkanError(format!("failed to create texture fence: {error:?}")))?;
+            let timestamp_query_pool = self
+                .device
+                .create_query_pool(
+                    &vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::TIMESTAMP)
+                        .query_count(2),
+                    None,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to create texture timestamp pool: {error:?}"
+                    ))
+                })?;
             self.device
                 .begin_command_buffer(
                     command_buffer,
@@ -302,6 +317,14 @@ impl VulkanComputeDevice {
                         .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE),
                 )
                 .map_err(|error| VulkanError(format!("failed to begin texture commands: {error:?}")))?;
+            self.device
+                .cmd_reset_query_pool(command_buffer, timestamp_query_pool, 0, 2);
+            self.device.cmd_write_timestamp(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                timestamp_query_pool,
+                0,
+            );
             let to_transfer = [vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -384,6 +407,12 @@ impl VulkanComputeDevice {
             );
             self.device
                 .cmd_dispatch(command_buffer, output_count.div_ceil(256), 1, 1);
+            self.device.cmd_write_timestamp(
+                command_buffer,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                timestamp_query_pool,
+                1,
+            );
             let to_host = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ)];
@@ -413,6 +442,8 @@ impl VulkanComputeDevice {
                 command_pool,
                 command_buffer,
                 completion_fence,
+                timestamp_query_pool,
+                timestamp_period_ns: self.timestamp_period_ns,
                 queue: self.queue,
                 _source: source,
                 output,
@@ -422,7 +453,7 @@ impl VulkanComputeDevice {
 }
 
 impl VulkanTextureCalibration {
-    pub fn run_for(&self, timeout: Duration) -> Result<(), VulkanError> {
+    pub fn run_for(&self, timeout: Duration) -> Result<u64, VulkanError> {
         unsafe {
             self.device
                 .reset_fences(&[self.completion_fence])
@@ -443,7 +474,28 @@ impl VulkanTextureCalibration {
                     VulkanError(format!(
                         "texture calibration did not complete within {timeout_ns} ns: {error:?}"
                     ))
-                })
+                })?;
+            let mut timestamps = [0_u64; 2];
+            self.device
+                .get_query_pool_results(
+                    self.timestamp_query_pool,
+                    0,
+                    &mut timestamps,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to read texture timestamps: {error:?}"
+                    ))
+                })?;
+            let duration_ns = timestamps[1].wrapping_sub(timestamps[0]) as f64
+                * f64::from(self.timestamp_period_ns);
+            if !duration_ns.is_finite() || duration_ns <= 0.0 || duration_ns > u64::MAX as f64 {
+                return Err(VulkanError(format!(
+                    "texture calibration produced invalid device duration {duration_ns}"
+                )));
+            }
+            Ok((duration_ns.round() as u64).max(1))
         }
     }
 
@@ -460,6 +512,8 @@ impl Drop for VulkanTextureCalibration {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+            self.device
+                .destroy_query_pool(self.timestamp_query_pool, None);
             self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);

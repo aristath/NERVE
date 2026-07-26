@@ -963,6 +963,25 @@ impl VulkanComputeDevice {
         destination: &VulkanResidentBuffer,
         len: usize,
     ) -> Result<VulkanResidentBufferCopy, VulkanError> {
+        self.create_resident_buffer_copy_internal(source, destination, len, false)
+    }
+
+    pub fn create_timestamped_resident_buffer_copy(
+        &self,
+        source: &VulkanResidentBuffer,
+        destination: &VulkanResidentBuffer,
+        len: usize,
+    ) -> Result<VulkanResidentBufferCopy, VulkanError> {
+        self.create_resident_buffer_copy_internal(source, destination, len, true)
+    }
+
+    fn create_resident_buffer_copy_internal(
+        &self,
+        source: &VulkanResidentBuffer,
+        destination: &VulkanResidentBuffer,
+        len: usize,
+        timestamped: bool,
+    ) -> Result<VulkanResidentBufferCopy, VulkanError> {
         if len == 0 {
             return Err(VulkanError(
                 "resident byte copy binding length must not be zero".to_string(),
@@ -997,16 +1016,47 @@ impl VulkanComputeDevice {
                     ))
                 })?
                 .remove(0);
+            let timestamp_query_pool = if timestamped {
+                match self.device.create_query_pool(
+                    &vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::TIMESTAMP)
+                        .query_count(2),
+                    None,
+                ) {
+                    Ok(query_pool) => Some(query_pool),
+                    Err(error) => {
+                        self.device.destroy_command_pool(command_pool, None);
+                        return Err(VulkanError(format!(
+                            "failed to create resident byte copy timestamp pool: {error:?}"
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
 
             let command_begin = vk::CommandBufferBeginInfo::default();
             self.device
                 .begin_command_buffer(command_buffer, &command_begin)
                 .map_err(|error| {
+                    if let Some(query_pool) = timestamp_query_pool {
+                        self.device.destroy_query_pool(query_pool, None);
+                    }
                     self.device.destroy_command_pool(command_pool, None);
                     VulkanError(format!(
                         "failed to begin resident byte copy binding command buffer: {error:?}"
                     ))
                 })?;
+            if let Some(query_pool) = timestamp_query_pool {
+                self.device
+                    .cmd_reset_query_pool(command_buffer, query_pool, 0, 2);
+                self.device.cmd_write_timestamp(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    0,
+                );
+            }
             let copy_regions = [vk::BufferCopy {
                 src_offset: 0,
                 dst_offset: 0,
@@ -1018,9 +1068,20 @@ impl VulkanComputeDevice {
                 destination.buffer,
                 &copy_regions,
             );
+            if let Some(query_pool) = timestamp_query_pool {
+                self.device.cmd_write_timestamp(
+                    command_buffer,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    query_pool,
+                    1,
+                );
+            }
             self.device
                 .end_command_buffer(command_buffer)
                 .map_err(|error| {
+                    if let Some(query_pool) = timestamp_query_pool {
+                        self.device.destroy_query_pool(query_pool, None);
+                    }
                     self.device.destroy_command_pool(command_pool, None);
                     VulkanError(format!(
                         "failed to end resident byte copy binding command buffer: {error:?}"
@@ -1030,6 +1091,9 @@ impl VulkanComputeDevice {
                 .device
                 .create_fence(&vk::FenceCreateInfo::default(), None)
                 .map_err(|error| {
+                    if let Some(query_pool) = timestamp_query_pool {
+                        self.device.destroy_query_pool(query_pool, None);
+                    }
                     self.device.destroy_command_pool(command_pool, None);
                     VulkanError(format!(
                         "failed to create resident byte copy completion fence: {error:?}"
@@ -1045,6 +1109,8 @@ impl VulkanComputeDevice {
                 destination: destination.buffer,
                 byte_len,
                 completion_fence,
+                timestamp_query_pool,
+                timestamp_period_ns: self.timestamp_period_ns,
             })
         }
     }

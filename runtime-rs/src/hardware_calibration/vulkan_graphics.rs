@@ -333,20 +333,23 @@ impl PreparedTexture {
         let target = Duration::from_nanos(minimum_duration_ns);
         let started = Instant::now();
         let mut iterations = 0u64;
+        let mut device_duration_ns = 0u64;
         while started.elapsed() < target || iterations == 0 {
             if cancelled.load(Ordering::Relaxed) {
                 return Err("calibration was cancelled during texture sampling".to_string());
             }
-            self.texture
+            let device_duration = self
+                .texture
                 .run_for(Duration::from_secs(1))
                 .map_err(|error| format!("texture calibration failed: {error}"))?;
+            device_duration_ns = device_duration_ns.saturating_add(device_duration);
             iterations = iterations.saturating_add(1);
         }
         Ok(HardwareCalibrationSample {
             sample_index,
             phase,
             duration_ns: elapsed_ns(started),
-            device_duration_ns: None,
+            device_duration_ns: Some(device_duration_ns),
             iterations,
             window_index,
             thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(

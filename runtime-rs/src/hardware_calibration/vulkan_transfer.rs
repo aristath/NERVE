@@ -96,7 +96,6 @@ enum PreparedTransfer {
         pci_address: Option<String>,
     },
     DeviceToDevice {
-        device: Rc<VulkanComputeDevice>,
         _source: VulkanResidentBuffer,
         destination: VulkanResidentBuffer,
         binding: VulkanResidentBufferCopy,
@@ -156,10 +155,9 @@ impl PreparedTransfer {
                     .write_bytes(&pattern)
                     .map_err(|error| format!("could not initialize transfer source: {error}"))?;
                 let binding = device
-                    .create_resident_buffer_copy(&source, &destination, byte_count)
+                    .create_timestamped_resident_buffer_copy(&source, &destination, byte_count)
                     .map_err(|error| format!("could not record device buffer copy: {error}"))?;
                 Ok(Self::DeviceToDevice {
-                    device: Rc::clone(device),
                     _source: source,
                     destination,
                     binding,
@@ -173,30 +171,33 @@ impl PreparedTransfer {
         }
     }
 
-    fn execute_once(&mut self) -> Result<(), String> {
+    fn execute_once(&mut self) -> Result<Option<u64>, String> {
         match self {
             Self::HostToDevice {
                 destination,
                 source,
                 ..
-            } => destination
-                .write_bytes(source)
-                .map_err(|error| format!("host-to-device transfer failed: {error}")),
+            } => {
+                destination
+                    .write_bytes(source)
+                    .map_err(|error| format!("host-to-device transfer failed: {error}"))?;
+                Ok(None)
+            }
             Self::DeviceToHost {
                 source, last_read, ..
             } => {
                 *last_read = source
                     .read_bytes(source.byte_capacity())
                     .map_err(|error| format!("device-to-host transfer failed: {error}"))?;
-                Ok(())
+                Ok(None)
             }
             Self::DeviceToDevice {
-                device,
                 binding,
                 byte_count,
                 ..
-            } => device
-                .run_resident_buffer_copy(binding, *byte_count)
+            } => binding
+                .run_with_device_duration(*byte_count)
+                .map(Some)
                 .map_err(|error| format!("device-to-device transfer failed: {error}")),
         }
     }
@@ -212,18 +213,24 @@ impl PreparedTransfer {
         let target = Duration::from_nanos(minimum_duration_ns);
         let started = Instant::now();
         let mut iterations = 0u64;
+        let mut device_duration_ns = 0u64;
+        let mut device_timing_available = true;
         while started.elapsed() < target || iterations == 0 {
             if cancelled.load(Ordering::Relaxed) {
                 return Err("calibration was cancelled during a transfer sample".to_string());
             }
-            self.execute_once()?;
+            if let Some(duration_ns) = self.execute_once()? {
+                device_duration_ns = device_duration_ns.saturating_add(duration_ns);
+            } else {
+                device_timing_available = false;
+            }
             iterations = iterations.saturating_add(1);
         }
         Ok(HardwareCalibrationSample {
             sample_index,
             phase,
             duration_ns: elapsed_ns(started),
-            device_duration_ns: None,
+            device_duration_ns: device_timing_available.then_some(device_duration_ns),
             iterations,
             window_index,
             thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(self.pci_address()),

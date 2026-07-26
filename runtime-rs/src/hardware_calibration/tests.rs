@@ -182,6 +182,19 @@ fn explicit_vulkan_transfer_calibration_moves_real_bytes_sequentially() {
         workload.validation.status == CalibrationValidationStatus::Passed
             && workload.samples.iter().all(|sample| sample.valid)
     }));
+    assert_eq!(
+        result
+            .workloads
+            .iter()
+            .filter(|workload| {
+                workload
+                    .samples
+                    .iter()
+                    .all(|sample| sample.device_duration_ns.is_some_and(|value| value > 0))
+            })
+            .count(),
+        1
+    );
 }
 
 #[cfg(feature = "vulkan")]
@@ -251,7 +264,7 @@ fn explicit_vulkan_texture_calibration_samples_a_real_image_sequentially() {
         result.workloads[0]
             .samples
             .iter()
-            .all(|sample| sample.valid)
+            .all(|sample| sample.valid && sample.device_duration_ns.is_some_and(|value| value > 0))
     );
     std::fs::remove_dir_all(temporary).unwrap();
 }

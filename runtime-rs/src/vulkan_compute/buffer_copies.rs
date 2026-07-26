@@ -7,6 +7,8 @@ pub struct VulkanResidentBufferCopy {
     destination: vk::Buffer,
     byte_len: vk::DeviceSize,
     completion_fence: vk::Fence,
+    timestamp_query_pool: Option<vk::QueryPool>,
+    timestamp_period_ns: f32,
 }
 
 pub struct VulkanResidentBufferCopyBatch {
@@ -101,6 +103,18 @@ impl VulkanResidentBufferCopy {
     }
 
     pub fn run(&self, len: usize) -> Result<(), VulkanError> {
+        self.run_internal(len).map(|_| ())
+    }
+
+    pub fn run_with_device_duration(&self, len: usize) -> Result<u64, VulkanError> {
+        self.run_internal(len)?.ok_or_else(|| {
+            VulkanError(
+                "resident byte copy was not created with timestamp measurement".to_string(),
+            )
+        })
+    }
+
+    fn run_internal(&self, len: usize) -> Result<Option<u64>, VulkanError> {
         if len == 0 {
             return Err(VulkanError(
                 "resident byte copy length must not be zero".to_string(),
@@ -136,7 +150,35 @@ impl VulkanResidentBufferCopy {
                     VulkanError(format!("failed waiting for resident byte copy: {error:?}"))
                 })?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+            let device_duration_ns = if let Some(query_pool) = self.timestamp_query_pool {
+                let mut timestamps = [0_u64; 2];
+                self.device
+                    .get_query_pool_results(
+                        query_pool,
+                        0,
+                        &mut timestamps,
+                        vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                    )
+                    .map_err(|error| {
+                        VulkanError(format!(
+                            "failed to read resident byte copy timestamps: {error:?}"
+                        ))
+                    })?;
+                let duration_ns = timestamps[1].wrapping_sub(timestamps[0]) as f64
+                    * f64::from(self.timestamp_period_ns);
+                if !duration_ns.is_finite()
+                    || duration_ns <= 0.0
+                    || duration_ns > u64::MAX as f64
+                {
+                    return Err(VulkanError(format!(
+                        "resident byte copy produced invalid device duration {duration_ns}"
+                    )));
+                }
+                Some((duration_ns.round() as u64).max(1))
+            } else {
+                None
+            };
+            Ok(device_duration_ns)
         }
     }
 }
@@ -181,6 +223,9 @@ impl VulkanResidentBufferCopyBatch {
 impl Drop for VulkanResidentBufferCopy {
     fn drop(&mut self) {
         unsafe {
+            if let Some(query_pool) = self.timestamp_query_pool {
+                self.device.destroy_query_pool(query_pool, None);
+            }
             self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }
