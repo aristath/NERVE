@@ -59,37 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 3. Build an empirical hardware calibration suite
-
-- Measure realized rather than advertised performance for each exposed hardware
-  process.
-- Cover representative:
-  - arithmetic types and instruction families;
-  - matrix and dot shapes;
-  - subgroup reductions, scans, shuffles, and ballots;
-  - access patterns and working-set sizes across the memory hierarchy;
-  - gathers, scatters, packed decoding, and bit operations;
-  - texture lookup and interpolation;
-  - raster, blend, depth/stencil, and ray-query operations;
-  - atomics, sparse compaction, and indirect execution;
-  - dispatch, synchronization, and queue costs;
-  - host/device and device/device transfers;
-  - CPU branches, trees, hash lookups, generated code, SIMD, and NUMA; and
-  - construction costs for indexes, fields, acceleration structures, and other
-    non-tensor artifacts.
-- Separate cold construction, warmup, and steady-state measurements.
-- Measure throughput and latency as a function of sustained execution length,
-  including thermal behavior, queue contention, bounded waits, and resident
-  feedback-window replay. A short-turn mean must not conceal long-horizon
-  throughput decay.
-- Record variance and require statistically meaningful differences.
-- Persist calibration as a versioned hardware-process profile tied to the
-  physical device, driver, API, and compiler implementation.
-
-Completion requires reproducible sequential runs, raw measurement artifacts,
-regression tests for result parsing, and profiles usable by candidate cost
-models.
-
 ### 4. Formalize the alternative-representation design space
 
 - Convert the open vocabulary in `EXPERIMENTS.md` into machine-readable
