@@ -32,6 +32,7 @@ from nerve.representation_optimizer.providers.types import (
 from nerve.representation_optimizer.representation_ir import (
     RepresentationGraphDocument,
 )
+from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
 
 
 _REQUIRED_METHODS = (
@@ -265,10 +266,15 @@ def _candidate_plan(
         raise ContractValidationError(
             "provider static cost estimator must return StaticEstimate"
         )
-    construction = _provider_document(
-        provider.construction_requirements(context, candidate.to_json()),
-        "construction requirements",
+    construction = CandidateBuildPlan.from_json(
+        provider.construction_requirements(context, candidate.to_json())
     )
+    if construction.output_paths != tuple(
+        artifact["path"] for artifact in document["artifact_declarations"]
+    ):
+        raise ContractValidationError(
+            "candidate build-plan outputs must match candidate artifact declarations"
+        )
     mount = _provider_document(
         provider.mount_requirements(context, candidate.to_json()),
         "mount requirements",

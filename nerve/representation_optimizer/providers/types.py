@@ -18,6 +18,7 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.representation_ir.contracts import (
     RepresentationGraphDocument,
 )
+from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
 
 
 @dataclass(frozen=True, order=True)
@@ -266,7 +267,7 @@ class ProviderCandidatePlan:
     representation_ir: RepresentationGraphDocument
     target_lowering: Json
     static_estimate: StaticEstimate
-    construction_requirements: Json
+    construction_requirements: CandidateBuildPlan
     mount_requirements: Json
     proof_or_error_contract: Json
     benchmark_workloads: tuple[Json, ...]

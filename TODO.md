@@ -59,23 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 9. Implement candidate synthesis and isolated staging
-
-- Construct candidate parameters, indexes, fields, graphs, programs, codebooks,
-  geometry, state layouts, correction artifacts, and target-specific code in an
-  isolated staging area.
-- Never mutate the source package or exact baseline in place.
-- Measure construction time, temporary memory, final permanent memory, and
-  generated artifact size.
-- Support cancellation and clean removal of incomplete candidates.
-- Re-run ordinary lowering and physical optimization after a semantic
-  representation change.
-- Validate every staged artifact and its integrity before execution.
-
-Completion requires atomic staging tests, cancellation tests, corruption tests,
-and proof that failed candidates leave no published or partially referenced
-artifacts.
-
 ### 10. Build the matched candidate benchmark engine
 
 - Benchmark a candidate and its exact reference scope with identical inputs,

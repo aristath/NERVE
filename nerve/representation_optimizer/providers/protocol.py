@@ -66,7 +66,7 @@ class RepresentationProvider(Protocol):
         context: ProviderContext,
         candidate: Json,
     ) -> Json:
-        """Describe construction phases, inputs, outputs, and resources."""
+        """Return the shared candidate_build_plan.v1 construction contract."""
 
     def mount_requirements(
         self,

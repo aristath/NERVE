@@ -5,6 +5,7 @@ import math
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from nerve.compilation import Json, ModelCompileError
@@ -1253,27 +1254,294 @@ def _validate_candidate_construction(document: Json) -> None:
             "candidate_id",
             "status",
             "staging_identity",
+            "source_seal",
+            "representation_graph_digest",
+            "target_lowering_digest",
+            "relowering_request_digest",
+            "phases",
             "artifacts",
+            "integrity",
             "resource_measurements",
             "diagnostics",
         },
     )
-    _require_stable_id(document["construction_id"], "construction", "construction_id")
-    _require_nonempty_string(document["candidate_id"], "candidate_id")
-    if document["status"] not in {
-        "planned",
-        "constructing",
-        "completed",
-        "cancelled",
-        "failed",
-    }:
+    construction_id = _require_stable_id(
+        document["construction_id"],
+        "construction",
+        "construction_id",
+    )
+    candidate_id = _require_stable_id(
+        document["candidate_id"],
+        "candidate",
+        "candidate_id",
+    )
+    if document["status"] not in {"completed", "cancelled", "failed"}:
         raise ContractValidationError(
             f"construction status is unsupported: {document['status']!r}"
         )
     _require_nonempty_string(document["staging_identity"], "staging_identity")
-    _require_artifact_refs(document["artifacts"], "artifacts")
-    _require_object(document["resource_measurements"], "resource_measurements")
-    _require_string_list(document["diagnostics"], "diagnostics")
+    source_seal = _require_object(document["source_seal"], "source_seal")
+    _require_fields(
+        source_seal,
+        {
+            "schema",
+            "package_id",
+            "manifest_digest",
+            "optimizer_stage_digest",
+            "exact_baseline_digest",
+            "scope_catalog_digest",
+            "package_integrity_contract_digest",
+            "source_inputs",
+        },
+    )
+    if source_seal["schema"] != "nerve.optimizer.source_package_seal.v1":
+        raise ContractValidationError("source_seal schema is unsupported")
+    _require_nonempty_string(source_seal["package_id"], "source_seal.package_id")
+    _require_staged_artifact_digest(
+        source_seal["manifest_digest"], "source_seal.manifest_digest"
+    )
+    _require_staged_artifact_digest(
+        source_seal["optimizer_stage_digest"],
+        "source_seal.optimizer_stage_digest",
+    )
+    for field in (
+        "exact_baseline_digest",
+        "scope_catalog_digest",
+        "package_integrity_contract_digest",
+    ):
+        _require_digest(source_seal[field], f"source_seal.{field}")
+    source_inputs = _require_object(
+        source_seal["source_inputs"], "source_seal.source_inputs"
+    )
+    if list(source_inputs) != sorted(source_inputs):
+        raise ContractValidationError("source_seal.source_inputs must be sorted")
+    for path, digest in source_inputs.items():
+        _require_normalized_relative_path(
+            path,
+            "source_seal.source_inputs path",
+        )
+        _require_staged_artifact_digest(
+            digest, f"source_seal.source_inputs.{path}"
+        )
+    for field in (
+        "representation_graph_digest",
+        "target_lowering_digest",
+        "relowering_request_digest",
+    ):
+        _require_digest(document[field], field)
+    if construction_id != stable_contract_id(
+        "construction",
+        candidate_id,
+        document["representation_graph_digest"],
+        document["target_lowering_digest"],
+        document["staging_identity"],
+    ):
+        raise ContractValidationError(
+            "construction_id does not match staged construction inputs"
+        )
+
+    phases = _require_list(document["phases"], "phases")
+    phase_names = []
+    previous_finished = 0
+    for index, raw_phase in enumerate(phases):
+        path = f"phases[{index}]"
+        phase = _require_object(raw_phase, path)
+        _require_fields(
+            phase,
+            {
+                "name",
+                "status",
+                "started_ns",
+                "finished_ns",
+                "duration_ns",
+                "staging_bytes_written",
+                "peak_temporary_bytes",
+                "diagnostics",
+            },
+        )
+        phase_names.append(_require_nonempty_string(phase["name"], f"{path}.name"))
+        if phase["status"] not in {"completed", "cancelled", "failed"}:
+            raise ContractValidationError(f"{path}.status is unsupported")
+        for field in (
+            "started_ns",
+            "finished_ns",
+            "duration_ns",
+            "staging_bytes_written",
+            "peak_temporary_bytes",
+        ):
+            _require_nonnegative_integer(phase[field], f"{path}.{field}")
+        if phase["finished_ns"] < phase["started_ns"]:
+            raise ContractValidationError(f"{path} finishes before it starts")
+        if phase["duration_ns"] != phase["finished_ns"] - phase["started_ns"]:
+            raise ContractValidationError(f"{path}.duration_ns is inconsistent")
+        if phase["started_ns"] < previous_finished:
+            raise ContractValidationError(
+                f"{path} overlaps the preceding construction phase"
+            )
+        previous_finished = phase["finished_ns"]
+        _require_string_list(phase["diagnostics"], f"{path}.diagnostics")
+    required_phases = [
+        "semantic_construction",
+        "ordinary_lowering",
+        "physical_optimization",
+    ]
+    if phase_names != required_phases[: len(phase_names)]:
+        raise ContractValidationError(
+            "construction phases are not a contiguous ordinary pipeline prefix"
+        )
+    if document["status"] == "completed" and (
+        phase_names != required_phases
+        or any(phase["status"] != "completed" for phase in phases)
+    ):
+        raise ContractValidationError(
+            "completed construction requires every phase to complete"
+        )
+    if (
+        document["status"] != "completed"
+        and phases
+        and phases[-1]["status"] != document["status"]
+    ):
+        raise ContractValidationError(
+            "incomplete construction status must match its final phase"
+        )
+
+    artifacts = _require_list(document["artifacts"], "artifacts")
+    artifact_paths = []
+    for index, raw_artifact in enumerate(artifacts):
+        path = f"artifacts[{index}]"
+        artifact = _require_object(raw_artifact, path)
+        _require_fields(
+            artifact,
+            {
+                "path",
+                "digest",
+                "byte_count",
+                "kind",
+                "lifetime",
+                "producer_phase",
+                "resident_bytes",
+                "validation",
+            },
+        )
+        artifact_paths.append(
+            _require_normalized_relative_path(
+                artifact["path"],
+                f"{path}.path",
+            )
+        )
+        _require_staged_artifact_digest(artifact["digest"], f"{path}.digest")
+        _require_nonnegative_integer(artifact["byte_count"], f"{path}.byte_count")
+        _require_nonempty_string(artifact["kind"], f"{path}.kind")
+        if artifact["lifetime"] not in {
+            "compile",
+            "mount",
+            "residency",
+            "dynamic",
+        }:
+            raise ContractValidationError(f"{path}.lifetime is unsupported")
+        if artifact["producer_phase"] not in required_phases:
+            raise ContractValidationError(f"{path}.producer_phase is unsupported")
+        _require_nonnegative_integer(
+            artifact["resident_bytes"], f"{path}.resident_bytes"
+        )
+        validation = _require_object(artifact["validation"], f"{path}.validation")
+        _require_fields(validation, {"validator_id", "status", "facts"})
+        _require_nonempty_string(
+            validation["validator_id"], f"{path}.validation.validator_id"
+        )
+        if validation["status"] != "passed":
+            raise ContractValidationError(
+                f"{path}.validation.status must be passed"
+            )
+        _require_object(validation["facts"], f"{path}.validation.facts")
+    if artifact_paths != sorted(set(artifact_paths)):
+        raise ContractValidationError("construction artifacts must be sorted and unique")
+    integrity = document["integrity"]
+    if document["status"] == "completed":
+        if not artifacts:
+            raise ContractValidationError(
+                "completed construction must contain artifacts"
+            )
+        integrity = _require_object(integrity, "integrity")
+        _require_fields(integrity, {"schema", "digest", "file_count"})
+        if integrity["schema"] != "nerve.optimizer.staged_candidate_integrity.v1":
+            raise ContractValidationError("construction integrity schema is unsupported")
+        _require_staged_artifact_digest(integrity["digest"], "integrity.digest")
+        _require_positive_integer(integrity["file_count"], "integrity.file_count")
+        if integrity["file_count"] != len(artifacts) + 5:
+            raise ContractValidationError(
+                "construction integrity file_count does not cover its "
+                "five contracts and declared artifacts"
+            )
+    elif artifacts or integrity is not None:
+        raise ContractValidationError(
+            "incomplete construction cannot retain staged artifacts or integrity"
+        )
+    measurements = _require_object(
+        document["resource_measurements"], "resource_measurements"
+    )
+    _require_fields(
+        measurements,
+        {
+            "construction_time_ns",
+            "peak_temporary_bytes",
+            "peak_staging_bytes",
+            "final_permanent_bytes",
+            "generated_artifact_bytes",
+        },
+    )
+    for field, value in measurements.items():
+        _require_nonnegative_integer(value, f"resource_measurements.{field}")
+    if document["status"] == "completed":
+        if measurements["construction_time_ns"] < phases[-1]["finished_ns"]:
+            raise ContractValidationError(
+                "construction_time_ns ends before its final phase"
+            )
+        if measurements["peak_temporary_bytes"] < max(
+            phase["peak_temporary_bytes"] for phase in phases
+        ):
+            raise ContractValidationError(
+                "peak_temporary_bytes is below a phase peak"
+            )
+        if measurements["generated_artifact_bytes"] != sum(
+            artifact["byte_count"] for artifact in artifacts
+        ):
+            raise ContractValidationError(
+                "generated_artifact_bytes does not match constructed artifacts"
+            )
+        if measurements["peak_staging_bytes"] < measurements[
+            "generated_artifact_bytes"
+        ]:
+            raise ContractValidationError(
+                "peak_staging_bytes is below generated artifact bytes"
+            )
+        if measurements["final_permanent_bytes"] != sum(
+            artifact["resident_bytes"] for artifact in artifacts
+        ):
+            raise ContractValidationError(
+                "final_permanent_bytes does not match constructed artifacts"
+            )
+        phase_bytes = {
+            phase["name"]: phase["staging_bytes_written"]
+            for phase in phases
+        }
+        artifact_bytes = {
+            phase: sum(
+                artifact["byte_count"]
+                for artifact in artifacts
+                if artifact["producer_phase"] == phase
+            )
+            for phase in required_phases
+        }
+        if phase_bytes != artifact_bytes:
+            raise ContractValidationError(
+                "phase staging bytes do not match generated artifacts"
+            )
+    diagnostics = _require_string_list(document["diagnostics"], "diagnostics")
+    if not phases and not diagnostics:
+        raise ContractValidationError(
+            "pre-phase construction failure requires diagnostics"
+        )
 
 
 def _validate_benchmark_record(document: Json) -> None:
@@ -1455,6 +1723,21 @@ def _require_nonempty_string(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value:
         raise ContractValidationError(f"{path} must be a non-empty string")
     return value
+
+
+def _require_normalized_relative_path(value: Any, path: str) -> str:
+    text = _require_nonempty_string(value, path)
+    relative = PurePosixPath(text)
+    if (
+        relative.is_absolute()
+        or "." in relative.parts
+        or ".." in relative.parts
+        or relative.as_posix() != text
+    ):
+        raise ContractValidationError(
+            f"{path} must be a normalized relative path"
+        )
+    return text
 
 
 def _require_string_list(value: Any, path: str) -> list[str]:
@@ -1653,6 +1936,19 @@ def _require_digest(value: Any, path: str) -> str:
     hexadecimal = digest[len(prefix) :]
     if len(hexadecimal) != 64 or any(character not in "0123456789abcdef" for character in hexadecimal):
         raise ContractValidationError(f"{path} contains an invalid SHA-256 digest")
+    return digest
+
+
+def _require_staged_artifact_digest(value: Any, path: str) -> str:
+    digest = _require_nonempty_string(value, path)
+    prefix = "nerve.optimizer.artifact_sha256.v1:"
+    hexadecimal = digest.removeprefix(prefix)
+    if (
+        not digest.startswith(prefix)
+        or len(hexadecimal) != 64
+        or any(character not in "0123456789abcdef" for character in hexadecimal)
+    ):
+        raise ContractValidationError(f"{path} must be a staged artifact digest")
     return digest
 
 

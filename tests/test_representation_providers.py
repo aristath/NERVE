@@ -105,7 +105,17 @@ class FixtureProvider:
                 "error_contract": None,
             },
             "artifact_declarations": [
-                {"path": (f"optimization/candidates/{self.provider_id}/program.bin")}
+                {"path": "codebooks/table.bin"},
+                {"path": "corrections/residual.bin"},
+                {"path": "fields/samples.bin"},
+                {"path": "geometry/basis.bin"},
+                {"path": "graphs/events.bin"},
+                {"path": "indexes/search.bin"},
+                {"path": "kernels/native_island.spv"},
+                {"path": "parameters/sparse_weights.bin"},
+                {"path": "programs/evaluator.bin"},
+                {"path": "state/compact_layout.json"},
+                {"path": "topology/events.bin"},
             ],
         }
         candidate["candidate_id"] = representation_candidate_id(candidate)
@@ -148,8 +158,149 @@ class FixtureProvider:
     def construction_requirements(self, context, candidate):
         self._called("construction_requirements")
         return {
-            "schema": "nerve.optimizer.fixture_construction_requirements.v1",
-            "phases": ["construct"],
+            "schema": "nerve.optimizer.candidate_build_plan.v1",
+            "phases": [
+                "semantic_construction",
+                "ordinary_lowering",
+                "physical_optimization",
+            ],
+            "source_inputs": [],
+            "outputs": [
+                {
+                    "path": "codebooks/table.bin",
+                    "kind": "codebook",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "corrections/residual.bin",
+                    "kind": "correction_artifact",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "fields/samples.bin",
+                    "kind": "sampled_field",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "geometry/basis.bin",
+                    "kind": "geometry",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "graphs/events.bin",
+                    "kind": "graph",
+                    "lifetime": "residency",
+                    "producer_phase": "ordinary_lowering",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "indexes/search.bin",
+                    "kind": "index",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "kernels/native_island.spv",
+                    "kind": "spirv",
+                    "lifetime": "mount",
+                    "producer_phase": "physical_optimization",
+                    "resident_bytes": 0,
+                    "validator_id": "spirv_module",
+                    "validation_contract": {"minimum_version": 65536},
+                },
+                {
+                    "path": "parameters/sparse_weights.bin",
+                    "kind": "sparse_parameter",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 128,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "programs/evaluator.bin",
+                    "kind": "generated_program",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 16,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+                {
+                    "path": "state/compact_layout.json",
+                    "kind": "state_layout",
+                    "lifetime": "mount",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 32,
+                    "validator_id": "json_contract",
+                    "validation_contract": {
+                        "schema": "fixture.state_layout.v1",
+                        "object_required": True,
+                    },
+                },
+                {
+                    "path": "topology/events.bin",
+                    "kind": "event_topology",
+                    "lifetime": "residency",
+                    "producer_phase": "ordinary_lowering",
+                    "resident_bytes": 64,
+                    "validator_id": "nonempty_binary",
+                    "validation_contract": {
+                        "minimum_byte_count": 1,
+                        "byte_multiple": 1,
+                    },
+                },
+            ],
+            "resource_limits": {
+                "maximum_construction_time_ns": None,
+                "maximum_temporary_bytes": None,
+                "maximum_staging_bytes": None,
+            },
         }
 
     def mount_requirements(self, context, candidate):

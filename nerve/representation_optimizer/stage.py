@@ -21,9 +21,19 @@ from nerve.representation_optimizer.contracts import (
     contract_digest,
 )
 from nerve.representation_optimizer.lifecycle import OptimizationSession
+from nerve.representation_optimizer.representation_ir import (
+    REPRESENTATION_GRAPH_SCHEMA,
+)
 from nerve.representation_optimizer.scope_enumeration.catalog import (
     load_optimization_scope_catalog,
     write_optimization_scope_catalog,
+)
+from nerve.representation_optimizer.staging.contracts import (
+    CANDIDATE_BUILD_PLAN_SCHEMA,
+    SOURCE_PACKAGE_SEAL_SCHEMA,
+)
+from nerve.representation_optimizer.staging.integrity import (
+    STAGED_CANDIDATE_INTEGRITY_SCHEMA,
 )
 
 
@@ -38,7 +48,11 @@ OPTIMIZER_CONTRACT_SCHEMAS = (
     HARDWARE_PROCESS_PROFILE_SCHEMA,
     REPRESENTATION_DESCRIPTOR_SCHEMA,
     REPRESENTATION_CANDIDATE_SCHEMA,
+    REPRESENTATION_GRAPH_SCHEMA,
+    CANDIDATE_BUILD_PLAN_SCHEMA,
     CANDIDATE_CONSTRUCTION_SCHEMA,
+    SOURCE_PACKAGE_SEAL_SCHEMA,
+    STAGED_CANDIDATE_INTEGRITY_SCHEMA,
     BENCHMARK_RECORD_SCHEMA,
     VALIDATION_RECORD_SCHEMA,
     PROMOTION_DECISION_SCHEMA,

@@ -25,6 +25,9 @@ from nerve.representation_optimizer.contracts import (
     stable_contract_id,
     validate_contract,
 )
+from nerve.representation_optimizer.staging.contracts import (
+    staged_artifact_digest,
+)
 
 
 def digest(label: str) -> str:
@@ -255,21 +258,87 @@ def contract_fixtures() -> list[dict[str, object]]:
         {
             "schema": CANDIDATE_CONSTRUCTION_SCHEMA,
             "construction_id": stable_contract_id(
-                "construction", candidate_id, "fixture-target"
+                "construction",
+                candidate_id,
+                digest("representation graph"),
+                digest("target lowering"),
+                "stage_fixture",
             ),
             "candidate_id": candidate_id,
             "status": "completed",
             "staging_identity": "stage_fixture",
+            "source_seal": {
+                "schema": "nerve.optimizer.source_package_seal.v1",
+                "package_id": "fixture_package",
+                "manifest_digest": staged_artifact_digest(b"manifest"),
+                "optimizer_stage_digest": staged_artifact_digest(b"stage"),
+                "exact_baseline_digest": digest("baseline"),
+                "scope_catalog_digest": digest("scopes"),
+                "package_integrity_contract_digest": digest("integrity"),
+                "source_inputs": {},
+            },
+            "representation_graph_digest": digest("representation graph"),
+            "target_lowering_digest": digest("target lowering"),
+            "relowering_request_digest": digest("relowering request"),
+            "phases": [
+                {
+                    "name": "semantic_construction",
+                    "status": "completed",
+                    "started_ns": 0,
+                    "finished_ns": 30,
+                    "duration_ns": 30,
+                    "staging_bytes_written": 4,
+                    "peak_temporary_bytes": 512,
+                    "diagnostics": [],
+                },
+                {
+                    "name": "ordinary_lowering",
+                    "status": "completed",
+                    "started_ns": 30,
+                    "finished_ns": 70,
+                    "duration_ns": 40,
+                    "staging_bytes_written": 0,
+                    "peak_temporary_bytes": 512,
+                    "diagnostics": [],
+                },
+                {
+                    "name": "physical_optimization",
+                    "status": "completed",
+                    "started_ns": 70,
+                    "finished_ns": 100,
+                    "duration_ns": 30,
+                    "staging_bytes_written": 0,
+                    "peak_temporary_bytes": 512,
+                    "diagnostics": [],
+                },
+            ],
             "artifacts": [
                 {
                     "path": "optimization/staging/field/grid.bin",
-                    "digest": digest("grid"),
+                    "digest": staged_artifact_digest(b"grid"),
+                    "byte_count": 4,
+                    "kind": "sampled_field",
+                    "lifetime": "residency",
+                    "producer_phase": "semantic_construction",
+                    "resident_bytes": 256,
+                    "validation": {
+                        "validator_id": "nonempty_binary",
+                        "status": "passed",
+                        "facts": {"byte_count": 4},
+                    },
                 }
             ],
+            "integrity": {
+                "schema": "nerve.optimizer.staged_candidate_integrity.v1",
+                "digest": staged_artifact_digest(b"integrity manifest"),
+                "file_count": 6,
+            },
             "resource_measurements": {
                 "construction_time_ns": 100,
-                "temporary_bytes": 512,
-                "permanent_bytes": 256,
+                "peak_temporary_bytes": 512,
+                "peak_staging_bytes": 256,
+                "final_permanent_bytes": 256,
+                "generated_artifact_bytes": 4,
             },
             "diagnostics": [],
         },
@@ -392,6 +461,57 @@ def test_algebraic_evidence_identity_rejects_claim_drift() -> None:
         match="canonical algebraic evidence",
     ):
         validate_contract(evidence)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda document: document["phases"][1].update(
+                {"started_ns": 29, "duration_ns": 41}
+            ),
+            "overlaps",
+        ),
+        (
+            lambda document: document["phases"][0].__setitem__(
+                "staging_bytes_written",
+                3,
+            ),
+            "phase staging bytes",
+        ),
+        (
+            lambda document: document["integrity"].__setitem__(
+                "file_count",
+                7,
+            ),
+            "file_count",
+        ),
+        (
+            lambda document: document["artifacts"][0].__setitem__(
+                "path",
+                "../escaped.bin",
+            ),
+            "normalized relative path",
+        ),
+    ],
+)
+def test_candidate_construction_rejects_inconsistent_evidence(
+    mutate,
+    message: str,
+) -> None:
+    construction = contract_fixtures()[5]
+    mutate(construction)
+
+    with pytest.raises(ContractValidationError, match=message):
+        validate_contract(construction)
+
+
+def test_candidate_construction_identity_rejects_rebinding() -> None:
+    construction = contract_fixtures()[5]
+    construction["target_lowering_digest"] = digest("different target")
+
+    with pytest.raises(ContractValidationError, match="construction_id"):
+        validate_contract(construction)
 
 
 def test_contract_validation_rejects_unknown_fields_and_nonfinite_numbers() -> None:

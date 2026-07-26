@@ -45,4 +45,7 @@ nerve/representation_optimizer/scope_enumeration/drafts.py
 nerve/representation_optimizer/scope_enumeration/enumerator.py
 nerve/representation_optimizer/scope_enumeration/graph.py
 nerve/representation_optimizer/stage.py
+nerve/representation_optimizer/staging/__init__.py
+nerve/representation_optimizer/staging/contracts.py
+nerve/representation_optimizer/staging/integrity.py
 nerve/semantic_modules.py
