@@ -4,6 +4,7 @@ use super::schema::{
     HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
 use super::shader_compiler::compile_calibration_shader;
+use super::telemetry::{elapsed_ns, maximum_pci_temperature_millidegrees};
 use super::vulkan_specialized::{
     PreparedFixedGraphics, SpecializedVulkanContext, SpecializedVulkanRequirements,
     fixed_graphics_fragment_shader, fixed_graphics_vertex_shader,
@@ -91,7 +92,10 @@ impl VulkanGraphicsCalibrationExecutor {
             )
             .map_err(|error| format!("could not construct texture calibration: {error}"))?;
         let construction_duration_ns = elapsed_ns(construction_started);
-        let mut prepared = PreparedTexture { texture };
+        let mut prepared = PreparedTexture {
+            texture,
+            pci_address: self.device.pci_address().map(str::to_string),
+        };
         let mut samples = Vec::new();
         for _ in 0..plan.policy.warmup_iterations {
             samples.push(prepared.measure(
@@ -289,6 +293,7 @@ impl VulkanGraphicsCalibrationExecutor {
 
 struct PreparedTexture {
     texture: VulkanTextureCalibration,
+    pci_address: Option<String>,
 }
 
 struct PreparedFixedGraphicsState {
@@ -323,7 +328,7 @@ impl PreparedFixedGraphicsState {
             device_duration_ns: Some(device_duration_ns),
             iterations,
             window_index,
-            thermal_millidegrees_celsius: maximum_device_temperature_millidegrees(
+            thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
                 self.pci_address.as_deref(),
             ),
             valid: true,
@@ -359,7 +364,9 @@ impl PreparedTexture {
             device_duration_ns: None,
             iterations,
             window_index,
-            thermal_millidegrees_celsius: None,
+            thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
+                self.pci_address.as_deref(),
+            ),
             valid: true,
         })
     }
@@ -405,10 +412,6 @@ void main() {
     .to_string()
 }
 
-fn elapsed_ns(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
-
 fn parse_extent(value: &str) -> Result<(u32, u32), String> {
     let (width, height) = value
         .split_once('x')
@@ -423,25 +426,4 @@ fn parse_extent(value: &str) -> Result<(u32, u32), String> {
         return Err("graphics extent must be nonzero".to_string());
     }
     Ok((width, height))
-}
-
-fn maximum_device_temperature_millidegrees(pci_address: Option<&str>) -> Option<u64> {
-    let pci_address = pci_address?;
-    let entries = std::fs::read_dir(format!("/sys/bus/pci/devices/{pci_address}/hwmon")).ok()?;
-    entries
-        .filter_map(Result::ok)
-        .flat_map(|entry| {
-            std::fs::read_dir(entry.path())
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-        })
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("temp") && name.ends_with("_input")
-        })
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|value| value.trim().parse::<u64>().ok())
-        .max()
 }

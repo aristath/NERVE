@@ -4,6 +4,7 @@ use super::schema::{
     HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
 use super::shader_compiler::compile_calibration_shader;
+use super::telemetry::{elapsed_ns, maximum_pci_temperature_millidegrees};
 use super::vulkan_specialized::{
     PreparedDeviceGeneratedCommands, SpecializedVulkanContext, SpecializedVulkanRequirements,
     device_generated_commands_shader,
@@ -69,7 +70,10 @@ impl VulkanDgcCalibrationExecutor {
         let prepared =
             PreparedDeviceGeneratedCommands::new(Rc::clone(&self.context), &spirv, dispatch_count)?;
         let construction_duration_ns = elapsed_ns(construction_started);
-        let prepared = PreparedDgcState { prepared };
+        let prepared = PreparedDgcState {
+            prepared,
+            pci_address: self.context.pci_address().map(str::to_string),
+        };
         let mut samples = Vec::new();
         for _ in 0..plan.policy.warmup_iterations {
             samples.push(prepared.measure(
@@ -135,6 +139,7 @@ impl VulkanDgcCalibrationExecutor {
 
 struct PreparedDgcState {
     prepared: PreparedDeviceGeneratedCommands,
+    pci_address: Option<String>,
 }
 
 impl PreparedDgcState {
@@ -164,12 +169,10 @@ impl PreparedDgcState {
             device_duration_ns: Some(device_duration_ns),
             iterations,
             window_index,
-            thermal_millidegrees_celsius: None,
+            thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
+                self.pci_address.as_deref(),
+            ),
             valid: true,
         })
     }
-}
-
-fn elapsed_ns(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }

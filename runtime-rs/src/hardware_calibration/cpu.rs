@@ -15,6 +15,10 @@ pub(super) struct CpuCalibrationWorkload {
     atomics: Vec<AtomicU64>,
     atomic_operation_count: usize,
     generated_program: Option<GeneratedProgram>,
+    lookup_index: Option<LookupIndex>,
+    lookup_artifact: Vec<u8>,
+    lookup_artifact_kind: Option<&'static str>,
+    lookup_query_count: usize,
     checksum: u64,
 }
 
@@ -153,6 +157,18 @@ impl CpuCalibrationWorkload {
         } else {
             None
         };
+        let (lookup_index, lookup_artifact, lookup_artifact_kind) =
+            match workload.operation.as_str() {
+                "binary_tree_lookup" => {
+                    let (index, bytes) = LookupIndex::eytzinger(item_count.max(1));
+                    (Some(index), bytes, Some("eytzinger_index"))
+                }
+                "hash_lookup" => {
+                    let (index, bytes) = LookupIndex::open_address_hash(item_count.max(1));
+                    (Some(index), bytes, Some("open_address_hash_index"))
+                }
+                _ => (None, Vec::new(), None),
+            };
         Ok(Self {
             operation: workload.operation.clone(),
             regime: workload.regime.clone(),
@@ -165,6 +181,10 @@ impl CpuCalibrationWorkload {
             atomics,
             atomic_operation_count: item_count,
             generated_program,
+            lookup_index,
+            lookup_artifact,
+            lookup_artifact_kind,
+            lookup_query_count: item_count,
             checksum: 0,
         })
     }
@@ -213,6 +233,11 @@ impl CpuCalibrationWorkload {
                     .map(String::as_str)
                     .unwrap_or("shared"),
             ),
+            "binary_tree_lookup" | "hash_lookup" => self
+                .lookup_index
+                .as_ref()
+                .ok_or_else(|| "lookup index was not constructed".to_string())?
+                .lookup(self.lookup_query_count),
             unsupported => {
                 return Err(format!(
                     "CPU calibrator does not implement operation {unsupported:?}"
@@ -246,7 +271,112 @@ impl CpuCalibrationWorkload {
         self.generated_program
             .as_ref()
             .map(|program| (program.machine_code.as_slice(), "generated_code"))
+            .or_else(|| {
+                self.lookup_artifact_kind
+                    .map(|kind| (self.lookup_artifact.as_slice(), kind))
+            })
     }
+}
+
+enum LookupIndex {
+    Eytzinger(Vec<u64>),
+    OpenAddressHash(Vec<u64>),
+}
+
+impl LookupIndex {
+    fn eytzinger(entry_count: usize) -> (Self, Vec<u8>) {
+        let sorted = (0..entry_count)
+            .map(|index| (index as u64).wrapping_mul(2).wrapping_add(1))
+            .collect::<Vec<_>>();
+        let mut values = vec![u64::MAX; entry_count + 1];
+        let mut source_index = 0usize;
+        fill_eytzinger(&sorted, &mut values, 1, &mut source_index);
+        let artifact = encode_u64s(&values[1..]);
+        (Self::Eytzinger(values), artifact)
+    }
+
+    fn open_address_hash(entry_count: usize) -> (Self, Vec<u8>) {
+        let capacity = entry_count.saturating_mul(2).max(2).next_power_of_two();
+        let mut table = vec![u64::MAX; capacity];
+        for index in 0..entry_count {
+            let key = (index as u64).wrapping_mul(2).wrapping_add(1);
+            let mut slot = hash_slot(key, capacity);
+            while table[slot] != u64::MAX {
+                slot = (slot + 1) & (capacity - 1);
+            }
+            table[slot] = key;
+        }
+        let artifact = encode_u64s(&table);
+        (Self::OpenAddressHash(table), artifact)
+    }
+
+    fn lookup(&self, query_count: usize) -> u64 {
+        match self {
+            Self::Eytzinger(values) => {
+                let entry_count = values.len().saturating_sub(1).max(1);
+                let mut checksum = 0u64;
+                for query in 0..query_count {
+                    let key_index =
+                        query.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) % entry_count;
+                    let key = (key_index as u64).wrapping_mul(2).wrapping_add(1);
+                    let mut node = 1usize;
+                    while node < values.len() {
+                        let value = values[node];
+                        if value == key {
+                            checksum ^= (node as u64).rotate_left((query & 63) as u32);
+                            break;
+                        }
+                        node = node.saturating_mul(2) + usize::from(key > value);
+                    }
+                }
+                black_box(checksum)
+            }
+            Self::OpenAddressHash(table) => {
+                let entry_count = (table.len() / 2).max(1);
+                let mut checksum = 0u64;
+                for query in 0..query_count {
+                    let key_index =
+                        query.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) % entry_count;
+                    let key = (key_index as u64).wrapping_mul(2).wrapping_add(1);
+                    let mut slot = hash_slot(key, table.len());
+                    loop {
+                        let value = table[slot];
+                        if value == key {
+                            checksum ^= (slot as u64).rotate_left((query & 63) as u32);
+                            break;
+                        }
+                        if value == u64::MAX {
+                            break;
+                        }
+                        slot = (slot + 1) & (table.len() - 1);
+                    }
+                }
+                black_box(checksum)
+            }
+        }
+    }
+}
+
+fn fill_eytzinger(sorted: &[u64], output: &mut [u64], node: usize, source_index: &mut usize) {
+    if node >= output.len() {
+        return;
+    }
+    fill_eytzinger(sorted, output, node * 2, source_index);
+    output[node] = sorted[*source_index];
+    *source_index += 1;
+    fill_eytzinger(sorted, output, node * 2 + 1, source_index);
+}
+
+fn hash_slot(key: u64, capacity: usize) -> usize {
+    (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize) & (capacity - 1)
+}
+
+fn encode_u64s(values: &[u64]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 fn scalar_integer(words: &[u64]) -> u64 {

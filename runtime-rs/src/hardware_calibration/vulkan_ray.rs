@@ -4,6 +4,7 @@ use super::schema::{
     HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
 use super::shader_compiler::{compile_calibration_shader, persist_calibration_artifact};
+use super::telemetry::{elapsed_ns, maximum_pci_temperature_millidegrees};
 use super::vulkan_specialized::{
     PreparedRayCalibration, SpecializedVulkanContext, SpecializedVulkanRequirements,
     ray_query_shader,
@@ -192,7 +193,7 @@ impl PreparedRayState {
             device_duration_ns: Some(device_duration_ns),
             iterations,
             window_index,
-            thermal_millidegrees_celsius: maximum_device_temperature_millidegrees(
+            thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
                 self.pci_address.as_deref(),
             ),
             valid: true,
@@ -207,29 +208,4 @@ fn regime_u32(workload: &HardwareCalibrationWorkload, name: &str) -> Result<u32,
         .ok_or_else(|| format!("ray workload has no {name} regime"))?
         .parse::<u32>()
         .map_err(|error| format!("invalid ray {name}: {error}"))
-}
-
-fn elapsed_ns(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
-
-fn maximum_device_temperature_millidegrees(pci_address: Option<&str>) -> Option<u64> {
-    let pci_address = pci_address?;
-    let entries = std::fs::read_dir(format!("/sys/bus/pci/devices/{pci_address}/hwmon")).ok()?;
-    entries
-        .filter_map(Result::ok)
-        .flat_map(|entry| {
-            std::fs::read_dir(entry.path())
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-        })
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("temp") && name.ends_with("_input")
-        })
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|value| value.trim().parse::<u64>().ok())
-        .max()
 }

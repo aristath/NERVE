@@ -3,6 +3,7 @@ mod runner;
 mod schema;
 #[cfg(feature = "vulkan")]
 mod shader_compiler;
+mod telemetry;
 #[cfg(feature = "vulkan")]
 mod vulkan_compute;
 #[cfg(feature = "vulkan")]

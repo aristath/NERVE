@@ -29,6 +29,11 @@ fn workload(operation: &str, regime: &[(&str, &str)]) -> HardwareCalibrationWork
             maximum_error_ppm: 0,
         },
     };
+    refresh_workload_id(&mut workload);
+    workload
+}
+
+fn refresh_workload_id(workload: &mut HardwareCalibrationWorkload) {
     workload.workload_id = stable_hardware_id(
         "calibration_workload",
         &[
@@ -42,7 +47,6 @@ fn workload(operation: &str, regime: &[(&str, &str)]) -> HardwareCalibrationWork
         ],
     )
     .unwrap();
-    workload
 }
 
 #[cfg(feature = "vulkan")]
@@ -588,7 +592,7 @@ fn explicit_vulkan_synchronization_calibration_uses_real_primitives_sequentially
         eprintln!("skipping Vulkan synchronization calibration: explicit idle AMD device is unset");
         return;
     };
-    let workloads = ["pipeline_barrier", "fence", "timeline_semaphore"]
+    let mut workloads = ["pipeline_barrier", "fence", "timeline_semaphore"]
         .into_iter()
         .map(|primitive| {
             let mut synchronization = workload(
@@ -603,22 +607,24 @@ fn explicit_vulkan_synchronization_calibration_uses_real_primitives_sequentially
                 bytes_written_per_iteration: 64,
             };
             synchronization.artifacts.clear();
-            synchronization.workload_id = stable_hardware_id(
-                "calibration_workload",
-                &[
-                    serde_json::to_value(&synchronization.process_names).unwrap(),
-                    serde_json::to_value(synchronization.executor).unwrap(),
-                    Value::String(synchronization.operation.clone()),
-                    serde_json::to_value(&synchronization.regime).unwrap(),
-                    serde_json::to_value(&synchronization.work).unwrap(),
-                    serde_json::to_value(&synchronization.artifacts).unwrap(),
-                    serde_json::to_value(&synchronization.validation).unwrap(),
-                ],
-            )
-            .unwrap();
+            refresh_workload_id(&mut synchronization);
             synchronization
         })
         .collect::<Vec<_>>();
+    let mut queue_contention = workload(
+        "queue_contention",
+        &[("queue_count", "1"), ("streams", "2")],
+    );
+    queue_contention.executor = CalibrationExecutor::VulkanSynchronization;
+    queue_contention.work = CalibrationUsefulWork {
+        items_per_iteration: 2,
+        operations_per_iteration: 2,
+        bytes_read_per_iteration: 8_388_608,
+        bytes_written_per_iteration: 8_388_608,
+    };
+    queue_contention.artifacts.clear();
+    refresh_workload_id(&mut queue_contention);
+    workloads.push(queue_contention);
     let result = run_calibration_plan(
         &plan(workloads),
         &CalibrationRunnerOptions {
@@ -628,7 +634,7 @@ fn explicit_vulkan_synchronization_calibration_uses_real_primitives_sequentially
     )
     .unwrap();
     assert_eq!(result.status, CalibrationRunStatus::Completed);
-    assert_eq!(result.workloads.len(), 3);
+    assert_eq!(result.workloads.len(), 4);
     assert!(result.workloads.iter().all(|workload| {
         workload.validation.status == CalibrationValidationStatus::Passed
             && workload.samples.iter().all(|sample| {
@@ -672,6 +678,8 @@ fn explicit_vulkan_compute_calibration_executes_every_native_family_sequentially
         ("subgroup_scan", "operation", "scan"),
         ("subgroup_shuffle", "operation", "shuffle"),
         ("subgroup_ballot", "operation", "ballot"),
+        ("sparse_compaction", "density_ppm", "125000"),
+        ("bitfield_mix", "format", "u32"),
         ("sequential_copy", "working_set_bytes", "262144"),
         ("strided_read", "working_set_bytes", "262144"),
         ("gather_scatter", "working_set_bytes", "262144"),
@@ -774,6 +782,8 @@ fn every_generated_vulkan_compute_calibration_shader_compiles_for_vulkan_1_4() {
         ("subgroup_scan", "operation", "scan"),
         ("subgroup_shuffle", "operation", "shuffle"),
         ("subgroup_ballot", "operation", "ballot"),
+        ("sparse_compaction", "density_ppm", "125000"),
+        ("bitfield_mix", "format", "u32"),
         ("sequential_copy", "working_set_bytes", "4096"),
         ("strided_read", "working_set_bytes", "4096"),
         ("gather_scatter", "working_set_bytes", "4096"),
@@ -925,6 +935,11 @@ fn cpu_calibration_executes_every_declared_cpu_operation_sequentially() {
         ("pointer_chase", vec![("working_set_bytes", "4096")]),
         ("gather_scatter", vec![("working_set_bytes", "4096")]),
         (
+            "binary_tree_lookup",
+            vec![("entries", "64"), ("queries", "64")],
+        ),
+        ("hash_lookup", vec![("entries", "64"), ("queries", "64")]),
+        (
             "generated_code_dispatch",
             vec![("instruction_footprint", "small")],
         ),
@@ -970,6 +985,52 @@ fn cpu_calibration_executes_every_declared_cpu_operation_sequentially() {
 }
 
 #[test]
+fn cpu_lookup_construction_persists_real_index_artifacts_sequentially() {
+    let workloads = [
+        ("binary_tree_lookup", "eytzinger_index"),
+        ("hash_lookup", "open_address_hash_index"),
+    ]
+    .into_iter()
+    .map(|(operation, kind)| {
+        let mut candidate = workload(operation, &[("entries", "4096"), ("queries", "4096")]);
+        candidate.work = CalibrationUsefulWork {
+            items_per_iteration: 4_096,
+            operations_per_iteration: 81_920,
+            bytes_read_per_iteration: 32_768,
+            bytes_written_per_iteration: 8,
+        };
+        candidate.artifacts = vec![CalibrationArtifactDeclaration {
+            name: operation.to_string(),
+            kind: kind.to_string(),
+            digest: None,
+        }];
+        refresh_workload_id(&mut candidate);
+        candidate
+    })
+    .collect::<Vec<_>>();
+    let temporary = std::env::temp_dir().join(format!(
+        "nerve-cpu-index-calibration-test-{}",
+        std::process::id()
+    ));
+    let run = run_calibration_plan(
+        &plan(workloads),
+        &CalibrationRunnerOptions {
+            artifact_directory: temporary.clone(),
+            ..CalibrationRunnerOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(run.status, CalibrationRunStatus::Completed);
+    assert!(run.workloads.iter().all(|result| {
+        result.validation.status == CalibrationValidationStatus::Passed
+            && result.artifacts.len() == 1
+            && result.artifacts[0].byte_length > 16_384
+            && temporary.join(&result.artifacts[0].relative_path).is_file()
+    }));
+    std::fs::remove_dir_all(temporary).unwrap();
+}
+
+#[test]
 fn cancelled_calibration_does_not_claim_completion() {
     let plan = plan(vec![workload("scalar_integer", &[])]);
     let options = CalibrationRunnerOptions::default();
@@ -980,6 +1041,29 @@ fn cancelled_calibration_does_not_claim_completion() {
     let run = run_calibration_plan(&plan, &options).unwrap();
     assert_eq!(run.status, CalibrationRunStatus::Cancelled);
     assert!(run.workloads.is_empty());
+}
+
+#[test]
+fn failed_workload_validation_fails_the_complete_run() {
+    let mut candidate = workload("scalar_integer", &[]);
+    candidate.validation.expected_digest = Some(format!(
+        "nerve.calibration_output_sha256.v1:{}",
+        "0".repeat(64)
+    ));
+    refresh_workload_id(&mut candidate);
+    let run =
+        run_calibration_plan(&plan(vec![candidate]), &CalibrationRunnerOptions::default()).unwrap();
+    assert_eq!(run.status, CalibrationRunStatus::Failed);
+    assert_eq!(run.workloads[0].status, CalibrationRunStatus::Failed);
+    assert!(!run.diagnostics.is_empty());
+    run.validate().unwrap();
+}
+
+#[test]
+fn default_calibration_artifact_directories_are_collision_free() {
+    let first = CalibrationRunnerOptions::default();
+    let second = CalibrationRunnerOptions::default();
+    assert_ne!(first.artifact_directory, second.artifact_directory);
 }
 
 #[test]

@@ -3,8 +3,10 @@ use super::schema::{
     CalibrationValidationStatus, HardwareCalibrationPlan, HardwareCalibrationSample,
     HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
+use super::telemetry::{elapsed_ns, maximum_pci_temperature_millidegrees};
 use super::vulkan_specialized::{
-    PreparedSynchronizationCalibration, SpecializedVulkanContext, SpecializedVulkanRequirements,
+    PreparedQueueContention, PreparedSynchronizationCalibration, SpecializedVulkanContext,
+    SpecializedVulkanRequirements,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,12 +18,26 @@ pub(super) struct VulkanSynchronizationCalibrationExecutor {
 }
 
 impl VulkanSynchronizationCalibrationExecutor {
-    pub(super) fn new(physical_device_index: usize) -> Result<Self, String> {
+    pub(super) fn new(
+        physical_device_index: usize,
+        workload: &HardwareCalibrationWorkload,
+    ) -> Result<Self, String> {
+        let compute_queue_count = workload
+            .regime
+            .get("queue_count")
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .map_err(|error| format!("invalid synchronization queue_count: {error}"))
+            })
+            .transpose()?
+            .unwrap_or(1);
         Ok(Self {
             context: SpecializedVulkanContext::new(
                 physical_device_index,
                 SpecializedVulkanRequirements {
                     compute: true,
+                    compute_queue_count,
                     ..Default::default()
                 },
             )?,
@@ -34,7 +50,10 @@ impl VulkanSynchronizationCalibrationExecutor {
         workload: &HardwareCalibrationWorkload,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<HardwareCalibrationWorkloadResult, String> {
-        if workload.operation != "synchronization_round_trip" {
+        if !matches!(
+            workload.operation.as_str(),
+            "synchronization_round_trip" | "queue_contention"
+        ) {
             return Err(format!(
                 "synchronization calibrator does not implement {:?}",
                 workload.operation
@@ -43,22 +62,25 @@ impl VulkanSynchronizationCalibrationExecutor {
         if !workload.artifacts.is_empty() {
             return Err("synchronization workloads must not declare shader artifacts".to_string());
         }
-        let primitive = workload
-            .regime
-            .get("primitive")
-            .ok_or_else(|| "synchronization workload has no primitive".to_string())?;
-        let round_trips = workload
-            .regime
-            .get("round_trips")
-            .ok_or_else(|| "synchronization workload has no round_trips".to_string())?
-            .parse::<u32>()
-            .map_err(|error| format!("invalid synchronization round_trips: {error}"))?;
         let construction_started = Instant::now();
-        let prepared = PreparedSynchronizationCalibration::new(
-            Rc::clone(&self.context),
-            primitive,
-            round_trips,
-        )?;
+        let prepared = if workload.operation == "queue_contention" {
+            let queue_count = regime_u32(workload, "queue_count")?;
+            let streams = regime_u32(workload, "streams")?;
+            PreparedSynchronizationWorkload::Queue(PreparedQueueContention::new(
+                Rc::clone(&self.context),
+                queue_count,
+                streams,
+            )?)
+        } else {
+            PreparedSynchronizationWorkload::Primitive(PreparedSynchronizationCalibration::new(
+                Rc::clone(&self.context),
+                workload
+                    .regime
+                    .get("primitive")
+                    .ok_or_else(|| "synchronization workload has no primitive".to_string())?,
+                regime_u32(workload, "round_trips")?,
+            )?)
+        };
         let construction_duration_ns = elapsed_ns(construction_started);
         let prepared = PreparedSynchronizationState {
             prepared,
@@ -128,7 +150,7 @@ impl VulkanSynchronizationCalibrationExecutor {
 }
 
 struct PreparedSynchronizationState {
-    prepared: PreparedSynchronizationCalibration,
+    prepared: PreparedSynchronizationWorkload,
     pci_address: Option<String>,
 }
 
@@ -159,7 +181,7 @@ impl PreparedSynchronizationState {
             device_duration_ns: Some(device_duration_ns),
             iterations,
             window_index,
-            thermal_millidegrees_celsius: maximum_device_temperature_millidegrees(
+            thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
                 self.pci_address.as_deref(),
             ),
             valid: true,
@@ -167,27 +189,32 @@ impl PreparedSynchronizationState {
     }
 }
 
-fn elapsed_ns(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+enum PreparedSynchronizationWorkload {
+    Primitive(PreparedSynchronizationCalibration),
+    Queue(PreparedQueueContention),
 }
 
-fn maximum_device_temperature_millidegrees(pci_address: Option<&str>) -> Option<u64> {
-    let pci_address = pci_address?;
-    let entries = std::fs::read_dir(format!("/sys/bus/pci/devices/{pci_address}/hwmon")).ok()?;
-    entries
-        .filter_map(Result::ok)
-        .flat_map(|entry| {
-            std::fs::read_dir(entry.path())
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-        })
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("temp") && name.ends_with("_input")
-        })
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|value| value.trim().parse::<u64>().ok())
-        .max()
+impl PreparedSynchronizationWorkload {
+    fn run(&self) -> Result<u64, String> {
+        match self {
+            Self::Primitive(prepared) => prepared.run(),
+            Self::Queue(prepared) => prepared.run(),
+        }
+    }
+
+    fn observed_digest(&self) -> Result<String, String> {
+        match self {
+            Self::Primitive(prepared) => prepared.observed_digest(),
+            Self::Queue(prepared) => prepared.observed_digest(),
+        }
+    }
+}
+
+fn regime_u32(workload: &HardwareCalibrationWorkload, name: &str) -> Result<u32, String> {
+    workload
+        .regime
+        .get(name)
+        .ok_or_else(|| format!("synchronization workload has no {name}"))?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid synchronization {name}: {error}"))
 }

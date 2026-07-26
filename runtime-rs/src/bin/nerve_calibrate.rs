@@ -4,6 +4,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+#[cfg(unix)]
+use std::{fs::File, os::unix::fs::OpenOptionsExt, os::unix::io::AsRawFd};
 
 fn main() -> ExitCode {
     match run() {
@@ -45,6 +47,7 @@ fn run() -> Result<(), String> {
         .transpose()?;
     reject_unknown_arguments(&arguments)?;
     let plan = read_calibration_plan(&plan_path)?;
+    let _sequential_lease = CalibrationLease::acquire(vulkan_physical_device_index)?;
     let options = CalibrationRunnerOptions {
         artifact_directory,
         vulkan_physical_device_index,
@@ -61,6 +64,47 @@ fn run() -> Result<(), String> {
         output_path.display()
     );
     Ok(())
+}
+
+#[cfg(unix)]
+struct CalibrationLease {
+    _file: File,
+}
+
+#[cfg(unix)]
+impl CalibrationLease {
+    fn acquire(vulkan_physical_device_index: Option<usize>) -> Result<Self, String> {
+        let device = vulkan_physical_device_index
+            .map(|index| format!("vulkan-{index}"))
+            .unwrap_or_else(|| "cpu".to_string());
+        let path = std::env::temp_dir().join(format!("nerve-hardware-calibration-{device}.lock"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| format!("could not open calibration lease {path:?}: {error}"))?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(format!(
+                "another hardware calibration already owns {device}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+#[cfg(not(unix))]
+struct CalibrationLease;
+
+#[cfg(not(unix))]
+impl CalibrationLease {
+    fn acquire(_vulkan_physical_device_index: Option<usize>) -> Result<Self, String> {
+        Err("hardware calibration requires a platform with advisory file locks".to_string())
+    }
 }
 
 fn option_path(arguments: &[String], name: &str) -> Result<Option<PathBuf>, String> {

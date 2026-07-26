@@ -3,6 +3,7 @@ use ash::vk;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 pub(crate) struct PreparedSynchronizationCalibration {
     context: Rc<SpecializedVulkanContext>,
@@ -178,5 +179,98 @@ impl Drop for PreparedSynchronizationCalibration {
                 self.context.device().destroy_semaphore(timeline, None);
             }
         }
+    }
+}
+
+pub(crate) struct PreparedQueueContention {
+    resources: Vec<SpecializedVulkanResources>,
+    outputs: Vec<SpecializedBuffer>,
+}
+
+impl PreparedQueueContention {
+    pub(in crate::hardware_calibration) fn new(
+        context: Rc<SpecializedVulkanContext>,
+        queue_count: u32,
+        streams: u32,
+    ) -> Result<Self, String> {
+        if queue_count == 0 || streams < 2 {
+            return Err(
+                "queue-contention calibration requires queues and at least two streams".to_string(),
+            );
+        }
+        let queue_family = context.compute_queue_family()?;
+        let mut resources = Vec::with_capacity(streams as usize);
+        let mut outputs = Vec::with_capacity(streams as usize);
+        for stream in 0..streams {
+            let output = context.create_buffer(
+                4 * 1024 * 1024,
+                vk::BufferUsageFlags::TRANSFER_DST,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                true,
+            )?;
+            output.write(&vec![0; 4 * 1024 * 1024])?;
+            let prepared = SpecializedVulkanResources::new_on_queue(
+                Rc::clone(&context),
+                queue_family,
+                stream % queue_count,
+            )?;
+            prepared.begin()?;
+            unsafe {
+                context.device().cmd_fill_buffer(
+                    prepared.command_buffer,
+                    output.buffer,
+                    0,
+                    output.size,
+                    0x85eb_ca6bu32.wrapping_add(stream),
+                );
+                context.device().cmd_pipeline_barrier2(
+                    prepared.command_buffer,
+                    &vk::DependencyInfo::default().buffer_memory_barriers(&[
+                        vk::BufferMemoryBarrier2::default()
+                            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                            .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .buffer(output.buffer)
+                            .offset(0)
+                            .size(output.size),
+                    ]),
+                );
+            }
+            prepared.finish_recording()?;
+            outputs.push(output);
+            resources.push(prepared);
+        }
+        Ok(Self { resources, outputs })
+    }
+
+    pub(in crate::hardware_calibration) fn run(&self) -> Result<u64, String> {
+        let started = Instant::now();
+        for resources in &self.resources {
+            resources.submit()?;
+        }
+        for resources in &self.resources {
+            resources.wait_and_read_duration(1_000_000_000)?;
+        }
+        Ok(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+
+    pub(in crate::hardware_calibration) fn observed_digest(&self) -> Result<String, String> {
+        let mut digest = Sha256::new();
+        for output in &self.outputs {
+            let bytes = output.read(4096)?;
+            if bytes.iter().all(|byte| *byte == 0) {
+                return Err("queue-contention calibration produced unchanged output".to_string());
+            }
+            digest.update(bytes);
+        }
+        Ok(format!(
+            "nerve.calibration_output_sha256.v1:{:x}",
+            digest.finalize()
+        ))
     }
 }

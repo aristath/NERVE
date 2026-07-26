@@ -9,6 +9,7 @@ pub(crate) struct SpecializedVulkanRequirements {
     pub graphics: bool,
     pub ray_query: bool,
     pub device_generated_commands: bool,
+    pub compute_queue_count: u32,
 }
 
 pub(crate) struct SpecializedVulkanContext {
@@ -16,7 +17,7 @@ pub(crate) struct SpecializedVulkanContext {
     instance: ash::Instance,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
-    queues: BTreeMap<u32, vk::Queue>,
+    queues: BTreeMap<(u32, u32), vk::Queue>,
     graphics_queue_family: Option<u32>,
     compute_queue_family: Option<u32>,
     timestamp_period_ns: f32,
@@ -104,13 +105,36 @@ impl SpecializedVulkanContext {
             unsafe { instance.destroy_instance(None) };
             return Err("specialized Vulkan calibration requested no queue family".to_string());
         }
-        let queue_priority = [1.0f32];
-        let queue_infos = family_indices
+        let mut family_queue_counts = family_indices
             .iter()
-            .map(|family| {
+            .map(|family| (*family, 1u32))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(compute_family) = compute_queue_family {
+            let requested = requirements.compute_queue_count.max(1);
+            let available = queue_properties
+                .get(compute_family as usize)
+                .map(|properties| properties.queue_count)
+                .unwrap_or(0);
+            if requested > available {
+                unsafe { instance.destroy_instance(None) };
+                return Err(format!(
+                    "specialized calibration requested {requested} compute queues but family \
+                     {compute_family} exposes {available}"
+                ));
+            }
+            family_queue_counts
+                .entry(compute_family)
+                .and_modify(|count| *count = (*count).max(requested))
+                .or_insert(requested);
+        }
+        let queue_priorities =
+            vec![1.0f32; family_queue_counts.values().copied().max().unwrap_or(1) as usize];
+        let queue_infos = family_queue_counts
+            .iter()
+            .map(|(family, count)| {
                 vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(*family)
-                    .queue_priorities(&queue_priority)
+                    .queue_priorities(&queue_priorities[..*count as usize])
             })
             .collect::<Vec<_>>();
         let supported_extensions =
@@ -181,10 +205,14 @@ impl SpecializedVulkanContext {
                 unsafe { instance.destroy_instance(None) };
                 format!("could not create specialized calibration device: {error:?}")
             })?;
-        let queues = family_indices
-            .into_iter()
-            .map(|family| (family, unsafe { device.get_device_queue(family, 0) }))
-            .collect();
+        let mut queues = BTreeMap::new();
+        for (family, count) in family_queue_counts {
+            for index in 0..count {
+                queues.insert((family, index), unsafe {
+                    device.get_device_queue(family, index)
+                });
+            }
+        }
         let acceleration_structure = requirements
             .ray_query
             .then(|| ash::khr::acceleration_structure::Device::new(&instance, &device));
@@ -225,11 +253,15 @@ impl SpecializedVulkanContext {
             .ok_or_else(|| "specialized device has no compute queue".to_string())
     }
 
-    pub(in crate::hardware_calibration) fn queue(&self, family: u32) -> Result<vk::Queue, String> {
+    pub(in crate::hardware_calibration) fn queue(
+        &self,
+        family: u32,
+        index: u32,
+    ) -> Result<vk::Queue, String> {
         self.queues
-            .get(&family)
+            .get(&(family, index))
             .copied()
-            .ok_or_else(|| format!("queue family {family} was not opened"))
+            .ok_or_else(|| format!("queue {index} in family {family} was not opened"))
     }
 
     pub(in crate::hardware_calibration) fn device_proc_address(
@@ -578,8 +610,16 @@ impl SpecializedVulkanResources {
         context: Rc<SpecializedVulkanContext>,
         queue_family: u32,
     ) -> Result<Self, String> {
+        Self::new_on_queue(context, queue_family, 0)
+    }
+
+    pub(in crate::hardware_calibration) fn new_on_queue(
+        context: Rc<SpecializedVulkanContext>,
+        queue_family: u32,
+        queue_index: u32,
+    ) -> Result<Self, String> {
         let device = context.device();
-        let queue = context.queue(queue_family)?;
+        let queue = context.queue(queue_family, queue_index)?;
         let command_pool = unsafe {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
@@ -660,6 +700,11 @@ impl SpecializedVulkanResources {
     }
 
     pub(in crate::hardware_calibration) fn run(&self, timeout_ns: u64) -> Result<u64, String> {
+        self.submit()?;
+        self.wait_and_read_duration(timeout_ns)
+    }
+
+    pub(in crate::hardware_calibration) fn submit(&self) -> Result<(), String> {
         let device = self.context.device();
         unsafe {
             device
@@ -674,6 +719,16 @@ impl SpecializedVulkanResources {
                     self.fence,
                 )
                 .map_err(|error| format!("could not submit calibration commands: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::hardware_calibration) fn wait_and_read_duration(
+        &self,
+        timeout_ns: u64,
+    ) -> Result<u64, String> {
+        let device = self.context.device();
+        unsafe {
             match device.wait_for_fences(&[self.fence], true, timeout_ns) {
                 Ok(()) => {}
                 Err(vk::Result::TIMEOUT) => {

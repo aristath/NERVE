@@ -326,20 +326,55 @@ def _hardware_measurements(
         if not samples:
             continue
         yield {
-            "name": f"{workload['workload_id']}.{phase}_duration_ns",
-            "unit": "nanoseconds_per_iteration",
-            "regime": {**base_regime, "phase": phase},
+            "name": f"{workload['workload_id']}.{phase}_host_duration_ns",
+            "unit": "host_nanoseconds_per_iteration",
+            "regime": {**base_regime, "phase": phase, "clock": "host_monotonic"},
             "samples": [
                 max(
                     1,
                     _round_div(
-                        sample["device_duration_ns"] or sample["duration_ns"],
+                        sample["duration_ns"],
                         sample["iterations"],
                     ),
                 )
                 for sample in samples
             ],
         }
+        device_samples = [
+            sample for sample in samples if sample["device_duration_ns"] is not None
+        ]
+        if len(device_samples) == len(samples):
+            yield {
+                "name": f"{workload['workload_id']}.{phase}_device_duration_ns",
+                "unit": "device_nanoseconds_per_iteration",
+                "regime": {
+                    **base_regime,
+                    "phase": phase,
+                    "clock": "device_timestamp",
+                },
+                "samples": [
+                    max(
+                        1,
+                        _round_div(
+                            sample["device_duration_ns"],
+                            sample["iterations"],
+                        ),
+                    )
+                    for sample in device_samples
+                ],
+            }
+        temperatures = [
+            sample["thermal_millidegrees_celsius"]
+            for sample in samples
+            if sample["thermal_millidegrees_celsius"] is not None
+        ]
+        if temperatures:
+            yield {
+                "name": f"{workload['workload_id']}.{phase}_temperature",
+                "unit": "millidegrees_celsius",
+                "regime": {**base_regime, "phase": phase, "sensor": "maximum"},
+                "samples": temperatures,
+            }
     yield {
         "name": f"{workload['workload_id']}.construction_duration_ns",
         "unit": "nanoseconds",

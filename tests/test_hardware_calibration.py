@@ -88,7 +88,7 @@ def hardware_profile(*, include_unknown: bool = False) -> dict[str, object]:
             "api": "vulkan",
             "operations": ["probe"],
             "numeric_formats": (
-                ["bf16", "f16", "f32", "fp8_e4m3"]
+                ["bf16", "f16", "f32", "f8_e4m3"]
                 if name
                 in {
                     "cooperative_matrix",
@@ -356,6 +356,29 @@ def test_plan_covers_every_exposed_process_and_is_deterministic() -> None:
         "vulkan_transfer",
         "vulkan_video",
     }
+    assert {
+        workload["operation"] for workload in first["workloads"]
+    }.issuperset(
+        {
+            "bitfield_mix",
+            "sparse_compaction",
+        }
+    )
+    assert {
+        int(workload["regime"]["working_set_bytes"])
+        for workload in first["workloads"]
+        if workload["operation"] == "sequential_copy"
+    }.issuperset({4_096, 32_768, 262_144, 2_097_152, 16_777_216, 134_217_728})
+    assert {
+        int(workload["regime"]["bytes"])
+        for workload in first["workloads"]
+        if workload["operation"] == "buffer_copy"
+    } == {4_096, 1_048_576, 268_435_456}
+    assert {
+        int(workload["regime"]["round_trips"])
+        for workload in first["workloads"]
+        if workload["operation"] == "synchronization_round_trip"
+    } == {1, 64, 4_096}
     validate_calibration_plan(first)
 
 
@@ -411,6 +434,16 @@ def test_summary_preserves_raw_statistics_and_detects_sustained_decay() -> None:
     assert summary["hardware_profile"]["profile_id"] != profile["profile_id"]
     assert summary["hardware_profile"]["capability_class"] == profile["capability_class"]
     assert summary["hardware_profile"]["measurements"]
+    measurement_units = {
+        measurement["unit"]
+        for measurement in summary["hardware_profile"]["measurements"]
+    }
+    assert {
+        "host_nanoseconds_per_iteration",
+        "device_nanoseconds_per_iteration",
+        "millidegrees_celsius",
+        "nanoseconds",
+    } <= measurement_units
     assert all(workload["reliable"] for workload in summary["workloads"])
     assert any(
         workload["sustained"]["throughput_slope_ppm_per_window"] < 0

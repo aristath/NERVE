@@ -4,6 +4,7 @@ use super::schema::{
     HardwareCalibrationSample, HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
 use super::shader_compiler::compile_calibration_shader;
+use super::telemetry::{elapsed_ns, maximum_pci_temperature_millidegrees};
 use super::vulkan_compute_shaders::compute_shader_source;
 use crate::vulkan_compute::{
     VulkanComputeDevice, VulkanResidentBuffer, VulkanResidentKernelBufferAccess,
@@ -262,7 +263,7 @@ impl<'a> PreparedVulkanComputeWorkload<'a> {
             device_duration_ns: None,
             iterations,
             window_index,
-            thermal_millidegrees_celsius: maximum_device_temperature_millidegrees(
+            thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
                 self.device.pci_address(),
             ),
             valid: true,
@@ -345,29 +346,4 @@ fn is_scheduling_operation(operation: &str) -> bool {
         operation,
         "command_queues" | "indirect_work_generation" | "resident_command_replay"
     )
-}
-
-fn elapsed_ns(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
-
-fn maximum_device_temperature_millidegrees(pci_address: Option<&str>) -> Option<u64> {
-    let pci_address = pci_address?;
-    let entries = fs::read_dir(format!("/sys/bus/pci/devices/{pci_address}/hwmon")).ok()?;
-    entries
-        .filter_map(Result::ok)
-        .flat_map(|entry| {
-            fs::read_dir(entry.path())
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-        })
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("temp") && name.ends_with("_input")
-        })
-        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
-        .filter_map(|value| value.trim().parse::<u64>().ok())
-        .max()
 }

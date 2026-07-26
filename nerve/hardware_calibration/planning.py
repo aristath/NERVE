@@ -246,6 +246,28 @@ def _cpu_branch(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
             work=Work(1_048_576, 1_048_576, 1_048_576, 8),
             validation_mode="exact",
         )
+    for operation, artifact_kind, operations_per_item in (
+        ("binary_tree_lookup", "eytzinger_index", 20),
+        ("hash_lookup", "open_address_hash_index", 3),
+    ):
+        item_count = 262_144
+        yield WorkloadSpec(
+            executor="cpu",
+            operation=operation,
+            process_names=(process["name"],),
+            regime=(
+                ("entries", str(item_count)),
+                ("queries", str(item_count)),
+            ),
+            work=Work(
+                item_count,
+                item_count * operations_per_item,
+                item_count * 8,
+                8,
+            ),
+            artifacts=((operation, artifact_kind),),
+            validation_mode="exact",
+        )
 
 
 def _cpu_vector(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
@@ -416,7 +438,6 @@ def _gpu_formats(process: Json, fallback: tuple[str, ...] = ("f32",)) -> list[st
 
 
 def _gpu_arithmetic(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
-    item_count = 1_048_576
     for numeric_format in _gpu_formats(process):
         packed_dot = process["name"] == "packed_dot_product"
         if packed_dot:
@@ -433,23 +454,51 @@ def _gpu_arithmetic(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
                 if numeric_format == "f64"
                 else 16
             )
+        for item_count in (256, 65_536, 1_048_576):
+            dot_shape = (
+                "4x8"
+                if numeric_format in {"i8", "u8", "f8_e4m3"}
+                else "2x16"
+            )
+            yield WorkloadSpec(
+                executor="vulkan_compute",
+                operation=process["name"],
+                process_names=(process["name"],),
+                regime=tuple(
+                    sorted(
+                        (
+                            ("format", numeric_format),
+                            ("dependency", "independent_chains"),
+                            ("items", str(item_count)),
+                            *((("dot_shape", dot_shape),) if packed_dot else ()),
+                        )
+                    )
+                ),
+                work=Work(
+                    item_count,
+                    item_count * operations_per_item,
+                    item_count * bytes_read_per_item,
+                    item_count * 4,
+                ),
+                artifacts=(
+                    (
+                        f"{process['name']}_{numeric_format}_{item_count}",
+                        "spirv_compute",
+                    ),
+                ),
+                validation_mode="tolerance" if "f" in numeric_format else "exact",
+                maximum_error_ppm=250 if "f" in numeric_format else 0,
+            )
+    if process["name"] == "shader_scalar":
+        item_count = 1_048_576
         yield WorkloadSpec(
             executor="vulkan_compute",
-            operation=process["name"],
+            operation="bitfield_mix",
             process_names=(process["name"],),
-            regime=(
-                ("format", numeric_format),
-                ("dependency", "independent_chains"),
-            ),
-            work=Work(
-                item_count,
-                item_count * operations_per_item,
-                item_count * bytes_read_per_item,
-                item_count * 4,
-            ),
-            artifacts=((f"{process['name']}_{numeric_format}", "spirv_compute"),),
-            validation_mode="tolerance" if "f" in numeric_format else "exact",
-            maximum_error_ppm=250 if "f" in numeric_format else 0,
+            regime=(("format", "u32"), ("items", str(item_count))),
+            work=Work(item_count, item_count * 16, item_count * 4, item_count * 4),
+            artifacts=(("bitfield_mix_u32", "spirv_compute"),),
+            validation_mode="exact",
         )
 
 
@@ -463,28 +512,40 @@ def _gpu_matrix(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
         shapes = properties.get(property_name, "")
         for shape in filter(None, shapes.split(",")):
             dimensions = [int(value) for value in shape.split("x")]
-            tile_count = 8_192
-            operations = 2 * dimensions[0] * dimensions[1] * dimensions[2] * tile_count
-            yield WorkloadSpec(
-                executor="vulkan_compute",
-                operation="cooperative_matrix_multiply",
-                process_names=(process["name"],),
-                regime=(("format", numeric_format), ("shape", shape)),
-                work=Work(
-                    tile_count,
-                    operations,
-                    tile_count * 512 * (1 if numeric_format == "f8_e4m3" else 2),
-                    tile_count * 256 * 4,
-                ),
-                artifacts=(
-                    (
-                        f"cooperative_matrix_{numeric_format}_{shape}",
-                        "spirv_compute",
+            for tile_count in (1, 64, 8_192):
+                operations = (
+                    2
+                    * dimensions[0]
+                    * dimensions[1]
+                    * dimensions[2]
+                    * tile_count
+                )
+                yield WorkloadSpec(
+                    executor="vulkan_compute",
+                    operation="cooperative_matrix_multiply",
+                    process_names=(process["name"],),
+                    regime=(
+                        ("format", numeric_format),
+                        ("shape", shape),
+                        ("tiles", str(tile_count)),
                     ),
-                ),
-                validation_mode="tolerance",
-                maximum_error_ppm=500,
-            )
+                    work=Work(
+                        tile_count,
+                        operations,
+                        tile_count
+                        * 512
+                        * (1 if numeric_format == "f8_e4m3" else 2),
+                        tile_count * 256 * 4,
+                    ),
+                    artifacts=(
+                        (
+                            f"cooperative_matrix_{numeric_format}_{shape}_{tile_count}",
+                            "spirv_compute",
+                        ),
+                    ),
+                    validation_mode="tolerance",
+                    maximum_error_ppm=500,
+                )
 
 
 def _gpu_subgroup(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
@@ -498,6 +559,22 @@ def _gpu_subgroup(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
             artifacts=((f"subgroup_{operation}", "spirv_compute"),),
             validation_mode="exact",
         )
+    if process["name"] == "parallel_collective_algorithms":
+        item_count = 16_777_216
+        yield WorkloadSpec(
+            executor="vulkan_compute",
+            operation="sparse_compaction",
+            process_names=(process["name"],),
+            regime=(("density_ppm", "125000"),),
+            work=Work(
+                item_count,
+                item_count * 2,
+                item_count * 4,
+                item_count // 8 * 4,
+            ),
+            artifacts=(("sparse_compaction", "spirv_compute"),),
+            validation_mode="exact",
+        )
 
 
 def _gpu_memory(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
@@ -509,37 +586,35 @@ def _gpu_memory(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
         "register_pressure_sweep",
         "shared_memory_tiled_copy",
     )
+    working_sets = (4_096, 32_768, 262_144, 2_097_152, 16_777_216, 134_217_728)
     for pattern in patterns:
-        item_count = (
-            1_048_576
-            if pattern == "register_pressure_sweep"
-            else 4_194_304
-            if pattern == "shared_memory_tiled_copy"
-            else 16_777_216
-        )
-        operation_multiplier = (
-            320
-            if pattern == "register_pressure_sweep"
-            else 7
-            if pattern == "packed_decode"
-            else 2
-            if pattern == "gather_scatter"
-            else 1
-        )
-        yield WorkloadSpec(
-            executor="vulkan_compute",
-            operation=pattern,
-            process_names=(process["name"],),
-            regime=(("working_set_bytes", str(item_count * 4)),),
-            work=Work(
-                item_count,
-                item_count * operation_multiplier,
-                item_count * (8 if pattern == "gather_scatter" else 4),
-                item_count * 4,
-            ),
-            artifacts=((pattern, "spirv_compute"),),
-            validation_mode="digest",
-        )
+        for working_set_bytes in working_sets:
+            item_count = working_set_bytes // 4
+            operation_multiplier = (
+                320
+                if pattern == "register_pressure_sweep"
+                else 7
+                if pattern == "packed_decode"
+                else 2
+                if pattern == "gather_scatter"
+                else 1
+            )
+            yield WorkloadSpec(
+                executor="vulkan_compute",
+                operation=pattern,
+                process_names=(process["name"],),
+                regime=(("working_set_bytes", str(working_set_bytes)),),
+                work=Work(
+                    item_count,
+                    item_count * operation_multiplier,
+                    item_count * (8 if pattern == "gather_scatter" else 4),
+                    item_count * 4,
+                ),
+                artifacts=(
+                    (f"{pattern}_{working_set_bytes}", "spirv_compute"),
+                ),
+                validation_mode="digest",
+            )
 
 
 def _gpu_atomic(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
@@ -579,30 +654,62 @@ def _gpu_scheduling(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
             artifacts=((f"scheduling_{process['name']}_{dispatch_count}", "spirv_compute"),),
             validation_mode="exact",
         )
+    if process["name"] == "command_queues":
+        available_queue_count = max(
+            1,
+            int(process["limits"].get("compute_queue_count", 1)),
+        )
+        for queue_count in sorted({1, min(2, available_queue_count)}):
+            yield WorkloadSpec(
+                executor="vulkan_synchronization",
+                operation="queue_contention",
+                process_names=(process["name"],),
+                regime=(
+                    ("queue_count", str(queue_count)),
+                    ("streams", "2"),
+                ),
+                work=Work(2, 2, 8_388_608, 8_388_608),
+                validation_mode="exact",
+            )
 
 
 def _gpu_transfer(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
-    for direction in ("host_to_device", "device_to_host", "device_to_device"):
-        yield WorkloadSpec(
-            executor="vulkan_transfer",
-            operation="buffer_copy",
-            process_names=(process["name"],),
-            regime=(("direction", direction), ("bytes", "268435456")),
-            work=Work(67_108_864, 67_108_864, 268_435_456, 268_435_456),
-            validation_mode="digest",
-        )
+    for byte_count in (4_096, 1_048_576, 268_435_456):
+        for direction in ("host_to_device", "device_to_host", "device_to_device"):
+            yield WorkloadSpec(
+                executor="vulkan_transfer",
+                operation="buffer_copy",
+                process_names=(process["name"],),
+                regime=(("direction", direction), ("bytes", str(byte_count))),
+                work=Work(
+                    byte_count // 4,
+                    byte_count // 4,
+                    byte_count,
+                    byte_count,
+                ),
+                validation_mode="digest",
+            )
 
 
 def _gpu_sync(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
-    for primitive in ("pipeline_barrier", "fence", "timeline_semaphore"):
-        yield WorkloadSpec(
-            executor="vulkan_synchronization",
-            operation="synchronization_round_trip",
-            process_names=(process["name"],),
-            regime=(("primitive", primitive), ("round_trips", "4096")),
-            work=Work(4_096, 4_096, 16_384, 16_384),
-            validation_mode="exact",
-        )
+    for round_trips in (1, 64, 4_096):
+        for primitive in ("pipeline_barrier", "fence", "timeline_semaphore"):
+            yield WorkloadSpec(
+                executor="vulkan_synchronization",
+                operation="synchronization_round_trip",
+                process_names=(process["name"],),
+                regime=(
+                    ("primitive", primitive),
+                    ("round_trips", str(round_trips)),
+                ),
+                work=Work(
+                    round_trips,
+                    round_trips,
+                    round_trips * 4,
+                    round_trips * 4,
+                ),
+                validation_mode="exact",
+            )
 
 
 def _gpu_texture(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:

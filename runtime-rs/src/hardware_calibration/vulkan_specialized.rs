@@ -13,4 +13,4 @@ pub(super) use graphics::{
     PreparedFixedGraphics, fixed_graphics_fragment_shader, fixed_graphics_vertex_shader,
 };
 pub(super) use ray::{PreparedRayCalibration, ray_query_shader};
-pub(super) use synchronization::PreparedSynchronizationCalibration;
+pub(super) use synchronization::{PreparedQueueContention, PreparedSynchronizationCalibration};

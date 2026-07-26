@@ -4,6 +4,7 @@ use super::schema::{
     HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
 use super::shader_compiler::persist_calibration_artifact;
+use super::telemetry::elapsed_ns;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -466,8 +467,4 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
-}
-
-fn elapsed_ns(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }

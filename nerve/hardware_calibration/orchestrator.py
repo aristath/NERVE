@@ -13,7 +13,10 @@ from typing import Callable, Sequence
 
 from nerve.compilation import Json, ModelCompileCancelled, ModelCompileError
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
-from nerve.representation_optimizer.contracts import canonical_json_bytes
+from nerve.representation_optimizer.contracts import (
+    ContractDocument,
+    canonical_json_bytes,
+)
 
 from .contracts import validate_calibration_run
 from .planning import CalibrationPolicy, build_calibration_plan
@@ -195,7 +198,7 @@ def validate_calibration_collection(destination: Path) -> Json:
 def _selected_profiles(
     target: CompilerTarget,
     selected_devices: Sequence[str],
-) -> tuple[object, ...]:
+) -> tuple[ContractDocument, ...]:
     profiles = sorted(
         target.hardware_profiles,
         key=lambda profile: profile.to_json()["profile_id"],

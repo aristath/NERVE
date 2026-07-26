@@ -30,6 +30,8 @@ pub(super) fn compute_shader_source(
         "subgroup_reduce" | "subgroup_scan" | "subgroup_shuffle" | "subgroup_ballot" => {
             subgroup_source(&workload.operation)
         }
+        "sparse_compaction" => sparse_compaction_source(),
+        "bitfield_mix" => bitfield_mix_source(),
         "sequential_copy"
         | "strided_read"
         | "gather_scatter"
@@ -445,6 +447,47 @@ void main() {{
 }}
 "#
     ))
+}
+
+fn sparse_compaction_source() -> Result<String, String> {
+    Ok(r#"#version 460
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer InputWords { uint words[]; } input_words;
+layout(set = 0, binding = 1) buffer OutputWords { uint words[]; } output_words;
+layout(push_constant) uniform Control { uint output_count; } control;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= control.output_count) { return; }
+    uint value = input_words.words[index];
+    if ((value & 7u) == 0u) {
+        uint slot = atomicAdd(output_words.words[0], 1u);
+        uint capacity = max(control.output_count - 1u, 1u);
+        output_words.words[1u + slot % capacity] = value ^ index;
+    }
+}
+"#
+    .to_string())
+}
+
+fn bitfield_mix_source() -> Result<String, String> {
+    Ok(r#"#version 460
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer InputWords { uint words[]; } input_words;
+layout(set = 0, binding = 1) writeonly buffer OutputWords { uint words[]; } output_words;
+layout(push_constant) uniform Control { uint output_count; } control;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= control.output_count) { return; }
+    uint value = input_words.words[index];
+    value = bitfieldReverse(value);
+    value = bitfieldInsert(value, value ^ 0x9e3779b9u, 7, 13);
+    value ^= bitCount(value) * 0x45d9f3bu;
+    value ^= uint(findMSB(value)) << 24u;
+    value ^= uint(findLSB(value)) << 16u;
+    output_words.words[index] = value;
+}
+"#
+    .to_string())
 }
 
 fn scheduling_source() -> Result<String, String> {
