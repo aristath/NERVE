@@ -59,30 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 1. Define the optimizer architecture and versioned contracts
-
-- Name and place the representation-optimization stage between semantic
-  compilation and final package publication.
-- Define versioned schemas for:
-  - optimization scopes;
-  - source behavioral contracts;
-  - algebraic-analysis evidence;
-  - hardware process profiles;
-  - representation candidates;
-  - candidate construction artifacts;
-  - benchmark records;
-  - proof and behavioral-validation records; and
-  - promotion decisions.
-- Give every scope a stable semantic identity and source-contract digest.
-- Define how the optimizer requests re-lowering after a representation or
-  topology change.
-- Define failure isolation: one analyzer or candidate failure must not corrupt
-  the exact compiled baseline or another experiment.
-
-Completion requires schema validation, round-trip tests, deterministic
-serialization, and a documented lifecycle from exact source scope to promoted
-package implementation.
-
 ### 2. Build a complete hardware-process capability model
 
 - Represent CPU capabilities, including:
@@ -136,6 +112,10 @@ capability fixtures, fail-closed validation, and stable hardware identities.
   - construction costs for indexes, fields, acceleration structures, and other
     non-tensor artifacts.
 - Separate cold construction, warmup, and steady-state measurements.
+- Measure throughput and latency as a function of sustained execution length,
+  including thermal behavior, queue contention, bounded waits, and resident
+  feedback-window replay. A short-turn mean must not conceal long-horizon
+  throughput decay.
 - Record variance and require statistically meaningful differences.
 - Persist calibration as a versioned hardware-process profile tied to the
   physical device, driver, API, and compiler implementation.
@@ -301,6 +281,13 @@ artifacts.
   utilization, synchronization, and memory residency.
 - Use warmup, repeated measurements, confidence intervals, and a declared
   material-improvement threshold.
+- Verify fixed-seed reproducibility at the distribution, token, and runtime
+  scheduling levels. When identical inputs and seeds diverge, preserve both
+  traces and classify whether the cause is permitted sampling variance,
+  numerical nondeterminism, speculative scheduling, or a correctness defect.
+- Report throughput slope over the output window and surface queue-wait,
+  timeout, synchronization, and transport counters that explain degradation
+  during sustained generation.
 - Reject benchmark-only shortcuts, arbitrary output caps, convenient seeds, and
   comparisons against mismatched source work.
 
