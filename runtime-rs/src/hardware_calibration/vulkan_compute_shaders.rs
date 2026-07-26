@@ -43,11 +43,9 @@ pub(super) fn compute_shader_source(
                 .map(String::as_str)
                 .unwrap_or("global"),
         ),
-        "command_queues"
-        | "device_generated_commands"
-        | "indirect_work_generation"
-        | "resident_command_replay"
-        | "synchronization_round_trip" => scheduling_source(),
+        "command_queues" | "indirect_work_generation" | "resident_command_replay" => {
+            scheduling_source()
+        }
         unsupported => Err(format!(
             "Vulkan compute calibrator has no shader for {unsupported:?}"
         )),

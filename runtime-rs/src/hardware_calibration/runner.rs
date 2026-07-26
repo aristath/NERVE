@@ -8,9 +8,17 @@ use super::schema::{
 #[cfg(feature = "vulkan")]
 use super::vulkan_compute::VulkanComputeCalibrationExecutor;
 #[cfg(feature = "vulkan")]
+use super::vulkan_dgc::VulkanDgcCalibrationExecutor;
+#[cfg(feature = "vulkan")]
 use super::vulkan_graphics::VulkanGraphicsCalibrationExecutor;
 #[cfg(feature = "vulkan")]
+use super::vulkan_ray::VulkanRayCalibrationExecutor;
+#[cfg(feature = "vulkan")]
+use super::vulkan_synchronization::VulkanSynchronizationCalibrationExecutor;
+#[cfg(feature = "vulkan")]
 use super::vulkan_transfer::VulkanTransferCalibrationExecutor;
+#[cfg(feature = "vulkan")]
+use super::vulkan_video::VulkanVideoCalibrationExecutor;
 use crate::hardware_profile::stable_hardware_id;
 #[cfg(feature = "vulkan")]
 use crate::vulkan_compute::VulkanComputeDevice;
@@ -69,62 +77,10 @@ pub fn run_calibration_plan(
         .iter()
         .any(|workload| workload.executor != CalibrationExecutor::Cpu);
     #[cfg(feature = "vulkan")]
-    let vulkan_device = if uses_vulkan {
-        let physical_device_index = options.vulkan_physical_device_index.ok_or_else(|| {
+    let vulkan_physical_device_index = if uses_vulkan {
+        Some(options.vulkan_physical_device_index.ok_or_else(|| {
             "a Vulkan calibration plan requires an explicit physical device index".to_string()
-        })?;
-        Some(Rc::new(
-            VulkanComputeDevice::new_for_physical_device_index(physical_device_index)
-                .map_err(|error| format!("could not open Vulkan calibration device: {error}"))?,
-        ))
-    } else {
-        None
-    };
-    #[cfg(feature = "vulkan")]
-    let mut vulkan_compute = if plan
-        .workloads
-        .iter()
-        .any(|workload| workload.executor == CalibrationExecutor::VulkanCompute)
-    {
-        Some(VulkanComputeCalibrationExecutor::new(
-            Rc::clone(
-                vulkan_device
-                    .as_ref()
-                    .expect("Vulkan calibration device was initialized"),
-            ),
-            options.artifact_directory.clone(),
-        )?)
-    } else {
-        None
-    };
-    #[cfg(feature = "vulkan")]
-    let mut vulkan_transfer = if plan
-        .workloads
-        .iter()
-        .any(|workload| workload.executor == CalibrationExecutor::VulkanTransfer)
-    {
-        Some(VulkanTransferCalibrationExecutor::new(Rc::clone(
-            vulkan_device
-                .as_ref()
-                .expect("Vulkan calibration device was initialized"),
-        )))
-    } else {
-        None
-    };
-    #[cfg(feature = "vulkan")]
-    let mut vulkan_graphics = if plan
-        .workloads
-        .iter()
-        .any(|workload| workload.executor == CalibrationExecutor::VulkanGraphics)
-    {
-        Some(VulkanGraphicsCalibrationExecutor::new(
-            Rc::clone(
-                vulkan_device
-                    .as_ref()
-                    .expect("Vulkan calibration device was initialized"),
-            ),
-            options.artifact_directory.clone(),
-        )?)
+        })?)
     } else {
         None
     };
@@ -145,20 +101,127 @@ pub fn run_calibration_plan(
         let result = match workload.executor {
             CalibrationExecutor::Cpu => run_cpu_workload(plan, workload, options)?,
             #[cfg(feature = "vulkan")]
-            CalibrationExecutor::VulkanCompute => vulkan_compute
-                .as_mut()
-                .expect("Vulkan executor was initialized for the plan")
-                .run(plan, workload, &options.cancelled)?,
+            CalibrationExecutor::VulkanCompute => {
+                let construction_started = Instant::now();
+                let device = Rc::new(
+                    VulkanComputeDevice::new_for_physical_device_index(
+                        vulkan_physical_device_index
+                            .expect("Vulkan physical device index was validated"),
+                    )
+                    .map_err(|error| {
+                        format!("could not open Vulkan calibration device: {error}")
+                    })?,
+                );
+                let executor = VulkanComputeCalibrationExecutor::new(
+                    device,
+                    options.artifact_directory.clone(),
+                )?;
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
             #[cfg(feature = "vulkan")]
-            CalibrationExecutor::VulkanTransfer => vulkan_transfer
-                .as_mut()
-                .expect("Vulkan transfer executor was initialized for the plan")
-                .run(plan, workload, &options.cancelled)?,
+            CalibrationExecutor::VulkanDgc => {
+                let construction_started = Instant::now();
+                let executor = VulkanDgcCalibrationExecutor::new(
+                    vulkan_physical_device_index
+                        .expect("Vulkan physical device index was validated"),
+                    options.artifact_directory.clone(),
+                )?;
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
             #[cfg(feature = "vulkan")]
-            CalibrationExecutor::VulkanGraphics => vulkan_graphics
-                .as_mut()
-                .expect("Vulkan graphics executor was initialized for the plan")
-                .run(plan, workload, &options.cancelled)?,
+            CalibrationExecutor::VulkanTransfer => {
+                let construction_started = Instant::now();
+                let device = Rc::new(
+                    VulkanComputeDevice::new_for_physical_device_index(
+                        vulkan_physical_device_index
+                            .expect("Vulkan physical device index was validated"),
+                    )
+                    .map_err(|error| {
+                        format!("could not open Vulkan calibration device: {error}")
+                    })?,
+                );
+                let executor = VulkanTransferCalibrationExecutor::new(device);
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
+            #[cfg(feature = "vulkan")]
+            CalibrationExecutor::VulkanGraphics => {
+                let construction_started = Instant::now();
+                let device = Rc::new(
+                    VulkanComputeDevice::new_for_physical_device_index(
+                        vulkan_physical_device_index
+                            .expect("Vulkan physical device index was validated"),
+                    )
+                    .map_err(|error| {
+                        format!("could not open Vulkan calibration device: {error}")
+                    })?,
+                );
+                let executor = VulkanGraphicsCalibrationExecutor::new(
+                    device,
+                    vulkan_physical_device_index
+                        .expect("Vulkan physical device index was validated"),
+                    workload.operation != "texture_sampling",
+                    options.artifact_directory.clone(),
+                )?;
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
+            #[cfg(feature = "vulkan")]
+            CalibrationExecutor::VulkanRay => {
+                let construction_started = Instant::now();
+                let executor = VulkanRayCalibrationExecutor::new(
+                    vulkan_physical_device_index
+                        .expect("Vulkan physical device index was validated"),
+                    options.artifact_directory.clone(),
+                )?;
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
+            #[cfg(feature = "vulkan")]
+            CalibrationExecutor::VulkanSynchronization => {
+                let construction_started = Instant::now();
+                let executor = VulkanSynchronizationCalibrationExecutor::new(
+                    vulkan_physical_device_index
+                        .expect("Vulkan physical device index was validated"),
+                )?;
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
+            #[cfg(feature = "vulkan")]
+            CalibrationExecutor::VulkanVideo => {
+                let construction_started = Instant::now();
+                let executor = VulkanVideoCalibrationExecutor::new(
+                    vulkan_physical_device_index
+                        .expect("Vulkan physical device index was validated"),
+                    options.artifact_directory.clone(),
+                )?;
+                let executor_construction_ns = elapsed_ns(construction_started);
+                include_executor_construction(
+                    executor.run(plan, workload, &options.cancelled)?,
+                    executor_construction_ns,
+                )
+            }
+            #[cfg(not(feature = "vulkan"))]
             executor => {
                 return Err(format!(
                     "calibration executor {executor:?} is not implemented by this build"
@@ -363,6 +426,17 @@ fn measure_minimum_duration(
 
 fn elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "vulkan")]
+fn include_executor_construction(
+    mut result: HardwareCalibrationWorkloadResult,
+    executor_construction_ns: u64,
+) -> HardwareCalibrationWorkloadResult {
+    result.construction_duration_ns = result
+        .construction_duration_ns
+        .saturating_add(executor_construction_ns);
+    result
 }
 
 fn maximum_thermal_millidegrees() -> Option<u64> {

@@ -57,8 +57,10 @@ pub struct HardwareCalibrationWorkload {
 pub enum CalibrationExecutor {
     Cpu,
     VulkanCompute,
+    VulkanDgc,
     VulkanGraphics,
     VulkanRay,
+    VulkanSynchronization,
     VulkanTransfer,
     VulkanVideo,
 }

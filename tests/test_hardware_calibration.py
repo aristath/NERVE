@@ -349,8 +349,10 @@ def test_plan_covers_every_exposed_process_and_is_deterministic() -> None:
     ]
     assert {workload["executor"] for workload in first["workloads"]} == {
         "vulkan_compute",
+        "vulkan_dgc",
         "vulkan_graphics",
         "vulkan_ray",
+        "vulkan_synchronization",
         "vulkan_transfer",
         "vulkan_video",
     }

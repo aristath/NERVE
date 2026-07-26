@@ -559,7 +559,11 @@ def _gpu_atomic(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
 def _gpu_scheduling(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
     for dispatch_count in (1, 16, 256):
         yield WorkloadSpec(
-            executor="vulkan_compute",
+            executor=(
+                "vulkan_dgc"
+                if process["name"] == "device_generated_commands"
+                else "vulkan_compute"
+            ),
             operation=process["name"],
             process_names=(process["name"],),
             regime=(
@@ -592,12 +596,11 @@ def _gpu_transfer(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
 def _gpu_sync(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
     for primitive in ("pipeline_barrier", "fence", "timeline_semaphore"):
         yield WorkloadSpec(
-            executor="vulkan_compute",
+            executor="vulkan_synchronization",
             operation="synchronization_round_trip",
             process_names=(process["name"],),
             regime=(("primitive", primitive), ("round_trips", "4096")),
             work=Work(4_096, 4_096, 16_384, 16_384),
-            artifacts=(("synchronization_probe", "spirv_compute"),),
             validation_mode="exact",
         )
 
@@ -614,7 +617,7 @@ def _gpu_texture(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
                 ("addressing", "random"),
             ),
             work=Work(16_777_216, 16_777_216, 134_217_728, 67_108_864),
-            artifacts=(("texture_sampling", "spirv_graphics"),),
+            artifacts=(("texture_sampling", "spirv_compute"),),
             validation_mode="tolerance",
             maximum_error_ppm=250,
         )
@@ -631,7 +634,10 @@ def _gpu_graphics(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
             ("overdraw", "4"),
         ),
         work=Work(67_108_864, 67_108_864, 268_435_456, 134_217_728),
-        artifacts=((f"graphics_{process['name']}", "spirv_graphics"),),
+        artifacts=(
+            (f"graphics_{process['name']}_vertex", "spirv_vertex"),
+            (f"graphics_{process['name']}_fragment", "spirv_fragment"),
+        ),
         validation_mode="digest",
     )
 
@@ -642,13 +648,16 @@ def _gpu_ray(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
         if process["name"] == "acceleration_structure_construction"
         else "ray_query_traversal"
     )
+    artifacts = [("ray_scene", "procedural_ray_scene")]
+    if operation == "ray_query_traversal":
+        artifacts.append(("ray_query_shader", "spirv_compute"))
     yield WorkloadSpec(
         executor="vulkan_ray",
         operation=operation,
         process_names=(process["name"],),
         regime=(("primitives", "1048576"), ("rays", "16777216")),
         work=Work(16_777_216, 16_777_216, 268_435_456, 67_108_864),
-        artifacts=(("ray_scene", "acceleration_structure"),),
+        artifacts=tuple(artifacts),
         validation_mode="digest",
     )
 
@@ -659,12 +668,16 @@ def _gpu_video(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
         operation=process["name"],
         process_names=(process["name"],),
         regime=(
-            ("codec", "h264"),
+            ("codec", "av1"),
             ("resolution", "3840x2160"),
             ("frames", "120"),
+            ("timeout_ms", "30000"),
         ),
         work=Work(120, 120, 3_981_312_000, 3_981_312_000),
-        artifacts=(("video_bitstream", "video_fixture"),),
+        artifacts=(
+            ("video_backend_manifest", "external_backend_manifest"),
+            ("video_bitstream", "video_fixture_av1"),
+        ),
         validation_mode="digest",
     )
 

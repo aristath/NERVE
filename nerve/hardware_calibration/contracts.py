@@ -20,8 +20,10 @@ EXECUTORS = frozenset(
     {
         "cpu",
         "vulkan_compute",
+        "vulkan_dgc",
         "vulkan_graphics",
         "vulkan_ray",
+        "vulkan_synchronization",
         "vulkan_transfer",
         "vulkan_video",
     }

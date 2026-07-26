@@ -4,6 +4,10 @@ use super::schema::{
     HardwareCalibrationWorkload, HardwareCalibrationWorkloadResult,
 };
 use super::shader_compiler::compile_calibration_shader;
+use super::vulkan_specialized::{
+    PreparedFixedGraphics, SpecializedVulkanContext, SpecializedVulkanRequirements,
+    fixed_graphics_fragment_shader, fixed_graphics_vertex_shader,
+};
 use crate::vulkan_compute::{VulkanComputeDevice, VulkanTextureCalibration};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -14,12 +18,15 @@ use std::time::{Duration, Instant};
 
 pub(super) struct VulkanGraphicsCalibrationExecutor {
     device: Rc<VulkanComputeDevice>,
+    fixed_graphics_context: Option<Rc<SpecializedVulkanContext>>,
     artifact_directory: PathBuf,
 }
 
 impl VulkanGraphicsCalibrationExecutor {
     pub(super) fn new(
         device: Rc<VulkanComputeDevice>,
+        physical_device_index: usize,
+        needs_fixed_graphics: bool,
         artifact_directory: PathBuf,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(&artifact_directory).map_err(|error| {
@@ -27,8 +34,20 @@ impl VulkanGraphicsCalibrationExecutor {
                 "could not create graphics calibration artifacts {artifact_directory:?}: {error}"
             )
         })?;
+        let fixed_graphics_context = needs_fixed_graphics
+            .then(|| {
+                SpecializedVulkanContext::new(
+                    physical_device_index,
+                    SpecializedVulkanRequirements {
+                        graphics: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .transpose()?;
         Ok(Self {
             device,
+            fixed_graphics_context,
             artifact_directory,
         })
     }
@@ -39,12 +58,19 @@ impl VulkanGraphicsCalibrationExecutor {
         workload: &HardwareCalibrationWorkload,
         cancelled: &Arc<AtomicBool>,
     ) -> Result<HardwareCalibrationWorkloadResult, String> {
-        if workload.operation != "texture_sampling" {
-            return Err(format!(
-                "Vulkan graphics calibrator does not implement {:?}",
-                workload.operation
-            ));
+        if workload.operation == "texture_sampling" {
+            self.run_texture(plan, workload, cancelled)
+        } else {
+            self.run_fixed_graphics(plan, workload, cancelled)
         }
+    }
+
+    fn run_texture(
+        &self,
+        plan: &HardwareCalibrationPlan,
+        workload: &HardwareCalibrationWorkload,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<HardwareCalibrationWorkloadResult, String> {
         let construction_started = Instant::now();
         let source = texture_shader_source();
         let (spirv, artifact) =
@@ -127,10 +153,182 @@ impl VulkanGraphicsCalibrationExecutor {
             diagnostics: Vec::new(),
         })
     }
+
+    fn run_fixed_graphics(
+        &self,
+        plan: &HardwareCalibrationPlan,
+        workload: &HardwareCalibrationWorkload,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<HardwareCalibrationWorkloadResult, String> {
+        if workload.artifacts.len() != 2 {
+            return Err(format!(
+                "fixed graphics workload {} must declare vertex and fragment artifacts",
+                workload.workload_id
+            ));
+        }
+        let context = self.fixed_graphics_context.as_ref().ok_or_else(|| {
+            "fixed graphics workload reached an executor without a graphics context".to_string()
+        })?;
+        let construction_started = Instant::now();
+        let vertex_index = workload
+            .artifacts
+            .iter()
+            .position(|artifact| artifact.kind == "spirv_vertex")
+            .ok_or_else(|| "fixed graphics workload has no vertex artifact".to_string())?;
+        let fragment_index = workload
+            .artifacts
+            .iter()
+            .position(|artifact| artifact.kind == "spirv_fragment")
+            .ok_or_else(|| "fixed graphics workload has no fragment artifact".to_string())?;
+        let (vertex_spirv, vertex_artifact) = compile_calibration_shader(
+            workload,
+            vertex_index,
+            fixed_graphics_vertex_shader(),
+            "vert",
+            &self.artifact_directory,
+        )?;
+        let (fragment_spirv, fragment_artifact) = compile_calibration_shader(
+            workload,
+            fragment_index,
+            fixed_graphics_fragment_shader(),
+            "frag",
+            &self.artifact_directory,
+        )?;
+        let (width, height) = parse_extent(
+            workload
+                .regime
+                .get("render_target")
+                .map(String::as_str)
+                .unwrap_or("4096x4096"),
+        )?;
+        let overdraw = workload
+            .regime
+            .get("overdraw")
+            .map(String::as_str)
+            .unwrap_or("1")
+            .parse::<u32>()
+            .map_err(|error| format!("invalid fixed graphics overdraw: {error}"))?;
+        let prepared = PreparedFixedGraphics::new(
+            Rc::clone(context),
+            &workload.operation,
+            &vertex_spirv,
+            &fragment_spirv,
+            width,
+            height,
+            overdraw,
+        )?;
+        let construction_duration_ns = elapsed_ns(construction_started);
+        let mut prepared = PreparedFixedGraphicsState {
+            prepared,
+            pci_address: context.pci_address().map(str::to_string),
+        };
+        let mut samples = Vec::new();
+        for _ in 0..plan.policy.warmup_iterations {
+            samples.push(prepared.measure(
+                CalibrationSamplePhase::Warmup,
+                None,
+                plan.policy.minimum_sample_duration_ns,
+                cancelled,
+                samples.len(),
+            )?);
+        }
+        for _ in 0..plan.policy.steady_iterations {
+            samples.push(prepared.measure(
+                CalibrationSamplePhase::Steady,
+                None,
+                plan.policy.minimum_sample_duration_ns,
+                cancelled,
+                samples.len(),
+            )?);
+        }
+        for window_index in 0..plan.policy.sustained_window_count {
+            samples.push(
+                prepared.measure(
+                    CalibrationSamplePhase::Sustained,
+                    Some(window_index),
+                    plan.policy
+                        .sustained_window_duration_ms
+                        .saturating_mul(1_000_000),
+                    cancelled,
+                    samples.len(),
+                )?,
+            );
+        }
+        let observed_digest = prepared.prepared.observed_digest()?;
+        let validation_passed = workload
+            .validation
+            .expected_digest
+            .as_ref()
+            .is_none_or(|expected| expected == &observed_digest);
+        let mut artifacts = vec![vertex_artifact, fragment_artifact];
+        artifacts.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(HardwareCalibrationWorkloadResult {
+            workload_id: workload.workload_id.clone(),
+            status: if validation_passed {
+                CalibrationRunStatus::Completed
+            } else {
+                CalibrationRunStatus::Failed
+            },
+            construction_duration_ns,
+            artifacts,
+            samples,
+            validation: CalibrationValidationResult {
+                status: if validation_passed {
+                    CalibrationValidationStatus::Passed
+                } else {
+                    CalibrationValidationStatus::Failed
+                },
+                observed_digest: Some(observed_digest),
+                maximum_error_ppm: 0,
+            },
+            counters: Default::default(),
+            diagnostics: Vec::new(),
+        })
+    }
 }
 
 struct PreparedTexture {
     texture: VulkanTextureCalibration,
+}
+
+struct PreparedFixedGraphicsState {
+    prepared: PreparedFixedGraphics,
+    pci_address: Option<String>,
+}
+
+impl PreparedFixedGraphicsState {
+    fn measure(
+        &mut self,
+        phase: CalibrationSamplePhase,
+        window_index: Option<usize>,
+        minimum_duration_ns: u64,
+        cancelled: &Arc<AtomicBool>,
+        sample_index: usize,
+    ) -> Result<HardwareCalibrationSample, String> {
+        let target = Duration::from_nanos(minimum_duration_ns);
+        let started = Instant::now();
+        let mut iterations = 0u64;
+        let mut device_duration_ns = 0u64;
+        while started.elapsed() < target || iterations == 0 {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err("calibration was cancelled during fixed graphics".to_string());
+            }
+            device_duration_ns = device_duration_ns.saturating_add(self.prepared.run()?);
+            iterations = iterations.saturating_add(1);
+        }
+        Ok(HardwareCalibrationSample {
+            sample_index,
+            phase,
+            duration_ns: elapsed_ns(started),
+            device_duration_ns: Some(device_duration_ns),
+            iterations,
+            window_index,
+            thermal_millidegrees_celsius: maximum_device_temperature_millidegrees(
+                self.pci_address.as_deref(),
+            ),
+            valid: true,
+        })
+    }
 }
 
 impl PreparedTexture {
@@ -209,4 +407,41 @@ void main() {
 
 fn elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn parse_extent(value: &str) -> Result<(u32, u32), String> {
+    let (width, height) = value
+        .split_once('x')
+        .ok_or_else(|| format!("invalid graphics extent {value:?}"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|error| format!("invalid graphics width: {error}"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|error| format!("invalid graphics height: {error}"))?;
+    if width == 0 || height == 0 {
+        return Err("graphics extent must be nonzero".to_string());
+    }
+    Ok((width, height))
+}
+
+fn maximum_device_temperature_millidegrees(pci_address: Option<&str>) -> Option<u64> {
+    let pci_address = pci_address?;
+    let entries = std::fs::read_dir(format!("/sys/bus/pci/devices/{pci_address}/hwmon")).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .flat_map(|entry| {
+            std::fs::read_dir(entry.path())
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+        })
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("temp") && name.ends_with("_input")
+        })
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|value| value.trim().parse::<u64>().ok())
+        .max()
 }

@@ -343,11 +343,7 @@ fn deterministic_bytes(byte_count: usize) -> Vec<u8> {
 fn is_scheduling_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "command_queues"
-            | "device_generated_commands"
-            | "indirect_work_generation"
-            | "resident_command_replay"
-            | "synchronization_round_trip"
+        "command_queues" | "indirect_work_generation" | "resident_command_replay"
     )
 }
 
