@@ -29,6 +29,15 @@ from nerve.representation_optimizer.contracts import (
     contract_digest,
 )
 from nerve.representation_optimizer.lifecycle import OptimizationSession
+from nerve.representation_optimizer.promotion.contracts import (
+    IMPLEMENTATION_REGISTRY_SCHEMA,
+    RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
+    ImplementationRegistry,
+    create_empty_implementation_registry,
+)
+from nerve.representation_optimizer.promotion.package_validation import (
+    validate_published_implementation_registry,
+)
 from nerve.representation_optimizer.representation_ir import (
     REPRESENTATION_GRAPH_SCHEMA,
 )
@@ -56,9 +65,10 @@ from nerve.representation_optimizer.validation.contracts import (
 )
 
 
-OPTIMIZER_STAGE_SCHEMA = "nerve.optimizer.stage.v2"
+OPTIMIZER_STAGE_SCHEMA = "nerve.optimizer.stage.v3"
 OPTIMIZER_STAGE_DIR = "optimization"
 OPTIMIZER_STAGE_FILE = "stage.json"
+OPTIMIZER_IMPLEMENTATION_REGISTRY_FILE = "implementations.json"
 OPTIMIZER_CONTRACT_SCHEMAS = (
     OPTIMIZATION_SCOPE_SCHEMA,
     OPTIMIZATION_SCOPE_CATALOG_SCHEMA,
@@ -89,7 +99,9 @@ OPTIMIZER_CONTRACT_SCHEMAS = (
     PREBENCHMARK_RECORD_SCHEMA,
     VALIDATION_EVIDENCE_INTEGRITY_SCHEMA,
     VALIDATION_RECORD_SCHEMA,
+    RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
     PROMOTION_DECISION_SCHEMA,
+    IMPLEMENTATION_REGISTRY_SCHEMA,
     RELOWERING_REQUEST_SCHEMA,
 )
 
@@ -126,6 +138,22 @@ def initialize_optimizer_stage(
         lowered_index=lowered_index,
         lowered_index_ref=lowered_ref,
     )
+    exact_baseline = {
+        "artifact_ref": lowered_ref,
+        "contract_digest": baseline_digest,
+        "mutable": False,
+    }
+    implementation_registry = create_empty_implementation_registry(
+        package_id=package_id,
+        exact_baseline=exact_baseline,
+    )
+    implementation_registry_path = (
+        optimizer_dir / OPTIMIZER_IMPLEMENTATION_REGISTRY_FILE
+    )
+    write_json(
+        implementation_registry_path,
+        implementation_registry.to_json(),
+    )
     document = {
         "schema": OPTIMIZER_STAGE_SCHEMA,
         "stage": "behavioral_representation_optimization",
@@ -134,11 +162,7 @@ def initialize_optimizer_stage(
             "before": "physical_package_publication",
         },
         "status": "exact_baseline_retained",
-        "exact_baseline": {
-            "artifact_ref": lowered_ref,
-            "contract_digest": baseline_digest,
-            "mutable": False,
-        },
+        "exact_baseline": exact_baseline,
         "scope_catalog": {
             "artifact_ref": scope_catalog.package_reference(package_dir),
             "contract_digest": scope_catalog.digest,
@@ -148,6 +172,16 @@ def initialize_optimizer_stage(
             ],
         },
         "session": session.to_json(),
+        "implementation_registry": {
+            "artifact_ref": (
+                f"{OPTIMIZER_STAGE_DIR}/"
+                f"{OPTIMIZER_IMPLEMENTATION_REGISTRY_FILE}"
+            ),
+            "contract_digest": contract_digest(
+                implementation_registry.to_json()
+            ),
+            "implementation_count": 0,
+        },
         "contract_schemas": list(OPTIMIZER_CONTRACT_SCHEMAS),
     }
     validate_optimizer_stage(document, package_dir=package_dir)
@@ -165,6 +199,7 @@ def validate_optimizer_stage(document: Json, *, package_dir: Path) -> None:
         "exact_baseline",
         "scope_catalog",
         "session",
+        "implementation_registry",
         "contract_schemas",
     }
     if not isinstance(document, dict) or set(document) != required:
@@ -256,10 +291,87 @@ def validate_optimizer_stage(document: Json, *, package_dir: Path) -> None:
         raise ModelCompileError(
             "optimizer session does not reference the immutable exact baseline"
         )
-    if document["status"] == "exact_baseline_retained" and session.candidates:
+    registry_reference = _require_object(
+        document["implementation_registry"],
+        "implementation registry reference",
+    )
+    if set(registry_reference) != {
+        "artifact_ref",
+        "contract_digest",
+        "implementation_count",
+    }:
+        raise ModelCompileError(
+            "compiled implementation registry reference is invalid"
+        )
+    registry_path = _package_artifact_path(
+        package_dir,
+        registry_reference.get("artifact_ref"),
+        "implementation registry",
+    )
+    if not registry_path.is_file():
+        raise ModelCompileError(
+            f"compiled implementation registry is missing: {registry_path}"
+        )
+    registry = ImplementationRegistry.from_json(read_json(registry_path))
+    registry_document = registry.to_json()
+    if (
+        registry_document["package_id"] != session.package_id
+        or registry_document["exact_baseline"] != baseline
+        or registry_reference.get("contract_digest")
+        != contract_digest(registry_document)
+        or registry_reference.get("implementation_count")
+        != len(registry.implementations)
+    ):
+        raise ModelCompileError(
+            "compiled implementation registry does not match optimizer stage"
+        )
+    validate_published_implementation_registry(
+        package_dir,
+        registry,
+        scope_catalog=scope_catalog_document,
+    )
+    if document["status"] == "exact_baseline_retained" and (
+        session.candidates or registry.implementations
+    ):
         raise ModelCompileError(
             "an unoptimized stage cannot declare representation candidates"
         )
+    if document["status"] == "optimized":
+        if any(
+            candidate.state.value != "published"
+            for candidate in session.candidates
+        ):
+            raise ModelCompileError(
+                "optimized package sessions may contain only published candidates"
+            )
+        published_candidates = {
+            candidate.candidate_id
+            for candidate in session.candidates
+            if candidate.state.value == "published"
+        }
+        registry_candidates = {
+            str(implementation["candidate_id"])
+            for implementation in registry.implementations
+        }
+        if (
+            not registry_candidates
+            or registry_candidates != published_candidates
+        ):
+            raise ModelCompileError(
+                "optimized stage registry and published candidate lifecycle differ"
+            )
+        for candidate in session.candidates:
+            for event in candidate.history:
+                for evidence_ref in event["evidence_refs"]:
+                    evidence_path = _package_artifact_path(
+                        package_dir,
+                        evidence_ref,
+                        "published candidate lifecycle evidence",
+                    )
+                    if not evidence_path.is_file():
+                        raise ModelCompileError(
+                            "published candidate lifecycle evidence is missing"
+                        )
 
 
 def load_optimizer_stage(path: Path, *, package_dir: Path) -> Json:

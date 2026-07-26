@@ -32,11 +32,19 @@ nerve/model_transpiler_quantization.py
 nerve/model_transpiler_tensor_index.py
 nerve/model_transpiler_types.py
 nerve/representation_optimizer/__init__.py
+nerve/representation_optimizer/analysis/__init__.py
+nerve/representation_optimizer/analysis/evidence.py
 nerve/representation_optimizer/benchmarking/__init__.py
 nerve/representation_optimizer/benchmarking/contracts.py
+nerve/representation_optimizer/benchmarking/protocols.py
+nerve/representation_optimizer/benchmarking/runner.py
+nerve/representation_optimizer/benchmarking/storage.py
 nerve/representation_optimizer/contracts.py
 nerve/representation_optimizer/descriptor_registry.py
 nerve/representation_optimizer/lifecycle.py
+nerve/representation_optimizer/promotion/__init__.py
+nerve/representation_optimizer/promotion/contracts.py
+nerve/representation_optimizer/promotion/package_validation.py
 nerve/representation_optimizer/representation_ir/__init__.py
 nerve/representation_optimizer/representation_ir/contracts.py
 nerve/representation_optimizer/representation_ir/planning.py
@@ -52,4 +60,7 @@ nerve/representation_optimizer/staging/contracts.py
 nerve/representation_optimizer/staging/integrity.py
 nerve/representation_optimizer/validation/__init__.py
 nerve/representation_optimizer/validation/contracts.py
+nerve/representation_optimizer/validation/proofs.py
+nerve/representation_optimizer/validation/protocols.py
+nerve/representation_optimizer/validation/storage.py
 nerve/semantic_modules.py

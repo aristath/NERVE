@@ -21,7 +21,7 @@ REPRESENTATION_CANDIDATE_SCHEMA = "nerve.optimizer.representation_candidate.v1"
 CANDIDATE_CONSTRUCTION_SCHEMA = "nerve.optimizer.candidate_construction.v1"
 BENCHMARK_RECORD_SCHEMA = "nerve.optimizer.benchmark_record.v1"
 VALIDATION_RECORD_SCHEMA = "nerve.optimizer.validation_record.v1"
-PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v1"
+PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
 RELOWERING_REQUEST_SCHEMA = "nerve.optimizer.relowering_request.v1"
 BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
@@ -1628,29 +1628,11 @@ def _validate_prebenchmark_record(document: Json) -> None:
 
 
 def _validate_promotion_decision(document: Json) -> None:
-    _require_fields(
-        document,
-        {
-            "schema",
-            "promotion_id",
-            "candidate_id",
-            "benchmark_record_digest",
-            "validation_record_digest",
-            "runtime_predicate",
-            "implementation_id",
-            "decision",
-            "reason",
-        },
+    from nerve.representation_optimizer.promotion.contracts import (
+        validate_promotion_decision,
     )
-    _require_stable_id(document["promotion_id"], "promotion", "promotion_id")
-    _require_nonempty_string(document["candidate_id"], "candidate_id")
-    _require_digest(document["benchmark_record_digest"], "benchmark_record_digest")
-    _require_digest(document["validation_record_digest"], "validation_record_digest")
-    _require_object(document["runtime_predicate"], "runtime_predicate")
-    _require_nonempty_string(document["implementation_id"], "implementation_id")
-    if document["decision"] not in {"promote", "reject"}:
-        raise ContractValidationError("promotion decision must be promote or reject")
-    _require_nonempty_string(document["reason"], "reason")
+
+    validate_promotion_decision(document)
 
 
 def _validate_relowering_request(document: Json) -> None:

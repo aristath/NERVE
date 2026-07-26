@@ -31,6 +31,11 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
+from nerve.representation_optimizer.promotion.contracts import (
+    create_runtime_implementation_predicate,
+    implementation_id,
+    promotion_decision_id,
+)
 from nerve.representation_optimizer.validation.contracts import (
     VALIDATION_FUNNEL_STAGE_NAMES,
     validation_record_id,
@@ -445,6 +450,107 @@ def contract_fixtures() -> list[dict[str, object]]:
     validation_record["validation_id"] = validation_record_id(
         validation_record
     )
+    promotion_hardware_profile = hardware_profile_contract()
+    runtime_predicate = create_runtime_implementation_predicate(
+        capability_classes=(
+            promotion_hardware_profile["capability_class"],
+        ),
+        device_kinds=("gpu",),
+        apis=("vulkan",),
+        required_processes=("texture_sampling",),
+        required_features=("shader_float16",),
+        execution_phases=("decode",),
+        activation_batch_minimum=1,
+        activation_batch_maximum=1,
+        context_activations_minimum=4096,
+        context_activations_maximum=4096,
+        state_activations_minimum=4096,
+        state_activations_maximum=4096,
+        placement_mode="local",
+        minimum_device_count=1,
+        maximum_device_count=1,
+        required_interconnects=(),
+    )
+    promoted_implementation_id = implementation_id(
+        candidate_id,
+        runtime_predicate,
+    )
+    promotion = {
+        "schema": PROMOTION_DECISION_SCHEMA,
+        "promotion_id": "",
+        "candidate_id": candidate_id,
+        "implementation_id": promoted_implementation_id,
+        "scope_ids": [scope_id],
+        "source_contract_digests": [source_digest],
+        "candidate_contract_digest": contract_digest(candidate),
+        "construction_record_digest": digest("construction"),
+        "prebenchmark_record_digest": digest("prebenchmark"),
+        "benchmark_record_digest": contract_digest(benchmark_record),
+        "validation_record_digest": contract_digest(validation_record),
+        "runtime_predicate": runtime_predicate.to_json(),
+        "artifact_integrity": {
+            "schema": "nerve.optimizer.staged_candidate_integrity.v1",
+            "digest": staged_artifact_digest(b"integrity manifest"),
+            "file_count": 6,
+        },
+        "comparison": {
+            "exact_implementation_id": "exact_reference",
+            "exact_contract_digest": source_digest,
+            "benchmark_id": benchmark_record["benchmark_id"],
+            "benchmark_decision": "materially_faster",
+            "workloads": [
+                {
+                    "workload_id": benchmark_workload_id,
+                    "decision": "materially_faster",
+                    "paired": deepcopy(
+                        benchmark_record["workloads"][0]["paired"]
+                    ),
+                }
+            ],
+            "validation_id": validation_record["validation_id"],
+            "validation_status": "passed",
+            "behavioral_contract": deepcopy(
+                candidate["behavioral_contract"]
+            ),
+        },
+        "provenance": {
+            "provider": deepcopy(candidate["provider"]),
+            "descriptor_id": candidate["descriptor_id"],
+            "evidence_refs": deepcopy(candidate["evidence_refs"]),
+            "analysis_runs": [
+                {
+                    "run_id": stable_contract_id(
+                        "analysis_run",
+                        "fixture promotion analysis",
+                    ),
+                    "run_digest": digest("analysis run"),
+                    "cited_evidence_ids": deepcopy(
+                        candidate["evidence_refs"]
+                    ),
+                }
+            ],
+            "hardware_profiles": [
+                {
+                    "profile_id": promotion_hardware_profile[
+                        "profile_id"
+                    ],
+                    "profile_digest": contract_digest(
+                        promotion_hardware_profile
+                    ),
+                }
+            ],
+            "representation_graph_digest": digest(
+                "representation graph"
+            ),
+            "target_lowering_digest": digest("target lowering"),
+            "relowering_request_digest": digest(
+                "relowering request"
+            ),
+        },
+        "decision": "promote",
+        "reason": "material speedup with validated error contract",
+    }
+    promotion["promotion_id"] = promotion_decision_id(promotion)
     return [
         {
             "schema": OPTIMIZATION_SCOPE_SCHEMA,
@@ -548,19 +654,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         },
         benchmark_record,
         validation_record,
-        {
-            "schema": PROMOTION_DECISION_SCHEMA,
-            "promotion_id": stable_contract_id(
-                "promotion", candidate_id, "fixture-target"
-            ),
-            "candidate_id": candidate_id,
-            "benchmark_record_digest": digest("benchmark"),
-            "validation_record_digest": digest("validation"),
-            "runtime_predicate": {"capability_class": "gpu.fixture"},
-            "implementation_id": "field_fixture_target",
-            "decision": "promote",
-            "reason": "material speedup with validated error contract",
-        },
+        promotion,
         {
             "schema": RELOWERING_REQUEST_SCHEMA,
             "request_id": stable_contract_id(

@@ -69,6 +69,13 @@ from nerve.representation_optimizer.validation import (
     ValidationResidencyEvent,
     ValidationRun,
 )
+from nerve.representation_optimizer.promotion import (
+    IMPLEMENTATION_REGISTRY_SCHEMA,
+    RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
+    ImplementationRegistry,
+    PromotionDecision,
+    RuntimeImplementationPredicate,
+)
 
 __all__ = [
     "ALGEBRAIC_EVIDENCE_SCHEMA",
@@ -77,6 +84,7 @@ __all__ = [
     "CANDIDATE_CONSTRUCTION_SCHEMA",
     "CANDIDATE_LIFECYCLE_SCHEMA",
     "HARDWARE_PROCESS_PROFILE_SCHEMA",
+    "IMPLEMENTATION_REGISTRY_SCHEMA",
     "OPTIMIZATION_SCOPE_CATALOG_SCHEMA",
     "OPTIMIZATION_SCOPE_SCHEMA",
     "OPTIMIZATION_SESSION_SCHEMA",
@@ -87,6 +95,7 @@ __all__ = [
     "REPRESENTATION_CANDIDATE_SCHEMA",
     "REPRESENTATION_DESCRIPTOR_SCHEMA",
     "REPRESENTATION_GRAPH_SCHEMA",
+    "RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA",
     "SOURCE_BEHAVIOR_CONTRACT_SCHEMA",
     "VALIDATION_RECORD_SCHEMA",
     "VALIDATION_COVERAGE_KINDS",
@@ -102,10 +111,13 @@ __all__ = [
     "ContractDocument",
     "ContractValidationError",
     "OptimizationSession",
+    "ImplementationRegistry",
+    "PromotionDecision",
     "ProofResult",
     "RepresentationDescriptorRegistry",
     "RepresentationGraphDocument",
     "RepresentationGraphPlan",
+    "RuntimeImplementationPredicate",
     "ValidationObservation",
     "ValidationPlan",
     "ValidationRequirements",

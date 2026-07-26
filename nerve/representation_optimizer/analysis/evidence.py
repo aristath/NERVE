@@ -197,18 +197,28 @@ def validate_analysis_run(document: Json) -> None:
 
 
 def validate_analysis_run_directory(output_dir: Path) -> AnalysisRun:
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        raise ModelCompileError(
+            "analysis output must be a regular directory"
+        )
     document = read_json(output_dir / "analysis.json")
     validate_analysis_run(document)
     evidence = []
     details = []
+    expected_paths = {"analysis.json"}
     for record in document["evidence"]:
-        evidence_path = output_dir / _safe_relative_path(
+        evidence_relative = _safe_relative_path(
             record["path"],
             "analysis evidence path",
         )
-        detail_path = output_dir / _safe_relative_path(
+        details_relative = _safe_relative_path(
             record["details_path"],
             "analysis details path",
+        )
+        evidence_path = output_dir / evidence_relative
+        detail_path = output_dir / details_relative
+        expected_paths.update(
+            (evidence_relative.as_posix(), details_relative.as_posix())
         )
         evidence_document = read_json(evidence_path)
         details_document = read_json(detail_path)
@@ -229,6 +239,18 @@ def validate_analysis_run_directory(output_dir: Path) -> AnalysisRun:
         )
         evidence.append(evidence_document)
         details.append(details_document)
+    actual_paths = set()
+    for path in output_dir.rglob("*"):
+        if path.is_symlink():
+            raise ModelCompileError(
+                "analysis output must not contain symbolic links"
+            )
+        if path.is_file():
+            actual_paths.add(path.relative_to(output_dir).as_posix())
+    if actual_paths != expected_paths:
+        raise ModelCompileError(
+            "analysis output contains missing or undeclared artifacts"
+        )
     return AnalysisRun(
         document=document,
         evidence=tuple(evidence),
