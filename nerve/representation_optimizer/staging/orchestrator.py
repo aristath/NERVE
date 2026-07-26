@@ -17,7 +17,6 @@ from nerve.representation_optimizer.contracts import (
     CANDIDATE_CONSTRUCTION_SCHEMA,
     RELOWERING_REQUEST_SCHEMA,
     ContractDocument,
-    canonical_json_bytes,
     contract_digest,
     stable_contract_id,
 )

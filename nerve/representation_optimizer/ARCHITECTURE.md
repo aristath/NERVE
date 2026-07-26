@@ -65,7 +65,16 @@ non-finite number, or internally inconsistent contract.
 | `benchmark_run.v1` | Ordered raw observations and residency lifecycle |
 | `benchmark_record.v1` | Statistical summary and material-speed decision |
 | `benchmark_evidence_integrity.v1` | Complete byte coverage of benchmark evidence |
-| `validation_record.v1` | Proof or behavioral-validation stages and counterexamples |
+| `behavioral_error_contract.v1` | Approximation validity predicates, metric limits, and correction policy |
+| `validation_requirements.v1` | Proof verifiers, behavioral checks, applicability map, and counterexamples |
+| `validation_plan.v1` | Candidate-bound implementations, matched conditions, and ordered checks |
+| `proof_result.v1` | Request-bound exact or bounded-error proof evidence |
+| `validation_observation.v1` | Paired output, state, metric, trace, seed, and horizon evidence |
+| `validation_residency_event.v1` | Validation mount/unmount device-state evidence |
+| `validation_run.v1` | Ordered sanity, local, or whole-model observations |
+| `prebenchmark_record.v1` | Static integrity, proof, and cheap-sanity gate result |
+| `validation_record.v1` | Complete funnel, benchmark link, full runs, and counterexamples |
+| `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
 | `promotion_decision.v1` | Benchmark/validation evidence and guarded implementation decision |
 | `relowering_request.v1` | Representation-aware request to repeat ordinary lowering passes |
 
@@ -234,6 +243,7 @@ A candidate moves only through the following evidence-carrying sequence:
 synthesized
     -> staged
     -> statically_validated
+    -> prebenchmark_validated
     -> benchmarked
     -> behaviorally_validated
     -> promotable
@@ -249,6 +259,12 @@ The lifecycle is immutable: a transition returns a new session value. Its
 history is contiguous and replay-validated when loaded. Skipped phases,
 retroactive edits, duplicated candidates, missing evidence, and transitions
 from terminal states are rejected.
+
+`statically_validated` means the staged contract, build plan, construction
+record, source-package seal, artifact validators, and integrity manifest all
+agree. `prebenchmark_validated` additionally means every declared proof
+obligation and cheap numerical/state sanity check passed. Static integrity
+alone cannot make a candidate eligible for timing.
 
 ## Failure isolation
 
@@ -348,6 +364,58 @@ rename of the deterministic plan, ordered raw run, summary, traces, and exact
 integrity manifest. Failed mount validation closes the already-open session,
 and every successful mount must prove that unmount returned the device to the
 matched idle state.
+
+## Proof and behavioral-validation funnel
+
+Validation is an ordered rejection funnel, not one similarity score:
+
+```text
+static contracts and artifacts
+    -> exact or bounded-error proof obligations
+    -> cheap numerical and state sanity
+    -> matched performance gate
+    -> full local behavior
+    -> whole-model free-running behavior
+```
+
+Static integrity, proof, and cheap sanity run before benchmarking. Full local
+validation runs only after a statistically material matched speed win, and
+whole-model free-running validation runs only after full local behavior passes.
+Only the complete funnel may produce `behaviorally_validated`.
+
+Every provider returns the shared `validation_requirements.v1` contract. It
+classifies every validation dimension as required with concrete checks or not
+applicable with a reason. Output comparison, teacher-forced behavior,
+long-horizon free-running behavior, multiple fixed seeds, source-declared
+context and output limits, graph editing, and alternative placement cannot be
+waived. Stateful, routing, memory, correction, reasoning, lifecycle, and
+counterexample checks become mandatory whenever their semantic responsibility
+applies. Coverage is constrained to compatible check kinds and stages, so a
+component comparison cannot masquerade as a whole-model conversation, graph,
+placement, or state-lifecycle test.
+
+Exact candidates require named proof obligations and must reproduce paired
+output, transient state, and declared metrics exactly. Approximate candidates
+may prove bounded claims, but every observed error metric must belong to an
+explicit `behavioral_error_contract.v1`. That contract binds numeric maximum
+errors to behavioral dimensions, a validity regime, and a correction or
+rejection policy. Generated-text equality is neither the sole acceptance
+criterion nor a substitute for distribution, rank, route, memory, calibration,
+state, and long-horizon evidence.
+
+Checks execute reference and candidate pairs through a backend-neutral
+normal-runtime adapter. They bind immutable input, initial-state,
+counterexample, context-limit, and output-limit evidence by digest. Long
+context and output allowances must resolve through source-model JSON metadata;
+a convenient small cap is not valid evidence. Full and whole-model checks use
+at least two fixed seeds and an explicit minimum executed horizon.
+
+Each validation-stage mount records device state before and after residency.
+Teardown must restore the exact idle digest even on rejection or execution
+failure. Raw traces, fixtures, plans, runs, records, and integrity manifests
+are streamed into atomically published evidence trees. Unproven exact
+candidates never reach timing; faster approximations that exceed any declared
+error limit are rejected before promotion.
 
 ## Hardware-process profiles
 

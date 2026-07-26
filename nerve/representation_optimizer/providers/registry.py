@@ -36,6 +36,9 @@ from nerve.representation_optimizer.representation_ir import (
     RepresentationGraphDocument,
 )
 from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
+from nerve.representation_optimizer.validation.contracts import (
+    ValidationRequirements,
+)
 
 
 _REQUIRED_METHODS = (
@@ -300,9 +303,8 @@ def _candidate_plan(
         BenchmarkWorkload.from_json(workload)
         for workload in raw_workloads
     )
-    validation = _provider_document(
-        provider.validation_requirements(context, candidate.to_json()),
-        "validation requirements",
+    validation = ValidationRequirements.from_json(
+        provider.validation_requirements(context, candidate.to_json())
     )
     return ProviderCandidatePlan(
         provider=provider.identity,

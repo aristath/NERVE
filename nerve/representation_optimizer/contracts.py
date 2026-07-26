@@ -23,6 +23,18 @@ BENCHMARK_RECORD_SCHEMA = "nerve.optimizer.benchmark_record.v1"
 VALIDATION_RECORD_SCHEMA = "nerve.optimizer.validation_record.v1"
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v1"
 RELOWERING_REQUEST_SCHEMA = "nerve.optimizer.relowering_request.v1"
+BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
+    "nerve.optimizer.behavioral_error_contract.v1"
+)
+VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v1"
+PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
+VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v1"
+VALIDATION_RESIDENCY_EVENT_SCHEMA = (
+    "nerve.optimizer.validation_residency_event.v1"
+)
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v1"
+PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 CONTRACT_DIGEST_SCHEMA = "nerve.optimizer.canonical_json_sha256.v1"
 
 OPTIMIZATION_SCOPE_KINDS = frozenset(
@@ -878,23 +890,14 @@ def _validate_representation_candidate(document: Json) -> None:
     for field in ("parameter_format", "state_format", "topology"):
         _require_object(representation[field], f"representation.{field}")
     _require_object(document["target_predicate"], "target_predicate")
-    behavioral = _require_object(document["behavioral_contract"], "behavioral_contract")
-    _require_fields(behavioral, {"mode", "proof_obligations", "error_contract"})
-    if behavioral["mode"] not in {"exact", "approximate"}:
-        raise ContractValidationError("behavioral_contract.mode must be exact or approximate")
-    _require_unique_strings(
-        behavioral["proof_obligations"],
-        "behavioral_contract.proof_obligations",
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_candidate_behavioral_contract,
     )
-    if behavioral["mode"] == "exact" and behavioral["error_contract"] is not None:
-        raise ContractValidationError(
-            "an exact candidate cannot declare an approximation error contract"
-        )
-    if behavioral["mode"] == "approximate":
-        _require_object(
-            behavioral["error_contract"],
-            "behavioral_contract.error_contract",
-        )
+
+    validate_candidate_behavioral_contract(
+        document["behavioral_contract"],
+        "behavioral_contract",
+    )
     _require_artifact_refs(
         document["artifact_declarations"], "artifact_declarations"
     )
@@ -1553,43 +1556,75 @@ def _validate_benchmark_record(document: Json) -> None:
 
 
 def _validate_validation_record(document: Json) -> None:
-    _require_fields(
-        document,
-        {
-            "schema",
-            "validation_id",
-            "candidate_id",
-            "source_contract_digests",
-            "behavioral_contract",
-            "stages",
-            "counterexamples",
-            "status",
-        },
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_record,
     )
-    _require_stable_id(document["validation_id"], "validation", "validation_id")
-    _require_nonempty_string(document["candidate_id"], "candidate_id")
-    digests = _require_unique_strings(
-        document["source_contract_digests"],
-        "source_contract_digests",
-        nonempty=True,
+
+    validate_validation_record(document)
+
+
+def _validate_behavioral_error_contract(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_behavioral_error_contract,
     )
-    for index, digest in enumerate(digests):
-        _require_digest(digest, f"source_contract_digests[{index}]")
-    _require_object(document["behavioral_contract"], "behavioral_contract")
-    stages = _require_list(document["stages"], "stages")
-    for index, stage in enumerate(stages):
-        stage = _require_object(stage, f"stages[{index}]")
-        _require_fields(stage, {"name", "status", "metrics", "artifacts"})
-        _require_nonempty_string(stage["name"], f"stages[{index}].name")
-        if stage["status"] not in {"passed", "failed", "not_required"}:
-            raise ContractValidationError(
-                f"stages[{index}].status has unsupported value {stage['status']!r}"
-            )
-        _require_object(stage["metrics"], f"stages[{index}].metrics")
-        _require_artifact_refs(stage["artifacts"], f"stages[{index}].artifacts")
-    _require_artifact_refs(document["counterexamples"], "counterexamples")
-    if document["status"] not in {"passed", "failed"}:
-        raise ContractValidationError("validation status must be passed or failed")
+
+    validate_behavioral_error_contract(document)
+
+
+def _validate_validation_requirements(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_requirements,
+    )
+
+    validate_validation_requirements(document)
+
+
+def _validate_validation_plan(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_plan,
+    )
+
+    validate_validation_plan(document)
+
+
+def _validate_proof_result(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_proof_result,
+    )
+
+    validate_proof_result(document)
+
+
+def _validate_validation_observation(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_observation,
+    )
+
+    validate_validation_observation(document)
+
+
+def _validate_validation_run(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_run,
+    )
+
+    validate_validation_run(document)
+
+
+def _validate_validation_residency_event(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_residency_event,
+    )
+
+    validate_validation_residency_event(document)
+
+
+def _validate_prebenchmark_record(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_prebenchmark_record,
+    )
+
+    validate_prebenchmark_record(document)
 
 
 def _validate_promotion_decision(document: Json) -> None:
@@ -1944,6 +1979,16 @@ _VALIDATORS: dict[str, Validator] = {
     REPRESENTATION_CANDIDATE_SCHEMA: _validate_representation_candidate,
     CANDIDATE_CONSTRUCTION_SCHEMA: _validate_candidate_construction,
     BENCHMARK_RECORD_SCHEMA: _validate_benchmark_record,
+    BEHAVIORAL_ERROR_CONTRACT_SCHEMA: _validate_behavioral_error_contract,
+    VALIDATION_REQUIREMENTS_SCHEMA: _validate_validation_requirements,
+    VALIDATION_PLAN_SCHEMA: _validate_validation_plan,
+    PROOF_RESULT_SCHEMA: _validate_proof_result,
+    VALIDATION_OBSERVATION_SCHEMA: _validate_validation_observation,
+    VALIDATION_RESIDENCY_EVENT_SCHEMA: (
+        _validate_validation_residency_event
+    ),
+    VALIDATION_RUN_SCHEMA: _validate_validation_run,
+    PREBENCHMARK_RECORD_SCHEMA: _validate_prebenchmark_record,
     VALIDATION_RECORD_SCHEMA: _validate_validation_record,
     PROMOTION_DECISION_SCHEMA: _validate_promotion_decision,
     RELOWERING_REQUEST_SCHEMA: _validate_relowering_request,

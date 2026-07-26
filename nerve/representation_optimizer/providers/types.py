@@ -22,6 +22,9 @@ from nerve.representation_optimizer.representation_ir.contracts import (
     RepresentationGraphDocument,
 )
 from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
+from nerve.representation_optimizer.validation.contracts import (
+    ValidationRequirements,
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -274,7 +277,7 @@ class ProviderCandidatePlan:
     mount_requirements: Json
     proof_or_error_contract: Json
     benchmark_workloads: tuple[BenchmarkWorkload, ...]
-    validation_requirements: Json
+    validation_requirements: ValidationRequirements
 
     @property
     def candidate_id(self) -> str:

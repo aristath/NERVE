@@ -50,4 +50,6 @@ nerve/representation_optimizer/stage.py
 nerve/representation_optimizer/staging/__init__.py
 nerve/representation_optimizer/staging/contracts.py
 nerve/representation_optimizer/staging/integrity.py
+nerve/representation_optimizer/validation/__init__.py
+nerve/representation_optimizer/validation/contracts.py
 nerve/semantic_modules.py

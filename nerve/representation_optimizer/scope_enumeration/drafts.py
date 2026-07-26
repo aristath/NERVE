@@ -176,7 +176,6 @@ def _add_semantic_module_scopes(
     for module in component.modules:
         if module.get("child_ids") or module.get("virtual"):
             continue
-        module_id = str(module["id"])
         qualified_module = _qualified_module(component, module)
         node_ids = tuple(str(value) for value in module.get("source_node_ids", []))
         node_keys = set(component.qualified_nodes(node_ids))

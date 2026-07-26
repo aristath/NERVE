@@ -100,8 +100,10 @@ def _validate_session(
     ]
     if (
         len(matching) != 1
-        or matching[0].state != CandidateState.STATICALLY_VALIDATED
+        or matching[0].state
+        != CandidateState.PREBENCHMARK_VALIDATED
     ):
         raise ModelCompileError(
-            "candidate must be statically validated before benchmarking"
+            "candidate must pass proof and prebenchmark behavioral sanity "
+            "before benchmarking"
         )

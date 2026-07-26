@@ -38,6 +38,17 @@ def test_candidate_lifecycle_requires_ordered_evidence_carrying_transitions() ->
         evidence_refs=("static_validation.json",),
         reason="all static contracts passed",
     )
+    with pytest.raises(ContractValidationError, match="cannot transition"):
+        lifecycle.transition(
+            CandidateState.BENCHMARKED,
+            evidence_refs=("benchmark.json",),
+            reason="skipped proof and sanity",
+        )
+    lifecycle = lifecycle.transition(
+        CandidateState.PREBENCHMARK_VALIDATED,
+        evidence_refs=("prebenchmark_validation.json",),
+        reason="proof obligations and cheap behavioral sanity passed",
+    )
 
     assert CandidateLifecycle.from_json(lifecycle.to_json()) == lifecycle
 

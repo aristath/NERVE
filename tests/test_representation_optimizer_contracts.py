@@ -31,6 +31,13 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
+from nerve.representation_optimizer.validation.contracts import (
+    VALIDATION_FUNNEL_STAGE_NAMES,
+    validation_record_id,
+)
+from nerve.representation_optimizer.validation.planning import (
+    create_behavioral_error_contract,
+)
 
 
 def digest(label: str) -> str:
@@ -197,6 +204,19 @@ def contract_fixtures() -> list[dict[str, object]]:
     source_digest = str(source["contract_digest"])
     scope_members = fixture_scope_members()
     scope_id = fixture_scope_id()
+    error_contract = create_behavioral_error_contract(
+        validity_predicates={"scope": "fixture"},
+        metric_limits={
+            "maximum_absolute_error": (
+                0.001,
+                "absolute",
+                ("component_output_error",),
+            )
+        },
+        correction_mode="reject",
+        correction_trigger_metrics=("maximum_absolute_error",),
+        correction_action="reject candidate and retain exact implementation",
+    ).to_json()
     candidate = {
         "schema": REPRESENTATION_CANDIDATE_SCHEMA,
         "candidate_id": "",
@@ -214,7 +234,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         "behavioral_contract": {
             "mode": "approximate",
             "proof_obligations": ["bounded_interpolation_error"],
-            "error_contract": {"maximum_absolute_error": 0.001},
+            "error_contract": error_contract,
         },
         "artifact_declarations": [
             {"path": "optimization/candidates/field/grid.bin"}
@@ -394,6 +414,37 @@ def contract_fixtures() -> list[dict[str, object]]:
         "decision_reasons": [],
     }
     benchmark_record["benchmark_id"] = benchmark_record_id(benchmark_record)
+    validation_record = {
+        "schema": VALIDATION_RECORD_SCHEMA,
+        "validation_id": "",
+        "candidate_id": candidate_id,
+        "source_contract_digests": [source_digest],
+        "behavioral_contract": deepcopy(candidate["behavioral_contract"]),
+        "validation_plan_digest": digest("validation plan"),
+        "construction_record_digest": digest("construction"),
+        "prebenchmark_record_digest": digest("prebenchmark"),
+        "benchmark_record_digest": contract_digest(benchmark_record),
+        "runs": [
+            {"stage": "full_local", "run_digest": digest("local run")},
+            {"stage": "whole_model", "run_digest": digest("model run")},
+        ],
+        "stages": [
+            {
+                "name": name,
+                "status": "passed",
+                "evidence_digests": [digest(name)],
+                "metrics": {},
+                "artifacts": [],
+                "reason": None,
+            }
+            for name in VALIDATION_FUNNEL_STAGE_NAMES
+        ],
+        "counterexamples": [],
+        "status": "passed",
+    }
+    validation_record["validation_id"] = validation_record_id(
+        validation_record
+    )
     return [
         {
             "schema": OPTIMIZATION_SCOPE_SCHEMA,
@@ -496,28 +547,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             "diagnostics": [],
         },
         benchmark_record,
-        {
-            "schema": VALIDATION_RECORD_SCHEMA,
-            "validation_id": stable_contract_id(
-                "validation", candidate_id, "fixture-validation"
-            ),
-            "candidate_id": candidate_id,
-            "source_contract_digests": [source_digest],
-            "behavioral_contract": {
-                "mode": "approximate",
-                "maximum_absolute_error": 0.001,
-            },
-            "stages": [
-                {
-                    "name": "component_error",
-                    "status": "passed",
-                    "metrics": {"maximum_absolute_error": 0.0005},
-                    "artifacts": [],
-                }
-            ],
-            "counterexamples": [],
-            "status": "passed",
-        },
+        validation_record,
         {
             "schema": PROMOTION_DECISION_SCHEMA,
             "promotion_id": stable_contract_id(

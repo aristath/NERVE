@@ -26,6 +26,13 @@ from nerve.representation_optimizer.providers import (
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
+from nerve.representation_optimizer.validation.contracts import (
+    VALIDATION_COVERAGE_KINDS,
+)
+from nerve.representation_optimizer.validation.planning import (
+    create_validation_check,
+    create_validation_requirements,
+)
 from tests.representation_graph_fixtures import exact_representation_graph
 from tests.test_representation_optimizer_contracts import (
     contract_fixtures,
@@ -399,10 +406,250 @@ class FixtureProvider:
 
     def validation_requirements(self, context, candidate):
         self._called("validation_requirements")
-        return {
-            "schema": "nerve.optimizer.fixture_validation_requirements.v1",
-            "checks": ["exact_output"],
+        checks = (
+            create_validation_check(
+                name="fixture cheap output and state sanity",
+                stage="sanity",
+                kind="component_comparison",
+                coverage=(
+                    "component_output_error",
+                    "state_transition_consistency",
+                    "distribution_divergence",
+                    "top_k_overlap",
+                    "rank_stability",
+                ),
+                execution_scope="component",
+                activation_batch_width=1,
+                context_size=0,
+                context_size_basis={"kind": "not_applicable"},
+                state_size=1,
+                boundary_mode="local",
+                input_artifact={
+                    "path": "fixtures/decode-input.bin",
+                    "digest": staged_artifact_digest(b"fixture input"),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/decode-state.bin",
+                    "digest": staged_artifact_digest(b"fixture state"),
+                },
+                controls={"execution": "ordinary"},
+                seeds=(1,),
+                minimum_steps=1,
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
+                metrics=("exact_match",),
+            ),
+            create_validation_check(
+                name="fixture full local teacher forced sequence",
+                stage="full_local",
+                kind="teacher_forced",
+                coverage=(
+                    "teacher_forced_sequences",
+                    "multiple_fixed_seeds",
+                ),
+                execution_scope="whole_model",
+                activation_batch_width=1,
+                context_size=0,
+                context_size_basis={"kind": "not_applicable"},
+                state_size=128,
+                boundary_mode="local",
+                input_artifact={
+                    "path": "fixtures/prefill-input.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill input"
+                    ),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/prefill-state.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill state"
+                    ),
+                },
+                controls={"execution": "ordinary"},
+                seeds=(1, 2),
+                minimum_steps=128,
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
+                metrics=("exact_match",),
+            ),
+            create_validation_check(
+                name="fixture lifecycle operations",
+                stage="full_local",
+                kind="lifecycle_operation",
+                coverage=(
+                    "interruption",
+                    "snapshot",
+                    "fork",
+                    "rollback",
+                    "resumption",
+                ),
+                execution_scope="whole_model",
+                activation_batch_width=1,
+                context_size=0,
+                context_size_basis={"kind": "not_applicable"},
+                state_size=128,
+                boundary_mode="local",
+                input_artifact={
+                    "path": "fixtures/prefill-input.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill input"
+                    ),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/prefill-state.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill state"
+                    ),
+                },
+                controls={"execution": "ordinary"},
+                seeds=(1, 2),
+                minimum_steps=128,
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
+                metrics=("exact_match",),
+            ),
+            create_validation_check(
+                name="fixture graph editing",
+                stage="full_local",
+                kind="graph_edit",
+                coverage=("graph_edits",),
+                execution_scope="whole_model",
+                activation_batch_width=1,
+                context_size=0,
+                context_size_basis={"kind": "not_applicable"},
+                state_size=128,
+                boundary_mode="local",
+                input_artifact={
+                    "path": "fixtures/prefill-input.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill input"
+                    ),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/prefill-state.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill state"
+                    ),
+                },
+                controls={"execution": "ordinary"},
+                seeds=(1, 2),
+                minimum_steps=128,
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
+                metrics=("exact_match",),
+            ),
+            create_validation_check(
+                name="fixture alternative placement",
+                stage="full_local",
+                kind="placement",
+                coverage=("alternative_placements",),
+                execution_scope="whole_model",
+                activation_batch_width=1,
+                context_size=0,
+                context_size_basis={"kind": "not_applicable"},
+                state_size=128,
+                boundary_mode="cross_device",
+                input_artifact={
+                    "path": "fixtures/prefill-input.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill input"
+                    ),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/prefill-state.bin",
+                    "digest": staged_artifact_digest(
+                        b"fixture prefill state"
+                    ),
+                },
+                controls={"execution": "ordinary"},
+                seeds=(1, 2),
+                minimum_steps=128,
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
+                metrics=("exact_match",),
+            ),
+            create_validation_check(
+                name="fixture whole model free running horizon",
+                stage="whole_model",
+                kind="free_running",
+                coverage=(
+                    "free_running_long_horizon",
+                    "long_context",
+                    "long_output",
+                ),
+                execution_scope="whole_model",
+                activation_batch_width=1,
+                context_size=131_072,
+                context_size_basis={
+                    "kind": "declared_model_limit",
+                    "artifact": {
+                        "path": "fixtures/model-limits.json",
+                        "digest": staged_artifact_digest(
+                            b'{"max_context_tokens":131072,'
+                            b'"max_output_tokens":65536}'
+                        ),
+                    },
+                    "json_pointer": "/max_context_tokens",
+                    "declared_limit": 131_072,
+                },
+                state_size=8_192,
+                boundary_mode="local",
+                input_artifact={
+                    "path": "fixtures/decode-input.bin",
+                    "digest": staged_artifact_digest(b"fixture input"),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/decode-state.bin",
+                    "digest": staged_artifact_digest(b"fixture state"),
+                },
+                controls={
+                    "execution": "ordinary",
+                    "max_output_tokens": 65_536,
+                },
+                seeds=(1, 2),
+                minimum_steps=1_024,
+                output_allowance=65_536,
+                output_allowance_basis={
+                    "kind": "declared_model_limit",
+                    "artifact": {
+                        "path": "fixtures/model-limits.json",
+                        "digest": staged_artifact_digest(
+                            b'{"max_context_tokens":131072,'
+                            b'"max_output_tokens":65536}'
+                        ),
+                    },
+                    "json_pointer": "/max_output_tokens",
+                    "declared_limit": 65_536,
+                },
+                metrics=("exact_match",),
+            ),
+        )
+        covered = {
+            coverage
+            for check in checks
+            for coverage in check["coverage"]
         }
+        not_applicable = {
+            coverage: (
+                "fixture source contract has no semantic responsibility "
+                f"for {coverage}"
+            )
+            for coverage in VALIDATION_COVERAGE_KINDS
+            if coverage not in covered
+        }
+        return create_validation_requirements(
+            candidate_id=candidate["candidate_id"],
+            source_contract_digests=candidate[
+                "source_contract_digests"
+            ],
+            proof_verifiers={
+                "fixture_reconstruction": (
+                    "fixture.exact_reconstruction.v1"
+                )
+            },
+            checks=checks,
+            not_applicable_reasons=not_applicable,
+        ).to_json()
 
 
 def _descriptors():

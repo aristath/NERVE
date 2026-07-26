@@ -23,6 +23,7 @@ class CandidateState(StrEnum):
     SYNTHESIZED = "synthesized"
     STAGED = "staged"
     STATICALLY_VALIDATED = "statically_validated"
+    PREBENCHMARK_VALIDATED = "prebenchmark_validated"
     BENCHMARKED = "benchmarked"
     BEHAVIORALLY_VALIDATED = "behaviorally_validated"
     PROMOTABLE = "promotable"
@@ -56,6 +57,12 @@ _VALID_TRANSITIONS = {
         CandidateState.FAILED,
     },
     CandidateState.STATICALLY_VALIDATED: {
+        CandidateState.PREBENCHMARK_VALIDATED,
+        CandidateState.REJECTED,
+        CandidateState.CANCELLED,
+        CandidateState.FAILED,
+    },
+    CandidateState.PREBENCHMARK_VALIDATED: {
         CandidateState.BENCHMARKED,
         CandidateState.REJECTED,
         CandidateState.CANCELLED,
@@ -64,16 +71,19 @@ _VALID_TRANSITIONS = {
     CandidateState.BENCHMARKED: {
         CandidateState.BEHAVIORALLY_VALIDATED,
         CandidateState.REJECTED,
+        CandidateState.CANCELLED,
         CandidateState.FAILED,
     },
     CandidateState.BEHAVIORALLY_VALIDATED: {
         CandidateState.PROMOTABLE,
         CandidateState.REJECTED,
+        CandidateState.CANCELLED,
         CandidateState.FAILED,
     },
     CandidateState.PROMOTABLE: {
         CandidateState.PUBLISHED,
         CandidateState.REJECTED,
+        CandidateState.CANCELLED,
         CandidateState.FAILED,
     },
 }

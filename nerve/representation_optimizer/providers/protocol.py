@@ -94,4 +94,4 @@ class RepresentationProvider(Protocol):
         context: ProviderContext,
         candidate: Json,
     ) -> Json:
-        """Declare component, state, and whole-model validation obligations."""
+        """Return shared validation_requirements.v1 with complete coverage."""

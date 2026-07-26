@@ -1,0 +1,43 @@
+"""Proof-first behavioral validation for representation candidates."""
+
+from nerve.representation_optimizer.validation.contracts import (
+    BEHAVIORAL_ERROR_CONTRACT_SCHEMA,
+    PREBENCHMARK_RECORD_SCHEMA,
+    PROOF_RESULT_SCHEMA,
+    VALIDATION_COVERAGE_KINDS,
+    VALIDATION_EVIDENCE_INTEGRITY_SCHEMA,
+    VALIDATION_OBSERVATION_SCHEMA,
+    VALIDATION_PLAN_SCHEMA,
+    VALIDATION_REQUIREMENTS_SCHEMA,
+    VALIDATION_RESIDENCY_EVENT_SCHEMA,
+    VALIDATION_RUN_SCHEMA,
+    BehavioralErrorContract,
+    ProofResult,
+    ValidationContractError,
+    ValidationObservation,
+    ValidationPlan,
+    ValidationRequirements,
+    ValidationResidencyEvent,
+    ValidationRun,
+)
+
+__all__ = [
+    "BEHAVIORAL_ERROR_CONTRACT_SCHEMA",
+    "PREBENCHMARK_RECORD_SCHEMA",
+    "PROOF_RESULT_SCHEMA",
+    "VALIDATION_COVERAGE_KINDS",
+    "VALIDATION_EVIDENCE_INTEGRITY_SCHEMA",
+    "VALIDATION_OBSERVATION_SCHEMA",
+    "VALIDATION_PLAN_SCHEMA",
+    "VALIDATION_REQUIREMENTS_SCHEMA",
+    "VALIDATION_RESIDENCY_EVENT_SCHEMA",
+    "VALIDATION_RUN_SCHEMA",
+    "BehavioralErrorContract",
+    "ProofResult",
+    "ValidationContractError",
+    "ValidationObservation",
+    "ValidationPlan",
+    "ValidationRequirements",
+    "ValidationResidencyEvent",
+    "ValidationRun",
+]

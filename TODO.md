@@ -59,39 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 11. Build the proof and behavioral-validation funnel
-
-Apply validation in this order:
-
-1. static contract and artifact validation;
-2. exact algebraic proof where available;
-3. cheap numerical and state-transition sanity checks before benchmarking;
-4. matched performance measurement;
-5. full local validation only for materially faster candidates; and
-6. whole-model free-running validation before promotion.
-
-Full validation must cover, as applicable:
-
-- component output error and state-transition consistency;
-- output-distribution divergence;
-- top-k overlap and rank stability;
-- route, memory, and candidate recall;
-- confidence and correction calibration;
-- teacher-forced sequences;
-- free-running long-horizon behavior;
-- multiple fixed seeds;
-- reasoning-enabled real conversations;
-- long context and long output;
-- interruption, snapshot, fork, rollback, and resumption;
-- graph edits and alternative placements; and
-- adversarial counterexamples collected during earlier trials.
-
-Exact generated text is neither required nor sufficient by itself. Validation
-thresholds must belong to an explicit behavioral error contract.
-
-Completion requires tests demonstrating correct acceptance of proven exact
-rewrites and rejection of faster but behaviorally invalid approximations.
-
 ### 12. Implement target-guarded promotion and package publication
 
 - Promote a candidate only when its benchmark and validation records both pass.

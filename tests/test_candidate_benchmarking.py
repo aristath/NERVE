@@ -409,6 +409,12 @@ def _fixture(
         evidence_refs=("static-validation.json",),
         reason="fixture static validation passed",
     )
+    prebenchmark_validated = statically_validated.transition_candidate(
+        candidate_plan.candidate_id,
+        CandidateState.PREBENCHMARK_VALIDATED,
+        evidence_refs=("prebenchmark-validation.json",),
+        reason="fixture proof and behavioral sanity passed",
+    )
     profile = hardware_profile_contract()
     plan = build_benchmark_plan(
         candidate_plan=candidate_plan,
@@ -445,7 +451,7 @@ def _fixture(
     return (
         candidate_plan,
         construction,
-        statically_validated,
+        prebenchmark_validated,
         plan,
         FixtureExecutionAdapter(behavior),
     )
@@ -1051,7 +1057,9 @@ def test_output_allowance_value_is_checked_against_immutable_evidence(
     assert adapter.mount_requests == []
 
 
-def test_benchmark_requires_static_validation_lifecycle(tmp_path: Path) -> None:
+def test_benchmark_requires_complete_prebenchmark_lifecycle(
+    tmp_path: Path,
+) -> None:
     _, construction, session, plan, adapter = _fixture(tmp_path)
     staged_session = replace(
         session,
@@ -1061,7 +1069,7 @@ def test_benchmark_requires_static_validation_lifecycle(tmp_path: Path) -> None:
         ),
     )
 
-    with pytest.raises(ModelCompileError, match="statically validated"):
+    with pytest.raises(ModelCompileError, match="proof and prebenchmark"):
         benchmark_candidate(
             plan=plan,
             construction_record=construction.record,
