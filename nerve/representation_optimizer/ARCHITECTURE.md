@@ -58,7 +58,13 @@ non-finite number, or internally inconsistent contract.
 | `candidate_construction.v1` | Isolated construction result, artifacts, resources, and diagnostics |
 | `source_package_seal.v1` | Immutable baseline, stage, package-integrity, and source-input evidence |
 | `staged_candidate_integrity.v1` | Complete byte coverage for one atomically ready candidate |
-| `benchmark_record.v1` | Matched workload, raw samples, summary, and speed decision |
+| `benchmark_workload.v1` | Immutable input, state, randomness, useful work, and validity regime |
+| `benchmark_plan.v1` | Counterbalanced matched reference/candidate experiment |
+| `benchmark_observation.v1` | One normal-runtime timing, work, resource, and trace observation |
+| `benchmark_residency_event.v1` | Mount/unmount cost and device-state evidence |
+| `benchmark_run.v1` | Ordered raw observations and residency lifecycle |
+| `benchmark_record.v1` | Statistical summary and material-speed decision |
+| `benchmark_evidence_integrity.v1` | Complete byte coverage of benchmark evidence |
 | `validation_record.v1` | Proof or behavioral-validation stages and counterexamples |
 | `promotion_decision.v1` | Benchmark/validation evidence and guarded implementation decision |
 | `relowering_request.v1` | Representation-aware request to repeat ordinary lowering passes |
@@ -302,6 +308,46 @@ closed instead of being silently replaced.
 The ready-candidate loader rechecks integrity, kind-validation evidence,
 construction-record links, all contract digests, and optionally the live source
 seal before any later benchmark or execution phase can consume the candidate.
+
+## Matched candidate benchmarking
+
+The benchmark engine mounts the exact source implementation and staged
+candidate through the same normal execution-adapter contract. It accepts only
+hardware profiles that exactly describe the declared devices and an explicit
+semantic-scope-to-device placement. Workloads bind immutable input and initial
+state bytes by digest, declare control and randomness contracts, and describe
+actual execution regimes: prefill or decode, activation width, context and
+state size, stream count, cold or resident mounting, and local or cross-device
+boundaries. A bounded output window must cite a digest-bound source-model
+metadata artifact and JSON pointer, or a candidate validity predicate; an
+arbitrary convenience cap cannot form a valid workload.
+
+Before mounting anything, the runner streams and verifies every workload
+fixture. It then executes reference/candidate samples in alternating AB/BA
+order, with at least four warmups and five measured pairs for each of at least
+two fixed seeds. Candidate and reference must complete identical useful work.
+The normal runtime supplies its default statistics plus separate counters for
+useful, speculative, cancelled, discarded, and corrective work; setup,
+execution, teardown, queueing, synchronization, transport, conversion,
+residency, memory, and device-utilization costs remain distinct.
+
+Every observation retains content-addressed distribution, token, state,
+random-draw, and schedule traces. Repetitions are classified as identical,
+permitted sampling variance, permitted numerical nondeterminism, speculative
+scheduling variance, or a correctness defect. The raw trace bytes are streamed
+again into the published evidence tree and covered by its integrity manifest,
+so a digest label without its auditable evidence is insufficient.
+
+Inputs, initial states, and limit evidence are preserved beside those traces.
+The summary uses paired log-throughput ratios, a 95 percent Student-t
+confidence interval, a declared material-improvement floor, warmup convergence,
+counterbalanced order-bias detection, and sustained-window throughput slope.
+Timeouts, divergent fixed-seed behavior, excessive noise, order sensitivity,
+or sustained degradation prevent a winning result. Publication is an atomic
+rename of the deterministic plan, ordered raw run, summary, traces, and exact
+integrity manifest. Failed mount validation closes the already-open session,
+and every successful mount must prove that unmount returned the device to the
+matched idle state.
 
 ## Hardware-process profiles
 

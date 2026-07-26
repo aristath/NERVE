@@ -1545,41 +1545,11 @@ def _validate_candidate_construction(document: Json) -> None:
 
 
 def _validate_benchmark_record(document: Json) -> None:
-    _require_fields(
-        document,
-        {
-            "schema",
-            "benchmark_id",
-            "candidate_id",
-            "reference_implementation_id",
-            "workload",
-            "matched_conditions_digest",
-            "measurements",
-            "decision",
-        },
+    from nerve.representation_optimizer.benchmarking.contracts import (
+        validate_benchmark_record,
     )
-    _require_stable_id(document["benchmark_id"], "benchmark", "benchmark_id")
-    _require_nonempty_string(document["candidate_id"], "candidate_id")
-    _require_nonempty_string(
-        document["reference_implementation_id"],
-        "reference_implementation_id",
-    )
-    _require_object(document["workload"], "workload")
-    _require_digest(document["matched_conditions_digest"], "matched_conditions_digest")
-    measurements = _require_list(document["measurements"], "measurements")
-    if not measurements:
-        raise ContractValidationError("benchmark measurements must not be empty")
-    for index, measurement in enumerate(measurements):
-        _require_measurement(measurement, f"measurements[{index}]")
-    if document["decision"] not in {
-        "materially_faster",
-        "not_materially_faster",
-        "inconclusive",
-        "invalid",
-    }:
-        raise ContractValidationError(
-            f"benchmark decision is unsupported: {document['decision']!r}"
-        )
+
+    validate_benchmark_record(document)
 
 
 def _validate_validation_record(document: Json) -> None:

@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from nerve.compilation import Json
+from nerve.representation_optimizer.benchmarking.contracts import (
+    BenchmarkWorkload,
+)
 from nerve.representation_optimizer.contracts import (
     REPRESENTATION_CANDIDATE_SCHEMA,
     ContractDocument,
@@ -294,7 +297,8 @@ def _candidate_plan(
             "provider must declare a non-empty benchmark workload tuple"
         )
     workloads = tuple(
-        _provider_document(workload, "benchmark workload") for workload in raw_workloads
+        BenchmarkWorkload.from_json(workload)
+        for workload in raw_workloads
     )
     validation = _provider_document(
         provider.validation_requirements(context, candidate.to_json()),

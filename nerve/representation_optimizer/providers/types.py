@@ -15,6 +15,9 @@ from nerve.representation_optimizer.contracts import (
     ContractValidationError,
     canonical_json_bytes,
 )
+from nerve.representation_optimizer.benchmarking.contracts import (
+    BenchmarkWorkload,
+)
 from nerve.representation_optimizer.representation_ir.contracts import (
     RepresentationGraphDocument,
 )
@@ -270,7 +273,7 @@ class ProviderCandidatePlan:
     construction_requirements: CandidateBuildPlan
     mount_requirements: Json
     proof_or_error_contract: Json
-    benchmark_workloads: tuple[Json, ...]
+    benchmark_workloads: tuple[BenchmarkWorkload, ...]
     validation_requirements: Json
 
     @property

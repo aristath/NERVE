@@ -87,7 +87,7 @@ class RepresentationProvider(Protocol):
         context: ProviderContext,
         candidate: Json,
     ) -> tuple[Json, ...]:
-        """Declare matched workloads needed to establish performance."""
+        """Declare shared benchmark_workload.v1 matched execution regimes."""
 
     def validation_requirements(
         self,

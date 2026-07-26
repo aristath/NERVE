@@ -4,6 +4,9 @@ from copy import deepcopy
 
 import pytest
 
+from nerve.representation_optimizer.benchmarking.contracts import (
+    benchmark_record_id,
+)
 from nerve.representation_optimizer.contracts import (
     ALGEBRAIC_EVIDENCE_SCHEMA,
     BENCHMARK_RECORD_SCHEMA,
@@ -241,6 +244,156 @@ def contract_fixtures() -> list[dict[str, object]]:
     candidate["evidence_refs"] = [evidence["evidence_id"]]
     candidate["candidate_id"] = representation_candidate_id(candidate)
     candidate_id = candidate["candidate_id"]
+    benchmark_workload_id = stable_contract_id(
+        "benchmark_workload",
+        "fixture-workload",
+    )
+    distribution = {
+        "sample_count": 5,
+        "minimum": 9,
+        "maximum": 11,
+        "median": 10,
+        "mean": 10,
+        "standard_deviation": 1,
+        "confidence_interval_low": 9,
+        "confidence_interval_high": 11,
+        "relative_ci_width_ppm": 200_000,
+    }
+    role_summary = {
+        "latency_ns": deepcopy(distribution),
+        "throughput_per_second": deepcopy(distribution),
+        "permanent_bytes": 256,
+        "peak_transient_bytes": 512,
+        "resident_before_bytes": 256,
+        "resident_peak_bytes": 512,
+        "resident_after_bytes": 256,
+        "conversion_bytes": 0,
+        "conversion_ns": 0,
+        "boundary_count": 0,
+        "utilization_ppm": 800_000,
+        "synchronization_wait_ns": 10,
+        "transport_bytes": 0,
+        "transport_ns": 0,
+        "queue_wait_ns": 10,
+        "timeout_count": 0,
+        "useful_units": 640,
+        "wasted_units": 0,
+    }
+    resource_role = {
+        "setup_ns": 100,
+        "teardown_ns": 50,
+        "host_elapsed_ns": 1_000,
+        "permanent_bytes": 256,
+        "peak_transient_bytes": 512,
+        "resident_before_bytes": 256,
+        "resident_peak_bytes": 512,
+        "resident_after_bytes": 256,
+        "conversion_bytes": 0,
+        "conversion_ns": 0,
+        "boundary_count": 0,
+        "device_measurement_ns": 1_000,
+        "device_busy_ns": 800,
+        "utilization_ppm": 800_000,
+        "synchronization_count": 10,
+        "synchronization_wait_ns": 10,
+        "transport_bytes": 0,
+        "transport_ns": 0,
+        "queue_wait_count": 0,
+        "queue_wait_ns": 10,
+        "timeout_count": 0,
+        "useful_units": 640,
+        "speculative_units": 0,
+        "cancelled_units": 0,
+        "discarded_units": 0,
+        "corrective_units": 0,
+    }
+    benchmark_record = {
+        "schema": BENCHMARK_RECORD_SCHEMA,
+        "benchmark_id": "",
+        "candidate_id": candidate_id,
+        "plan_digest": digest("benchmark plan"),
+        "run_digest": digest("benchmark run"),
+        "construction_record_digest": digest("construction"),
+        "reference_implementation_id": "exact_reference",
+        "matched_conditions_digest": digest("matched conditions"),
+        "workloads": [
+            {
+                "workload_id": benchmark_workload_id,
+                "decision": "materially_faster",
+                "reasons": [],
+                "sample_count_per_role": 5,
+                "warmup": {
+                    "reference": {
+                        "sample_count": 8,
+                        "maximum_shift_ppm": 1_000,
+                        "converged": True,
+                    },
+                    "candidate": {
+                        "sample_count": 8,
+                        "maximum_shift_ppm": 1_000,
+                        "converged": True,
+                    },
+                },
+                "reference": deepcopy(role_summary),
+                "candidate": deepcopy(role_summary),
+                "paired": {
+                    "geometric_speedup_ppm": 100_000,
+                    "confidence_interval_low_ppm": 75_000,
+                    "confidence_interval_high_ppm": 125_000,
+                    "relative_ci_width_ppm": 45_455,
+                    "order_bias_ppm": 1_000,
+                },
+                "sustained": {
+                    "reference_slope_ppm_per_window": 0,
+                    "candidate_slope_ppm_per_window": 0,
+                    "candidate_regression_ppm": 0,
+                    "passed": True,
+                },
+            }
+        ],
+        "reproducibility": [
+            {
+                "workload_id": benchmark_workload_id,
+                "role": role,
+                "seed": 1,
+                "order_index": order,
+                "classification": "identical",
+                "observation_ids": [
+                    stable_contract_id(
+                        "benchmark_observation",
+                        role,
+                        order,
+                        repeat,
+                    )
+                    for repeat in range(2)
+                ],
+            }
+            for role, order in (("candidate", 1), ("reference", 0))
+        ],
+        "resource_measurements": {
+            "construction": {
+                "construction_time_ns": 100,
+                "peak_temporary_bytes": 512,
+                "peak_staging_bytes": 256,
+                "final_permanent_bytes": 256,
+                "generated_artifact_bytes": 4,
+            },
+            "roles": {
+                "reference": deepcopy(resource_role),
+                "candidate": deepcopy(resource_role),
+            },
+        },
+        "raw_evidence": {
+            "run_id": stable_contract_id("benchmark_run", "fixture"),
+            "observation_count": 20,
+            "residency_event_count": 4,
+            "host_elapsed_sample_count": 20,
+            "trace_artifact_count": 100,
+        },
+        "decision": "materially_faster",
+        "decision_reasons": [],
+    }
+    benchmark_record["benchmark_id"] = benchmark_record_id(benchmark_record)
     return [
         {
             "schema": OPTIMIZATION_SCOPE_SCHEMA,
@@ -342,26 +495,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             },
             "diagnostics": [],
         },
-        {
-            "schema": BENCHMARK_RECORD_SCHEMA,
-            "benchmark_id": stable_contract_id(
-                "benchmark", candidate_id, "fixture-workload"
-            ),
-            "candidate_id": candidate_id,
-            "reference_implementation_id": "exact_reference",
-            "workload": {"id": "fixture-workload", "regime": "decode"},
-            "matched_conditions_digest": digest("matched conditions"),
-            "measurements": [
-                {
-                    "name": "latency",
-                    "unit": "ns",
-                    "reference_samples": [20, 21, 19],
-                    "candidate_samples": [10, 11, 9],
-                    "summary": {"speedup": 2.0},
-                }
-            ],
-            "decision": "materially_faster",
-        },
+        benchmark_record,
         {
             "schema": VALIDATION_RECORD_SCHEMA,
             "validation_id": stable_contract_id(

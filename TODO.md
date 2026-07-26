@@ -59,39 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 10. Build the matched candidate benchmark engine
-
-- Benchmark a candidate and its exact reference scope with identical inputs,
-  state, randomness, control, placement, and device conditions.
-- Exercise the regimes in which the candidate claims validity, including
-  relevant combinations of:
-  - decode and prefill;
-  - narrow and wide activation batches;
-  - context and state sizes;
-  - single-stream and multi-stream execution;
-  - cold mount and resident reuse; and
-  - local and cross-device boundaries.
-- Measure useful work separately from speculative, cancelled, discarded, or
-  corrective work.
-- Report latency, throughput, permanent bytes, transient bytes,
-  representation-conversion traffic, construction cost, setup cost, device
-  utilization, synchronization, and memory residency.
-- Use warmup, repeated measurements, confidence intervals, and a declared
-  material-improvement threshold.
-- Verify fixed-seed reproducibility at the distribution, token, and runtime
-  scheduling levels. When identical inputs and seeds diverge, preserve both
-  traces and classify whether the cause is permitted sampling variance,
-  numerical nondeterminism, speculative scheduling, or a correctness defect.
-- Report throughput slope over the output window and surface queue-wait,
-  timeout, synchronization, and transport counters that explain degradation
-  during sustained generation.
-- Reject benchmark-only shortcuts, arbitrary output caps, convenient seeds, and
-  comparisons against mismatched source work.
-
-Completion requires deterministic benchmark plans, auditable raw results,
-noise-sensitive tests, and reuse of normal runtime execution and default
-statistics rather than a special inference path.
-
 ### 11. Build the proof and behavioral-validation funnel
 
 Apply validation in this order:

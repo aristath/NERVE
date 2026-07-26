@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from nerve.representation_optimizer.benchmarking.planning import (
+    create_benchmark_workload,
+)
 from nerve.representation_optimizer.contracts import (
     ContractValidationError,
     representation_candidate_id,
@@ -19,6 +22,9 @@ from nerve.representation_optimizer.providers import (
     ProviderProblem,
     ProviderRegistry,
     StaticEstimate,
+)
+from nerve.representation_optimizer.staging.contracts import (
+    staged_artifact_digest,
 )
 from tests.representation_graph_fixtures import exact_representation_graph
 from tests.test_representation_optimizer_contracts import (
@@ -317,10 +323,78 @@ class FixtureProvider:
     def benchmark_workloads(self, context, candidate):
         self._called("benchmark_workloads")
         return (
-            {
-                "schema": "nerve.optimizer.fixture_benchmark_workload.v1",
-                "regime": "decode",
-            },
+            create_benchmark_workload(
+                name="fixture decode",
+                execution_phase="decode",
+                activation_batch_width=1,
+                context_size=4096,
+                state_size=4096,
+                stream_count=1,
+                mount_mode="resident_reuse",
+                boundary_mode="local",
+                input_artifact={
+                    "path": "fixtures/decode-input.bin",
+                    "digest": staged_artifact_digest(b"fixture input"),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/decode-state.bin",
+                    "digest": staged_artifact_digest(b"fixture state"),
+                },
+                controls={"sampler": "greedy"},
+                randomness_algorithm="fixture-counter",
+                seeds=(1, 2),
+                deterministic_replay_required=True,
+                permit_sampling_variance=False,
+                permit_numerical_nondeterminism=False,
+                permit_speculative_schedule_variance=False,
+                useful_work_unit="tokens",
+                minimum_useful_work_units=128,
+                completion_condition="semantic_stop_or_allowance",
+                output_allowance=65_536,
+                output_allowance_basis={
+                    "kind": "declared_model_limit",
+                    "artifact": {
+                        "path": "fixtures/model-limits.json",
+                        "digest": staged_artifact_digest(
+                            b'{"max_output_tokens":65536}'
+                        ),
+                    },
+                    "json_pointer": "/max_output_tokens",
+                    "declared_limit": 65_536,
+                },
+                sustained_window_count=4,
+            ).to_json(),
+            create_benchmark_workload(
+                name="fixture prefill wide multi-stream cross-device",
+                execution_phase="prefill",
+                activation_batch_width=8,
+                context_size=32_768,
+                state_size=8_192,
+                stream_count=4,
+                mount_mode="cold",
+                boundary_mode="cross_device",
+                input_artifact={
+                    "path": "fixtures/prefill-input.bin",
+                    "digest": staged_artifact_digest(b"fixture prefill input"),
+                },
+                initial_state_artifact={
+                    "path": "fixtures/prefill-state.bin",
+                    "digest": staged_artifact_digest(b"fixture prefill state"),
+                },
+                controls={"scheduler": "multi_stream"},
+                randomness_algorithm="fixture-counter",
+                seeds=(1, 2),
+                deterministic_replay_required=True,
+                permit_sampling_variance=False,
+                permit_numerical_nondeterminism=False,
+                permit_speculative_schedule_variance=False,
+                useful_work_unit="activation_rows",
+                minimum_useful_work_units=1_024,
+                completion_condition="all_prefill_rows_committed",
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
+                sustained_window_count=4,
+            ).to_json(),
         )
 
     def validation_requirements(self, context, candidate):
