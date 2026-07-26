@@ -17,6 +17,7 @@ from nerve.representation_optimizer.contracts import (
     VALIDATION_RECORD_SCHEMA,
     ContractDocument,
     ContractValidationError,
+    algebraic_evidence_id,
     canonical_json_bytes,
     contract_digest,
     source_behavior_contract_digest,
@@ -190,6 +191,23 @@ def contract_fixtures() -> list[dict[str, object]]:
     scope_members = fixture_scope_members()
     scope_id = fixture_scope_id()
     candidate_id = stable_contract_id("candidate", scope_id, "provider", "field")
+    evidence = {
+        "schema": ALGEBRAIC_EVIDENCE_SCHEMA,
+        "evidence_id": "",
+        "scope_id": scope_id,
+        "source_contract_digest": source_digest,
+        "analyzer": {"id": "spectral_structure", "version": "1"},
+        "claims": [
+            {
+                "kind": "spectral_concentration",
+                "status": "supported",
+                "exact": False,
+                "facts": {"energy_fraction": 0.999},
+            }
+        ],
+        "artifacts": [{"path": "optimization/evidence/spectral.json"}],
+    }
+    evidence["evidence_id"] = algebraic_evidence_id(evidence)
     return [
         {
             "schema": OPTIMIZATION_SCOPE_SCHEMA,
@@ -201,22 +219,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             "source_contract_digest": source_digest,
         },
         source,
-        {
-            "schema": ALGEBRAIC_EVIDENCE_SCHEMA,
-            "evidence_id": stable_contract_id("evidence", scope_id, "analyzer"),
-            "scope_id": scope_id,
-            "source_contract_digest": source_digest,
-            "analyzer": {"id": "spectral_structure", "version": "1"},
-            "claims": [
-                {
-                    "kind": "spectral_concentration",
-                    "status": "supported",
-                    "exact": False,
-                    "facts": {"energy_fraction": 0.999},
-                }
-            ],
-            "artifacts": [{"path": "optimization/evidence/spectral.json"}],
-        },
+        evidence,
         hardware_profile_contract(),
         {
             "schema": REPRESENTATION_CANDIDATE_SCHEMA,
@@ -370,6 +373,17 @@ def test_source_contract_digest_rejects_behavioral_drift() -> None:
 
     with pytest.raises(ContractValidationError, match="digest does not match"):
         validate_contract(source)
+
+
+def test_algebraic_evidence_identity_rejects_claim_drift() -> None:
+    evidence = contract_fixtures()[2]
+    evidence["claims"][0]["facts"]["energy_fraction"] = 0.5
+
+    with pytest.raises(
+        ContractValidationError,
+        match="canonical algebraic evidence",
+    ):
+        validate_contract(evidence)
 
 
 def test_contract_validation_rejects_unknown_fields_and_nonfinite_numbers() -> None:

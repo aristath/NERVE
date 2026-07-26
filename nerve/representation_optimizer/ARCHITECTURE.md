@@ -132,6 +132,31 @@ the exact lowered artifacts. The self-contained catalog lives at
 `optimization/scopes.json`; its content-derived identity, link digests,
 classification counts, and stage reference all fail closed on drift.
 
+## Algebraic and structural evidence
+
+`nerve.representation_optimizer.analysis` examines an enumerated scope without
+changing its exact source implementation. The engine decodes effective BF16,
+block-scaled FP8, native NERVE Q8, and group-scaled packed INT4 parameter values
+through a package tensor repository. Every exhaustive or deterministic-grid
+observation carries its domain, storage format, effective-value status, and
+sample indices; a sampled observation cannot become an exact proof.
+
+Independent analyzers cover elementwise structure, matrix and tensor
+factorizations, coupled parameters, semantic graph topology, procedural
+generators, and optional reachable activations. Coupled analysis canonicalizes
+permutation-equivalent coordinates before comparing tensors and searches for
+shared subspaces, generators, repeated experts, and cross-component motifs.
+Numerical tolerances remain distinct from exact equality. Activation traces
+must declare their prompts, positions, seeds, or other reachable domain and are
+always refinement evidence rather than exhaustive behavioral proof.
+
+An analysis run emits one content-identified `algebraic_evidence.v1` record and
+one integrity-checked details artifact per analyzer. The run index, evidence,
+and details are deterministic, written atomically to a fresh output directory,
+and fail validation after content drift. This stage records hypotheses and
+proof evidence only: it neither synthesizes a replacement nor mutates the
+compiled package.
+
 ## Candidate lifecycle
 
 A candidate moves only through the following evidence-carrying sequence:

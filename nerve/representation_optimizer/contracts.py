@@ -128,6 +128,12 @@ def representation_descriptor_id(document: Json) -> str:
     return stable_contract_id("representation_descriptor", unsigned)
 
 
+def algebraic_evidence_id(document: Json) -> str:
+    unsigned = deepcopy(document)
+    unsigned.pop("evidence_id", None)
+    return stable_contract_id("evidence", unsigned)
+
+
 def optimization_scope_catalog_id(document: Json) -> str:
     unsigned = deepcopy(document)
     unsigned.pop("catalog_id", None)
@@ -504,6 +510,11 @@ def _validate_algebraic_evidence(document: Json) -> None:
             raise ContractValidationError(f"claims[{index}].exact must be boolean")
         _require_object(claim["facts"], f"claims[{index}].facts")
     _require_artifact_refs(document["artifacts"], "artifacts")
+    expected_id = algebraic_evidence_id(document)
+    if document["evidence_id"] != expected_id:
+        raise ContractValidationError(
+            "evidence_id must match canonical algebraic evidence content"
+        )
 
 
 def _validate_hardware_process_profile(document: Json) -> None:

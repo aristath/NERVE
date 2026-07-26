@@ -59,35 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 6. Implement the algebraic and structural analysis engine
-
-- Provide analyzers for exact and approximate:
-  - zero, constant, and sparse structure;
-  - rank and shared subspaces;
-  - repeated rows, columns, blocks, experts, and cross-layer motifs;
-  - permutation symmetries and canonicalization;
-  - block-diagonal, banded, Toeplitz, circulant, convolutional, and spectral
-    structure;
-  - Kronecker, tensor-product, tensor-train, butterfly, and other structured
-    factorizations;
-  - codebook entropy and repeated quantized values;
-  - common subexpressions and shared parameter generators;
-  - orthogonality, normalization invariants, and coordinate equivalences;
-  - graph communities and routing structure;
-  - procedural predictability; and
-  - structured bases with sparse or low-rank exceptions.
-- Analyze related parameters jointly where their semantics are coupled.
-- Canonicalize symmetry-equivalent tensors before comparing layers or searching
-  for shared structure.
-- Allow reachable-activation evidence to refine a structural hypothesis, but
-  record the trace domain and never present sampled behavior as an exhaustive
-  proof.
-- Produce evidence artifacts rather than immediately rewriting the model.
-
-Completion requires adversarial synthetic cases, negative controls, known exact
-structures, numerical-tolerance tests, and successful analysis of real compiled
-components without model-name rules.
-
 ### 7. Define the representation-provider interface and registry
 
 Each provider must implement:
