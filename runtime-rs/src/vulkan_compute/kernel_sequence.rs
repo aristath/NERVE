@@ -24,6 +24,7 @@ pub struct VulkanResidentKernelSequence {
     command_buffer: vk::CommandBuffer,
     completion_fence: vk::Fence,
     timestamp_period_ns: f32,
+    timestamp_query_pool: Option<vk::QueryPool>,
     recorded_input_copies: RefCell<Option<Vec<VulkanResidentKernelRecordedInputCopy>>>,
     recorded_steps: RefCell<Option<Vec<VulkanResidentKernelRecordedStep>>>,
     recorded_snapshot_copies: RefCell<Option<Vec<VulkanResidentKernelRecordedSnapshotCopy>>>,

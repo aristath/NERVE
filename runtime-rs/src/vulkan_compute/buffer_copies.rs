@@ -258,6 +258,9 @@ impl Drop for VulkanResidentKernelDispatch {
 impl Drop for VulkanResidentKernelSequence {
     fn drop(&mut self) {
         unsafe {
+            if let Some(query_pool) = self.timestamp_query_pool {
+                self.device.destroy_query_pool(query_pool, None);
+            }
             self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }

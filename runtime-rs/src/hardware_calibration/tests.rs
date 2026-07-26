@@ -124,7 +124,7 @@ fn explicit_vulkan_calibration_runs_a_real_resident_shader_sequentially() {
         result.workloads[0]
             .samples
             .iter()
-            .all(|sample| sample.valid)
+            .all(|sample| sample.valid && sample.device_duration_ns.is_some_and(|value| value > 0))
     );
     std::fs::remove_dir_all(temporary).unwrap();
 }

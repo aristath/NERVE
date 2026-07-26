@@ -21,6 +21,29 @@ impl VulkanComputeDevice {
         timeout: Duration,
     ) -> Result<(), VulkanError> {
         self.submit_recorded_resident_kernel_sequence(sequence)?;
+        self.wait_recorded_resident_kernel_sequence_for(sequence, timeout)
+    }
+
+    pub fn run_timestamped_recorded_resident_kernel_sequence_for(
+        &self,
+        sequence: &VulkanResidentKernelSequence,
+        timeout: Duration,
+    ) -> Result<u64, VulkanError> {
+        if sequence.timestamp_query_pool.is_none() {
+            return Err(VulkanError(
+                "resident kernel sequence was not created with timestamp measurement".to_string(),
+            ));
+        }
+        self.submit_recorded_resident_kernel_sequence(sequence)?;
+        self.wait_recorded_resident_kernel_sequence_for(sequence, timeout)?;
+        self.read_recorded_resident_kernel_sequence_duration_ns(sequence)
+    }
+
+    fn wait_recorded_resident_kernel_sequence_for(
+        &self,
+        sequence: &VulkanResidentKernelSequence,
+        timeout: Duration,
+    ) -> Result<(), VulkanError> {
         let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
         unsafe {
             match self
@@ -40,6 +63,40 @@ impl VulkanComputeDevice {
                 ))),
             }
         }
+    }
+
+    fn read_recorded_resident_kernel_sequence_duration_ns(
+        &self,
+        sequence: &VulkanResidentKernelSequence,
+    ) -> Result<u64, VulkanError> {
+        let query_pool = sequence.timestamp_query_pool.ok_or_else(|| {
+            VulkanError(
+                "resident kernel sequence was not created with timestamp measurement".to_string(),
+            )
+        })?;
+        let mut timestamps = [0_u64; 2];
+        unsafe {
+            self.device
+                .get_query_pool_results(
+                    query_pool,
+                    0,
+                    &mut timestamps,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to read resident sequence timestamps: {error:?}"
+                    ))
+                })?;
+        }
+        let elapsed_ns = timestamps[1].wrapping_sub(timestamps[0]) as f64
+            * f64::from(sequence.timestamp_period_ns);
+        if !elapsed_ns.is_finite() || elapsed_ns <= 0.0 || elapsed_ns > u64::MAX as f64 {
+            return Err(VulkanError(format!(
+                "resident sequence produced invalid device duration {elapsed_ns}"
+            )));
+        }
+        Ok((elapsed_ns.round() as u64).max(1))
     }
 
     pub fn submit_recorded_resident_kernel_sequence(
@@ -579,6 +636,22 @@ impl VulkanComputeDevice {
                     0,
                 );
             }
+            if !command_buffer_matches
+                && let Some(query_pool) = sequence.timestamp_query_pool
+            {
+                self.device.cmd_reset_query_pool(
+                    sequence.command_buffer,
+                    query_pool,
+                    0,
+                    2,
+                );
+                self.device.cmd_write_timestamp(
+                    sequence.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    0,
+                );
+            }
 
             if !command_buffer_matches {
                 if input_copies.is_empty() {
@@ -845,6 +918,15 @@ impl VulkanComputeDevice {
                         );
                         pending_buffer_accesses.clear();
                     }
+                }
+
+                if let Some(query_pool) = sequence.timestamp_query_pool {
+                    self.device.cmd_write_timestamp(
+                        sequence.command_buffer,
+                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        query_pool,
+                        1,
+                    );
                 }
 
                 let host_visibility_barrier = [vk::MemoryBarrier::default()

@@ -261,6 +261,19 @@ impl VulkanComputeDevice {
     pub fn create_resident_kernel_sequence(
         &self,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
+        self.create_resident_kernel_sequence_internal(false)
+    }
+
+    pub fn create_timestamped_resident_kernel_sequence(
+        &self,
+    ) -> Result<VulkanResidentKernelSequence, VulkanError> {
+        self.create_resident_kernel_sequence_internal(true)
+    }
+
+    fn create_resident_kernel_sequence_internal(
+        &self,
+        timestamped: bool,
+    ) -> Result<VulkanResidentKernelSequence, VulkanError> {
         unsafe {
             let command_pool_info = vk::CommandPoolCreateInfo::default()
                 .queue_family_index(self.queue_family_index)
@@ -296,6 +309,25 @@ impl VulkanComputeDevice {
                         "failed to create resident kernel sequence completion fence: {error:?}"
                     ))
                 })?;
+            let timestamp_query_pool = if timestamped {
+                match self.device.create_query_pool(
+                    &vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::TIMESTAMP)
+                        .query_count(2),
+                    None,
+                ) {
+                    Ok(query_pool) => Some(query_pool),
+                    Err(error) => {
+                        self.device.destroy_fence(completion_fence, None);
+                        self.device.destroy_command_pool(command_pool, None);
+                        return Err(VulkanError(format!(
+                            "failed to create resident sequence timestamp pool: {error:?}"
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
 
             Ok(VulkanResidentKernelSequence {
                 device: self.device.clone(),
@@ -303,6 +335,7 @@ impl VulkanComputeDevice {
                 command_buffer,
                 completion_fence,
                 timestamp_period_ns: self.timestamp_period_ns,
+                timestamp_query_pool,
                 recorded_input_copies: RefCell::new(None),
                 recorded_steps: RefCell::new(None),
                 recorded_snapshot_copies: RefCell::new(None),

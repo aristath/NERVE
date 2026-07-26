@@ -173,7 +173,7 @@ impl<'a> PreparedVulkanComputeWorkload<'a> {
             )
             .map_err(|error| format!("could not construct calibration dispatch: {error}"))?;
         let sequence = device
-            .create_resident_kernel_sequence()
+            .create_timestamped_resident_kernel_sequence()
             .map_err(|error| format!("could not construct calibration sequence: {error}"))?;
         let indirect = if workload.operation == "indirect_work_generation" {
             let buffer = device
@@ -239,20 +239,26 @@ impl<'a> PreparedVulkanComputeWorkload<'a> {
         let target = Duration::from_nanos(minimum_duration_ns);
         let started = Instant::now();
         let mut iterations = 0u64;
+        let mut device_duration_ns = 0u64;
         while started.elapsed() < target || iterations == 0 {
             if cancelled.load(Ordering::Relaxed) {
                 return Err("calibration was cancelled during a Vulkan sample".to_string());
             }
-            self.device
-                .run_recorded_resident_kernel_sequence_for(&self.sequence, Duration::from_secs(1))
+            let device_duration = self
+                .device
+                .run_timestamped_recorded_resident_kernel_sequence_for(
+                    &self.sequence,
+                    Duration::from_secs(1),
+                )
                 .map_err(|error| format!("Vulkan calibration dispatch failed: {error}"))?;
+            device_duration_ns = device_duration_ns.saturating_add(device_duration);
             iterations = iterations.saturating_add(1);
         }
         Ok(HardwareCalibrationSample {
             sample_index,
             phase,
             duration_ns: elapsed_ns(started),
-            device_duration_ns: None,
+            device_duration_ns: Some(device_duration_ns),
             iterations,
             window_index,
             thermal_millidegrees_celsius: maximum_pci_temperature_millidegrees(
