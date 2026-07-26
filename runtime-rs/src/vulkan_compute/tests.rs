@@ -1450,6 +1450,7 @@ fn synthetic_vulkan_hardware_profile_covers_exposed_and_unavailable_processes() 
         physical_device_id: "vulkan-uuid:00112233445566778899aabbccddeeff".to_string(),
         device_uuid: [7; vk::UUID_SIZE],
         device_name: "synthetic GPU".to_string(),
+        pci_address: Some("0000:02:00.0".to_string()),
         device_type: "discrete_gpu".to_string(),
         vendor_id: 0x1002,
         device_id: 0xabcd,

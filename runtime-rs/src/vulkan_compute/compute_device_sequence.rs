@@ -15,6 +15,33 @@ impl VulkanComputeDevice {
         self.wait_resident_kernel_sequence(sequence)
     }
 
+    pub fn run_recorded_resident_kernel_sequence_for(
+        &self,
+        sequence: &VulkanResidentKernelSequence,
+        timeout: Duration,
+    ) -> Result<(), VulkanError> {
+        self.submit_recorded_resident_kernel_sequence(sequence)?;
+        let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        unsafe {
+            match self
+                .device
+                .wait_for_fences(&[sequence.completion_fence], true, timeout_ns)
+            {
+                Ok(()) => {
+                    RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+                Err(vk::Result::TIMEOUT) => Err(VulkanError(format!(
+                    "resident kernel sequence exceeded bounded wait of {} ns",
+                    timeout_ns
+                ))),
+                Err(error) => Err(VulkanError(format!(
+                    "failed waiting for resident kernel sequence: {error:?}"
+                ))),
+            }
+        }
+    }
+
     pub fn submit_recorded_resident_kernel_sequence(
         &self,
         sequence: &VulkanResidentKernelSequence,

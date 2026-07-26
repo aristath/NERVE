@@ -26,6 +26,7 @@ def device_payload(
         "physical_device_id": f"vulkan:test-{index}",
         "device_name": f"device {index}",
         "device_type": device_type,
+        "pci_address": f"0000:{index:02x}:00.0",
         "vendor_id": 1,
         "device_id": index,
         "shader_features": features,

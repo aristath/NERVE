@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 const COMPILER_FINGERPRINT_SCHEMA: &str = "nerve.package_compiler_sha256.v2";
 const COMPILER_SOURCE_MANIFEST: &str = "compiler_sources.txt";
 const HARDWARE_DISCOVERY_FINGERPRINT_SCHEMA: &str = "nerve.hardware_discovery_sha256.v1";
+const HARDWARE_CALIBRATOR_FINGERPRINT_SCHEMA: &str = "nerve.hardware_calibrator_sha256.v1";
 
 fn directory_files(path: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
     fs::read_dir(path)
@@ -128,5 +129,38 @@ fn main() {
     println!(
         "cargo:rustc-env=NERVE_HARDWARE_DISCOVERY_FINGERPRINT={HARDWARE_DISCOVERY_FINGERPRINT_SCHEMA}:{:x}",
         hardware_digest.finalize()
+    );
+
+    let hardware_calibrator_sources = [
+        "Cargo.lock",
+        "Cargo.toml",
+        "build.rs",
+        "src/bin/nerve_calibrate.rs",
+        "src/hardware_calibration.rs",
+        "src/hardware_calibration/cpu.rs",
+        "src/hardware_calibration/runner.rs",
+        "src/hardware_calibration/schema.rs",
+        "src/hardware_profile/schema.rs",
+        "../nerve/hardware_calibration/__init__.py",
+        "../nerve/hardware_calibration/contracts.py",
+        "../nerve/hardware_calibration/planning.py",
+        "../nerve/hardware_calibration/publication.py",
+        "../nerve/hardware_calibration/statistics.py",
+    ];
+    let mut calibrator_digest = Sha256::new();
+    for relative in hardware_calibrator_sources {
+        let path = manifest_dir.join(relative);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = fs::read(&path).unwrap_or_else(|error| {
+            panic!("failed to read hardware-calibrator input {path:?}: {error}")
+        });
+        calibrator_digest.update((relative.len() as u64).to_le_bytes());
+        calibrator_digest.update(relative.as_bytes());
+        calibrator_digest.update((source.len() as u64).to_le_bytes());
+        calibrator_digest.update(source);
+    }
+    println!(
+        "cargo:rustc-env=NERVE_HARDWARE_CALIBRATOR_FINGERPRINT={HARDWARE_CALIBRATOR_FINGERPRINT_SCHEMA}:{:x}",
+        calibrator_digest.finalize()
     );
 }

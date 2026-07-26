@@ -26,6 +26,7 @@ class CompilerTargetDevice:
     physical_device_id: str
     device_name: str
     device_type: str
+    pci_address: str | None
     vendor_id: int
     device_id: int
     shader_features: frozenset[str]
@@ -62,6 +63,7 @@ class CompilerTargetDevice:
             "physical_device_id",
             "device_name",
             "device_type",
+            "pci_address",
             "vendor_id",
             "device_id",
             "shader_features",
@@ -90,6 +92,11 @@ class CompilerTargetDevice:
                 physical_device_id=str(payload["physical_device_id"]),
                 device_name=str(payload["device_name"]),
                 device_type=str(payload["device_type"]),
+                pci_address=(
+                    str(payload["pci_address"])
+                    if payload["pci_address"] is not None
+                    else None
+                ),
                 vendor_id=int(payload["vendor_id"]),
                 device_id=int(payload["device_id"]),
                 shader_features=frozenset(
@@ -137,6 +144,7 @@ class CompilerTargetDevice:
             "physical_device_id": self.physical_device_id,
             "device_name": self.device_name,
             "device_type": self.device_type,
+            "pci_address": self.pci_address,
             "vendor_id": self.vendor_id,
             "device_id": self.device_id,
             "shader_features": sorted(self.shader_features),
@@ -271,6 +279,7 @@ class CompilerTarget:
                 physical_device_id=f"test-device-{index}",
                 device_name=f"test device {index}",
                 device_type="discrete_gpu",
+                pci_address=None,
                 vendor_id=0,
                 device_id=index,
                 shader_features=frozenset(features),
@@ -379,7 +388,11 @@ def synthetic_hardware_profile(device: CompilerTargetDevice) -> Json:
         "architecture": (
             f"synthetic_vendor_{device.vendor_id:04x}_device_{device.device_id:04x}"
         ),
-        "physical_location": device.physical_device_id,
+        "physical_location": (
+            f"pci:{device.pci_address}"
+            if device.pci_address is not None
+            else device.physical_device_id
+        ),
     }
     process: Json = {
         "name": "shader_arithmetic",
@@ -428,6 +441,7 @@ def synthetic_hardware_profile(device: CompilerTargetDevice) -> Json:
         "device_type",
         "vendor_id",
         "device_id",
+        "pci_address",
     }
     capability_extensions: Json = (
         {

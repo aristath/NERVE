@@ -352,7 +352,11 @@ pub fn build_vulkan_hardware_profile(
             "vulkan_vendor_{:04x}_device_{:04x}",
             device.vendor_id, device.device_id
         ),
-        physical_location: device.physical_device_id.clone(),
+        physical_location: device
+            .pci_address
+            .as_ref()
+            .map(|address| format!("pci:{address}"))
+            .unwrap_or_else(|| device.physical_device_id.clone()),
     };
     let processes = vulkan_processes(&target, &facts);
     let memory_domains = vulkan_memory_domains(device, &facts)?;
@@ -418,6 +422,7 @@ pub fn build_vulkan_hardware_profile(
                 "device_name": device.device_name,
                 "device_type": device.device_type,
                 "vendor_id": device.vendor_id,
+                "pci_address": device.pci_address,
                 "device_id": device.device_id,
             }),
         )]),
@@ -602,7 +607,36 @@ fn vulkan_packed_dot_process(
         &[],
         &[],
     );
-    process.numeric_formats = shader_numeric_formats(target);
+    let mut numeric_formats = BTreeSet::new();
+    if target
+        .shader_features
+        .contains(&VulkanShaderFeature::ShaderIntegerDotProduct)
+    {
+        numeric_formats.extend(["i8".to_string(), "u8".to_string()]);
+    }
+    if target
+        .shader_features
+        .contains(&VulkanShaderFeature::ShaderBfloat16DotProduct)
+        || target
+            .shader_features
+            .contains(&VulkanShaderFeature::ShaderMixedFloatDotProductBfloat16Acc)
+    {
+        numeric_formats.insert("bf16".to_string());
+    }
+    if target.shader_features.contains(
+        &VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat32,
+    ) || target.shader_features.contains(
+        &VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat16,
+    ) {
+        numeric_formats.insert("f16".to_string());
+    }
+    if target
+        .shader_features
+        .contains(&VulkanShaderFeature::ShaderMixedFloatDotProductFloat8AccFloat32)
+    {
+        numeric_formats.insert("f8_e4m3".to_string());
+    }
+    process.numeric_formats = numeric_formats.into_iter().collect();
     process.required_features = target
         .shader_features
         .iter()
@@ -1145,12 +1179,6 @@ fn shader_numeric_formats(target: &VulkanComputeTargetCapabilities) -> Vec<Strin
             }
             VulkanShaderFeature::ShaderInt64 => {
                 formats.extend(["i64".to_string(), "u64".to_string()]);
-            }
-            VulkanShaderFeature::ShaderFloat8 => {
-                formats.insert("f8_e4m3".to_string());
-            }
-            VulkanShaderFeature::ShaderBfloat16Type => {
-                formats.insert("bf16".to_string());
             }
             _ => {}
         }

@@ -499,6 +499,8 @@ impl VulkanComputeDeviceCatalog {
                 })?;
             let subgroup_support = physical_device_subgroup_support(instance, physical_device);
             let subgroup_size = subgroup_support.subgroup_size;
+            let pci_address =
+                physical_device_pci_address(instance, physical_device);
 
             Ok(VulkanComputeDevice {
                 context: Arc::clone(&self.context),
@@ -507,6 +509,7 @@ impl VulkanComputeDeviceCatalog {
                 queue_family_index,
                 queue,
                 device_name,
+                pci_address,
                 enabled_device_extensions,
                 enabled_shader_features,
                 shared_host_memory_alignment,

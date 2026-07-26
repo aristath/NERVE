@@ -16,4 +16,5 @@ include!("vulkan_compute/compute_device_sequence.rs");
 include!("vulkan_compute/compute_device_pipelines.rs");
 include!("vulkan_compute/physical_device_capabilities.rs");
 include!("vulkan_compute/hardware_profile.rs");
+include!("vulkan_compute/calibration_specialized.rs");
 include!("vulkan_compute/tests.rs");

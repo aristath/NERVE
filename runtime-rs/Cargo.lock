@@ -980,6 +980,7 @@ dependencies = [
  "ash",
  "chrono",
  "crossterm",
+ "libc",
  "minijinja",
  "minijinja-contrib",
  "ratatui",

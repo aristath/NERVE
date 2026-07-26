@@ -783,6 +783,7 @@ unsafe fn inspect_compute_device(
     }
     let properties = unsafe { instance.get_physical_device_properties(physical_device) };
     let device_uuid = unsafe { physical_device_uuid(instance, physical_device) };
+    let pci_address = unsafe { physical_device_pci_address(instance, physical_device) };
     let memory_properties =
         unsafe { instance.get_physical_device_memory_properties(physical_device) };
     let device_name = unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }
@@ -804,6 +805,7 @@ unsafe fn inspect_compute_device(
         physical_device_id: format!("vulkan-uuid:{}", format_device_uuid(&device_uuid)),
         device_uuid,
         device_name,
+        pci_address,
         device_type: vulkan_device_type_label(properties.device_type).to_string(),
         vendor_id: properties.vendor_id,
         device_id: properties.device_id,
@@ -813,6 +815,33 @@ unsafe fn inspect_compute_device(
         memory_heaps,
         selected_by_default,
     })
+}
+
+unsafe fn physical_device_pci_address(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Option<String> {
+    let supports_pci_info = unsafe {
+        instance
+            .enumerate_device_extension_properties(physical_device)
+            .ok()?
+            .iter()
+            .any(|property| {
+                CStr::from_ptr(property.extension_name.as_ptr()) == ash::ext::pci_bus_info::NAME
+            })
+    };
+    if !supports_pci_info {
+        return None;
+    }
+    let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
+    unsafe {
+        instance.get_physical_device_properties2(physical_device, &mut properties);
+    }
+    Some(format!(
+        "{:04x}:{:02x}:{:02x}.{:x}",
+        pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
+    ))
 }
 
 unsafe fn compute_queue_family_indices(

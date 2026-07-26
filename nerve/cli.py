@@ -13,6 +13,7 @@ from pathlib import Path
 from nerve.compilation import ModelCompileCancelled, ModelCompileError
 from nerve.model_compiler import compile_model, discover_source_model
 from nerve.compiler_target import discover_compiler_target
+from nerve.hardware_calibration.orchestrator import calibrate_hardware
 
 
 RUNTIME_PACKAGE_MANIFEST = "vulkan_resident_package.json"
@@ -37,6 +38,24 @@ def main() -> None:
         type=Path,
         metavar="PACKAGE_DIR_OR_MANIFEST",
         help="run a compiled model package with the Rust/Vulkan runtime engine",
+    )
+    parser.add_argument(
+        "--calibrate-hardware",
+        type=Path,
+        metavar="OUTPUT_DIR",
+        help="measure hardware processes and publish self-contained calibration profiles",
+    )
+    parser.add_argument(
+        "--calibration-device",
+        action="append",
+        default=[],
+        metavar="PROFILE_OR_DEVICE_ID",
+        help="calibrate only this discovered profile or stable physical device; may be repeated",
+    )
+    parser.add_argument(
+        "--calibrator-bin",
+        type=Path,
+        help="path to a built nerve-calibrate binary",
     )
     parser.add_argument(
         "--prompt",
@@ -202,9 +221,12 @@ def main() -> None:
         args.compile_model is not None,
         args.discover_model is not None,
         args.run is not None,
+        args.calibrate_hardware is not None,
     ]
     if sum(selected_actions) > 1:
-        parser.error("--compile-model, --discover-model, and --run are mutually exclusive")
+        parser.error(
+            "--compile-model, --discover-model, --run, and --calibrate-hardware are mutually exclusive"
+        )
     if not any(selected_actions):
         if len(sys.argv) == 1:
             run_tui()
@@ -227,6 +249,38 @@ def main() -> None:
         parser.error("--compiler-events-jsonl requires --compile-model or --discover-model")
     if args.compiler_events_jsonl and args.json:
         parser.error("--compiler-events-jsonl and --json are mutually exclusive")
+    if args.calibrate_hardware is not None:
+        cancel_requested = False
+
+        def request_calibration_cancel(_signum: int, _frame: object) -> None:
+            nonlocal cancel_requested
+            cancel_requested = True
+
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, request_calibration_cancel)
+        signal.signal(signal.SIGTERM, request_calibration_cancel)
+        try:
+            report = calibrate_hardware(
+                args.calibrate_hardware,
+                runtime_bin=args.runtime_bin,
+                calibrator_bin=args.calibrator_bin,
+                selected_devices=args.calibration_device,
+                cancel_requested=lambda: cancel_requested,
+            )
+        except ModelCompileCancelled:
+            raise SystemExit(130) from None
+        except ModelCompileError as error:
+            raise SystemExit(str(error)) from None
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        if args.json:
+            print(json.dumps(report.to_json(), indent=2))
+        else:
+            print(f"calibrated {report.profile_count} hardware profiles")
+            print(f"  output: {report.destination}")
+        return
     if args.discover_model is not None:
         reporter = JsonLineCompileReporter() if args.compiler_events_jsonl else None
         if reporter is not None:
@@ -393,8 +447,15 @@ def validate_action_options(
         args.runtime_bin is not None
         and args.run is None
         and args.compile_model is None
+        and args.calibrate_hardware is None
     ):
-        parser.error("--runtime-bin is only supported with --run or --compile-model")
+        parser.error(
+            "--runtime-bin is only supported with --run, --compile-model, or --calibrate-hardware"
+        )
+    if args.calibration_device and args.calibrate_hardware is None:
+        parser.error("--calibration-device requires --calibrate-hardware")
+    if args.calibrator_bin is not None and args.calibrate_hardware is None:
+        parser.error("--calibrator-bin requires --calibrate-hardware")
 
     compiler_options = (
         ("--compiled-model-dir", args.compiled_model_dir is not None),

@@ -11,7 +11,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ash::{Entry, vk};
 use ash::vk::Handle as _;

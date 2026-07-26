@@ -31,6 +31,10 @@ impl VulkanComputeDevice {
         &self.device_name
     }
 
+    pub fn pci_address(&self) -> Option<&str> {
+        self.pci_address.as_deref()
+    }
+
     pub fn has_enabled_device_extension(&self, extension_name: &str) -> bool {
         self.enabled_device_extensions.contains(extension_name)
     }
