@@ -75,7 +75,9 @@ non-finite number, or internally inconsistent contract.
 | `prebenchmark_record.v1` | Static integrity, proof, and cheap-sanity gate result |
 | `validation_record.v1` | Complete funnel, benchmark link, full runs, and counterexamples |
 | `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
-| `promotion_decision.v1` | Benchmark/validation evidence and guarded implementation decision |
+| `runtime_implementation_predicate.v1` | Hardware, execution-regime, and placement guard for one verified implementation |
+| `promotion_decision.v2` | Candidate, proof, benchmark, validation, target, artifact, and provenance decision |
+| `implementation_registry.v1` | Exact baseline plus all published physical implementations |
 | `relowering_request.v1` | Representation-aware request to repeat ordinary lowering passes |
 
 Every contract round-trips through the same canonical serializer. The canonical
@@ -278,8 +280,8 @@ only that candidate's new session value. It cannot:
 - mark another candidate as evaluated; or
 - turn a failed experiment into a runtime implementation.
 
-Filesystem staging and atomic publication build on this contract in the
-candidate-construction and promotion milestones.
+Filesystem staging and atomic publication build on this contract during
+candidate construction and target-guarded package publication.
 
 ## Isolated candidate construction
 
@@ -416,6 +418,60 @@ failure. Raw traces, fixtures, plans, runs, records, and integrity manifests
 are streamed into atomically published evidence trees. Unproven exact
 candidates never reach timing; faster approximations that exceed any declared
 error limit are rejected before promotion.
+
+## Target-guarded promotion and package publication
+
+Promotion is a new compiled package, never an in-place mutation of the exact
+source package. A candidate is eligible only in `behaviorally_validated` state
+and only when its complete matched benchmark record—and every workload regime
+represented by the resulting guard—reports `materially_faster`. The linked
+validation record must report `passed`. Preparation reloads the candidate,
+source seal, raw prebenchmark evidence, raw matched benchmark, full validation,
+cited analysis runs, and measured hardware profiles from their integrity
+checked publications before it creates a promotion decision.
+
+The runtime predicate is derived from evidence rather than supplied as an
+unverified label. It records allowed hardware capability classes, device kinds,
+APIs, required processes and features; prefill, decode, component, mixed, or
+state-transition phases; measured activation-batch, context, and state ranges;
+and local, distributed, or either placement with an exact device-count range
+and any required interconnects. Physical profile documents remain in the
+published bundle, while the guard uses capability identities so a runtime is
+not hardcoded to the physical device used for benchmarking.
+
+Each registry entry retains:
+
+- the exact semantic scopes and source-contract digests it implements;
+- the representation and behavioral contract;
+- the target predicate;
+- the complete candidate artifact integrity contract;
+- the provider, descriptor, analysis, representation-graph, target-lowering,
+  and re-lowering provenance;
+- the exact implementation and per-regime paired comparison it beat;
+- full prebenchmark, benchmark, and validation evidence; and
+- the explicit promotion reason.
+
+Several candidate identities may implement the same semantic scopes. Their
+predicates distinguish the regimes in which each measured representation is
+eligible. The immutable exact baseline remains in both `stage.json` and
+`implementations.json`; promotion only adds physical choices.
+
+Publication clones the self-contained source package into a sibling private
+tree. Linux reflinks avoid rewriting immutable model bytes when the filesystem
+supports them; the fallback is an independent streaming copy, never a hard
+link. Candidate artifacts and all cited evidence are copied into
+`optimization/implementations/<implementation_id>/`. The implementation
+registry, package-local lifecycle references, optimizer stage, and whole
+package artifact-integrity manifest are rebuilt and fully reloaded before one
+atomic rename exposes the destination. A second post-rename validation runs
+before success is returned. Any failure removes the private tree or the newly
+renamed destination and leaves the source package byte-for-byte unchanged.
+
+Optimized packages contain only published candidate lifecycles. Every
+lifecycle evidence reference resolves to a file inside that package; rejected
+and failed experiment workspaces do not leak into the deployable model.
+Relocation validation therefore needs neither the source package nor analysis,
+construction, benchmark, or validation workspaces.
 
 ## Hardware-process profiles
 

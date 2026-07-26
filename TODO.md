@@ -59,29 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 12. Implement target-guarded promotion and package publication
-
-- Promote a candidate only when its benchmark and validation records both pass.
-- Bind the promoted implementation to explicit predicates such as:
-  - hardware capability class;
-  - device/API requirements;
-  - prefill or decode regime;
-  - activation batch range;
-  - context or state range; and
-  - local or distributed execution requirements.
-- Permit several verified implementations of one semantic component when
-  different representations win in different regimes.
-- Retain the exact semantic source contract and transformation provenance.
-- Include only complete, integrity-checked implementation artifacts in the
-  self-contained compiled model.
-- Record why a candidate won, where it is valid, and which exact implementation
-  it was compared against.
-- Make publication atomic and rebuild package integrity after promotion.
-
-Completion requires tests proving that failed, slower, noisy, or inaccurate
-candidates cannot be published and that promoted packages remain relocatable
-and independently loadable.
-
 ### 13. Implement runtime implementation selection
 
 - Select among promoted implementations using actual runtime device bindings
@@ -96,6 +73,9 @@ and independently loadable.
   inspection and the TUI.
 - Report selection and representation-boundary costs in default execution
   statistics.
+- Treat sustained decode length as an explicit selection and measurement
+  regime. Expose throughput changes as context and transient state grow so a
+  short-window average cannot hide a long-running slow path.
 
 Completion requires runtime tests across CPU, one-GPU, multi-GPU, and mixed
 logical placements without model-specific selection code.
