@@ -18,14 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub(super) struct VulkanGraphicsCalibrationExecutor {
-    device: Rc<VulkanComputeDevice>,
+    device: Option<Rc<VulkanComputeDevice>>,
     fixed_graphics_context: Option<Rc<SpecializedVulkanContext>>,
     artifact_directory: PathBuf,
 }
 
 impl VulkanGraphicsCalibrationExecutor {
     pub(super) fn new(
-        device: Rc<VulkanComputeDevice>,
+        device: Option<Rc<VulkanComputeDevice>>,
         physical_device_index: usize,
         needs_fixed_graphics: bool,
         artifact_directory: PathBuf,
@@ -73,13 +73,15 @@ impl VulkanGraphicsCalibrationExecutor {
         cancelled: &Arc<AtomicBool>,
     ) -> Result<HardwareCalibrationWorkloadResult, String> {
         let construction_started = Instant::now();
+        let device = self.device.as_ref().ok_or_else(|| {
+            "texture workload reached an executor without a compute device".to_string()
+        })?;
         let source = texture_shader_source();
         let (spirv, artifact) =
             compile_calibration_shader(workload, 0, &source, "comp", &self.artifact_directory)?;
         let output_count = u32::try_from(workload.work.items_per_iteration)
             .map_err(|_| "texture calibration item count exceeds u32".to_string())?;
-        let texture = self
-            .device
+        let texture = device
             .create_texture_calibration(
                 &spirv,
                 workload
@@ -94,7 +96,7 @@ impl VulkanGraphicsCalibrationExecutor {
         let construction_duration_ns = elapsed_ns(construction_started);
         let mut prepared = PreparedTexture {
             texture,
-            pci_address: self.device.pci_address().map(str::to_string),
+            pci_address: device.pci_address().map(str::to_string),
         };
         let mut samples = Vec::new();
         for _ in 0..plan.policy.warmup_iterations {

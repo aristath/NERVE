@@ -5,11 +5,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Sequence, TextIO
 
 from nerve.compilation import Json, ModelCompileCancelled, ModelCompileError
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
@@ -26,6 +28,7 @@ from .statistics import summarize_calibration_run
 
 CALIBRATION_COLLECTION_SCHEMA = "nerve.optimizer.hardware_calibration_collection.v1"
 CancelCheck = Callable[[], bool]
+_MAX_SUBPROCESS_CAPTURE_CHARACTERS = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -278,19 +281,36 @@ def _run_cancellable(
         stderr=subprocess.PIPE,
         text=True,
     )
+    stdout_capture = _BoundedTextCapture(_MAX_SUBPROCESS_CAPTURE_CHARACTERS)
+    stderr_capture = _BoundedTextCapture(_MAX_SUBPROCESS_CAPTURE_CHARACTERS)
+    stdout_thread = threading.Thread(
+        target=_drain_text_stream,
+        args=(process.stdout, stdout_capture),
+        name="nerve-calibrator-stdout",
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_text_stream,
+        args=(process.stderr, stderr_capture),
+        name="nerve-calibrator-stderr",
+    )
+    stdout_thread.start()
+    stderr_thread.start()
     try:
         while process.poll() is None:
             if cancelled():
-                process.terminate()
-                process.wait()
+                _terminate_subprocess(process)
                 raise ModelCompileCancelled("hardware calibration was cancelled")
             time.sleep(0.05)
-        stdout, stderr = process.communicate()
     except BaseException:
         if process.poll() is None:
             process.kill()
-            process.wait()
+            process.wait(timeout=5)
         raise
+    finally:
+        stdout_thread.join()
+        stderr_thread.join()
+    stdout = stdout_capture.text()
+    stderr = stderr_capture.text()
     completed = subprocess.CompletedProcess(
         command,
         process.returncode,
@@ -304,6 +324,58 @@ def _run_cancellable(
             + (f": {diagnostic}" if diagnostic else "")
         )
     return completed
+
+
+def _terminate_subprocess(process: subprocess.Popen[str]) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+class _BoundedTextCapture:
+    def __init__(self, maximum_characters: int) -> None:
+        self._maximum_characters = maximum_characters
+        self._chunks: deque[str] = deque()
+        self._length = 0
+        self._truncated = False
+
+    def append(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self._chunks.append(chunk)
+        self._length += len(chunk)
+        while self._length > self._maximum_characters and self._chunks:
+            excess = self._length - self._maximum_characters
+            oldest = self._chunks[0]
+            if len(oldest) <= excess:
+                self._chunks.popleft()
+                self._length -= len(oldest)
+            else:
+                self._chunks[0] = oldest[excess:]
+                self._length -= excess
+            self._truncated = True
+
+    def text(self) -> str:
+        payload = "".join(self._chunks)
+        if self._truncated:
+            return "[earlier subprocess output truncated]\n" + payload
+        return payload
+
+
+def _drain_text_stream(
+    stream: TextIO | None,
+    capture: _BoundedTextCapture,
+) -> None:
+    if stream is None:
+        return
+    while True:
+        chunk = stream.read(8_192)
+        if not chunk:
+            return
+        capture.append(chunk)
 
 
 def _vulkan_device_index(profile: Json) -> int | None:

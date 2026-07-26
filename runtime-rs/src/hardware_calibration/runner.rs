@@ -163,15 +163,19 @@ pub fn run_calibration_plan(
                 #[cfg(feature = "vulkan")]
                 CalibrationExecutor::VulkanGraphics => {
                     let construction_started = Instant::now();
-                    let device = Rc::new(
-                        VulkanComputeDevice::new_for_physical_device_index(
-                            vulkan_physical_device_index
-                                .expect("Vulkan physical device index was validated"),
-                        )
-                        .map_err(|error| {
-                            format!("could not open Vulkan calibration device: {error}")
-                        })?,
-                    );
+                    let device = if workload.operation == "texture_sampling" {
+                        Some(Rc::new(
+                            VulkanComputeDevice::new_for_physical_device_index(
+                                vulkan_physical_device_index
+                                    .expect("Vulkan physical device index was validated"),
+                            )
+                            .map_err(|error| {
+                                format!("could not open Vulkan calibration device: {error}")
+                            })?,
+                        ))
+                    } else {
+                        None
+                    };
                     let executor = VulkanGraphicsCalibrationExecutor::new(
                         device,
                         vulkan_physical_device_index

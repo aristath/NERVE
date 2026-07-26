@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -26,8 +27,10 @@ from nerve.hardware_calibration.publication import (
     validate_published_calibration,
 )
 from nerve.hardware_calibration.statistics import summarize_calibration_run
-from nerve.representation_optimizer.contracts import stable_contract_id
-from nerve.representation_optimizer.contracts import ContractDocument
+from nerve.representation_optimizer.contracts import (
+    ContractDocument,
+    stable_contract_id,
+)
 
 
 FINGERPRINT = "nerve.hardware_calibrator_sha256.v1:" + "a" * 64
@@ -582,6 +585,31 @@ def test_orchestrator_runs_profiles_sequentially_and_publishes_collection(
     profile_manifest.write_text("{}\n")
     with pytest.raises(ValueError, match="manifest digest mismatch"):
         orchestrator.validate_calibration_collection(destination)
+
+
+def test_cancellable_subprocess_drains_large_output_without_pipe_deadlock() -> None:
+    completed = orchestrator._run_cancellable(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys;"
+                "sys.stdout.write('o' * 2000000);"
+                "sys.stdout.flush();"
+                "sys.stderr.write('e' * 2000000);"
+                "sys.stderr.flush()"
+            ),
+        ],
+        lambda: False,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout.startswith("[earlier subprocess output truncated]")
+    assert completed.stderr.startswith("[earlier subprocess output truncated]")
+    assert completed.stdout.endswith("o" * 1024)
+    assert completed.stderr.endswith("e" * 1024)
+    assert len(completed.stdout) < 70_000
+    assert len(completed.stderr) < 70_000
 
 
 def test_orchestrator_cancellation_leaves_no_partial_collection(
