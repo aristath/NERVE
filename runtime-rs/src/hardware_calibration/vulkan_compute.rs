@@ -1,3 +1,4 @@
+use super::sampling::collect_adaptive_samples;
 use super::schema::{
     CalibrationArtifactRecord, CalibrationRunStatus, CalibrationSamplePhase,
     CalibrationValidationResult, CalibrationValidationStatus, HardwareCalibrationPlan,
@@ -51,24 +52,15 @@ impl VulkanComputeCalibrationExecutor {
             PreparedVulkanComputeWorkload::new(&self.device, workload, &self.artifact_directory)?;
         let construction_duration_ns = elapsed_ns(construction_started);
         let mut samples = Vec::new();
-        for _ in 0..plan.policy.warmup_iterations {
-            samples.push(prepared.measure(
-                CalibrationSamplePhase::Warmup,
+        collect_adaptive_samples(&mut samples, &plan.policy, |phase, sample_index| {
+            prepared.measure(
+                phase,
                 None,
                 plan.policy.minimum_sample_duration_ns,
                 cancelled,
-                samples.len(),
-            )?);
-        }
-        for _ in 0..plan.policy.steady_iterations {
-            samples.push(prepared.measure(
-                CalibrationSamplePhase::Steady,
-                None,
-                plan.policy.minimum_sample_duration_ns,
-                cancelled,
-                samples.len(),
-            )?);
-        }
+                sample_index,
+            )
+        })?;
         let sustained_duration_ns = plan
             .policy
             .sustained_window_duration_ms

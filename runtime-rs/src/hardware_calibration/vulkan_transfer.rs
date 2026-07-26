@@ -1,3 +1,4 @@
+use super::sampling::collect_adaptive_samples;
 use super::schema::{
     CalibrationRunStatus, CalibrationSamplePhase, CalibrationValidationResult,
     CalibrationValidationStatus, HardwareCalibrationPlan, HardwareCalibrationSample,
@@ -30,24 +31,15 @@ impl VulkanTransferCalibrationExecutor {
         let mut prepared = PreparedTransfer::new(&self.device, workload)?;
         let construction_duration_ns = elapsed_ns(construction_started);
         let mut samples = Vec::new();
-        for _ in 0..plan.policy.warmup_iterations {
-            samples.push(prepared.measure(
-                CalibrationSamplePhase::Warmup,
+        collect_adaptive_samples(&mut samples, &plan.policy, |phase, sample_index| {
+            prepared.measure(
+                phase,
                 None,
                 plan.policy.minimum_sample_duration_ns,
                 cancelled,
-                samples.len(),
-            )?);
-        }
-        for _ in 0..plan.policy.steady_iterations {
-            samples.push(prepared.measure(
-                CalibrationSamplePhase::Steady,
-                None,
-                plan.policy.minimum_sample_duration_ns,
-                cancelled,
-                samples.len(),
-            )?);
-        }
+                sample_index,
+            )
+        })?;
         for window_index in 0..plan.policy.sustained_window_count {
             samples.push(
                 prepared.measure(

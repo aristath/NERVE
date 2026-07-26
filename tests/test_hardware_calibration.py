@@ -212,7 +212,10 @@ def hardware_profile(*, include_unknown: bool = False) -> dict[str, object]:
 def calibration_policy() -> CalibrationPolicy:
     return CalibrationPolicy(
         warmup_iterations=1,
+        maximum_warmup_iterations=1,
+        warmup_stability_window=1,
         steady_iterations=5,
+        maximum_steady_iterations=5,
         minimum_sample_duration_ns=1,
         sustained_window_duration_ms=1,
         sustained_window_count=2,
@@ -473,13 +476,56 @@ def test_unreliable_measurements_cannot_become_a_calibrated_profile() -> None:
         summarize_calibration_run(profile, plan, run)
 
 
+def test_unconverged_warmup_cannot_become_a_calibrated_profile() -> None:
+    profile = hardware_profile()
+    policy = CalibrationPolicy(
+        warmup_iterations=3,
+        maximum_warmup_iterations=3,
+        warmup_stability_window=3,
+        maximum_warmup_relative_range_ppm=20_000,
+        steady_iterations=5,
+        maximum_steady_iterations=5,
+        minimum_sample_duration_ns=1,
+        sustained_window_duration_ms=1,
+        sustained_window_count=2,
+        confidence_level_ppm=950_000,
+        maximum_relative_ci_width_ppm=200_000,
+    )
+    plan = build_calibration_plan(
+        profile,
+        implementation_fingerprint=FINGERPRINT,
+        policy=policy,
+    )
+    run = completed_run(plan)
+    for workload in run["workloads"]:
+        template = next(
+            sample for sample in workload["samples"] if sample["phase"] == "warmup"
+        )
+        warmup = [
+            {**template, "duration_ns": duration}
+            for duration in (1_000_000, 800_000, 600_000)
+        ]
+        remaining = [
+            sample for sample in workload["samples"] if sample["phase"] != "warmup"
+        ]
+        workload["samples"] = warmup + remaining
+        for index, sample in enumerate(workload["samples"]):
+            sample["sample_index"] = index
+
+    with pytest.raises(CalibrationContractError, match="warmup did not converge"):
+        summarize_calibration_run(profile, plan, run)
+
+
 def test_requested_confidence_level_changes_the_statistical_interval() -> None:
     profile = hardware_profile()
     intervals: list[int] = []
     for confidence in (900_000, 990_000):
         policy = CalibrationPolicy(
             warmup_iterations=1,
+            maximum_warmup_iterations=1,
+            warmup_stability_window=1,
             steady_iterations=5,
+            maximum_steady_iterations=5,
             minimum_sample_duration_ns=1,
             sustained_window_duration_ms=1,
             sustained_window_count=2,

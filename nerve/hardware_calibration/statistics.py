@@ -175,12 +175,29 @@ def summarize_calibration_run(profile: Json, plan: Json, run: Json) -> Json:
 
 def _summarize_workload(workload: Json, result: Json, policy: Json) -> Json:
     diagnostics: list[str] = []
+    warmup = _normalized_samples(workload, result, phase="warmup")
     steady = _normalized_samples(workload, result, phase="steady")
     sustained = _normalized_samples(workload, result, phase="sustained")
+    warmup_summary = _warmup_summary(warmup, policy)
+    if not warmup_summary["converged"]:
+        diagnostics.append(
+            "warmup did not converge: final stability-window range is "
+            f"{warmup_summary['relative_range_ppm']} ppm"
+        )
+    if len(warmup) > policy["maximum_warmup_iterations"]:
+        diagnostics.append(
+            f"warmup sample count {len(warmup)} exceeds "
+            f"{policy['maximum_warmup_iterations']}"
+        )
     if len(steady) < policy["steady_iterations"]:
         diagnostics.append(
             f"steady sample count {len(steady)} is below "
             f"{policy['steady_iterations']}"
+        )
+    if len(steady) > policy["maximum_steady_iterations"]:
+        diagnostics.append(
+            f"steady sample count {len(steady)} exceeds "
+            f"{policy['maximum_steady_iterations']}"
         )
     if len(sustained) < policy["sustained_window_count"]:
         diagnostics.append(
@@ -211,11 +228,45 @@ def _summarize_workload(workload: Json, result: Json, policy: Json) -> Json:
         diagnostics.append("workload output validation did not pass")
     return {
         "workload_id": workload["workload_id"],
+        "warmup": warmup_summary,
         "steady": steady_distribution,
         "sustained": sustained_distribution,
         "construction_duration_ns": result["construction_duration_ns"],
         "reliable": not diagnostics,
         "diagnostics": diagnostics,
+    }
+
+
+def _warmup_summary(samples: list[_NormalizedSample], policy: Json) -> Json:
+    window = policy["warmup_stability_window"]
+    if len(samples) < window:
+        relative_range_ppm = 2**63 - 1
+    else:
+        durations = sorted(sample.duration_ns for sample in samples[-window:])
+        midpoint = len(durations) // 2
+        median = (
+            (durations[midpoint - 1] + durations[midpoint]) // 2
+            if len(durations) % 2 == 0
+            else durations[midpoint]
+        )
+        relative_range_ppm = (
+            _round_div(
+                (durations[-1] - durations[0]) * 1_000_000,
+                median,
+            )
+            if median
+            else (0 if durations[-1] == durations[0] else 2**63 - 1)
+        )
+    return {
+        "sample_count": len(samples),
+        "stability_window": window,
+        "relative_range_ppm": relative_range_ppm,
+        "converged": (
+            len(samples) >= policy["warmup_iterations"]
+            and len(samples) >= window
+            and relative_range_ppm
+            <= policy["maximum_warmup_relative_range_ppm"]
+        ),
     }
 
 

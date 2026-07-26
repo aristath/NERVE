@@ -69,7 +69,11 @@ def validate_calibration_plan(document: Json) -> None:
         policy,
         {
             "warmup_iterations",
+            "maximum_warmup_iterations",
+            "warmup_stability_window",
+            "maximum_warmup_relative_range_ppm",
             "steady_iterations",
+            "maximum_steady_iterations",
             "minimum_sample_duration_ns",
             "sustained_window_duration_ms",
             "sustained_window_count",
@@ -78,7 +82,33 @@ def validate_calibration_plan(document: Json) -> None:
         },
         "policy",
     )
-    _positive_integer(policy["warmup_iterations"], "policy.warmup_iterations")
+    warmup_iterations = _positive_integer(
+        policy["warmup_iterations"], "policy.warmup_iterations"
+    )
+    maximum_warmup_iterations = _positive_integer(
+        policy["maximum_warmup_iterations"],
+        "policy.maximum_warmup_iterations",
+    )
+    warmup_stability_window = _positive_integer(
+        policy["warmup_stability_window"],
+        "policy.warmup_stability_window",
+    )
+    warmup_relative_range = _positive_integer(
+        policy["maximum_warmup_relative_range_ppm"],
+        "policy.maximum_warmup_relative_range_ppm",
+    )
+    if (
+        maximum_warmup_iterations < warmup_iterations
+        or maximum_warmup_iterations < warmup_stability_window
+    ):
+        raise CalibrationContractError(
+            "policy.maximum_warmup_iterations must cover the minimum and "
+            "stability window"
+        )
+    if warmup_relative_range >= 1_000_000:
+        raise CalibrationContractError(
+            "policy.maximum_warmup_relative_range_ppm must be below 1000000"
+        )
     steady_iterations = _positive_integer(
         policy["steady_iterations"],
         "policy.steady_iterations",
@@ -86,6 +116,14 @@ def validate_calibration_plan(document: Json) -> None:
     if steady_iterations < 5:
         raise CalibrationContractError(
             "policy.steady_iterations must contain at least five independent samples"
+        )
+    maximum_steady_iterations = _positive_integer(
+        policy["maximum_steady_iterations"],
+        "policy.maximum_steady_iterations",
+    )
+    if maximum_steady_iterations < steady_iterations:
+        raise CalibrationContractError(
+            "policy.maximum_steady_iterations must cover steady_iterations"
         )
     _positive_integer(
         policy["minimum_sample_duration_ns"],
@@ -463,6 +501,7 @@ def validate_calibration_summary(document: Json) -> None:
             summary,
             {
                 "workload_id",
+                "warmup",
                 "steady",
                 "sustained",
                 "construction_duration_ns",
@@ -478,6 +517,7 @@ def validate_calibration_summary(document: Json) -> None:
                 f"{path}.workload_id",
             )
         )
+        _warmup_summary(summary["warmup"], f"{path}.warmup")
         _distribution(summary["steady"], f"{path}.steady")
         if summary["sustained"] is not None:
             _distribution(summary["sustained"], f"{path}.sustained")
@@ -518,6 +558,28 @@ def validate_calibration_summary(document: Json) -> None:
         raise CalibrationContractError(
             "summary_id does not match canonical calibration summary content"
         )
+
+
+def _warmup_summary(value: Any, path: str) -> None:
+    summary = _object(value, path)
+    _fields(
+        summary,
+        {
+            "sample_count",
+            "stability_window",
+            "relative_range_ppm",
+            "converged",
+        },
+        path,
+    )
+    _positive_integer(summary["sample_count"], f"{path}.sample_count")
+    _positive_integer(summary["stability_window"], f"{path}.stability_window")
+    _nonnegative_integer(
+        summary["relative_range_ppm"],
+        f"{path}.relative_range_ppm",
+    )
+    if not isinstance(summary["converged"], bool):
+        raise CalibrationContractError(f"{path}.converged must be boolean")
 
 
 def _distribution(value: Any, path: str) -> None:

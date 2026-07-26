@@ -1,5 +1,6 @@
 mod cpu;
 mod runner;
+mod sampling;
 mod schema;
 #[cfg(feature = "vulkan")]
 mod shader_compiler;

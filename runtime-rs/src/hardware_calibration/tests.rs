@@ -875,7 +875,11 @@ fn plan(mut workloads: Vec<HardwareCalibrationWorkload>) -> HardwareCalibrationP
         },
         policy: HardwareCalibrationPolicy {
             warmup_iterations: 1,
+            maximum_warmup_iterations: 4,
+            warmup_stability_window: 1,
+            maximum_warmup_relative_range_ppm: 20_000,
             steady_iterations: 5,
+            maximum_steady_iterations: 25,
             minimum_sample_duration_ns: 1,
             sustained_window_duration_ms: 1,
             sustained_window_count: 1,
@@ -974,12 +978,28 @@ fn cpu_calibration_executes_every_declared_cpu_operation_sequentially() {
     assert_eq!(run.status, CalibrationRunStatus::Completed);
     assert_eq!(run.workloads.len(), plan.workloads.len());
     assert!(run.workloads.iter().all(|result| {
+        let warmup_count = result
+            .samples
+            .iter()
+            .filter(|sample| sample.phase == CalibrationSamplePhase::Warmup)
+            .count();
+        let steady_count = result
+            .samples
+            .iter()
+            .filter(|sample| sample.phase == CalibrationSamplePhase::Steady)
+            .count();
+        let sustained_count = result
+            .samples
+            .iter()
+            .filter(|sample| sample.phase == CalibrationSamplePhase::Sustained)
+            .count();
         result.status == CalibrationRunStatus::Completed
             && result.validation.status == CalibrationValidationStatus::Passed
-            && result.samples.len()
-                == plan.policy.warmup_iterations
-                    + plan.policy.steady_iterations
-                    + plan.policy.sustained_window_count
+            && (plan.policy.warmup_iterations..=plan.policy.maximum_warmup_iterations)
+                .contains(&warmup_count)
+            && (plan.policy.steady_iterations..=plan.policy.maximum_steady_iterations)
+                .contains(&steady_count)
+            && sustained_count == plan.policy.sustained_window_count
     }));
     run.validate().unwrap();
 }

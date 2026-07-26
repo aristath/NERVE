@@ -1,3 +1,4 @@
+use super::sampling::collect_adaptive_samples;
 use super::schema::{
     CalibrationRunStatus, CalibrationSamplePhase, CalibrationValidationResult,
     CalibrationValidationStatus, HardwareCalibrationPlan, HardwareCalibrationSample,
@@ -87,24 +88,15 @@ impl VulkanSynchronizationCalibrationExecutor {
             pci_address: self.context.pci_address().map(str::to_string),
         };
         let mut samples = Vec::new();
-        for _ in 0..plan.policy.warmup_iterations {
-            samples.push(prepared.measure(
-                CalibrationSamplePhase::Warmup,
+        collect_adaptive_samples(&mut samples, &plan.policy, |phase, sample_index| {
+            prepared.measure(
+                phase,
                 None,
                 plan.policy.minimum_sample_duration_ns,
                 cancelled,
-                samples.len(),
-            )?);
-        }
-        for _ in 0..plan.policy.steady_iterations {
-            samples.push(prepared.measure(
-                CalibrationSamplePhase::Steady,
-                None,
-                plan.policy.minimum_sample_duration_ns,
-                cancelled,
-                samples.len(),
-            )?);
-        }
+                sample_index,
+            )
+        })?;
         for window_index in 0..plan.policy.sustained_window_count {
             samples.push(
                 prepared.measure(

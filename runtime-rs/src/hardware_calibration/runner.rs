@@ -1,4 +1,5 @@
 use super::cpu::CpuCalibrationWorkload;
+use super::sampling::collect_adaptive_samples;
 use super::schema::{
     CalibrationArtifactRecord, CalibrationExecutor, CalibrationRunStatus, CalibrationSamplePhase,
     CalibrationValidationResult, CalibrationValidationStatus, HARDWARE_CALIBRATION_RUN_SCHEMA,
@@ -325,26 +326,16 @@ fn run_cpu_workload(
     let mut state = CpuCalibrationWorkload::prepare(workload)?;
     let construction_duration_ns = elapsed_ns(construction_started);
     let mut samples = Vec::new();
-    for _ in 0..plan.policy.warmup_iterations {
-        samples.push(measure_minimum_duration(
+    collect_adaptive_samples(&mut samples, &plan.policy, |phase, sample_index| {
+        measure_minimum_duration(
             &mut state,
-            CalibrationSamplePhase::Warmup,
+            phase,
             None,
             plan.policy.minimum_sample_duration_ns,
             options,
-            samples.len(),
-        )?);
-    }
-    for _ in 0..plan.policy.steady_iterations {
-        samples.push(measure_minimum_duration(
-            &mut state,
-            CalibrationSamplePhase::Steady,
-            None,
-            plan.policy.minimum_sample_duration_ns,
-            options,
-            samples.len(),
-        )?);
-    }
+            sample_index,
+        )
+    })?;
     let sustained_duration_ns = plan
         .policy
         .sustained_window_duration_ms

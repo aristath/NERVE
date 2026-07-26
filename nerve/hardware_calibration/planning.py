@@ -15,8 +15,12 @@ from .contracts import CALIBRATION_PLAN_SCHEMA, validate_calibration_plan
 
 @dataclass(frozen=True)
 class CalibrationPolicy:
-    warmup_iterations: int = 3
+    warmup_iterations: int = 11
+    maximum_warmup_iterations: int = 64
+    warmup_stability_window: int = 5
+    maximum_warmup_relative_range_ppm: int = 20_000
     steady_iterations: int = 11
+    maximum_steady_iterations: int = 101
     minimum_sample_duration_ns: int = 50_000_000
     sustained_window_duration_ms: int = 1_000
     sustained_window_count: int = 8
