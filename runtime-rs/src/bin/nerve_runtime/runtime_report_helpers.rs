@@ -101,6 +101,7 @@ fn runtime_graph_report(args: &Args) -> RuntimeGraphControls {
 fn runtime_device_bindings_report(
     args: &Args,
     logical_device_ids: &[String],
+    available_devices: &[VulkanComputeDeviceInfo],
 ) -> RuntimeDeviceBindings {
     let all_logical_devices_are_explicitly_bound = logical_device_ids
         .iter()
@@ -112,13 +113,13 @@ fn runtime_device_bindings_report(
                 .and_then(|device_id| parse_vulkan_physical_device_ref(device_id).ok().flatten())
         })
     } else {
-        runtime_report_default_vulkan_physical_device_index(args)
+        runtime_report_default_vulkan_physical_device_index(args, available_devices)
     };
     RuntimeDeviceBindings::from_vulkan_targets(
         logical_device_ids,
         &args.device_bindings,
         default_physical_device_index,
-        resolve_runtime_vulkan_physical_device_ref,
+        |target| resolve_runtime_vulkan_physical_device_ref_in(target, available_devices),
     )
 }
 

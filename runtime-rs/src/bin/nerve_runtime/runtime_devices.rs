@@ -67,6 +67,19 @@ struct RuntimeBoundVulkanDevices {
     devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
     physical_device_indices: BTreeMap<String, usize>,
     physical_device_ids: BTreeMap<String, String>,
+    available_devices: Vec<VulkanComputeDeviceInfo>,
+}
+
+fn runtime_vulkan_device_catalog(
+    args: &Args,
+) -> Result<VulkanComputeDeviceCatalog, nerve_runtime::VulkanError> {
+    if args.allowed_physical_device_ids.is_empty() {
+        VulkanComputeDeviceCatalog::discover()
+    } else {
+        VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(
+            &args.allowed_physical_device_ids,
+        )
+    }
 }
 
 fn runtime_physical_device_bindings_in(
@@ -110,7 +123,7 @@ fn runtime_bound_vulkan_devices(
     args: &Args,
     logical_device_ids: &[String],
 ) -> Result<RuntimeBoundVulkanDevices, Box<dyn Error>> {
-    let device_catalog = VulkanComputeDeviceCatalog::discover()?;
+    let device_catalog = runtime_vulkan_device_catalog(args)?;
     let available_devices = device_catalog.available_compute_devices();
     let requested_bindings =
         runtime_physical_device_bindings_in(args, logical_device_ids, available_devices)?;
@@ -150,22 +163,8 @@ fn runtime_bound_vulkan_devices(
         devices,
         physical_device_indices,
         physical_device_ids,
+        available_devices: available_devices.to_vec(),
     })
-}
-
-fn runtime_default_vulkan_physical_device_index() -> Result<usize, Box<dyn Error>> {
-    let devices = VulkanComputeDevice::available_compute_devices()?;
-    devices
-        .iter()
-        .find(|device| device.selected_by_default)
-        .or_else(|| devices.first())
-        .map(|device| device.physical_device_index)
-        .ok_or_else(|| {
-            Box::new(io::Error::new(
-                io::ErrorKind::NotFound,
-                "no Vulkan compute-capable physical devices are available",
-            )) as Box<dyn Error>
-        })
 }
 
 fn bound_devices_report(bound_devices: &RuntimeBoundVulkanDevices) -> Vec<RuntimeBoundDevice> {
@@ -190,9 +189,13 @@ fn bound_devices_report(bound_devices: &RuntimeBoundVulkanDevices) -> Vec<Runtim
         .collect::<Vec<_>>()
 }
 
-fn runtime_edge_routes_report(args: &Args, edges: &[ComponentEdgePlacement]) -> RuntimeEdgeRoutes {
+fn runtime_edge_routes_report(
+    args: &Args,
+    edges: &[ComponentEdgePlacement],
+    available_devices: &[VulkanComputeDeviceInfo],
+) -> RuntimeEdgeRoutes {
     RuntimeEdgeRoutes::from_edges(edges, |device_id| {
-        runtime_target_for_logical_device(args, device_id)
+        runtime_target_for_logical_device(args, device_id, available_devices)
     })
 }
 
@@ -248,9 +251,13 @@ fn runtime_mount_physical_device_index(
 fn runtime_target_for_logical_device(
     args: &Args,
     logical_device_id: &str,
+    available_devices: &[VulkanComputeDeviceInfo],
 ) -> RuntimeEdgeRouteTarget {
     if let Some(target) = args.device_bindings.get(logical_device_id) {
-        let physical_device_index = resolve_runtime_vulkan_physical_device_ref(target)
+        let physical_device_index = resolve_runtime_vulkan_physical_device_ref_in(
+            target,
+            available_devices,
+        )
             .ok()
             .flatten();
         return RuntimeEdgeRouteTarget {
@@ -259,7 +266,7 @@ fn runtime_target_for_logical_device(
             binding_source: "explicit".to_string(),
         };
     }
-    match resolve_runtime_vulkan_physical_device_ref(logical_device_id) {
+    match resolve_runtime_vulkan_physical_device_ref_in(logical_device_id, available_devices) {
         Ok(Some(index)) => RuntimeEdgeRouteTarget {
             target: Some(logical_device_id.to_string()),
             physical_device_index: Some(index),
@@ -272,7 +279,7 @@ fn runtime_target_for_logical_device(
         },
         Ok(None) | Err(_) => {
             let default_physical_device_index =
-                runtime_report_default_vulkan_physical_device_index(args);
+                runtime_report_default_vulkan_physical_device_index(args, available_devices);
             let target = default_physical_device_index.map(|index| format!("vulkan:{index}"));
             RuntimeEdgeRouteTarget {
                 physical_device_index: default_physical_device_index,
@@ -287,14 +294,23 @@ fn runtime_target_for_logical_device(
     }
 }
 
-fn runtime_report_default_vulkan_physical_device_index(args: &Args) -> Option<usize> {
+fn runtime_report_default_vulkan_physical_device_index(
+    args: &Args,
+    available_devices: &[VulkanComputeDeviceInfo],
+) -> Option<usize> {
     args.vulkan_device_index
         .or_else(|| {
             args.default_device_id.as_deref().and_then(|device_id| {
-                resolve_runtime_vulkan_physical_device_ref(device_id)
+                resolve_runtime_vulkan_physical_device_ref_in(device_id, available_devices)
                     .ok()
                     .flatten()
             })
         })
-        .or_else(|| runtime_default_vulkan_physical_device_index().ok())
+        .or_else(|| {
+            available_devices
+                .iter()
+                .find(|device| device.selected_by_default)
+                .or_else(|| available_devices.first())
+                .map(|device| device.physical_device_index)
+        })
 }

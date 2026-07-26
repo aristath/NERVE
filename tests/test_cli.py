@@ -28,6 +28,7 @@ def runtime_args(**overrides: object) -> Namespace:
         "place_node": [],
         "shard_component": [],
         "bind_device": [],
+        "allow_physical_device": [],
         "duplicate_after": [],
         "chain": None,
         "max_new_tokens": 4,
@@ -52,6 +53,28 @@ def runtime_args(**overrides: object) -> Namespace:
 
 
 class RuntimeCliCommandTest(unittest.TestCase):
+    def test_build_runtime_command_forwards_physical_device_allowlist(self) -> None:
+        package = Path("compiled_models/model_x/vulkan_resident_package.json")
+        first = "vulkan-uuid:00000000070000000000000000000000"
+        second = "vulkan-uuid:000000000a0000000000000000000000"
+        args = runtime_args(
+            prompt="Hello",
+            bind_device=[f"gpu0={first}", f"gpu1={second}"],
+            allow_physical_device=[first, second],
+        )
+
+        command = build_runtime_command(args, package)
+
+        self.assertEqual(2, command.count("--allow-physical-device"))
+        self.assertIn(
+            ["--allow-physical-device", first],
+            [command[index : index + 2] for index in range(len(command) - 1)],
+        )
+        self.assertIn(
+            ["--allow-physical-device", second],
+            [command[index : index + 2] for index in range(len(command) - 1)],
+        )
+
     def test_build_runtime_command_forwards_model_chat_template_variables(self) -> None:
         package = Path("compiled_models/model_x/vulkan_resident_package.json")
         args = runtime_args(

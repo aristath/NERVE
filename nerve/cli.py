@@ -136,6 +136,13 @@ def main() -> None:
         help="bind one logical runtime device to a target such as vulkan:5 or cpu0; may be repeated",
     )
     parser.add_argument(
+        "--allow-physical-device",
+        action="append",
+        default=[],
+        metavar="vulkan-uuid:UUID",
+        help="restrict runtime discovery and execution to one physical Vulkan device; may be repeated",
+    )
+    parser.add_argument(
         "--duplicate-after",
         action="append",
         default=[],
@@ -422,6 +429,7 @@ def validate_action_options(
         ("--place-node", bool(args.place_node)),
         ("--shard-component", bool(args.shard_component)),
         ("--bind-device", bool(args.bind_device)),
+        ("--allow-physical-device", bool(args.allow_physical_device)),
         ("--duplicate-after", bool(args.duplicate_after)),
         ("--chain", args.chain is not None),
         ("--context-size", args.context_size is not None),
@@ -577,6 +585,8 @@ def build_runtime_command(args: argparse.Namespace, package_manifest: Path) -> l
         runtime_args.extend(["--shard-component", raw_sharding])
     for raw_binding in args.bind_device:
         runtime_args.extend(["--bind-device", raw_binding])
+    for physical_device_id in args.allow_physical_device:
+        runtime_args.extend(["--allow-physical-device", physical_device_id])
     for raw_duplicate in args.duplicate_after:
         runtime_args.extend(["--duplicate-after", raw_duplicate])
     if args.chain is not None:

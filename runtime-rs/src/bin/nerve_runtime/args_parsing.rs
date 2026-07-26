@@ -81,6 +81,18 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
                     ));
                 }
             }
+            "--allow-physical-device" => {
+                let physical_device_id =
+                    parse_allowed_physical_device_id(&next_value(&mut raw, &arg)?)?;
+                if !parsed
+                    .allowed_physical_device_ids
+                    .insert(physical_device_id.clone())
+                {
+                    return Err(format!(
+                        "duplicate allowed physical device {physical_device_id:?}"
+                    ));
+                }
+            }
             "--duplicate-after" => {
                 let assignment = next_value(&mut raw, "--duplicate-after")?;
                 parsed
@@ -332,6 +344,27 @@ fn parse_device_binding_assignment(raw: &str) -> Result<(String, String), String
     Ok((device_id.to_string(), target.to_string()))
 }
 
+fn parse_allowed_physical_device_id(raw: &str) -> Result<String, String> {
+    let device_uuid = parse_vulkan_device_uuid_ref(raw)?.ok_or_else(|| {
+        format!(
+            "invalid allowed physical device {raw:?}; expected a canonical vulkan-uuid: reference"
+        )
+    })?;
+    let canonical = format!(
+        "vulkan-uuid:{}",
+        device_uuid
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if raw != canonical {
+        return Err(format!(
+            "invalid allowed physical device {raw:?}; expected canonical reference {canonical:?}"
+        ));
+    }
+    Ok(canonical)
+}
+
 fn validate_runtime_device_target_syntax(raw: &str) -> Result<(), String> {
     if raw.starts_with("vulkan-uuid:") {
         parse_vulkan_device_uuid_ref(raw)?;
@@ -345,20 +378,6 @@ fn validate_runtime_device_target_syntax(raw: &str) -> Result<(), String> {
         parse_cpu_runtime_device_ref(raw)?;
     }
     Ok(())
-}
-
-fn resolve_runtime_vulkan_physical_device_ref(raw: &str) -> Result<Option<usize>, String> {
-    if let Some(index) = parse_vulkan_physical_device_ref(raw)? {
-        return Ok(Some(index));
-    }
-    let device_uuid = parse_vulkan_device_uuid_ref(raw)?;
-    let cpu_ordinal = parse_cpu_runtime_device_ref(raw)?;
-    if device_uuid.is_none() && cpu_ordinal.is_none() {
-        return Ok(None);
-    }
-    let available_devices = VulkanComputeDevice::available_compute_devices()
-        .map_err(|error| format!("failed to discover Vulkan devices: {error}"))?;
-    resolve_runtime_vulkan_physical_device_ref_in(raw, &available_devices)
 }
 
 fn resolve_runtime_vulkan_physical_device_ref_in(

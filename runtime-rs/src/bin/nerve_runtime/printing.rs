@@ -354,6 +354,8 @@ Options:
   --shard-component <NODE=DEV,DEV>
                              Shard eligible internal work while preserving the logical node boundary.
   --bind-device <DEV=TARGET> Bind a logical device to a discovered Vulkan device ID.
+  --allow-physical-device <vulkan-uuid:UUID>
+                             Restrict discovery and execution to this physical device; may be repeated.
   --chain <ITEM[,ITEM...]>    Runtime source chain. ITEM is SOURCE or INSTANCE=SOURCE.
   --duplicate-after <AFTER=NEW>
                              Duplicate runtime node instance AFTER with id NEW.

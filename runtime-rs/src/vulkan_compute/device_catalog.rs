@@ -8,6 +8,23 @@ impl VulkanResidentKernelSequence {
 
 impl VulkanComputeDeviceCatalog {
     pub fn discover() -> Result<Self, VulkanError> {
+        Self::discover_with_allowed_physical_device_ids(None)
+    }
+
+    pub fn discover_allowed_physical_device_ids(
+        allowed_physical_device_ids: &BTreeSet<String>,
+    ) -> Result<Self, VulkanError> {
+        if allowed_physical_device_ids.is_empty() {
+            return Err(VulkanError(
+                "the Vulkan physical-device allowlist must not be empty".to_string(),
+            ));
+        }
+        Self::discover_with_allowed_physical_device_ids(Some(allowed_physical_device_ids))
+    }
+
+    fn discover_with_allowed_physical_device_ids(
+        allowed_physical_device_ids: Option<&BTreeSet<String>>,
+    ) -> Result<Self, VulkanError> {
         unsafe {
             let entry = Entry::load()
                 .map_err(|error| VulkanError(format!("failed to load Vulkan: {error}")))?;
@@ -16,19 +33,72 @@ impl VulkanComputeDeviceCatalog {
                 instance.destroy_instance(None);
                 VulkanError(format!("failed to enumerate Vulkan devices: {error:?}"))
             })?;
-            let selected_index = select_compute_device_index(&instance, &physical_devices);
-            let available_devices = physical_devices
+
+            let discovered_physical_device_ids = physical_devices
                 .iter()
                 .enumerate()
-                .filter_map(|(physical_device_index, physical_device)| {
-                    inspect_compute_device(
-                        &instance,
+                .map(|(physical_device_index, physical_device)| {
+                    (
                         physical_device_index,
-                        *physical_device,
-                        Some(physical_device_index) == selected_index,
+                        format!(
+                            "vulkan-uuid:{}",
+                            format_device_uuid(&physical_device_uuid(
+                                &instance,
+                                *physical_device,
+                            ))
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
+            let allowed_physical_device_indices = match allowed_physical_device_indices(
+                &discovered_physical_device_ids,
+                allowed_physical_device_ids,
+            ) {
+                Ok(indices) => indices,
+                Err(error) => {
+                    instance.destroy_instance(None);
+                    return Err(error);
+                }
+            };
+
+            let allowed_physical_devices = allowed_physical_device_indices
+                .iter()
+                .map(|physical_device_index| physical_devices[*physical_device_index])
+                .collect::<Vec<_>>();
+            let selected_allowed_index =
+                select_compute_device_index(&instance, &allowed_physical_devices);
+            let selected_physical_device_index = selected_allowed_index
+                .map(|allowed_index| allowed_physical_device_indices[allowed_index]);
+            let available_devices = allowed_physical_device_indices
+                .iter()
+                .filter_map(|physical_device_index| {
+                    inspect_compute_device(
+                        &instance,
+                        *physical_device_index,
+                        physical_devices[*physical_device_index],
+                        Some(*physical_device_index) == selected_physical_device_index,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            if let Some(allowed) = allowed_physical_device_ids {
+                let compute_capable = available_devices
+                    .iter()
+                    .map(|device| device.physical_device_id.clone())
+                    .collect::<BTreeSet<_>>();
+                let unavailable = allowed
+                    .difference(&compute_capable)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !unavailable.is_empty() {
+                    instance.destroy_instance(None);
+                    return Err(VulkanError(format!(
+                        "allowed Vulkan physical devices are not compute-capable: {}",
+                        unavailable.join(", ")
+                    )));
+                }
+            }
+
             Ok(Self {
                 context: Arc::new(VulkanInstanceContext {
                     _entry: entry,
@@ -158,20 +228,32 @@ impl VulkanComputeDeviceCatalog {
     ) -> Result<VulkanComputeDevice, VulkanError> {
         unsafe {
             let instance = &self.context.instance;
+            let permitted_device = if let Some(device_uuid) = requested_device_uuid {
+                self.available_devices
+                    .iter()
+                    .find(|device| device.device_uuid == device_uuid)
+            } else if let Some(physical_device_index) = requested_physical_device_index {
+                self.available_devices
+                    .iter()
+                    .find(|device| device.physical_device_index == physical_device_index)
+            } else {
+                self.available_devices
+                    .iter()
+                    .find(|device| device.selected_by_default)
+                    .or_else(|| self.available_devices.first())
+            }
+            .ok_or_else(|| {
+                VulkanError(
+                    "the requested Vulkan device is unavailable or outside this catalog's physical-device allowlist"
+                        .to_string(),
+                )
+            })?;
             let (physical_device, queue_family_index, device_name) =
-                if let Some(device_uuid) = requested_device_uuid {
-                    select_compute_device_by_uuid(instance, &self.physical_devices, device_uuid)?
-                } else if let Some(physical_device_index) = requested_physical_device_index {
-                    select_compute_device_by_index(
-                        instance,
-                        &self.physical_devices,
-                        physical_device_index,
-                    )?
-                } else {
-                    select_compute_device(instance, &self.physical_devices).ok_or_else(|| {
-                        VulkanError("no Vulkan device with a compute queue was found".to_string())
-                    })?
-                };
+                select_compute_device_by_index(
+                    instance,
+                    &self.physical_devices,
+                    permitted_device.physical_device_index,
+                )?;
 
             let queue_priorities = [1.0_f32];
             let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -532,4 +614,35 @@ impl VulkanComputeDeviceCatalog {
             })
         }
     }
+}
+
+fn allowed_physical_device_indices(
+    discovered_physical_device_ids: &[(usize, String)],
+    allowed_physical_device_ids: Option<&BTreeSet<String>>,
+) -> Result<Vec<usize>, VulkanError> {
+    let Some(allowed) = allowed_physical_device_ids else {
+        return Ok(discovered_physical_device_ids
+            .iter()
+            .map(|(physical_device_index, _)| *physical_device_index)
+            .collect());
+    };
+    let discovered = discovered_physical_device_ids
+        .iter()
+        .map(|(_, physical_device_id)| physical_device_id.clone())
+        .collect::<BTreeSet<_>>();
+    let missing = allowed.difference(&discovered).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(VulkanError(format!(
+            "allowed Vulkan physical devices are not present: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(discovered_physical_device_ids
+        .iter()
+        .filter_map(|(physical_device_index, physical_device_id)| {
+            allowed
+                .contains(physical_device_id)
+                .then_some(*physical_device_index)
+        })
+        .collect())
 }

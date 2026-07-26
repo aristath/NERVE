@@ -28,8 +28,9 @@ use nerve_runtime::{
     VulkanResidentPlacedPrefixStateCacheStats,
     VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
-    VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats, discover_runtime_devices,
+    VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats,
     discover_cpu_hardware_profile, reset_vulkan_resident_execution_counters,
+    runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters,
 };
 use minijinja::{Environment, Error as TemplateError, ErrorKind as TemplateErrorKind};
@@ -50,6 +51,7 @@ struct Args {
     node_devices: BTreeMap<String, String>,
     component_shard_devices: BTreeMap<String, Vec<String>>,
     device_bindings: BTreeMap<String, String>,
+    allowed_physical_device_ids: BTreeSet<String>,
     duplicate_after: Vec<(String, String)>,
     source_chain: Option<Vec<(String, String)>>,
     chat_template_variables: BTreeMap<String, serde_json::Value>,
@@ -98,6 +100,7 @@ impl Default for Args {
             node_devices: BTreeMap::new(),
             component_shard_devices: BTreeMap::new(),
             device_bindings: BTreeMap::new(),
+            allowed_physical_device_ids: BTreeSet::new(),
             duplicate_after: Vec::new(),
             source_chain: None,
             chat_template_variables: BTreeMap::new(),

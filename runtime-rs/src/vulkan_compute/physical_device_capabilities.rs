@@ -17,22 +17,6 @@ impl Drop for VulkanComputeDevice {
     }
 }
 
-unsafe fn select_compute_device(
-    instance: &ash::Instance,
-    physical_devices: &[vk::PhysicalDevice],
-) -> Option<(vk::PhysicalDevice, u32, String)> {
-    let selected_index = unsafe { select_compute_device_index(instance, physical_devices)? };
-    let physical_device = physical_devices[selected_index];
-    let properties = unsafe { instance.get_physical_device_properties(physical_device) };
-    let device_name = unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }
-        .to_string_lossy()
-        .into_owned();
-    let queue_family_index = unsafe { compute_queue_family_indices(instance, physical_device) }
-        .into_iter()
-        .next()?;
-    Some((physical_device, queue_family_index, device_name))
-}
-
 unsafe fn select_compute_device_by_index(
     instance: &ash::Instance,
     physical_devices: &[vk::PhysicalDevice],
@@ -56,36 +40,6 @@ unsafe fn select_compute_device_by_index(
             ))
         })?;
     Ok((physical_device, queue_family_index, device_name))
-}
-
-unsafe fn select_compute_device_by_uuid(
-    instance: &ash::Instance,
-    physical_devices: &[vk::PhysicalDevice],
-    requested_device_uuid: [u8; vk::UUID_SIZE],
-) -> Result<(vk::PhysicalDevice, u32, String), VulkanError> {
-    for physical_device in physical_devices {
-        if unsafe { physical_device_uuid(instance, *physical_device) } == requested_device_uuid {
-            let properties = unsafe { instance.get_physical_device_properties(*physical_device) };
-            let device_name = unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
-            let queue_family_index =
-                unsafe { compute_queue_family_indices(instance, *physical_device) }
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        VulkanError(format!(
-                            "Vulkan device UUID {} ({device_name}) has no compute queue",
-                            format_device_uuid(&requested_device_uuid)
-                        ))
-                    })?;
-            return Ok((*physical_device, queue_family_index, device_name));
-        }
-    }
-    Err(VulkanError(format!(
-        "Vulkan device UUID {} was not found",
-        format_device_uuid(&requested_device_uuid)
-    )))
 }
 
 unsafe fn physical_device_uuid(

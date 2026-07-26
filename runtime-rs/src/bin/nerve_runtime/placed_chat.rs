@@ -415,7 +415,11 @@ fn execute_placed_prompt_run(
         bound_devices: bound_devices_report(&bound_devices),
         edge_routes: bound_edge_routes_report(&bound_devices, &placement.edges),
         runtime_graph: runtime_graph_report(args),
-        device_bindings: runtime_device_bindings_report(args, &stream_snapshot.device_ids),
+        device_bindings: runtime_device_bindings_report(
+            args,
+            &stream_snapshot.device_ids,
+            &bound_devices.available_devices,
+        ),
         hosted_component_count: stream_snapshot.hosted_component_count,
         context_window_activations: stream_snapshot.context_window_activations,
         scheduled_token_activations: *scheduled_token_activations,

@@ -8,9 +8,11 @@ fn inspect_runtime_topology(
         .default_device_id
         .as_deref()
         .unwrap_or(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID);
+    let compute_devices = inspect_compute_devices(args)?;
     let available_devices = inspect_available_devices(
         default_device_id,
-        runtime_report_default_vulkan_physical_device_index(args),
+        runtime_report_default_vulkan_physical_device_index(args, &compute_devices),
+        &compute_devices,
     );
     let source_graph = manifest.resolved_source_graph(manifest_dir.to_path_buf())?;
     let runtime_graph = manifest.runtime_graph_from_controls(
@@ -22,8 +24,10 @@ fn inspect_runtime_topology(
     let effective_graph = source_graph.instantiate_runtime_graph(&runtime_graph)?;
     let placement = effective_graph.placement_plan(&runtime_graph.placement_spec())?;
     let placement_device_ids = placement_device_ids(&placement.components);
-    let runtime_routes = runtime_edge_routes_report(args, &placement.edges);
-    let device_bindings = runtime_device_bindings_report(args, &placement_device_ids);
+    let runtime_routes =
+        runtime_edge_routes_report(args, &placement.edges, &compute_devices);
+    let device_bindings =
+        runtime_device_bindings_report(args, &placement_device_ids, &compute_devices);
     let source_components = source_components_report(&manifest);
     let payload = RuntimeTopologyReport {
         ok: true,
@@ -98,9 +102,11 @@ fn inspect_package(
         .default_device_id
         .as_deref()
         .unwrap_or(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID);
+    let compute_devices = inspect_compute_devices(args)?;
     let available_devices = inspect_available_devices(
         default_device_id,
-        runtime_report_default_vulkan_physical_device_index(args),
+        runtime_report_default_vulkan_physical_device_index(args, &compute_devices),
+        &compute_devices,
     );
     let source_components = source_components_report(&manifest);
     let source_component_count = source_components.len();
@@ -114,7 +120,7 @@ fn inspect_package(
         tokenizer: serde_json::to_value(&manifest.tokenizer)?,
         compiled_topology: manifest.circuit_graph.topology.clone(),
         runtime_graph: runtime_graph_report(args),
-        device_bindings: runtime_device_bindings_report(args, &[]),
+        device_bindings: runtime_device_bindings_report(args, &[], &compute_devices),
         max_context_activations: manifest.max_context_activations,
         source_component_count,
         source_components,
@@ -197,12 +203,23 @@ fn source_components_report(manifest: &VulkanResidentModelPackageManifest) -> Ve
 fn inspect_available_devices(
     default_device_id: &str,
     selected_vulkan_device_index: Option<usize>,
+    compute_devices: &[VulkanComputeDeviceInfo],
 ) -> Vec<RuntimeAvailableDevice> {
-    discover_runtime_devices(default_device_id, selected_vulkan_device_index)
+    runtime_devices_from_compute_devices(
+        default_device_id,
+        selected_vulkan_device_index,
+        compute_devices,
+    )
+}
+
+fn inspect_compute_devices(args: &Args) -> Result<Vec<VulkanComputeDeviceInfo>, Box<dyn Error>> {
+    Ok(runtime_vulkan_device_catalog(args)?
+        .available_compute_devices()
+        .to_vec())
 }
 
 fn inspect_device_capabilities(args: &Args) -> Result<(), Box<dyn Error>> {
-    let catalog = VulkanComputeDeviceCatalog::discover()?;
+    let catalog = runtime_vulkan_device_catalog(args)?;
     let mut profiles = catalog.available_hardware_profiles()?;
     profiles.push(discover_cpu_hardware_profile()?);
     let inventory = HardwareProcessInventory::new(profiles)?;
@@ -251,6 +268,7 @@ fn inspect_graph(
     let effective_graph = source_graph.instantiate_runtime_graph(&runtime_graph)?;
     let placement = effective_graph.placement_plan(&runtime_graph.placement_spec())?;
     let placement_device_ids = placement_device_ids(&placement.components);
+    let compute_devices = inspect_compute_devices(args)?;
     let instance_count = runtime_graph.instances.len();
     let edge_count = placement.edges.len();
     let payload = RuntimeGraphInspectionReport {
@@ -261,7 +279,11 @@ fn inspect_graph(
         compiled_source_component_count: source_graph.circuits.len(),
         runtime_graph_controls: runtime_graph_report(args),
         runtime_graph: runtime_graph,
-        device_bindings: runtime_device_bindings_report(args, &placement_device_ids),
+        device_bindings: runtime_device_bindings_report(
+            args,
+            &placement_device_ids,
+            &compute_devices,
+        ),
         effective_component_count: instance_count,
         effective_edge_count: edge_count,
         placement: RuntimeGraphPlacementReport {
@@ -269,7 +291,11 @@ fn inspect_graph(
             topology: placement.topology,
             local_edge_count: placement.local_edge_count,
             cross_device_edge_count: placement.cross_device_edge_count,
-            runtime_routes: runtime_edge_routes_report(args, &placement.edges),
+            runtime_routes: runtime_edge_routes_report(
+                args,
+                &placement.edges,
+                &compute_devices,
+            ),
             components: placement.components,
             edges: placement.edges,
         },
@@ -380,7 +406,11 @@ fn inspect_placement(
         package_manifest: package_manifest.to_path_buf(),
         context_window_activations: capacity,
         runtime_graph: runtime_graph_report(args),
-        device_bindings: runtime_device_bindings_report(args, &device_ids),
+        device_bindings: runtime_device_bindings_report(
+            args,
+            &device_ids,
+            &bound_devices.available_devices,
+        ),
         bound_devices: bound_devices_report(&bound_devices),
         edge_routes: bound_edge_routes_report(&bound_devices, &placement.edges),
         device_count: device_ids.len(),

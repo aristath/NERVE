@@ -1665,3 +1665,33 @@ fn synthetic_vulkan_hardware_profile_covers_exposed_and_unavailable_processes() 
     assert_eq!(profile.profile_id, rebuilt.profile_id);
     assert_eq!(profile.capability_class, rebuilt.capability_class);
 }
+#[test]
+fn physical_device_allowlist_preserves_real_indices_and_excludes_other_devices() {
+    let first = "vulkan-uuid:00000000070000000000000000000000".to_string();
+    let second = "vulkan-uuid:000000000a0000000000000000000000".to_string();
+    let forbidden = "vulkan-uuid:ffffffffffffffffffffffffffffffff".to_string();
+    let discovered = vec![(2, first.clone()), (5, forbidden), (9, second.clone())];
+
+    assert_eq!(
+        allowed_physical_device_indices(
+            &discovered,
+            Some(&BTreeSet::from([first.clone(), second.clone()])),
+        )
+        .unwrap(),
+        vec![2, 9]
+    );
+    assert_eq!(
+        allowed_physical_device_indices(&discovered, None).unwrap(),
+        vec![2, 5, 9]
+    );
+
+    let missing = allowed_physical_device_indices(
+        &discovered,
+        Some(&BTreeSet::from([
+            first,
+            "vulkan-uuid:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+        ])),
+    )
+    .unwrap_err();
+    assert!(missing.0.contains("are not present"));
+}

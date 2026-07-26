@@ -19,9 +19,10 @@ mod tests {
         Args, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
         assistant_content_token_ids, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
-        parse_args_from, parse_chat_template_variable, parse_device_binding_assignment,
+        parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
+        parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
-        resolve_runtime_vulkan_physical_device_ref, runtime_device_bindings_report,
+        resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
         runtime_physical_device_bindings_in,
     };
 
@@ -108,6 +109,54 @@ mod tests {
         assert!(args.inspect_devices);
         assert!(args.json);
         assert!(args.package_manifest.is_none());
+    }
+
+    #[test]
+    fn physical_device_allowlist_accepts_only_unique_canonical_vulkan_uuids() {
+        let first = "vulkan-uuid:00000000070000000000000000000000";
+        let second = "vulkan-uuid:000000000a0000000000000000000000";
+        let args = parse_args_from(
+            [
+                "--allow-physical-device",
+                first,
+                "--allow-physical-device",
+                second,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.allowed_physical_device_ids,
+            BTreeSet::from([first.to_string(), second.to_string()])
+        );
+        assert_eq!(parse_allowed_physical_device_id(first).unwrap(), first);
+
+        let duplicate = parse_args_from(
+            [
+                "--allow-physical-device",
+                first,
+                "--allow-physical-device",
+                first,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(duplicate.contains("duplicate allowed physical device"));
+
+        for invalid in [
+            "vulkan:0",
+            "vulkan-uuid:000000000A0000000000000000000000",
+            "vulkan-uuid:abcd",
+            "cpu0",
+        ] {
+            assert!(
+                parse_allowed_physical_device_id(invalid).is_err(),
+                "accepted invalid allowlist target {invalid:?}"
+            );
+        }
     }
 
     impl VulkanResidentTokenTextCodec for CharacterCodec {
@@ -214,7 +263,7 @@ mod tests {
             ("remote".to_string(), "lan:worker-a".to_string())
         );
         assert_eq!(
-            resolve_runtime_vulkan_physical_device_ref("vulkan:7").unwrap(),
+            resolve_runtime_vulkan_physical_device_ref_in("vulkan:7", &[]).unwrap(),
             Some(7)
         );
 
@@ -301,7 +350,40 @@ mod tests {
         args.device_bindings
             .insert("device_b".to_string(), "vulkan:3".to_string());
 
-        let report = runtime_device_bindings_report(&args, &logical_device_ids);
+        let available_devices = vec![
+            VulkanComputeDeviceInfo {
+                physical_device_index: 2,
+                physical_device_id: "vulkan-uuid:00000000000000000000000000000002".to_string(),
+                device_uuid: [2; 16],
+                device_name: "GPU 2".to_string(),
+                pci_address: None,
+                device_type: "discrete_gpu".to_string(),
+                vendor_id: 1,
+                device_id: 2,
+                api_version: 1,
+                driver_version: 1,
+                compute_queue_family_indices: vec![0],
+                memory_heaps: Vec::new(),
+                selected_by_default: true,
+            },
+            VulkanComputeDeviceInfo {
+                physical_device_index: 3,
+                physical_device_id: "vulkan-uuid:00000000000000000000000000000003".to_string(),
+                device_uuid: [3; 16],
+                device_name: "GPU 3".to_string(),
+                pci_address: None,
+                device_type: "discrete_gpu".to_string(),
+                vendor_id: 1,
+                device_id: 3,
+                api_version: 1,
+                driver_version: 1,
+                compute_queue_family_indices: vec![0],
+                memory_heaps: Vec::new(),
+                selected_by_default: false,
+            },
+        ];
+        let report =
+            runtime_device_bindings_report(&args, &logical_device_ids, &available_devices);
 
         assert_eq!(report.process_vulkan_device_index, None);
         assert_eq!(report.default_vulkan_device_index, None);
