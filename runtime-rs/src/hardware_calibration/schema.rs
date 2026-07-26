@@ -30,12 +30,13 @@ pub struct CalibrationImplementation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareCalibrationPolicy {
-    pub warmup_iterations: usize,
-    pub maximum_warmup_iterations: usize,
-    pub warmup_stability_window: usize,
-    pub maximum_warmup_relative_range_ppm: u64,
-    pub steady_iterations: usize,
-    pub maximum_steady_iterations: usize,
+    pub minimum_warmup_samples: usize,
+    pub maximum_warmup_samples: usize,
+    pub warmup_stability_window_samples: usize,
+    pub minimum_warmup_duration_ns: u64,
+    pub maximum_warmup_relative_shift_ppm: u64,
+    pub minimum_steady_samples: usize,
+    pub maximum_steady_samples: usize,
     pub minimum_sample_duration_ns: u64,
     pub sustained_window_duration_ms: u64,
     pub sustained_window_count: usize,
@@ -274,14 +275,15 @@ impl CalibrationImplementation {
 
 impl HardwareCalibrationPolicy {
     fn validate(&self) -> Result<(), String> {
-        if self.warmup_iterations == 0
-            || self.maximum_warmup_iterations < self.warmup_iterations
-            || self.maximum_warmup_iterations < self.warmup_stability_window
-            || self.warmup_stability_window == 0
-            || self.maximum_warmup_relative_range_ppm == 0
-            || self.maximum_warmup_relative_range_ppm >= 1_000_000
-            || self.steady_iterations < 5
-            || self.maximum_steady_iterations < self.steady_iterations
+        if self.minimum_warmup_samples == 0
+            || self.maximum_warmup_samples < self.minimum_warmup_samples
+            || self.maximum_warmup_samples < self.warmup_stability_window_samples.saturating_mul(2)
+            || self.warmup_stability_window_samples == 0
+            || self.minimum_warmup_duration_ns == 0
+            || self.maximum_warmup_relative_shift_ppm == 0
+            || self.maximum_warmup_relative_shift_ppm >= 1_000_000
+            || self.minimum_steady_samples < 5
+            || self.maximum_steady_samples < self.minimum_steady_samples
             || self.minimum_sample_duration_ns == 0
             || self.sustained_window_duration_ms == 0
             || self.sustained_window_count == 0

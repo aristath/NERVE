@@ -211,11 +211,12 @@ def hardware_profile(*, include_unknown: bool = False) -> dict[str, object]:
 
 def calibration_policy() -> CalibrationPolicy:
     return CalibrationPolicy(
-        warmup_iterations=1,
-        maximum_warmup_iterations=1,
-        warmup_stability_window=1,
-        steady_iterations=5,
-        maximum_steady_iterations=5,
+        minimum_warmup_samples=2,
+        maximum_warmup_samples=2,
+        warmup_stability_window_samples=1,
+        minimum_warmup_duration_ns=1,
+        minimum_steady_samples=5,
+        maximum_steady_samples=5,
         minimum_sample_duration_ns=1,
         sustained_window_duration_ms=1,
         sustained_window_count=2,
@@ -245,12 +246,22 @@ def completed_run(plan: dict[str, object]) -> dict[str, object]:
                 "window_index": None,
                 "thermal_millidegrees_celsius": None,
                 "valid": True,
-            }
+            },
+            {
+                "sample_index": 1,
+                "phase": "warmup",
+                "duration_ns": base + 50_000,
+                "device_duration_ns": None,
+                "iterations": 1,
+                "window_index": None,
+                "thermal_millidegrees_celsius": None,
+                "valid": True,
+            },
         ]
-        for index, offset in enumerate((-1000, -500, 0, 500, 1000), start=1):
+        for offset in (-1000, -500, 0, 500, 1000):
             samples.append(
                 {
-                    "sample_index": index,
+                    "sample_index": len(samples),
                     "phase": "steady",
                     "duration_ns": base + offset,
                     "device_duration_ns": base + offset - 100,
@@ -263,7 +274,7 @@ def completed_run(plan: dict[str, object]) -> dict[str, object]:
         samples.extend(
             [
                 {
-                    "sample_index": 6,
+                    "sample_index": len(samples),
                     "phase": "sustained",
                     "duration_ns": base,
                     "device_duration_ns": base - 100,
@@ -273,7 +284,7 @@ def completed_run(plan: dict[str, object]) -> dict[str, object]:
                     "valid": True,
                 },
                 {
-                    "sample_index": 7,
+                    "sample_index": len(samples) + 1,
                     "phase": "sustained",
                     "duration_ns": base + 10_000,
                     "device_duration_ns": base + 9_900,
@@ -479,12 +490,13 @@ def test_unreliable_measurements_cannot_become_a_calibrated_profile() -> None:
 def test_unconverged_warmup_cannot_become_a_calibrated_profile() -> None:
     profile = hardware_profile()
     policy = CalibrationPolicy(
-        warmup_iterations=3,
-        maximum_warmup_iterations=3,
-        warmup_stability_window=3,
-        maximum_warmup_relative_range_ppm=20_000,
-        steady_iterations=5,
-        maximum_steady_iterations=5,
+        minimum_warmup_samples=3,
+        maximum_warmup_samples=6,
+        warmup_stability_window_samples=3,
+        minimum_warmup_duration_ns=1,
+        maximum_warmup_relative_shift_ppm=20_000,
+        minimum_steady_samples=5,
+        maximum_steady_samples=5,
         minimum_sample_duration_ns=1,
         sustained_window_duration_ms=1,
         sustained_window_count=2,
@@ -503,7 +515,7 @@ def test_unconverged_warmup_cannot_become_a_calibrated_profile() -> None:
         )
         warmup = [
             {**template, "duration_ns": duration}
-            for duration in (1_000_000, 800_000, 600_000)
+            for duration in (1_000_000, 950_000, 900_000, 750_000, 700_000, 650_000)
         ]
         remaining = [
             sample for sample in workload["samples"] if sample["phase"] != "warmup"
@@ -516,16 +528,43 @@ def test_unconverged_warmup_cannot_become_a_calibrated_profile() -> None:
         summarize_calibration_run(profile, plan, run)
 
 
+def test_warmup_below_physical_duration_cannot_become_a_calibrated_profile() -> None:
+    profile = hardware_profile()
+    policy = CalibrationPolicy(
+        minimum_warmup_samples=2,
+        maximum_warmup_samples=2,
+        warmup_stability_window_samples=1,
+        minimum_warmup_duration_ns=3_000_000,
+        maximum_warmup_relative_shift_ppm=20_000,
+        minimum_steady_samples=5,
+        maximum_steady_samples=5,
+        minimum_sample_duration_ns=1,
+        sustained_window_duration_ms=1,
+        sustained_window_count=2,
+        confidence_level_ppm=950_000,
+        maximum_relative_ci_width_ppm=200_000,
+    )
+    plan = build_calibration_plan(
+        profile,
+        implementation_fingerprint=FINGERPRINT,
+        policy=policy,
+    )
+
+    with pytest.raises(CalibrationContractError, match="warmup did not converge"):
+        summarize_calibration_run(profile, plan, completed_run(plan))
+
+
 def test_requested_confidence_level_changes_the_statistical_interval() -> None:
     profile = hardware_profile()
     intervals: list[int] = []
     for confidence in (900_000, 990_000):
         policy = CalibrationPolicy(
-            warmup_iterations=1,
-            maximum_warmup_iterations=1,
-            warmup_stability_window=1,
-            steady_iterations=5,
-            maximum_steady_iterations=5,
+            minimum_warmup_samples=2,
+            maximum_warmup_samples=2,
+            warmup_stability_window_samples=1,
+            minimum_warmup_duration_ns=1,
+            minimum_steady_samples=5,
+            maximum_steady_samples=5,
             minimum_sample_duration_ns=1,
             sustained_window_duration_ms=1,
             sustained_window_count=2,

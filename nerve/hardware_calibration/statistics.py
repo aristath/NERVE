@@ -178,26 +178,35 @@ def _summarize_workload(workload: Json, result: Json, policy: Json) -> Json:
     warmup = _normalized_samples(workload, result, phase="warmup")
     steady = _normalized_samples(workload, result, phase="steady")
     sustained = _normalized_samples(workload, result, phase="sustained")
-    warmup_summary = _warmup_summary(warmup, policy)
+    warmup_elapsed_duration_ns = sum(
+        sample["duration_ns"]
+        for sample in result["samples"]
+        if sample["phase"] == "warmup" and sample["valid"]
+    )
+    warmup_summary = _warmup_summary(
+        warmup,
+        warmup_elapsed_duration_ns,
+        policy,
+    )
     if not warmup_summary["converged"]:
         diagnostics.append(
-            "warmup did not converge: final stability-window range is "
-            f"{warmup_summary['relative_range_ppm']} ppm"
+            "warmup did not converge: adjacent stability-window shift is "
+            f"{warmup_summary['relative_shift_ppm']} ppm"
         )
-    if len(warmup) > policy["maximum_warmup_iterations"]:
+    if len(warmup) > policy["maximum_warmup_samples"]:
         diagnostics.append(
             f"warmup sample count {len(warmup)} exceeds "
-            f"{policy['maximum_warmup_iterations']}"
+            f"{policy['maximum_warmup_samples']}"
         )
-    if len(steady) < policy["steady_iterations"]:
+    if len(steady) < policy["minimum_steady_samples"]:
         diagnostics.append(
             f"steady sample count {len(steady)} is below "
-            f"{policy['steady_iterations']}"
+            f"{policy['minimum_steady_samples']}"
         )
-    if len(steady) > policy["maximum_steady_iterations"]:
+    if len(steady) > policy["maximum_steady_samples"]:
         diagnostics.append(
             f"steady sample count {len(steady)} exceeds "
-            f"{policy['maximum_steady_iterations']}"
+            f"{policy['maximum_steady_samples']}"
         )
     if len(sustained) < policy["sustained_window_count"]:
         diagnostics.append(
@@ -237,37 +246,52 @@ def _summarize_workload(workload: Json, result: Json, policy: Json) -> Json:
     }
 
 
-def _warmup_summary(samples: list[_NormalizedSample], policy: Json) -> Json:
-    window = policy["warmup_stability_window"]
-    if len(samples) < window:
-        relative_range_ppm = 2**63 - 1
+def _warmup_summary(
+    samples: list[_NormalizedSample],
+    elapsed_duration_ns: int,
+    policy: Json,
+) -> Json:
+    window = policy["warmup_stability_window_samples"]
+    if len(samples) < 2 * window:
+        relative_shift_ppm = 2**63 - 1
     else:
-        durations = sorted(sample.duration_ns for sample in samples[-window:])
-        midpoint = len(durations) // 2
-        median = (
-            (durations[midpoint - 1] + durations[midpoint]) // 2
-            if len(durations) % 2 == 0
-            else durations[midpoint]
+        previous_median = _integer_median(
+            sample.duration_ns for sample in samples[-2 * window : -window]
         )
-        relative_range_ppm = (
+        current_median = _integer_median(
+            sample.duration_ns for sample in samples[-window:]
+        )
+        relative_shift_ppm = (
             _round_div(
-                (durations[-1] - durations[0]) * 1_000_000,
-                median,
+                abs(current_median - previous_median) * 1_000_000,
+                previous_median,
             )
-            if median
-            else (0 if durations[-1] == durations[0] else 2**63 - 1)
+            if previous_median
+            else (0 if current_median == 0 else 2**63 - 1)
         )
     return {
         "sample_count": len(samples),
         "stability_window": window,
-        "relative_range_ppm": relative_range_ppm,
+        "elapsed_duration_ns": elapsed_duration_ns,
+        "relative_shift_ppm": relative_shift_ppm,
         "converged": (
-            len(samples) >= policy["warmup_iterations"]
-            and len(samples) >= window
-            and relative_range_ppm
-            <= policy["maximum_warmup_relative_range_ppm"]
+            len(samples) >= policy["minimum_warmup_samples"]
+            and elapsed_duration_ns >= policy["minimum_warmup_duration_ns"]
+            and len(samples) >= 2 * window
+            and relative_shift_ppm
+            <= policy["maximum_warmup_relative_shift_ppm"]
         ),
     }
+
+
+def _integer_median(values: Iterable[int]) -> int:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    return (
+        (ordered[midpoint - 1] + ordered[midpoint]) // 2
+        if len(ordered) % 2 == 0
+        else ordered[midpoint]
+    )
 
 
 def _normalized_samples(

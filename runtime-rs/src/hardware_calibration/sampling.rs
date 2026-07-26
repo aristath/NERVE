@@ -28,7 +28,7 @@ pub fn warmup_complete(
     policy: &HardwareCalibrationPolicy,
 ) -> bool {
     let durations = normalized_durations(samples, CalibrationSamplePhase::Warmup);
-    if durations.len() >= policy.maximum_warmup_iterations {
+    if durations.len() >= policy.maximum_warmup_samples {
         return true;
     }
     warmup_converged(samples, policy)
@@ -39,10 +39,11 @@ pub fn warmup_converged(
     policy: &HardwareCalibrationPolicy,
 ) -> bool {
     let durations = normalized_durations(samples, CalibrationSamplePhase::Warmup);
-    durations.len() >= policy.warmup_iterations
-        && durations.len() >= policy.warmup_stability_window
-        && warmup_relative_range_ppm(&durations, policy.warmup_stability_window)
-            <= policy.maximum_warmup_relative_range_ppm
+    durations.len() >= policy.minimum_warmup_samples
+        && warmup_elapsed_duration_ns(samples) >= policy.minimum_warmup_duration_ns
+        && durations.len() >= policy.warmup_stability_window_samples.saturating_mul(2)
+        && warmup_relative_shift_ppm(&durations, policy.warmup_stability_window_samples)
+            <= policy.maximum_warmup_relative_shift_ppm
 }
 
 pub fn steady_complete(
@@ -50,14 +51,23 @@ pub fn steady_complete(
     policy: &HardwareCalibrationPolicy,
 ) -> bool {
     let durations = normalized_durations(samples, CalibrationSamplePhase::Steady);
-    if durations.len() < policy.steady_iterations {
+    if durations.len() < policy.minimum_steady_samples {
         return false;
     }
-    if durations.len() >= policy.maximum_steady_iterations {
+    if durations.len() >= policy.maximum_steady_samples {
         return true;
     }
     relative_ci_width_ppm(&durations, policy.confidence_level_ppm)
         <= policy.maximum_relative_ci_width_ppm.saturating_mul(99) / 100
+}
+
+fn warmup_elapsed_duration_ns(samples: &[HardwareCalibrationSample]) -> u64 {
+    samples
+        .iter()
+        .filter(|sample| sample.phase == CalibrationSamplePhase::Warmup && sample.valid)
+        .fold(0_u64, |total, sample| {
+            total.saturating_add(sample.duration_ns)
+        })
 }
 
 fn normalized_durations(
@@ -78,27 +88,32 @@ fn normalized_durations(
         .collect()
 }
 
-fn warmup_relative_range_ppm(durations: &[u64], window: usize) -> u64 {
-    if durations.len() < window || window == 0 {
+fn warmup_relative_shift_ppm(durations: &[u64], window: usize) -> u64 {
+    if durations.len() < window.saturating_mul(2) || window == 0 {
         return u64::MAX;
     }
-    let mut values = durations[durations.len() - window..].to_vec();
+    let previous_start = durations.len() - window * 2;
+    let current_start = durations.len() - window;
+    let previous_median = median(&durations[previous_start..current_start]);
+    let current_median = median(&durations[current_start..]);
+    if previous_median == 0 {
+        return if current_median == 0 { 0 } else { u64::MAX };
+    }
+    current_median
+        .abs_diff(previous_median)
+        .saturating_mul(1_000_000)
+        .checked_div(previous_median)
+        .unwrap_or(u64::MAX)
+}
+
+fn median(values: &[u64]) -> u64 {
+    let mut values = values.to_vec();
     values.sort_unstable();
-    let minimum = values[0];
-    let maximum = values[values.len() - 1];
-    let median = if values.len() % 2 == 0 {
+    if values.len() % 2 == 0 {
         values[values.len() / 2 - 1].saturating_add(values[values.len() / 2]) / 2
     } else {
         values[values.len() / 2]
-    };
-    if median == 0 {
-        return if maximum == minimum { 0 } else { u64::MAX };
     }
-    maximum
-        .saturating_sub(minimum)
-        .saturating_mul(1_000_000)
-        .checked_div(median)
-        .unwrap_or(u64::MAX)
 }
 
 fn relative_ci_width_ppm(durations: &[u64], confidence_level_ppm: u64) -> u64 {
@@ -208,12 +223,13 @@ mod tests {
 
     fn policy() -> HardwareCalibrationPolicy {
         HardwareCalibrationPolicy {
-            warmup_iterations: 5,
-            maximum_warmup_iterations: 12,
-            warmup_stability_window: 3,
-            maximum_warmup_relative_range_ppm: 20_000,
-            steady_iterations: 5,
-            maximum_steady_iterations: 25,
+            minimum_warmup_samples: 5,
+            maximum_warmup_samples: 12,
+            warmup_stability_window_samples: 3,
+            minimum_warmup_duration_ns: 1,
+            maximum_warmup_relative_shift_ppm: 20_000,
+            minimum_steady_samples: 5,
+            maximum_steady_samples: 25,
             minimum_sample_duration_ns: 1,
             sustained_window_duration_ms: 1,
             sustained_window_count: 1,
@@ -242,11 +258,23 @@ mod tests {
     #[test]
     fn warmup_waits_for_a_stable_window_after_the_minimum() {
         let policy = policy();
-        let durations = [100, 100, 95, 90, 85, 82, 81, 81];
+        let durations = [100, 100, 95, 90, 85, 82, 81, 81, 81, 80, 81];
         let mut samples = Vec::new();
         for (index, duration) in durations.into_iter().enumerate() {
             samples.push(sample(index, CalibrationSamplePhase::Warmup, duration));
-            assert_eq!(warmup_complete(&samples, &policy), index == 7);
+            assert_eq!(warmup_complete(&samples, &policy), index >= 9);
+        }
+        assert!(warmup_converged(&samples, &policy));
+    }
+
+    #[test]
+    fn warmup_requires_physical_elapsed_time_even_when_samples_are_stable() {
+        let mut policy = policy();
+        policy.minimum_warmup_duration_ns = 1_000;
+        let mut samples = Vec::new();
+        for index in 0..10 {
+            samples.push(sample(index, CalibrationSamplePhase::Warmup, 100));
+            assert_eq!(warmup_complete(&samples, &policy), index == 9);
         }
         assert!(warmup_converged(&samples, &policy));
     }
@@ -254,10 +282,10 @@ mod tests {
     #[test]
     fn steady_sampling_absorbs_an_outlier_before_stopping() {
         let mut policy = policy();
-        policy.maximum_steady_iterations = 101;
+        policy.maximum_steady_samples = 101;
         let mut samples = Vec::new();
         let mut stopping_count = None;
-        for index in 0..policy.maximum_steady_iterations {
+        for index in 0..policy.maximum_steady_samples {
             let duration = if index == 4 {
                 200
             } else {
@@ -271,13 +299,13 @@ mod tests {
         }
         let stopping_count = stopping_count.expect("stable samples must overcome one outlier");
         assert!(stopping_count > 20);
-        assert!(stopping_count < policy.maximum_steady_iterations);
+        assert!(stopping_count < policy.maximum_steady_samples);
     }
 
     #[test]
     fn sampling_caps_terminate_without_claiming_warmup_convergence() {
         let policy = policy();
-        let warmup = (0..policy.maximum_warmup_iterations)
+        let warmup = (0..policy.maximum_warmup_samples)
             .map(|index| {
                 sample(
                     index,
@@ -289,7 +317,7 @@ mod tests {
         assert!(warmup_complete(&warmup, &policy));
         assert!(!warmup_converged(&warmup, &policy));
 
-        let steady = (0..policy.maximum_steady_iterations)
+        let steady = (0..policy.maximum_steady_samples)
             .map(|index| {
                 sample(
                     index,

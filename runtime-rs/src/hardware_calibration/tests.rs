@@ -874,12 +874,13 @@ fn plan(mut workloads: Vec<HardwareCalibrationWorkload>) -> HardwareCalibrationP
             fingerprint: format!("nerve.hardware_calibrator_sha256.v1:{}", "3".repeat(64)),
         },
         policy: HardwareCalibrationPolicy {
-            warmup_iterations: 1,
-            maximum_warmup_iterations: 4,
-            warmup_stability_window: 1,
-            maximum_warmup_relative_range_ppm: 20_000,
-            steady_iterations: 5,
-            maximum_steady_iterations: 25,
+            minimum_warmup_samples: 2,
+            maximum_warmup_samples: 4,
+            warmup_stability_window_samples: 1,
+            minimum_warmup_duration_ns: 1,
+            maximum_warmup_relative_shift_ppm: 20_000,
+            minimum_steady_samples: 5,
+            maximum_steady_samples: 25,
             minimum_sample_duration_ns: 1,
             sustained_window_duration_ms: 1,
             sustained_window_count: 1,
@@ -995,9 +996,9 @@ fn cpu_calibration_executes_every_declared_cpu_operation_sequentially() {
             .count();
         result.status == CalibrationRunStatus::Completed
             && result.validation.status == CalibrationValidationStatus::Passed
-            && (plan.policy.warmup_iterations..=plan.policy.maximum_warmup_iterations)
+            && (plan.policy.minimum_warmup_samples..=plan.policy.maximum_warmup_samples)
                 .contains(&warmup_count)
-            && (plan.policy.steady_iterations..=plan.policy.maximum_steady_iterations)
+            && (plan.policy.minimum_steady_samples..=plan.policy.maximum_steady_samples)
                 .contains(&steady_count)
             && sustained_count == plan.policy.sustained_window_count
     }));

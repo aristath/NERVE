@@ -68,12 +68,13 @@ def validate_calibration_plan(document: Json) -> None:
     _fields(
         policy,
         {
-            "warmup_iterations",
-            "maximum_warmup_iterations",
-            "warmup_stability_window",
-            "maximum_warmup_relative_range_ppm",
-            "steady_iterations",
-            "maximum_steady_iterations",
+            "minimum_warmup_samples",
+            "maximum_warmup_samples",
+            "warmup_stability_window_samples",
+            "minimum_warmup_duration_ns",
+            "maximum_warmup_relative_shift_ppm",
+            "minimum_steady_samples",
+            "maximum_steady_samples",
             "minimum_sample_duration_ns",
             "sustained_window_duration_ms",
             "sustained_window_count",
@@ -82,48 +83,52 @@ def validate_calibration_plan(document: Json) -> None:
         },
         "policy",
     )
-    warmup_iterations = _positive_integer(
-        policy["warmup_iterations"], "policy.warmup_iterations"
+    minimum_warmup_samples = _positive_integer(
+        policy["minimum_warmup_samples"], "policy.minimum_warmup_samples"
     )
-    maximum_warmup_iterations = _positive_integer(
-        policy["maximum_warmup_iterations"],
-        "policy.maximum_warmup_iterations",
+    maximum_warmup_samples = _positive_integer(
+        policy["maximum_warmup_samples"],
+        "policy.maximum_warmup_samples",
     )
-    warmup_stability_window = _positive_integer(
-        policy["warmup_stability_window"],
-        "policy.warmup_stability_window",
+    warmup_stability_window_samples = _positive_integer(
+        policy["warmup_stability_window_samples"],
+        "policy.warmup_stability_window_samples",
     )
-    warmup_relative_range = _positive_integer(
-        policy["maximum_warmup_relative_range_ppm"],
-        "policy.maximum_warmup_relative_range_ppm",
+    _positive_integer(
+        policy["minimum_warmup_duration_ns"],
+        "policy.minimum_warmup_duration_ns",
+    )
+    warmup_relative_shift = _positive_integer(
+        policy["maximum_warmup_relative_shift_ppm"],
+        "policy.maximum_warmup_relative_shift_ppm",
     )
     if (
-        maximum_warmup_iterations < warmup_iterations
-        or maximum_warmup_iterations < warmup_stability_window
+        maximum_warmup_samples < minimum_warmup_samples
+        or maximum_warmup_samples < 2 * warmup_stability_window_samples
     ):
         raise CalibrationContractError(
-            "policy.maximum_warmup_iterations must cover the minimum and "
-            "stability window"
+            "policy.maximum_warmup_samples must cover the minimum and "
+            "two stability windows"
         )
-    if warmup_relative_range >= 1_000_000:
+    if warmup_relative_shift >= 1_000_000:
         raise CalibrationContractError(
-            "policy.maximum_warmup_relative_range_ppm must be below 1000000"
+            "policy.maximum_warmup_relative_shift_ppm must be below 1000000"
         )
-    steady_iterations = _positive_integer(
-        policy["steady_iterations"],
-        "policy.steady_iterations",
+    minimum_steady_samples = _positive_integer(
+        policy["minimum_steady_samples"],
+        "policy.minimum_steady_samples",
     )
-    if steady_iterations < 5:
+    if minimum_steady_samples < 5:
         raise CalibrationContractError(
-            "policy.steady_iterations must contain at least five independent samples"
+            "policy.minimum_steady_samples must contain at least five independent samples"
         )
-    maximum_steady_iterations = _positive_integer(
-        policy["maximum_steady_iterations"],
-        "policy.maximum_steady_iterations",
+    maximum_steady_samples = _positive_integer(
+        policy["maximum_steady_samples"],
+        "policy.maximum_steady_samples",
     )
-    if maximum_steady_iterations < steady_iterations:
+    if maximum_steady_samples < minimum_steady_samples:
         raise CalibrationContractError(
-            "policy.maximum_steady_iterations must cover steady_iterations"
+            "policy.maximum_steady_samples must cover minimum_steady_samples"
         )
     _positive_integer(
         policy["minimum_sample_duration_ns"],
@@ -567,16 +572,21 @@ def _warmup_summary(value: Any, path: str) -> None:
         {
             "sample_count",
             "stability_window",
-            "relative_range_ppm",
+            "elapsed_duration_ns",
+            "relative_shift_ppm",
             "converged",
         },
         path,
     )
     _positive_integer(summary["sample_count"], f"{path}.sample_count")
     _positive_integer(summary["stability_window"], f"{path}.stability_window")
+    _positive_integer(
+        summary["elapsed_duration_ns"],
+        f"{path}.elapsed_duration_ns",
+    )
     _nonnegative_integer(
-        summary["relative_range_ppm"],
-        f"{path}.relative_range_ppm",
+        summary["relative_shift_ppm"],
+        f"{path}.relative_shift_ppm",
     )
     if not isinstance(summary["converged"], bool):
         raise CalibrationContractError(f"{path}.converged must be boolean")
