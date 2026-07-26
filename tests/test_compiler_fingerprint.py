@@ -8,6 +8,7 @@ from nerve.compiler_fingerprint import (
     COMPILER_FINGERPRINT_SCHEMA,
     compiler_source_inputs,
     package_compiler_fingerprint,
+    representation_descriptor_inputs,
 )
 
 
@@ -82,6 +83,11 @@ def test_fingerprint_ignores_noncompiler_modules_but_tracks_compiler_dependencie
         destination = compiler_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(source, destination)
+    for _relative, source in representation_descriptor_inputs():
+        relative = source.relative_to(repository_root / "nerve")
+        destination = compiler_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, destination)
     (shader_dir / "kernel.comp").write_text("original shader")
     (compiler_dir / "conversation_gate.py").write_text("unrelated = 1\n")
 
@@ -99,6 +105,38 @@ def test_fingerprint_ignores_noncompiler_modules_but_tracks_compiler_dependencie
     assert original.startswith(f"{COMPILER_FINGERPRINT_SCHEMA}:")
     assert unrelated_change == original
     assert compiler_change != original
+
+
+def test_fingerprint_tracks_representation_descriptor_changes(tmp_path: Path) -> None:
+    repository_root = Path(__file__).parents[1]
+    compiler_dir = tmp_path / "nerve"
+    shader_dir = tmp_path / "shaders"
+    compiler_dir.mkdir()
+    shader_dir.mkdir()
+    shutil.copy(
+        repository_root / "nerve" / "compiler_sources.txt",
+        compiler_dir / "compiler_sources.txt",
+    )
+    for _relative, source in compiler_source_inputs():
+        relative = source.relative_to(repository_root / "nerve")
+        destination = compiler_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, destination)
+    for _relative, source in representation_descriptor_inputs():
+        relative = source.relative_to(repository_root / "nerve")
+        destination = compiler_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, destination)
+    (shader_dir / "kernel.comp").write_text("original shader")
+
+    original = package_compiler_fingerprint(shader_dir, compiler_dir=compiler_dir)
+    descriptor = next(
+        path for _relative, path in representation_descriptor_inputs(compiler_dir)
+    )
+    descriptor.write_text(descriptor.read_text() + "\n")
+    changed = package_compiler_fingerprint(shader_dir, compiler_dir=compiler_dir)
+
+    assert changed != original
 
 
 def test_fingerprint_tracks_shader_source_changes(tmp_path: Path) -> None:

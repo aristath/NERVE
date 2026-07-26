@@ -1,0 +1,80 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_64edce077175fdb954c048fc6422a9c3",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "sampled_field_with_residual",
+    "version": "1"
+  },
+  "summary": "Represents reachable behavior as sampled low-dimensional fields with interpolation and a verified residual path.",
+  "responsibilities": {
+    "may_express": ["dynamic_range_control", "feature_transformation", "nonlinear_gating_and_selection", "state_transition"],
+    "composition_scopes": ["coupled_region", "operator", "representation_island", "semantic_module"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "reachable_manifold_locality",
+      "acceptable_statuses": ["measured", "proven"],
+      "exactness": "either",
+      "required_facts": ["coordinate_map", "interpolation_error_domain", "sample_coverage"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "field_coordinate", "kind": "low_dimensional_coordinate", "properties": {"dimensions": "descriptor_instance"}},
+      {"name": "field_value", "kind": "sampled_or_interpolated_value", "properties": {"multiresolution": true}}
+    ],
+    "parameters": [
+      {"name": "coordinate_map", "kind": "structured_projection_or_chart", "properties": {"absorbs_adjacent_basis": true}},
+      {"name": "field_samples", "kind": "sampled_grid_mesh_or_basis", "properties": {"sparse_residency": "optional"}},
+      {"name": "residual", "kind": "exact_or_bounded_correction", "properties": {"activated_by": "error_estimate"}}
+    ],
+    "states": []
+  },
+  "execution": {
+    "topologies": ["coordinate_sample_residual", "multiresolution_field"],
+    "time_models": ["demand_driven", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "rasterization", "requirement": "alternative", "operations": ["barycentric_interpolation", "coverage"], "numeric_formats": ["f16", "f32"]},
+      {"name": "simd_vector", "requirement": "alternative", "operations": ["coordinate_transform", "residual"], "numeric_formats": ["f16", "f32"]},
+      {"name": "texture_sampling", "requirement": "alternative", "operations": ["linear_interpolation", "mip_selection", "texel_gather"], "numeric_formats": ["f16", "f32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["discover_coordinates", "sample_reachable_domain", "fit_residual", "certify_error"],
+    "artifacts": [
+      {"kind": "coordinate_map", "lifetime": "residency"},
+      {"kind": "error_certificate", "lifetime": "compile"},
+      {"kind": "field", "lifetime": "residency"},
+      {"kind": "residual", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["dense_numeric_vector", "low_dimensional_coordinate"],
+    "produced_outputs": ["dense_numeric_vector", "low_dimensional_coordinate", "sampled_or_interpolated_value"],
+    "cost_terms": [
+      {"name": "coordinate_projection_ns", "unit": "nanoseconds", "directions": ["input"], "measured_phase": "steady_state"},
+      {"name": "field_storage_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "mount"},
+      {"name": "residual_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["coordinate_decode", "coordinate_encode", "normalization"]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": ["coordinate_domain_coverage", "interpolation_error_bound", "residual_error_bound"],
+    "error_contract": {"metrics": ["maximum_output_error", "state_transition_error"], "requires_declared_domain": true},
+    "validity_predicates": ["declared_reachable_domain", "declared_sampling_resolution"]
+  },
+  "correction_paths": [
+    {"name": "refine_or_exact", "trigger": "field error estimate exceeds the declared bound", "action": "sample a finer field region or execute the exact source scope", "guarantee": "uncertain outputs are corrected before publication"}
+  ],
+  "tags": ["field", "interpolation", "non_matrix", "verified_correction"]
+}

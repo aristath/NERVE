@@ -1,0 +1,79 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_13ceee038d9b37f3c4e4cfba31c4ca21",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "heterogeneous_composite_island",
+    "version": "1"
+  },
+  "summary": "Composes several registered representation descriptors across adjacent semantic scopes while retaining explicit internal transducers.",
+  "responsibilities": {
+    "may_express": ["candidate_scoring", "contextual_addressing", "feature_representation", "feature_transformation", "memory_write_and_retention", "mixing_and_residual_transport", "routing", "state_transition"],
+    "composition_scopes": ["cross_layer_group", "layer", "representation_island", "stateful_system", "transducer"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "composable_representation_contracts",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["boundary_compatibility", "component_descriptor_ids", "composed_behavior_contract"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "composite_signal", "kind": "descriptor_owned_native_signal_graph", "properties": {"materialization": "explicit_boundaries_only"}}
+    ],
+    "parameters": [
+      {"name": "component_parameters", "kind": "registered_descriptor_parameter_artifacts", "properties": {"heterogeneous": true}},
+      {"name": "transducers", "kind": "explicit_or_absorbed_representation_transducers", "properties": {"costed": true}}
+    ],
+    "states": [
+      {"name": "composite_state", "kind": "descriptor_owned_heterogeneous_state", "properties": {"ownership": "explicit"}}
+    ]
+  },
+  "execution": {
+    "topologies": ["heterogeneous_dataflow_graph", "representation_island"],
+    "time_models": ["asynchronous_branches", "event_stream", "streaming_activation", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "device_generated_commands", "requirement": "optional", "operations": ["graph_activation", "work_generation"], "numeric_formats": ["u32"]},
+      {"name": "resident_program", "requirement": "alternative", "operations": ["device_owned_loop", "heterogeneous_dispatch"], "numeric_formats": []},
+      {"name": "synchronization", "requirement": "alternative", "operations": ["cross_process_ordering", "representation_handoff"], "numeric_formats": []}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["resolve_component_descriptors", "plan_native_boundaries", "synthesize_transducers", "compose_proofs"],
+    "artifacts": [
+      {"kind": "composed_behavior_proof", "lifetime": "compile"},
+      {"kind": "composite_execution_graph", "lifetime": "residency"},
+      {"kind": "transducer_plan", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["descriptor_owned_native_signal_graph", "public_semantic_value"],
+    "produced_outputs": ["descriptor_owned_native_signal_graph", "public_semantic_value"],
+    "cost_terms": [
+      {"name": "internal_transducer_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "internal_transducer_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "public_materialization_bytes", "unit": "bytes", "directions": ["input", "output"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["basis_change", "decode", "encode", "normalization", "quantize"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["component_contracts_hold", "composed_contract_matches_replaced_scope", "transducers_preserve_declared_semantics"],
+    "error_contract": null,
+    "validity_predicates": ["all_component_predicates_hold", "declared_composite_topology"]
+  },
+  "correction_paths": [
+    {"name": "component_fallback", "trigger": "a component representation predicate no longer holds", "action": "replace that component or the island with its verified exact implementation", "guarantee": "preserves the public semantic contract"}
+  ],
+  "tags": ["composite", "heterogeneous", "non_matrix", "representation_island"]
+}

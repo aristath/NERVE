@@ -14,14 +14,20 @@ from nerve.representation_optimizer.contracts import (
     PROMOTION_DECISION_SCHEMA,
     RELOWERING_REQUEST_SCHEMA,
     REPRESENTATION_CANDIDATE_SCHEMA,
+    REPRESENTATION_DESCRIPTOR_SCHEMA,
     SOURCE_BEHAVIOR_CONTRACT_SCHEMA,
     VALIDATION_RECORD_SCHEMA,
     ContractDocument,
     ContractValidationError,
     canonical_json_bytes,
     contract_digest,
+    representation_descriptor_id,
     stable_contract_id,
     validate_contract,
+)
+from nerve.representation_optimizer.descriptor_registry import (
+    RepresentationDescriptorRegistry,
+    load_builtin_representation_descriptors,
 )
 from nerve.representation_optimizer.lifecycle import (
     CANDIDATE_LIFECYCLE_SCHEMA,
@@ -42,6 +48,7 @@ __all__ = [
     "PROMOTION_DECISION_SCHEMA",
     "RELOWERING_REQUEST_SCHEMA",
     "REPRESENTATION_CANDIDATE_SCHEMA",
+    "REPRESENTATION_DESCRIPTOR_SCHEMA",
     "SOURCE_BEHAVIOR_CONTRACT_SCHEMA",
     "VALIDATION_RECORD_SCHEMA",
     "CandidateLifecycle",
@@ -49,8 +56,11 @@ __all__ = [
     "ContractDocument",
     "ContractValidationError",
     "OptimizationSession",
+    "RepresentationDescriptorRegistry",
     "canonical_json_bytes",
     "contract_digest",
+    "load_builtin_representation_descriptors",
+    "representation_descriptor_id",
     "stable_contract_id",
     "validate_contract",
 ]

@@ -20,6 +20,19 @@ fn directory_files(path: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+fn directory_files_with_extension(
+    path: &Path,
+    prefix: &str,
+    extension: &str,
+) -> Vec<(String, PathBuf)> {
+    directory_files(path, prefix)
+        .into_iter()
+        .filter(|(_relative, path)| {
+            path.extension().and_then(|value| value.to_str()) == Some(extension)
+        })
+        .collect()
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repository_root = manifest_dir
@@ -35,6 +48,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("shaders").display()
     );
+    let descriptor_dir = compiler_dir.join("representation_optimizer/descriptors");
+    println!("cargo:rerun-if-changed={}", descriptor_dir.display());
     let source_manifest = fs::read_to_string(&compiler_source_manifest).unwrap_or_else(|error| {
         panic!(
             "failed to read compiler source manifest {:?}: {error}",
@@ -76,6 +91,11 @@ fn main() {
             );
             (relative.to_string(), source)
         })
+        .chain(directory_files_with_extension(
+            &descriptor_dir,
+            "nerve/representation_optimizer/descriptors",
+            "json",
+        ))
         .chain(directory_files(
             &manifest_dir.join("shaders"),
             "runtime-rs/shaders",

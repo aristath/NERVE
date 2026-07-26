@@ -1,0 +1,79 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_a69c76e76e3b9121f2a9657e03fa2420",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "reconstructed_parameter_stream",
+    "version": "1"
+  },
+  "summary": "Stores compact parameter generators, codebooks, deltas, or compressed pages and reconstructs exact parameters at the useful lifetime.",
+  "responsibilities": {
+    "may_express": ["feature_representation", "feature_transformation", "memory_write_and_retention"],
+    "composition_scopes": ["cross_layer_group", "layer", "representation_island", "semantic_module"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "exact_parameter_reconstruction",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["decoder_semantics", "reconstruction_digest", "source_parameter_digest"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "parameter_request", "kind": "tile_page_or_component_identifier", "properties": {"asynchronous": true}}
+    ],
+    "parameters": [
+      {"name": "compressed_parameters", "kind": "codebook_delta_generator_or_bitstream", "properties": {"source_scalar_addressability": false}},
+      {"name": "decoder", "kind": "exact_parameter_reconstruction_program", "properties": {"deterministic": true}}
+    ],
+    "states": [
+      {"name": "parameter_residency", "kind": "reconstructed_tile_or_page_cache", "properties": {"evictable": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["decode_then_consume", "inline_reconstruction", "prefetch_pipeline"],
+    "time_models": ["mount_once", "on_demand", "residency_interval"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "copy_queue", "requirement": "optional", "operations": ["asynchronous_prefetch", "page_transfer"], "numeric_formats": []},
+      {"name": "media_decode", "requirement": "alternative", "operations": ["surface_decode"], "numeric_formats": ["u8"]},
+      {"name": "simd_vector", "requirement": "alternative", "operations": ["delta_decode", "parameter_generation"], "numeric_formats": ["bf16", "f16", "f32", "f8_e4m3", "i8"]},
+      {"name": "texture_sampling", "requirement": "alternative", "operations": ["format_decode", "texel_fetch"], "numeric_formats": ["f16", "f32", "u8"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["discover_reconstruction", "encode_parameters", "prove_reconstruction", "plan_residency"],
+    "artifacts": [
+      {"kind": "compressed_parameter_stream", "lifetime": "residency"},
+      {"kind": "decoder", "lifetime": "residency"},
+      {"kind": "reconstruction_proof", "lifetime": "compile"},
+      {"kind": "residency_plan", "lifetime": "mount"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["tile_page_or_component_identifier"],
+    "produced_outputs": ["exact_parameter_tile", "tile_page_or_component_identifier"],
+    "cost_terms": [
+      {"name": "decode_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "reconstructed_bytes", "unit": "bytes", "directions": ["output"], "measured_phase": "steady_state"},
+      {"name": "resident_compressed_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "mount"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": false,
+      "absorbable_transducers": ["parameter_decode", "parameter_prefetch"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["decoded_parameters_match_source_bytes_or_numeric_contract", "decoder_is_deterministic"],
+    "error_contract": null,
+    "validity_predicates": ["declared_parameter_format", "declared_reconstruction_lifetime"]
+  },
+  "correction_paths": [],
+  "tags": ["compression", "non_matrix", "parameter_reconstruction", "residency"]
+}

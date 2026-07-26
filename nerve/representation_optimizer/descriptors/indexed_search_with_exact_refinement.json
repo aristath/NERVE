@@ -1,0 +1,81 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_109a5ac6fcb2e82edd50c52278d5de6f",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "indexed_search_with_exact_refinement",
+    "version": "1"
+  },
+  "summary": "Uses an index to generate a candidate set and exact source scoring to resolve uncertain or selected candidates.",
+  "responsibilities": {
+    "may_express": ["candidate_scoring", "contextual_addressing", "memory_write_and_retention", "routing"],
+    "composition_scopes": ["coupled_region", "representation_island", "semantic_module", "stateful_system"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "search_recall_structure",
+      "acceptable_statuses": ["measured", "proven"],
+      "exactness": "either",
+      "required_facts": ["candidate_recall_domain", "index_metric", "refinement_rule"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "candidate_set", "kind": "ranked_or_unordered_identifiers", "properties": {"cardinality": "bounded"}},
+      {"name": "query", "kind": "index_query_record", "properties": {"projection": "descriptor_owned"}}
+    ],
+    "parameters": [
+      {"name": "index", "kind": "tree_graph_hash_or_geometry", "properties": {"mutable": false}},
+      {"name": "refinement_parameters", "kind": "exact_source_subset", "properties": {"materialization": "on_demand"}}
+    ],
+    "states": [
+      {"name": "search_state", "kind": "frontier_or_priority_queue", "properties": {"bounded": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["coarse_search_then_exact_refinement", "multi_index_union"],
+    "time_models": ["demand_driven", "streaming_query"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "bit_manipulation", "requirement": "optional", "operations": ["bitset_intersection", "population_count"], "numeric_formats": ["u32", "u64"]},
+      {"name": "ray_traversal", "requirement": "alternative", "operations": ["acceleration_structure_traversal"], "numeric_formats": ["f32"]},
+      {"name": "simd_vector", "requirement": "alternative", "operations": ["candidate_scoring", "distance"], "numeric_formats": ["bf16", "f16", "f32"]},
+      {"name": "subgroup_execution", "requirement": "alternative", "operations": ["candidate_compaction", "top_k"], "numeric_formats": ["f16", "f32", "u32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["construct_index", "measure_recall", "pack_exact_refinement"],
+    "artifacts": [
+      {"kind": "index", "lifetime": "residency"},
+      {"kind": "recall_evidence", "lifetime": "compile"},
+      {"kind": "refinement_payload", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["dense_or_quantized_query", "index_query_record"],
+    "produced_outputs": ["exact_refined_result", "ranked_or_unordered_identifiers"],
+    "cost_terms": [
+      {"name": "candidate_materialization_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "query_projection_ns", "unit": "nanoseconds", "directions": ["input"], "measured_phase": "steady_state"},
+      {"name": "refinement_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["candidate_projection", "query_projection"]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": ["exact_refinement_matches_source", "recall_bound_holds"],
+    "error_contract": {"metrics": ["candidate_recall", "output_error"], "requires_declared_domain": true},
+    "validity_predicates": ["declared_query_domain", "declared_state_regime"]
+  },
+  "correction_paths": [
+    {"name": "expand_or_fallback", "trigger": "candidate confidence or recall certificate is insufficient", "action": "expand the index frontier or execute exact global scoring", "guarantee": "returns the exact source result after fallback"}
+  ],
+  "tags": ["index", "non_matrix", "search", "verified_correction"]
+}

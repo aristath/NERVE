@@ -1,0 +1,81 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_0581728b7d175326c6b54366aca0b4ad",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "coarse_to_fine_evaluation",
+    "version": "1"
+  },
+  "summary": "Uses a cheap coarse expression to select regions or candidates before precise local evaluation and exact fallback.",
+  "responsibilities": {
+    "may_express": ["candidate_scoring", "contextual_addressing", "dynamic_range_control", "feature_transformation", "feedback_and_stopping", "routing"],
+    "composition_scopes": ["coupled_region", "cross_layer_group", "representation_island", "semantic_module", "stateful_system"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "coarse_bound_or_recall",
+      "acceptable_statuses": ["measured", "proven"],
+      "exactness": "either",
+      "required_facts": ["coarse_domain", "fine_selection_rule", "uncertainty_estimator"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "coarse_signal", "kind": "summary_candidate_set_or_low_resolution_value", "properties": {"confidence": true}},
+      {"name": "fine_signal", "kind": "precise_local_value", "properties": {"selected_regions_only": true}}
+    ],
+    "parameters": [
+      {"name": "coarse_parameters", "kind": "compressed_index_field_or_model", "properties": {"cheap": true}},
+      {"name": "fine_parameters", "kind": "exact_local_source_parameters", "properties": {"paged_or_selected": true}}
+    ],
+    "states": [
+      {"name": "refinement_state", "kind": "candidate_frontier_and_confidence", "properties": {"bounded": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["coarse_select_fine_correct", "multiresolution_hierarchy"],
+    "time_models": ["demand_driven", "speculative_with_commit", "streaming_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "indirect_execution", "requirement": "optional", "operations": ["fine_work_generation", "indirect_dispatch"], "numeric_formats": ["u32"]},
+      {"name": "simd_vector", "requirement": "alternative", "operations": ["coarse_evaluation", "fine_evaluation"], "numeric_formats": ["bf16", "f16", "f32"]},
+      {"name": "texture_sampling", "requirement": "alternative", "operations": ["coarse_field_sampling", "mip_selection"], "numeric_formats": ["f16", "f32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["construct_coarse_representation", "derive_refinement_rule", "calibrate_uncertainty", "retain_exact_fallback"],
+    "artifacts": [
+      {"kind": "coarse_representation", "lifetime": "residency"},
+      {"kind": "exact_fallback", "lifetime": "residency"},
+      {"kind": "refinement_policy", "lifetime": "residency"},
+      {"kind": "uncertainty_calibration", "lifetime": "compile"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["dense_numeric_vector", "summary_candidate_set_or_low_resolution_value"],
+    "produced_outputs": ["dense_numeric_vector", "precise_local_value", "summary_candidate_set_or_low_resolution_value"],
+    "cost_terms": [
+      {"name": "coarse_evaluation_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "fine_work_fraction", "unit": "ratio", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "representation_conversion_bytes", "unit": "bytes", "directions": ["input", "output"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["coarse_decode", "coarse_encode", "fine_materialization"]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": ["fine_path_matches_source", "uncertainty_routes_violations_to_fallback"],
+    "error_contract": {"metrics": ["candidate_recall", "confidence_calibration", "output_error"], "requires_declared_regimes": true},
+    "validity_predicates": ["declared_activation_regime", "declared_context_regime"]
+  },
+  "correction_paths": [
+    {"name": "exact_global_fallback", "trigger": "coarse confidence is insufficient or fine validation fails", "action": "execute the exact global source scope", "guarantee": "does not commit an unresolved approximate result"}
+  ],
+  "tags": ["coarse_to_fine", "composite", "non_matrix", "verified_correction"]
+}

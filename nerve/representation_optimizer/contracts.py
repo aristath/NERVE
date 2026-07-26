@@ -14,6 +14,7 @@ OPTIMIZATION_SCOPE_SCHEMA = "nerve.optimizer.optimization_scope.v1"
 SOURCE_BEHAVIOR_CONTRACT_SCHEMA = "nerve.optimizer.source_behavior_contract.v1"
 ALGEBRAIC_EVIDENCE_SCHEMA = "nerve.optimizer.algebraic_evidence.v1"
 HARDWARE_PROCESS_PROFILE_SCHEMA = "nerve.optimizer.hardware_process_profile.v1"
+REPRESENTATION_DESCRIPTOR_SCHEMA = "nerve.optimizer.representation_descriptor.v1"
 REPRESENTATION_CANDIDATE_SCHEMA = "nerve.optimizer.representation_candidate.v1"
 CANDIDATE_CONSTRUCTION_SCHEMA = "nerve.optimizer.candidate_construction.v1"
 BENCHMARK_RECORD_SCHEMA = "nerve.optimizer.benchmark_record.v1"
@@ -118,6 +119,12 @@ def stable_contract_id(prefix: str, *identity_parts: Any) -> str:
     _require_nonempty_string(prefix, "stable id prefix")
     digest = sha256(canonical_json_bytes(list(identity_parts))).hexdigest()
     return f"{prefix}_{digest[:32]}"
+
+
+def representation_descriptor_id(document: Json) -> str:
+    unsigned = deepcopy(document)
+    unsigned.pop("descriptor_id", None)
+    return stable_contract_id("representation_descriptor", unsigned)
 
 
 def validate_contract(document: Json, *, expected_schema: str | None = None) -> None:
@@ -627,6 +634,346 @@ def _validate_representation_candidate(document: Json) -> None:
     )
 
 
+def _validate_representation_descriptor(document: Json) -> None:
+    _require_fields(
+        document,
+        {
+            "schema",
+            "descriptor_id",
+            "identity",
+            "summary",
+            "responsibilities",
+            "evidence",
+            "representations",
+            "execution",
+            "hardware",
+            "construction",
+            "boundaries",
+            "behavioral",
+            "correction_paths",
+            "tags",
+        },
+    )
+    _require_stable_id(
+        document["descriptor_id"],
+        "representation_descriptor",
+        "descriptor_id",
+    )
+    identity = _require_object(document["identity"], "identity")
+    _require_fields(identity, {"namespace", "name", "version"})
+    for field in identity:
+        _require_nonempty_string(identity[field], f"identity.{field}")
+    _require_nonempty_string(document["summary"], "summary")
+
+    responsibilities = _require_object(
+        document["responsibilities"], "responsibilities"
+    )
+    _require_fields(
+        responsibilities,
+        {"may_express", "composition_scopes"},
+    )
+    _require_sorted_nonempty_unique_strings(
+        responsibilities["may_express"],
+        "responsibilities.may_express",
+    )
+    _require_sorted_nonempty_unique_strings(
+        responsibilities["composition_scopes"],
+        "responsibilities.composition_scopes",
+    )
+
+    evidence = _require_list(document["evidence"], "evidence")
+    if not evidence:
+        raise ContractValidationError("evidence must not be empty")
+    evidence_claims = []
+    for index, raw_requirement in enumerate(evidence):
+        path = f"evidence[{index}]"
+        requirement = _require_object(raw_requirement, path)
+        _require_fields(
+            requirement,
+            {
+                "claim_kind",
+                "acceptable_statuses",
+                "exactness",
+                "required_facts",
+            },
+        )
+        evidence_claims.append(
+            _require_nonempty_string(
+                requirement["claim_kind"],
+                f"{path}.claim_kind",
+            )
+        )
+        _require_sorted_nonempty_unique_strings(
+            requirement["acceptable_statuses"],
+            f"{path}.acceptable_statuses",
+        )
+        if requirement["exactness"] not in {"exact", "approximate", "either"}:
+            raise ContractValidationError(
+                f"{path}.exactness must be exact, approximate, or either"
+            )
+        _require_sorted_unique_strings(
+            requirement["required_facts"],
+            f"{path}.required_facts",
+        )
+    _require_sorted_unique_names(evidence_claims, "evidence")
+
+    representations = _require_object(
+        document["representations"], "representations"
+    )
+    _require_fields(representations, {"signals", "parameters", "states"})
+    _validate_representation_forms(
+        representations["signals"],
+        "representations.signals",
+        nonempty=True,
+    )
+    _validate_representation_forms(
+        representations["parameters"],
+        "representations.parameters",
+    )
+    _validate_representation_forms(
+        representations["states"],
+        "representations.states",
+    )
+
+    execution = _require_object(document["execution"], "execution")
+    _require_fields(execution, {"topologies", "time_models"})
+    _require_sorted_nonempty_unique_strings(
+        execution["topologies"],
+        "execution.topologies",
+    )
+    _require_sorted_nonempty_unique_strings(
+        execution["time_models"],
+        "execution.time_models",
+    )
+
+    hardware = _require_object(document["hardware"], "hardware")
+    _require_fields(hardware, {"compatible_processes", "composition"})
+    processes = _require_list(
+        hardware["compatible_processes"],
+        "hardware.compatible_processes",
+    )
+    if not processes:
+        raise ContractValidationError(
+            "hardware.compatible_processes must not be empty"
+        )
+    process_names = []
+    for index, raw_process in enumerate(processes):
+        path = f"hardware.compatible_processes[{index}]"
+        process = _require_object(raw_process, path)
+        _require_fields(
+            process,
+            {"name", "requirement", "operations", "numeric_formats"},
+        )
+        process_names.append(
+            _require_nonempty_string(process["name"], f"{path}.name")
+        )
+        if process["requirement"] not in {"required", "alternative", "optional"}:
+            raise ContractValidationError(
+                f"{path}.requirement must be required, alternative, or optional"
+            )
+        _require_sorted_nonempty_unique_strings(
+            process["operations"],
+            f"{path}.operations",
+        )
+        _require_sorted_unique_strings(
+            process["numeric_formats"],
+            f"{path}.numeric_formats",
+        )
+    _require_sorted_unique_names(
+        process_names,
+        "hardware.compatible_processes",
+    )
+    if hardware["composition"] not in {"all_required", "one_alternative", "composite"}:
+        raise ContractValidationError(
+            "hardware.composition must be all_required, one_alternative, or composite"
+        )
+
+    construction = _require_object(document["construction"], "construction")
+    _require_fields(construction, {"required", "phases", "artifacts"})
+    if not isinstance(construction["required"], bool):
+        raise ContractValidationError("construction.required must be boolean")
+    _require_unique_strings(construction["phases"], "construction.phases")
+    artifacts = _require_list(construction["artifacts"], "construction.artifacts")
+    artifact_kinds = []
+    for index, raw_artifact in enumerate(artifacts):
+        path = f"construction.artifacts[{index}]"
+        artifact = _require_object(raw_artifact, path)
+        _require_fields(artifact, {"kind", "lifetime"})
+        artifact_kinds.append(
+            _require_nonempty_string(artifact["kind"], f"{path}.kind")
+        )
+        if artifact["lifetime"] not in {
+            "compile",
+            "mount",
+            "residency",
+            "dynamic",
+        }:
+            raise ContractValidationError(
+                f"{path}.lifetime must be compile, mount, residency, or dynamic"
+            )
+    _require_sorted_unique_names(artifact_kinds, "construction.artifacts")
+    if construction["required"] and not construction["phases"]:
+        raise ContractValidationError(
+            "construction phases are required when construction.required is true"
+        )
+
+    boundaries = _require_object(document["boundaries"], "boundaries")
+    _require_fields(
+        boundaries,
+        {
+            "accepted_inputs",
+            "produced_outputs",
+            "cost_terms",
+            "island_compatibility",
+        },
+    )
+    _require_sorted_nonempty_unique_strings(
+        boundaries["accepted_inputs"],
+        "boundaries.accepted_inputs",
+    )
+    _require_sorted_nonempty_unique_strings(
+        boundaries["produced_outputs"],
+        "boundaries.produced_outputs",
+    )
+    cost_terms = _require_list(boundaries["cost_terms"], "boundaries.cost_terms")
+    cost_names = []
+    for index, raw_term in enumerate(cost_terms):
+        path = f"boundaries.cost_terms[{index}]"
+        term = _require_object(raw_term, path)
+        _require_fields(
+            term,
+            {"name", "unit", "directions", "measured_phase"},
+        )
+        cost_names.append(_require_nonempty_string(term["name"], f"{path}.name"))
+        _require_nonempty_string(term["unit"], f"{path}.unit")
+        directions = _require_sorted_nonempty_unique_strings(
+            term["directions"],
+            f"{path}.directions",
+        )
+        if not set(directions) <= {"input", "output", "internal"}:
+            raise ContractValidationError(
+                f"{path}.directions contains an unsupported boundary direction"
+            )
+        if term["measured_phase"] not in {
+            "construction",
+            "mount",
+            "steady_state",
+            "teardown",
+        }:
+            raise ContractValidationError(
+                f"{path}.measured_phase is unsupported"
+            )
+    _require_sorted_unique_names(cost_names, "boundaries.cost_terms")
+    island = _require_object(
+        boundaries["island_compatibility"],
+        "boundaries.island_compatibility",
+    )
+    _require_fields(
+        island,
+        {
+            "can_span_scopes",
+            "preserves_native_signals",
+            "absorbable_transducers",
+        },
+    )
+    for field in ("can_span_scopes", "preserves_native_signals"):
+        if not isinstance(island[field], bool):
+            raise ContractValidationError(
+                f"boundaries.island_compatibility.{field} must be boolean"
+            )
+    _require_sorted_unique_strings(
+        island["absorbable_transducers"],
+        "boundaries.island_compatibility.absorbable_transducers",
+    )
+
+    behavioral = _require_object(document["behavioral"], "behavioral")
+    _require_fields(
+        behavioral,
+        {
+            "exactness",
+            "proof_obligations",
+            "error_contract",
+            "validity_predicates",
+        },
+    )
+    if behavioral["exactness"] not in {"exact", "approximate"}:
+        raise ContractValidationError(
+            "behavioral.exactness must be exact or approximate"
+        )
+    _require_sorted_unique_strings(
+        behavioral["proof_obligations"],
+        "behavioral.proof_obligations",
+    )
+    _require_sorted_unique_strings(
+        behavioral["validity_predicates"],
+        "behavioral.validity_predicates",
+    )
+    if behavioral["exactness"] == "exact":
+        if behavioral["error_contract"] is not None:
+            raise ContractValidationError(
+                "an exact representation descriptor cannot declare an error contract"
+            )
+    else:
+        if (
+            not isinstance(behavioral["error_contract"], dict)
+            or not behavioral["error_contract"]
+        ):
+            raise ContractValidationError(
+                "an approximate representation descriptor requires an error contract"
+            )
+
+    corrections = _require_list(document["correction_paths"], "correction_paths")
+    correction_names = []
+    for index, raw_correction in enumerate(corrections):
+        path = f"correction_paths[{index}]"
+        correction = _require_object(raw_correction, path)
+        _require_fields(correction, {"name", "trigger", "action", "guarantee"})
+        correction_names.append(
+            _require_nonempty_string(correction["name"], f"{path}.name")
+        )
+        for field in ("trigger", "action", "guarantee"):
+            _require_nonempty_string(correction[field], f"{path}.{field}")
+    _require_sorted_unique_names(correction_names, "correction_paths")
+    if behavioral["exactness"] == "approximate" and not corrections:
+        raise ContractValidationError(
+            "an approximate representation descriptor requires a correction path"
+        )
+
+    _require_sorted_nonempty_unique_strings(document["tags"], "tags")
+    expected_id = representation_descriptor_id(document)
+    if document["descriptor_id"] != expected_id:
+        raise ContractValidationError(
+            f"descriptor_id must match canonical descriptor content {expected_id!r}"
+        )
+
+
+def _validate_representation_forms(
+    value: Any,
+    path: str,
+    *,
+    nonempty: bool = False,
+) -> None:
+    forms = _require_list(value, path)
+    if nonempty and not forms:
+        raise ContractValidationError(f"{path} must not be empty")
+    names = []
+    for index, raw_form in enumerate(forms):
+        form_path = f"{path}[{index}]"
+        form = _require_object(raw_form, form_path)
+        _require_fields(form, {"name", "kind", "properties"})
+        names.append(_require_nonempty_string(form["name"], f"{form_path}.name"))
+        _require_nonempty_string(form["kind"], f"{form_path}.kind")
+        _require_object(form["properties"], f"{form_path}.properties")
+    _require_sorted_unique_names(names, path)
+
+
+def _require_sorted_nonempty_unique_strings(value: Any, path: str) -> list[str]:
+    values = _require_sorted_unique_strings(value, path)
+    if not values:
+        raise ContractValidationError(f"{path} must not be empty")
+    return values
+
+
 def _validate_candidate_construction(document: Json) -> None:
     _require_fields(
         document,
@@ -1003,6 +1350,7 @@ _VALIDATORS: dict[str, Validator] = {
     SOURCE_BEHAVIOR_CONTRACT_SCHEMA: _validate_source_behavior_contract,
     ALGEBRAIC_EVIDENCE_SCHEMA: _validate_algebraic_evidence,
     HARDWARE_PROCESS_PROFILE_SCHEMA: _validate_hardware_process_profile,
+    REPRESENTATION_DESCRIPTOR_SCHEMA: _validate_representation_descriptor,
     REPRESENTATION_CANDIDATE_SCHEMA: _validate_representation_candidate,
     CANDIDATE_CONSTRUCTION_SCHEMA: _validate_candidate_construction,
     BENCHMARK_RECORD_SCHEMA: _validate_benchmark_record,

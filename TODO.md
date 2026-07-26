@@ -59,32 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 4. Formalize the alternative-representation design space
-
-- Convert the open vocabulary in `EXPERIMENTS.md` into machine-readable
-  representation descriptors without turning it into a fixed shortlist.
-- A descriptor must state:
-  - responsibilities it may express;
-  - required algebraic or behavioral evidence;
-  - signal, parameter, and state representations;
-  - supported topology and time model;
-  - compatible hardware processes;
-  - construction requirements;
-  - representation-boundary costs;
-  - exactness or approximation properties; and
-  - possible correction paths.
-- Cover an extensible space including structured transforms, lookup and
-  codebook forms, indexes and search structures, sampled fields and
-  interpolation, programs and logic, packed symbolic forms, sparse event
-  graphs, recurrent and bounded state, hierarchical output construction,
-  reconstructed parameters, coarse-to-fine evaluation, verified correction,
-  and heterogeneous composites.
-- Make descriptors registerable without modifying model-family-specific engine
-  code.
-
-Completion requires schema tests and several structurally different example
-descriptors proving that the contract is not matrix-specific.
-
 ### 5. Enumerate semantic optimization scopes
 
 - Traverse the existing semantic module tree and lowered dependency graph.

@@ -1,0 +1,80 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_55aee607a25279b7b21f0655a69b5889",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "verified_correction_circuit",
+    "version": "1"
+  },
+  "summary": "Wraps an approximate producer with confidence, unresolved-work signaling, exact correction, and commit control.",
+  "responsibilities": {
+    "may_express": ["feature_transformation", "feedback_and_stopping", "memory_write_and_retention", "routing", "state_transition"],
+    "composition_scopes": ["coupled_region", "representation_island", "stateful_system", "transducer"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "calibrated_error_detection",
+      "acceptable_statuses": ["measured", "proven"],
+      "exactness": "either",
+      "required_facts": ["correction_equivalence", "error_estimator", "false_accept_bound"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "candidate_result", "kind": "value_confidence_and_unresolved_set", "properties": {"commit": "guarded"}},
+      {"name": "corrected_result", "kind": "public_semantic_value", "properties": {"resolved": true}}
+    ],
+    "parameters": [
+      {"name": "correction_parameters", "kind": "exact_source_subset_or_full_fallback", "properties": {"source_owned": true}},
+      {"name": "error_estimator", "kind": "certificate_bounds_or_calibrator", "properties": {"false_accept_bound": "declared"}}
+    ],
+    "states": [
+      {"name": "correction_state", "kind": "unresolved_work_and_rollback_state", "properties": {"transactional": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["approximate_path_plus_exact_correction", "transactional_commit_graph"],
+    "time_models": ["asynchronous_reconciliation", "speculative_with_commit", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "atomics", "requirement": "optional", "operations": ["commit", "unresolved_queue"], "numeric_formats": ["u32", "u64"]},
+      {"name": "indirect_execution", "requirement": "alternative", "operations": ["correction_dispatch", "generated_work"], "numeric_formats": ["u32"]},
+      {"name": "synchronization", "requirement": "alternative", "operations": ["commit_barrier", "rollback_ordering"], "numeric_formats": []}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["bind_approximate_contract", "construct_error_estimator", "bind_exact_correction", "calibrate_false_accepts"],
+    "artifacts": [
+      {"kind": "correction_graph", "lifetime": "residency"},
+      {"kind": "error_calibration", "lifetime": "compile"},
+      {"kind": "exact_fallback_reference", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["approximate_value_with_confidence", "public_semantic_value"],
+    "produced_outputs": ["public_semantic_value", "unresolved_work_request"],
+    "cost_terms": [
+      {"name": "correction_fraction", "unit": "ratio", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "correction_latency_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "transaction_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["confidence_decode", "correction_merge", "transaction_commit"]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": ["correction_matches_source", "false_accept_rate_within_contract", "unresolved_results_cannot_commit"],
+    "error_contract": {"metrics": ["false_accept_rate", "post_correction_error"], "requires_transactional_commit": true},
+    "validity_predicates": ["declared_error_estimator_domain", "declared_scheduling_semantics"]
+  },
+  "correction_paths": [
+    {"name": "exact_correction", "trigger": "confidence is insufficient or unresolved work is reported", "action": "execute exact correction before committing output or state", "guarantee": "unresolved approximate results are never externally observable"}
+  ],
+  "tags": ["correction", "non_matrix", "transactional", "verified_approximation"]
+}

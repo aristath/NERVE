@@ -1,0 +1,79 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_dd74bbac29535984d5e47f83a585d21e",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "generated_program_with_exceptions",
+    "version": "1"
+  },
+  "summary": "Stores behavior as generated code, rules, or a compact program plus explicit exception data.",
+  "responsibilities": {
+    "may_express": ["feedback_and_stopping", "nonlinear_gating_and_selection", "routing", "state_transition", "symbol_transduction"],
+    "composition_scopes": ["coupled_region", "operator", "semantic_module", "stateful_system", "transducer"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "procedural_predictability",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["exception_domain", "program_equivalence", "termination"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "program_input", "kind": "numeric_or_symbolic_record", "properties": {"layout": "provider_defined"}},
+      {"name": "program_output", "kind": "numeric_or_symbolic_record", "properties": {"layout": "provider_defined"}}
+    ],
+    "parameters": [
+      {"name": "exception_data", "kind": "rule_exception_table", "properties": {"lookup": "exact"}},
+      {"name": "program", "kind": "generated_code_rules_or_bytecode", "properties": {"termination": "proven"}}
+    ],
+    "states": [
+      {"name": "program_state", "kind": "finite_or_bounded_program_state", "properties": {"ownership": "scope"}}
+    ]
+  },
+  "execution": {
+    "topologies": ["generated_straight_line", "interpreter", "rule_graph"],
+    "time_models": ["event_stream", "recurrent_until_quiescence", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "branch_execution", "requirement": "alternative", "operations": ["branch", "indirect_branch", "predication"], "numeric_formats": []},
+      {"name": "indirect_execution", "requirement": "alternative", "operations": ["generated_work", "indirect_dispatch"], "numeric_formats": ["u32"]},
+      {"name": "instruction_cache", "requirement": "alternative", "operations": ["generated_code_residency", "instruction_fetch"], "numeric_formats": []},
+      {"name": "scalar_integer", "requirement": "optional", "operations": ["bytecode_decode", "state_update"], "numeric_formats": ["i32", "u32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["synthesize_program", "extract_exceptions", "prove_equivalence", "compile_target_code"],
+    "artifacts": [
+      {"kind": "exception_table", "lifetime": "residency"},
+      {"kind": "generated_program", "lifetime": "residency"},
+      {"kind": "program_proof", "lifetime": "compile"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["numeric_or_symbolic_record"],
+    "produced_outputs": ["numeric_or_symbolic_record"],
+    "cost_terms": [
+      {"name": "branch_divergence", "unit": "inactive_lane_cycles", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "code_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "mount"},
+      {"name": "record_conversion_ns", "unit": "nanoseconds", "directions": ["input", "output"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["numeric_to_symbolic", "symbolic_to_numeric"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["exception_coverage", "program_equivalence", "termination"],
+    "error_contract": null,
+    "validity_predicates": ["declared_input_types", "declared_state_bounds"]
+  },
+  "correction_paths": [],
+  "tags": ["generated_code", "logic", "non_matrix", "program"]
+}

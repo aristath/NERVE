@@ -1,0 +1,78 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_dc98891633b3216ab038083e3407e248",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "sparse_event_graph",
+    "version": "1"
+  },
+  "summary": "Represents only active coordinates, changes, and graph messages, generating work until the event graph becomes quiescent.",
+  "responsibilities": {
+    "may_express": ["feature_representation", "feedback_and_stopping", "memory_write_and_retention", "mixing_and_residual_transport", "routing", "state_transition"],
+    "composition_scopes": ["coupled_region", "cross_layer_group", "representation_island", "stateful_system"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "exact_inactive_region",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["activation_predicate", "inactive_contribution", "quiescence_rule"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "event_signal", "kind": "active_coordinate_delta_or_message", "properties": {"ordered": false}}
+    ],
+    "parameters": [
+      {"name": "event_rules", "kind": "sparse_graph_and_update_rules", "properties": {"fallback_density": "declared"}}
+    ],
+    "states": [
+      {"name": "active_state", "kind": "sparse_state_pages_and_event_queue", "properties": {"quiescent": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["event_driven_dataflow", "sparse_message_passing"],
+    "time_models": ["activated_on_change", "event_stream", "recurrent_until_quiescence"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "atomics", "requirement": "alternative", "operations": ["queue_append", "state_update"], "numeric_formats": ["u32", "u64"]},
+      {"name": "indirect_execution", "requirement": "alternative", "operations": ["generated_work", "indirect_dispatch"], "numeric_formats": ["u32"]},
+      {"name": "subgroup_execution", "requirement": "alternative", "operations": ["ballot", "compaction", "scan"], "numeric_formats": ["u32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["derive_event_predicate", "construct_sparse_graph", "prove_inactive_zero", "select_density_fallback"],
+    "artifacts": [
+      {"kind": "event_graph", "lifetime": "residency"},
+      {"kind": "inactive_region_proof", "lifetime": "compile"},
+      {"kind": "queue_layout", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["active_coordinate_delta_or_message", "dense_numeric_vector"],
+    "produced_outputs": ["active_coordinate_delta_or_message", "dense_numeric_vector"],
+    "cost_terms": [
+      {"name": "compaction_ns", "unit": "nanoseconds", "directions": ["input", "internal"], "measured_phase": "steady_state"},
+      {"name": "dense_materialization_bytes", "unit": "bytes", "directions": ["input", "output"], "measured_phase": "steady_state"},
+      {"name": "queue_contention_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["dense_to_events", "events_to_dense", "sparse_delta_merge"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["event_order_preserves_semantics", "inactive_regions_contribute_exactly_zero", "quiescence_matches_source_completion"],
+    "error_contract": null,
+    "validity_predicates": ["declared_activation_predicate", "declared_density_regime"]
+  },
+  "correction_paths": [
+    {"name": "dense_fallback", "trigger": "active density exceeds the declared efficient regime", "action": "execute the exact dense representation for the affected activation", "guarantee": "preserves exact source behavior"}
+  ],
+  "tags": ["event_driven", "non_matrix", "sparse", "stateful"]
+}

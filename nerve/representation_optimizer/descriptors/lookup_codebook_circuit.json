@@ -1,0 +1,136 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_9e65359d9531d6f46a89497fd0927233",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "lookup_codebook_circuit",
+    "version": "1"
+  },
+  "summary": "Replaces repeated arithmetic behavior with exact addressing into codebooks, tables, or transition dictionaries.",
+  "responsibilities": {
+    "may_express": [
+      "candidate_scoring",
+      "feature_representation",
+      "feature_transformation",
+      "nonlinear_gating_and_selection",
+      "routing",
+      "state_transition",
+      "symbol_transduction"
+    ],
+    "composition_scopes": [
+      "coupled_region",
+      "operator",
+      "representation_island",
+      "semantic_module",
+      "transducer"
+    ]
+  },
+  "evidence": [
+    {
+      "claim_kind": "finite_repeated_behavior",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["address_function", "entry_equivalence", "reachable_domain"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {
+        "name": "address_signal",
+        "kind": "codebook_identifier_or_symbolic_key",
+        "properties": {"packed": true}
+      },
+      {
+        "name": "numeric_boundary_signal",
+        "kind": "dense_or_sparse_numeric_value",
+        "properties": {"materialization": "boundary_only"}
+      }
+    ],
+    "parameters": [
+      {
+        "name": "addressing_parameters",
+        "kind": "hash_tree_or_index",
+        "properties": {"collision_policy": "proven_exact"}
+      },
+      {
+        "name": "codebook_parameters",
+        "kind": "lookup_entries",
+        "properties": {"entry_payloads": ["output", "parameter", "state_delta", "transition"]}
+      }
+    ],
+    "states": [
+      {
+        "name": "transition_state",
+        "kind": "optional_finite_symbolic_state",
+        "properties": {"bounded": true}
+      }
+    ]
+  },
+  "execution": {
+    "topologies": ["address_then_read", "cascaded_lookup", "finite_state_transition"],
+    "time_models": ["demand_driven", "event_stream", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {
+        "name": "cache_hierarchy",
+        "requirement": "alternative",
+        "operations": ["indexed_read", "table_reuse"],
+        "numeric_formats": []
+      },
+      {
+        "name": "scalar_integer",
+        "requirement": "alternative",
+        "operations": ["address_calculation", "hash"],
+        "numeric_formats": ["u32", "u64"]
+      },
+      {
+        "name": "texture_sampling",
+        "requirement": "alternative",
+        "operations": ["nearest_sampling", "texel_fetch"],
+        "numeric_formats": ["f16", "f32", "i32", "u32"]
+      }
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["canonicalize_entries", "construct_addressing", "prove_entry_equivalence"],
+    "artifacts": [
+      {"kind": "address_index", "lifetime": "residency"},
+      {"kind": "codebook", "lifetime": "residency"},
+      {"kind": "equivalence_proof", "lifetime": "compile"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["codebook_identifier_or_symbolic_key", "dense_or_sparse_numeric_value"],
+    "produced_outputs": ["codebook_identifier_or_symbolic_key", "dense_or_sparse_numeric_value", "state_delta"],
+    "cost_terms": [
+      {
+        "name": "address_encoding_ns",
+        "unit": "nanoseconds",
+        "directions": ["input"],
+        "measured_phase": "steady_state"
+      },
+      {
+        "name": "entry_materialization_bytes",
+        "unit": "bytes",
+        "directions": ["output"],
+        "measured_phase": "steady_state"
+      }
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["codebook_decode", "symbol_encode"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["addressing_is_total_on_reachable_domain", "entry_payloads_are_equivalent"],
+    "error_contract": null,
+    "validity_predicates": ["finite_reachable_domain", "stable_addressing_semantics"]
+  },
+  "correction_paths": [],
+  "tags": ["addressing", "codebook", "lookup", "non_matrix"]
+}

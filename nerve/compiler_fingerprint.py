@@ -6,6 +6,7 @@ from pathlib import Path
 
 COMPILER_FINGERPRINT_SCHEMA = "nerve.package_compiler_sha256.v2"
 COMPILER_SOURCE_MANIFEST = "compiler_sources.txt"
+REPRESENTATION_DESCRIPTOR_DIR = "representation_optimizer/descriptors"
 
 
 def compiler_source_inputs(compiler_dir: Path | None = None) -> tuple[tuple[str, Path], ...]:
@@ -51,6 +52,27 @@ def compiler_source_inputs(compiler_dir: Path | None = None) -> tuple[tuple[str,
     return tuple(inputs)
 
 
+def representation_descriptor_inputs(
+    compiler_dir: Path | None = None,
+) -> tuple[tuple[str, Path], ...]:
+    compiler_dir = compiler_dir or Path(__file__).resolve().parent
+    descriptor_dir = compiler_dir / REPRESENTATION_DESCRIPTOR_DIR
+    if not descriptor_dir.is_dir():
+        raise RuntimeError(
+            f"compiler representation descriptor directory is missing: {descriptor_dir}"
+        )
+    paths = sorted(descriptor_dir.glob("*.json"))
+    if not paths:
+        raise RuntimeError(
+            f"compiler representation descriptor directory is empty: {descriptor_dir}"
+        )
+    repository_root = compiler_dir.parent
+    return tuple(
+        (path.relative_to(repository_root).as_posix(), path)
+        for path in paths
+    )
+
+
 def package_compiler_fingerprint(
     shader_source_dir: Path,
     *,
@@ -58,6 +80,7 @@ def package_compiler_fingerprint(
 ) -> str:
     inputs = [
         *compiler_source_inputs(compiler_dir),
+        *representation_descriptor_inputs(compiler_dir),
         *(
             (f"runtime-rs/shaders/{path.name}", path)
             for path in shader_source_dir.iterdir()

@@ -33,6 +33,7 @@ nerve/model_transpiler_tensor_index.py
 nerve/model_transpiler_types.py
 nerve/representation_optimizer/__init__.py
 nerve/representation_optimizer/contracts.py
+nerve/representation_optimizer/descriptor_registry.py
 nerve/representation_optimizer/lifecycle.py
 nerve/representation_optimizer/stage.py
 nerve/semantic_modules.py

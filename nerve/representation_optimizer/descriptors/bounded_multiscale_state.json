@@ -1,0 +1,81 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_99e6e39d3264ce871baacfb15df95914",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "bounded_multiscale_state",
+    "version": "1"
+  },
+  "summary": "Compresses explicit history into bounded fast and slow recurrent state with auditable reconciliation.",
+  "responsibilities": {
+    "may_express": ["contextual_addressing", "memory_write_and_retention", "order_position_and_time", "state_transition"],
+    "composition_scopes": ["cross_layer_group", "representation_island", "stateful_system"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "bounded_state_sufficiency",
+      "acceptable_statuses": ["measured", "proven"],
+      "exactness": "either",
+      "required_facts": ["history_domain", "state_transition", "state_transition_error"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "state_event", "kind": "event_or_dense_update", "properties": {"clock": "provider_defined"}}
+    ],
+    "parameters": [
+      {"name": "state_transition_parameters", "kind": "recurrent_filter_rules_or_local_fields", "properties": {"multiscale": true}}
+    ],
+    "states": [
+      {"name": "fast_state", "kind": "bounded_recurrent_state", "properties": {"timescale": "fast"}},
+      {"name": "reconciliation_state", "kind": "compressed_history_or_exception_log", "properties": {"bounded_or_paged": true}},
+      {"name": "slow_state", "kind": "bounded_recurrent_state", "properties": {"timescale": "slow"}}
+    ]
+  },
+  "execution": {
+    "topologies": ["fast_slow_recurrent_loop", "state_update_with_reconciliation"],
+    "time_models": ["event_stream", "multirate_clock", "recurrent_per_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "cache_hierarchy", "requirement": "alternative", "operations": ["state_reuse", "temporal_locality"], "numeric_formats": []},
+      {"name": "resident_program", "requirement": "alternative", "operations": ["device_owned_loop", "state_transition"], "numeric_formats": ["bf16", "f16", "f32"]},
+      {"name": "simd_vector", "requirement": "alternative", "operations": ["filter_update", "gated_update"], "numeric_formats": ["bf16", "f16", "f32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["identify_sufficient_state", "fit_transitions", "measure_horizon_error", "construct_reconciliation"],
+    "artifacts": [
+      {"kind": "horizon_validation", "lifetime": "compile"},
+      {"kind": "reconciliation_contract", "lifetime": "compile"},
+      {"kind": "state_layout", "lifetime": "residency"},
+      {"kind": "transition_parameters", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["event_or_dense_update", "explicit_history"],
+    "produced_outputs": ["bounded_state_reference", "dense_numeric_vector", "event_or_dense_update"],
+    "cost_terms": [
+      {"name": "history_compression_ns", "unit": "nanoseconds", "directions": ["input"], "measured_phase": "steady_state"},
+      {"name": "reconciliation_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "state_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "mount"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["history_to_state", "state_projection"]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": ["bounded_state_transition_error", "reconciliation_restores_declared_behavior"],
+    "error_contract": {"metrics": ["free_running_divergence", "state_transition_error"], "requires_declared_horizon": true},
+    "validity_predicates": ["declared_history_domain", "declared_output_horizon"]
+  },
+  "correction_paths": [
+    {"name": "history_reconciliation", "trigger": "state confidence decays or an exception is observed", "action": "replay or query the exact retained history and repair bounded state", "guarantee": "restores the declared state and output error bounds"}
+  ],
+  "tags": ["bounded_state", "multiscale", "non_matrix", "recurrent"]
+}

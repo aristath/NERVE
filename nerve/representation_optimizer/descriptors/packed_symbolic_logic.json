@@ -1,0 +1,75 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_71798b5cda701a6c5c1abd8a2f91ed80",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "packed_symbolic_logic",
+    "version": "1"
+  },
+  "summary": "Keeps binary, ternary, categorical, mask, or symbolic values packed and operates on them without scalar expansion.",
+  "responsibilities": {
+    "may_express": ["feature_representation", "mixing_and_residual_transport", "nonlinear_gating_and_selection", "routing", "selection_and_randomness"],
+    "composition_scopes": ["coupled_region", "operator", "representation_island", "semantic_module"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "discrete_symbolic_equivalence",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["encoding_bijection", "operation_truth_table", "packing_layout"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "packed_signal", "kind": "bitplane_categorical_or_symbolic_record", "properties": {"scalar_expansion": "boundary_only"}}
+    ],
+    "parameters": [
+      {"name": "logic_parameters", "kind": "packed_masks_tables_or_boolean_circuit", "properties": {"integer_exact": true}}
+    ],
+    "states": [
+      {"name": "symbolic_state", "kind": "packed_finite_state", "properties": {"bounded": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["bit_sliced_pipeline", "logic_circuit", "symbolic_set_graph"],
+    "time_models": ["event_stream", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "bit_manipulation", "requirement": "required", "operations": ["bit_extract_deposit", "boolean_logic", "population_count"], "numeric_formats": ["u32", "u64"]},
+      {"name": "scalar_integer", "requirement": "alternative", "operations": ["comparison", "packed_lookup"], "numeric_formats": ["i32", "u32"]},
+      {"name": "subgroup_execution", "requirement": "alternative", "operations": ["ballot", "vote"], "numeric_formats": ["u32", "u64"]}
+    ],
+    "composition": "composite"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["derive_encoding", "synthesize_logic", "prove_truth_table", "pack_parameters"],
+    "artifacts": [
+      {"kind": "encoding_contract", "lifetime": "compile"},
+      {"kind": "logic_program", "lifetime": "residency"},
+      {"kind": "packed_parameters", "lifetime": "residency"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["bitplane_categorical_or_symbolic_record", "dense_discrete_value"],
+    "produced_outputs": ["bitplane_categorical_or_symbolic_record", "dense_discrete_value"],
+    "cost_terms": [
+      {"name": "pack_unpack_bytes", "unit": "bytes", "directions": ["input", "output"], "measured_phase": "steady_state"},
+      {"name": "packing_ns", "unit": "nanoseconds", "directions": ["input", "output"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["bit_pack", "bit_unpack", "categorical_encode"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["encoding_is_bijective", "packed_operations_match_source"],
+    "error_contract": null,
+    "validity_predicates": ["declared_discrete_domain"]
+  },
+  "correction_paths": [],
+  "tags": ["bitplane", "logic", "non_matrix", "packed", "symbolic"]
+}

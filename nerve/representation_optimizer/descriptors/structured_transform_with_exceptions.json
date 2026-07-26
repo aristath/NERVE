@@ -1,0 +1,126 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_06ca4e20a8f65c8224fbba939edcee15",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "structured_transform_with_exceptions",
+    "version": "1"
+  },
+  "summary": "Expresses a transform as exact structured stages plus sparse or low-rank exceptions.",
+  "responsibilities": {
+    "may_express": [
+      "dynamic_range_control",
+      "feature_transformation",
+      "mixing_and_residual_transport"
+    ],
+    "composition_scopes": [
+      "coupled_region",
+      "cross_layer_group",
+      "operator",
+      "representation_island",
+      "semantic_module"
+    ]
+  },
+  "evidence": [
+    {
+      "claim_kind": "structured_factorization",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["exception_support", "factor_sequence", "reconstruction_digest"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {
+        "name": "basis_signal",
+        "kind": "spectral_or_factorized_coefficients",
+        "properties": {"materialization": "optional"}
+      },
+      {
+        "name": "dense_boundary_signal",
+        "kind": "dense_numeric_vector",
+        "properties": {"materialization": "boundary_only"}
+      }
+    ],
+    "parameters": [
+      {
+        "name": "exception_parameters",
+        "kind": "sparse_or_low_rank_exception",
+        "properties": {"applied_after": "structured_base"}
+      },
+      {
+        "name": "structured_parameters",
+        "kind": "factor_sequence",
+        "properties": {"forms": ["butterfly", "circulant", "convolution", "diagonal", "permutation", "spectral"]}
+      }
+    ],
+    "states": []
+  },
+  "execution": {
+    "topologies": ["factor_pipeline", "structured_base_plus_exception"],
+    "time_models": ["streaming_activation", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {
+        "name": "cooperative_matrix",
+        "requirement": "optional",
+        "operations": ["exception_projection"],
+        "numeric_formats": ["bf16", "f16", "f32", "f8_e4m3"]
+      },
+      {
+        "name": "simd_vector",
+        "requirement": "alternative",
+        "operations": ["factor_stage", "sparse_correction"],
+        "numeric_formats": ["bf16", "f16", "f32"]
+      },
+      {
+        "name": "subgroup_execution",
+        "requirement": "alternative",
+        "operations": ["lane_permutation", "reduction"],
+        "numeric_formats": ["f16", "f32"]
+      }
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["factorize", "prove_reconstruction", "pack_exceptions"],
+    "artifacts": [
+      {"kind": "exception_table", "lifetime": "residency"},
+      {"kind": "factor_program", "lifetime": "residency"},
+      {"kind": "reconstruction_proof", "lifetime": "compile"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["dense_numeric_vector", "spectral_or_factorized_coefficients"],
+    "produced_outputs": ["dense_numeric_vector", "spectral_or_factorized_coefficients"],
+    "cost_terms": [
+      {
+        "name": "basis_conversion_bytes",
+        "unit": "bytes",
+        "directions": ["input", "output"],
+        "measured_phase": "steady_state"
+      },
+      {
+        "name": "exception_application_ns",
+        "unit": "nanoseconds",
+        "directions": ["internal"],
+        "measured_phase": "steady_state"
+      }
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["basis_change", "permutation", "scaling"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["exact_exception_application", "exact_factor_reconstruction"],
+    "error_contract": null,
+    "validity_predicates": ["declared_numeric_semantics", "declared_shapes"]
+  },
+  "correction_paths": [],
+  "tags": ["factorized", "non_dense", "structured_transform"]
+}

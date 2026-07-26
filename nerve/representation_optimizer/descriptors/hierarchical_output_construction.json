@@ -1,0 +1,78 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_574698927692897aa0ee18191e168bc1",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "hierarchical_output_construction",
+    "version": "1"
+  },
+  "summary": "Constructs output candidates through an exact hierarchy, trie, graph, or product code instead of a flat global projection.",
+  "responsibilities": {
+    "may_express": ["candidate_scoring", "feedback_and_stopping", "selection_and_randomness", "symbol_transduction"],
+    "composition_scopes": ["coupled_region", "representation_island", "transducer"]
+  },
+  "evidence": [
+    {
+      "claim_kind": "output_partition_equivalence",
+      "acceptable_statuses": ["proven"],
+      "exactness": "exact",
+      "required_facts": ["leaf_coverage", "path_score_equivalence", "selection_equivalence"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {"name": "candidate_frontier", "kind": "hierarchical_candidate_set", "properties": {"complete": true}},
+      {"name": "output_symbol", "kind": "token_subtoken_or_symbol", "properties": {"public_boundary": true}}
+    ],
+    "parameters": [
+      {"name": "output_hierarchy", "kind": "tree_trie_graph_or_product_code", "properties": {"leaf_coverage": "complete"}},
+      {"name": "path_scorers", "kind": "local_exact_scorers", "properties": {"composition": "source_equivalent"}}
+    ],
+    "states": [
+      {"name": "frontier_state", "kind": "bounded_candidate_frontier", "properties": {"rollback": true}}
+    ]
+  },
+  "execution": {
+    "topologies": ["hierarchical_tree", "product_code_graph", "token_trie"],
+    "time_models": ["demand_driven", "speculative_with_commit", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {"name": "bit_manipulation", "requirement": "optional", "operations": ["candidate_mask", "prefix_filter"], "numeric_formats": ["u32", "u64"]},
+      {"name": "scalar_integer", "requirement": "alternative", "operations": ["graph_traversal", "prefix_traversal"], "numeric_formats": ["u32"]},
+      {"name": "simd_vector", "requirement": "alternative", "operations": ["local_candidate_scoring", "top_k"], "numeric_formats": ["bf16", "f16", "f32"]}
+    ],
+    "composition": "one_alternative"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["construct_hierarchy", "map_source_scores", "prove_leaf_coverage", "prove_selection_equivalence"],
+    "artifacts": [
+      {"kind": "hierarchy", "lifetime": "residency"},
+      {"kind": "path_scorers", "lifetime": "residency"},
+      {"kind": "selection_proof", "lifetime": "compile"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["dense_numeric_vector", "hierarchical_candidate_set"],
+    "produced_outputs": ["hierarchical_candidate_set", "token_subtoken_or_symbol"],
+    "cost_terms": [
+      {"name": "frontier_bytes", "unit": "bytes", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "hierarchy_traversal_ns", "unit": "nanoseconds", "directions": ["internal"], "measured_phase": "steady_state"},
+      {"name": "symbol_materialization_ns", "unit": "nanoseconds", "directions": ["output"], "measured_phase": "steady_state"}
+    ],
+    "island_compatibility": {
+      "can_span_scopes": true,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["candidate_set_decode", "sampler_selection"]
+    }
+  },
+  "behavioral": {
+    "exactness": "exact",
+    "proof_obligations": ["all_public_symbols_are_reachable", "path_scores_match_source_distribution", "sampling_semantics_are_preserved"],
+    "error_contract": null,
+    "validity_predicates": ["declared_sampler_contract", "declared_vocabulary"]
+  },
+  "correction_paths": [],
+  "tags": ["hierarchical", "non_matrix", "output", "structured_decoding"]
+}

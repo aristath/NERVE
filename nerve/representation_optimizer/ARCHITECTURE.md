@@ -50,6 +50,7 @@ non-finite number, or internally inconsistent contract.
 | `source_behavior_contract.v1` | Observable source behavior and exact implementation |
 | `algebraic_evidence.v1` | Analyzer identity, structural claims, and evidence artifacts |
 | `hardware_process_profile.v1` | Target identity, processes, measurements, and provenance |
+| `representation_descriptor.v1` | Open representation-family vocabulary, evidence requirements, physical forms, costs, and correction paths |
 | `representation_candidate.v1` | Proposed representation, target predicate, and error contract |
 | `candidate_construction.v1` | Isolated construction result, artifacts, resources, and diagnostics |
 | `benchmark_record.v1` | Matched workload, raw samples, summary, and speed decision |
@@ -60,6 +61,45 @@ non-finite number, or internally inconsistent contract.
 Every contract round-trips through the same canonical serializer. The canonical
 SHA-256 contract digest is for compiler identity and evidence linkage; package
 artifact integrity independently protects the bytes published on disk.
+
+## Representation descriptors
+
+A representation descriptor is not a candidate and is not a hardcoded list of
+implementations. It is a registerable, model-independent declaration of a
+family of possible expressions. Descriptors state:
+
+- the semantic responsibilities and composition scopes they may express;
+- the exact or sampled evidence required before considering them;
+- their signal, parameter, and state forms;
+- supported topology and time models;
+- compatible CPU and GPU processes;
+- construction phases and artifact lifetimes;
+- accepted and produced boundary formats plus measured conversion costs;
+- whether adjacent scopes may retain the native representation;
+- proof obligations, validity predicates, and approximation error contracts;
+  and
+- exact fallback or correction paths.
+
+Built-in descriptor documents live in
+`nerve/representation_optimizer/descriptors/`. The registry loads every JSON
+document in that directory through the same strict contract validator and also
+accepts external descriptor documents. Neither responsibility names nor
+representation kinds are closed enums, so a new expression does not require a
+model-family conditional or a central catalog edit. Namespace, name, and
+version collisions fail closed, while each descriptor's content-derived
+identifier prevents silent semantic drift.
+
+The initial data-defined vocabulary spans structured transforms with
+exceptions, lookup/codebook circuits, indexed search, sampled fields, generated
+programs, packed symbolic logic, sparse event graphs, bounded multiscale state,
+hierarchical output construction, reconstructed parameter streams,
+coarse-to-fine evaluation, verified correction, and heterogeneous
+representation islands. These are composable examples from `EXPERIMENTS.md`,
+not an exhaustive list.
+
+Descriptor JSON is included in the package compiler fingerprint. Changing the
+available representation vocabulary therefore cannot silently reuse a compiled
+package fingerprint from different optimizer semantics.
 
 ## Candidate lifecycle
 
