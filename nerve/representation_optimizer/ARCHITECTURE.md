@@ -100,6 +100,53 @@ only that candidate's new session value. It cannot:
 Filesystem staging and atomic publication build on this contract in the
 candidate-construction and promotion milestones.
 
+## Hardware-process profiles
+
+`nerve-runtime --inspect-devices --json` emits one
+`hardware_process_profile.v1` for the native CPU and one for every
+compute-capable Vulkan GPU exposed by the selected ICD. The inventory describes
+processes the optimizer may target rather than reducing hardware to a list of
+matrix data types.
+
+CPU discovery covers scalar, branch, out-of-order, SIMD, matrix-extension,
+bit-manipulation, cache, prefetch, atomics, memory-copy, NUMA, and DMA exposure.
+Vulkan discovery covers shader arithmetic, packed dot products, cooperative
+matrices and their exact shapes, subgroups, registers, occupancy, workgroup
+memory, caches, texture sampling and format conversion, graphics fixed
+functions, ray traversal, collectives, indirect and device-generated work,
+execution graphs, command replay, copy queues, external memory and
+synchronization, and media queues. A facility is marked unavailable or opaque
+when the selected API does not expose a programmable contract or a required
+resource limit.
+
+CPU and GPU memory-bandwidth processes are marked available but deliberately
+carry no invented throughput number; realized bandwidth is supplied by the
+empirical calibration stage.
+
+Capability identity and physical identity are deliberately separate:
+
+- `capability_extensions` participates in the capability-class digest and
+  contains only compiler-relevant processes, formats, limits, and API facts;
+- `identity_extensions` participates in the physical-profile digest and
+  contains stable device-specific facts not shared by the capability class;
+- `runtime_bindings` carries ephemeral API bindings such as a Vulkan physical
+  index but does not participate in capability or profile identity; and
+- calibration measurements change the physical-profile identity without
+  changing the underlying capability class.
+
+Profile provenance embeds a SHA-256 implementation fingerprint over the Rust
+discovery schemas, CPU/Vulkan probes, API bindings, dependency lockfile, and
+fingerprint algorithm. A discovery implementation change therefore cannot
+silently reuse an older physical-profile identity merely because the crate
+version was not manually changed.
+
+Consequently, identical GPUs share one capability class even when their
+runtime bindings differ. Compiler packages may target that class without
+hardcoding model placement, while runtime placement still selects a concrete
+device. The compiler derives its current SPIR-V lowering view from these
+profiles and persists the complete inventory in `compiler_target.v2`; there is
+no separate model-family or legacy device-capability path.
+
 ## Re-lowering
 
 An alternative representation may change signals, state, parameters, or the

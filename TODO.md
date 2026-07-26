@@ -59,40 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 2. Build a complete hardware-process capability model
-
-- Represent CPU capabilities, including:
-  - scalar and out-of-order execution;
-  - branch-heavy execution;
-  - SIMD/vector widths and data types;
-  - matrix extensions where present;
-  - bit manipulation and population count;
-  - cache hierarchy;
-  - memory bandwidth and NUMA topology;
-  - prefetch behavior;
-  - instruction and micro-op caching;
-  - atomics; and
-  - DMA and device interconnects.
-- Represent GPU capabilities, including:
-  - scalar, vector, packed-dot, and matrix execution;
-  - supported numerical and packed formats;
-  - subgroup operations and subgroup width;
-  - registers, shared memory, occupancy constraints, and caches;
-  - texture addressing, sampling, interpolation, and format conversion;
-  - rasterization, interpolation, depth/stencil, and blending;
-  - acceleration-structure construction and ray traversal;
-  - atomics, scans, compaction, and indirect work generation;
-  - command queues, execution graphs, and resident execution;
-  - copy engines and memory domains; and
-  - exposed media reconstruction facilities.
-- Record API, driver, extension, format, alignment, and resource-limit
-  requirements. A physical unit that cannot be accessed through the selected API
-  is not an available compiler target.
-- Describe capability classes without embedding layer placement or model names.
-
-Completion requires discovery on the available CPUs and AMD GPUs, synthetic
-capability fixtures, fail-closed validation, and stable hardware identities.
-
 ### 3. Build an empirical hardware calibration suite
 
 - Measure realized rather than advertised performance for each exposed hardware
