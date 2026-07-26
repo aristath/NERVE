@@ -61,6 +61,7 @@ def source_contract() -> dict[str, object]:
             "states": [],
             "controls": [],
             "randomness": [],
+            "dependencies": [],
         },
         "exact_reference": {
             "implementation_id": "exact_reference",

@@ -11,6 +11,7 @@ from nerve.compilation import Json, ModelCompileError
 
 
 OPTIMIZATION_SCOPE_SCHEMA = "nerve.optimizer.optimization_scope.v1"
+OPTIMIZATION_SCOPE_CATALOG_SCHEMA = "nerve.optimizer.optimization_scope_catalog.v1"
 SOURCE_BEHAVIOR_CONTRACT_SCHEMA = "nerve.optimizer.source_behavior_contract.v1"
 ALGEBRAIC_EVIDENCE_SCHEMA = "nerve.optimizer.algebraic_evidence.v1"
 HARDWARE_PROCESS_PROFILE_SCHEMA = "nerve.optimizer.hardware_process_profile.v1"
@@ -127,6 +128,12 @@ def representation_descriptor_id(document: Json) -> str:
     return stable_contract_id("representation_descriptor", unsigned)
 
 
+def optimization_scope_catalog_id(document: Json) -> str:
+    unsigned = deepcopy(document)
+    unsigned.pop("catalog_id", None)
+    return stable_contract_id("scope_catalog", unsigned)
+
+
 def validate_contract(document: Json, *, expected_schema: str | None = None) -> None:
     _validate_json_value(document, "$")
     schema = document.get("schema")
@@ -193,10 +200,19 @@ def _validate_optimization_scope(document: Json) -> None:
             "states",
             "controls",
             "randomness",
+            "dependencies",
         },
     )
-    for field in boundary:
+    for field in (
+        "inputs",
+        "outputs",
+        "parameters",
+        "states",
+        "controls",
+        "randomness",
+    ):
         _require_reference_list(boundary[field], f"boundary.{field}")
+    _require_dependency_list(boundary["dependencies"], "boundary.dependencies")
     _require_digest(document["source_contract_digest"], "source_contract_digest")
     expected_id = stable_contract_id(
         "scope",
@@ -236,10 +252,22 @@ def _validate_source_behavior_contract(document: Json) -> None:
             "states",
             "controls",
             "randomness",
+            "dependencies",
         },
     )
-    for field in interface:
+    for field in (
+        "inputs",
+        "outputs",
+        "parameters",
+        "states",
+        "controls",
+        "randomness",
+    ):
         _require_reference_list(interface[field], f"interface.{field}")
+    _require_dependency_list(
+        interface["dependencies"],
+        "interface.dependencies",
+    )
     exact_reference = _require_object(document["exact_reference"], "exact_reference")
     _require_fields(exact_reference, {"implementation_id", "artifact_refs"})
     _require_nonempty_string(
@@ -256,6 +284,193 @@ def _validate_source_behavior_contract(document: Json) -> None:
     if document["contract_digest"] != expected:
         raise ContractValidationError(
             "source behavior contract digest does not match its canonical content"
+        )
+
+
+def _validate_optimization_scope_catalog(document: Json) -> None:
+    _require_fields(
+        document,
+        {
+            "schema",
+            "catalog_id",
+            "package_id",
+            "scopes",
+            "source_contracts",
+            "diagnostics",
+            "summary",
+        },
+    )
+    _require_stable_id(document["catalog_id"], "scope_catalog", "catalog_id")
+    package_id = _require_nonempty_string(document["package_id"], "package_id")
+
+    scopes = _require_list(document["scopes"], "scopes")
+    source_contracts = _require_list(
+        document["source_contracts"],
+        "source_contracts",
+    )
+    scope_by_id: dict[str, Json] = {}
+    region_ids = []
+    for index, raw_scope in enumerate(scopes):
+        path = f"scopes[{index}]"
+        scope = _require_object(raw_scope, path)
+        validate_contract(scope, expected_schema=OPTIMIZATION_SCOPE_SCHEMA)
+        scope_id = str(scope["scope_id"])
+        if scope_id in scope_by_id:
+            raise ContractValidationError(
+                f"optimization scope catalog contains duplicate scope {scope_id!r}"
+            )
+        if scope["package_id"] != package_id:
+            raise ContractValidationError(
+                f"{path}.package_id does not match catalog package_id"
+            )
+        extensions = _require_object(scope.get("extensions"), f"{path}.extensions")
+        _require_fields(
+            extensions,
+            {
+                "classifications",
+                "region_id",
+                "semantic_roles",
+            },
+        )
+        classifications = _require_sorted_nonempty_unique_strings(
+            extensions["classifications"],
+            f"{path}.extensions.classifications",
+        )
+        if scope["kind"] not in classifications:
+            raise ContractValidationError(
+                f"{path}.kind must be present in extensions.classifications"
+            )
+        _require_sorted_unique_strings(
+            extensions["semantic_roles"],
+            f"{path}.extensions.semantic_roles",
+        )
+        region_id = _require_stable_id(
+            extensions["region_id"],
+            "semantic_region",
+            f"{path}.extensions.region_id",
+        )
+        region_ids.append(region_id)
+        scope_by_id[scope_id] = scope
+    if len(region_ids) != len(set(region_ids)):
+        raise ContractValidationError(
+            "optimization scope catalog contains duplicate semantic regions"
+        )
+
+    source_by_scope: dict[str, Json] = {}
+    for index, raw_source in enumerate(source_contracts):
+        path = f"source_contracts[{index}]"
+        source = _require_object(raw_source, path)
+        validate_contract(
+            source,
+            expected_schema=SOURCE_BEHAVIOR_CONTRACT_SCHEMA,
+        )
+        scope_id = str(source["scope_id"])
+        if scope_id in source_by_scope:
+            raise ContractValidationError(
+                "optimization scope catalog contains duplicate source behavior "
+                f"contract for {scope_id!r}"
+            )
+        source_by_scope[scope_id] = source
+    if set(source_by_scope) != set(scope_by_id):
+        raise ContractValidationError(
+            "optimization scope catalog scopes and source contracts do not match"
+        )
+    for scope_id, scope in scope_by_id.items():
+        source = source_by_scope[scope_id]
+        if (
+            scope["source_contract_digest"]
+            != source["contract_digest"]
+        ):
+            raise ContractValidationError(
+                f"scope {scope_id!r} does not reference its source behavior contract"
+            )
+        if scope["boundary"] != source["interface"]:
+            raise ContractValidationError(
+                f"scope {scope_id!r} boundary does not match its source behavior contract"
+            )
+
+    diagnostics = _require_list(document["diagnostics"], "diagnostics")
+    diagnostic_ids = []
+    for index, raw_diagnostic in enumerate(diagnostics):
+        path = f"diagnostics[{index}]"
+        diagnostic = _require_object(raw_diagnostic, path)
+        _require_fields(
+            diagnostic,
+            {
+                "diagnostic_id",
+                "classification",
+                "component_ids",
+                "semantic_module_ids",
+                "reason",
+            },
+        )
+        diagnostic_ids.append(
+            _require_stable_id(
+                diagnostic["diagnostic_id"],
+                "scope_diagnostic",
+                f"{path}.diagnostic_id",
+            )
+        )
+        _require_nonempty_string(
+            diagnostic["classification"],
+            f"{path}.classification",
+        )
+        _require_unique_strings(
+            diagnostic["component_ids"],
+            f"{path}.component_ids",
+        )
+        _require_unique_strings(
+            diagnostic["semantic_module_ids"],
+            f"{path}.semantic_module_ids",
+        )
+        _require_nonempty_string(diagnostic["reason"], f"{path}.reason")
+    _require_sorted_unique_names(diagnostic_ids, "diagnostics")
+
+    summary = _require_object(document["summary"], "summary")
+    _require_fields(
+        summary,
+        {
+            "scope_count",
+            "source_contract_count",
+            "rejected_scope_count",
+            "classification_counts",
+        },
+    )
+    if _require_nonnegative_integer(
+        summary["scope_count"], "summary.scope_count"
+    ) != len(scopes):
+        raise ContractValidationError("summary.scope_count does not match scopes")
+    if _require_nonnegative_integer(
+        summary["source_contract_count"],
+        "summary.source_contract_count",
+    ) != len(source_contracts):
+        raise ContractValidationError(
+            "summary.source_contract_count does not match source_contracts"
+        )
+    if _require_nonnegative_integer(
+        summary["rejected_scope_count"],
+        "summary.rejected_scope_count",
+    ) != len(diagnostics):
+        raise ContractValidationError(
+            "summary.rejected_scope_count does not match diagnostics"
+        )
+    classification_counts = _require_object(
+        summary["classification_counts"],
+        "summary.classification_counts",
+    )
+    expected_counts: dict[str, int] = {}
+    for scope in scopes:
+        for classification in scope["extensions"]["classifications"]:
+            expected_counts[classification] = expected_counts.get(classification, 0) + 1
+    if classification_counts != dict(sorted(expected_counts.items())):
+        raise ContractValidationError(
+            "summary.classification_counts does not match scope classifications"
+        )
+
+    expected_id = optimization_scope_catalog_id(document)
+    if document["catalog_id"] != expected_id:
+        raise ContractValidationError(
+            f"catalog_id must match canonical scope catalog content {expected_id!r}"
         )
 
 
@@ -1259,6 +1474,59 @@ def _require_reference_list(value: Any, path: str) -> None:
         raise ContractValidationError(f"{path} contains duplicate reference ids")
 
 
+def _require_dependency_list(value: Any, path: str) -> None:
+    dependencies = _require_list(value, path)
+    edge_ids = []
+    for index, raw_dependency in enumerate(dependencies):
+        dependency_path = f"{path}[{index}]"
+        dependency = _require_object(raw_dependency, dependency_path)
+        _require_fields(
+            dependency,
+            {
+                "edge_id",
+                "connection",
+                "source",
+                "destination",
+                "covered_consumer_node_ids",
+            },
+        )
+        edge_ids.append(
+            _require_nonempty_string(
+                dependency["edge_id"],
+                f"{dependency_path}.edge_id",
+            )
+        )
+        connection = _require_object(
+            dependency["connection"],
+            f"{dependency_path}.connection",
+        )
+        _require_nonempty_string(
+            connection.get("kind"),
+            f"{dependency_path}.connection.kind",
+        )
+        for endpoint_name in ("source", "destination"):
+            endpoint = _require_object(
+                dependency[endpoint_name],
+                f"{dependency_path}.{endpoint_name}",
+            )
+            _require_fields(endpoint, {"component_id", "port_id"})
+            _require_nonempty_string(
+                endpoint["component_id"],
+                f"{dependency_path}.{endpoint_name}.component_id",
+            )
+            _require_nonempty_string(
+                endpoint["port_id"],
+                f"{dependency_path}.{endpoint_name}.port_id",
+            )
+        _require_unique_strings(
+            dependency["covered_consumer_node_ids"],
+            f"{dependency_path}.covered_consumer_node_ids",
+            nonempty=True,
+        )
+    if len(edge_ids) != len(set(edge_ids)):
+        raise ContractValidationError(f"{path} repeats an edge")
+
+
 def _require_named_records(value: Any, path: str) -> None:
     records = _require_list(value, path)
     names = []
@@ -1347,6 +1615,7 @@ def _require_stable_id(value: Any, prefix: str, path: str) -> str:
 
 _VALIDATORS: dict[str, Validator] = {
     OPTIMIZATION_SCOPE_SCHEMA: _validate_optimization_scope,
+    OPTIMIZATION_SCOPE_CATALOG_SCHEMA: _validate_optimization_scope_catalog,
     SOURCE_BEHAVIOR_CONTRACT_SCHEMA: _validate_source_behavior_contract,
     ALGEBRAIC_EVIDENCE_SCHEMA: _validate_algebraic_evidence,
     HARDWARE_PROCESS_PROFILE_SCHEMA: _validate_hardware_process_profile,

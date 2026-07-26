@@ -10,6 +10,7 @@ from nerve.representation_optimizer.contracts import (
     BENCHMARK_RECORD_SCHEMA,
     CANDIDATE_CONSTRUCTION_SCHEMA,
     HARDWARE_PROCESS_PROFILE_SCHEMA,
+    OPTIMIZATION_SCOPE_CATALOG_SCHEMA,
     OPTIMIZATION_SCOPE_SCHEMA,
     PROMOTION_DECISION_SCHEMA,
     RELOWERING_REQUEST_SCHEMA,
@@ -20,13 +21,18 @@ from nerve.representation_optimizer.contracts import (
     contract_digest,
 )
 from nerve.representation_optimizer.lifecycle import OptimizationSession
+from nerve.representation_optimizer.scope_enumeration.catalog import (
+    load_optimization_scope_catalog,
+    write_optimization_scope_catalog,
+)
 
 
-OPTIMIZER_STAGE_SCHEMA = "nerve.optimizer.stage.v1"
+OPTIMIZER_STAGE_SCHEMA = "nerve.optimizer.stage.v2"
 OPTIMIZER_STAGE_DIR = "optimization"
 OPTIMIZER_STAGE_FILE = "stage.json"
 OPTIMIZER_CONTRACT_SCHEMAS = (
     OPTIMIZATION_SCOPE_SCHEMA,
+    OPTIMIZATION_SCOPE_CATALOG_SCHEMA,
     SOURCE_BEHAVIOR_CONTRACT_SCHEMA,
     ALGEBRAIC_EVIDENCE_SCHEMA,
     HARDWARE_PROCESS_PROFILE_SCHEMA,
@@ -64,6 +70,14 @@ def initialize_optimizer_stage(
         ) from error
     baseline_digest = contract_digest(lowered_index)
     session = OptimizationSession.create(package_id, baseline_digest)
+    optimizer_dir = package_dir / OPTIMIZER_STAGE_DIR
+    scope_catalog = write_optimization_scope_catalog(
+        package_id=package_id,
+        package_dir=package_dir,
+        optimizer_dir=optimizer_dir,
+        lowered_index=lowered_index,
+        lowered_index_ref=lowered_ref,
+    )
     document = {
         "schema": OPTIMIZER_STAGE_SCHEMA,
         "stage": "behavioral_representation_optimization",
@@ -76,6 +90,14 @@ def initialize_optimizer_stage(
             "artifact_ref": lowered_ref,
             "contract_digest": baseline_digest,
             "mutable": False,
+        },
+        "scope_catalog": {
+            "artifact_ref": scope_catalog.package_reference(package_dir),
+            "contract_digest": scope_catalog.digest,
+            "scope_count": scope_catalog.document["summary"]["scope_count"],
+            "rejected_scope_count": scope_catalog.document["summary"][
+                "rejected_scope_count"
+            ],
         },
         "session": session.to_json(),
         "contract_schemas": list(OPTIMIZER_CONTRACT_SCHEMAS),
@@ -93,6 +115,7 @@ def validate_optimizer_stage(document: Json, *, package_dir: Path) -> None:
         "compiler_position",
         "status",
         "exact_baseline",
+        "scope_catalog",
         "session",
         "contract_schemas",
     }
@@ -139,6 +162,44 @@ def validate_optimizer_stage(document: Json, *, package_dir: Path) -> None:
     if contract_digest(baseline_document) != baseline.get("contract_digest"):
         raise ModelCompileError(
             "representation optimizer exact baseline digest does not match"
+        )
+    scope_catalog = _require_object(
+        document["scope_catalog"],
+        "optimization scope catalog",
+    )
+    if set(scope_catalog) != {
+        "artifact_ref",
+        "contract_digest",
+        "scope_count",
+        "rejected_scope_count",
+    }:
+        raise ModelCompileError(
+            "compiled representation optimizer scope catalog reference is invalid"
+        )
+    scope_catalog_path = _package_artifact_path(
+        package_dir,
+        scope_catalog.get("artifact_ref"),
+        "optimization scope catalog",
+    )
+    if not scope_catalog_path.is_file():
+        raise ModelCompileError(
+            f"optimization scope catalog is missing: {scope_catalog_path}"
+        )
+    scope_catalog_document = load_optimization_scope_catalog(scope_catalog_path)
+    if contract_digest(scope_catalog_document) != scope_catalog.get(
+        "contract_digest"
+    ):
+        raise ModelCompileError(
+            "optimization scope catalog digest does not match"
+        )
+    summary = scope_catalog_document["summary"]
+    if (
+        scope_catalog.get("scope_count") != summary["scope_count"]
+        or scope_catalog.get("rejected_scope_count")
+        != summary["rejected_scope_count"]
+    ):
+        raise ModelCompileError(
+            "optimization scope catalog counts do not match"
         )
     session = OptimizationSession.from_json(
         _require_object(document["session"], "optimizer session")

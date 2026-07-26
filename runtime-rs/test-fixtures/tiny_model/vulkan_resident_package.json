@@ -1,7 +1,7 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
   "package_id": "model_d119caf1_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:e8a4a0fabd467196b03a021014f65bef0b2e74518bf7030c328fd088e1a938ef",
+  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:c3fd12047c7928a7163ba60c1170e4af0d7c1ca76a0e74df197573ea926db03b",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
     "hardware_profiles": [
@@ -93,6 +93,7 @@
             "physical_device_id": "test-device-0",
             "device_name": "test device 0",
             "device_type": "discrete_gpu",
+            "pci_address": null,
             "vendor_id": 0,
             "device_id": 0
           }
@@ -105,6 +106,7 @@
         "physical_device_id": "test-device-0",
         "device_name": "test device 0",
         "device_type": "discrete_gpu",
+        "pci_address": null,
         "vendor_id": 0,
         "device_id": 0,
         "shader_features": [
@@ -2947,8 +2949,8 @@
         "sha256": "96723c949cf71070a2ab741fbfab5119868dc656249b76357b38611258a4319a"
       },
       "compiler_target.json": {
-        "byte_count": 3530,
-        "sha256": "a5593e8f514da6aa609ea2e34d6912e5d00cf2505126c13a98183a9155618838"
+        "byte_count": 3588,
+        "sha256": "9864c2fbf1639c3d75e83ac27e00723e1a579dd61f5a2395476b823ee0f192ac"
       },
       "config.json": {
         "byte_count": 1080,
@@ -3006,9 +3008,13 @@
         "byte_count": 97,
         "sha256": "1722b53d01285e75090e6b44f3d2199d1de1294d7a6687bbf08267d20ec8b222"
       },
+      "optimization/scopes.json": {
+        "byte_count": 304832,
+        "sha256": "6a1bdec19f2645e74e3b44d819e9caf1229241a5d3924bdf27c794406b821322"
+      },
       "optimization/stage.json": {
-        "byte_count": 1338,
-        "sha256": "0c5e6d9eb00e71e6cfe901c9c57f9fa8a57a4b1fef15b0745238f92eecf7b4b2"
+        "byte_count": 1702,
+        "sha256": "363547dbc67fde00dae5ddc903e4ff81386bb24e5dcd3505f77e5a0678ab5202"
       },
       "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv": {
         "byte_count": 23748,

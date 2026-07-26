@@ -89,6 +89,7 @@
           "physical_device_id": "test-device-0",
           "device_name": "test device 0",
           "device_type": "discrete_gpu",
+          "pci_address": null,
           "vendor_id": 0,
           "device_id": 0
         }
@@ -101,6 +102,7 @@
       "physical_device_id": "test-device-0",
       "device_name": "test device 0",
       "device_type": "discrete_gpu",
+      "pci_address": null,
       "vendor_id": 0,
       "device_id": 0,
       "shader_features": [

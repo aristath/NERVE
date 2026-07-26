@@ -437,12 +437,31 @@ def minimal_package(root: Path) -> dict[str, object]:
             }
         ],
     }
-    lowered_index = {
-        "schema": "nerve.lowered_execution_graph.v1",
-        "graph": manifest["circuit_graph"],
-    }
     lowered_index_path = root / "lowered" / "execution_graph.circuits.json"
     lowered_index_path.parent.mkdir(parents=True)
+    lowered_circuits = []
+    for component_id, candidate in circuits.items():
+        circuit_path = lowered_index_path.parent / component_id / "circuit.json"
+        circuit_path.parent.mkdir()
+        circuit_path.write_text(json.dumps(candidate))
+        lowered_circuits.append(
+            {
+                "id": component_id,
+                "operator_type": candidate["source"]["source_operator_type"],
+                "runtime_role": candidate["runtime_role"],
+                "implementation": candidate["implementation"],
+                "circuit": f"{component_id}/circuit.json",
+            }
+        )
+    lowered_index = {
+        "schema": "nerve.lowered_execution_graph.v1",
+        "graph": {
+            "topology": manifest["circuit_graph"]["topology"],
+            "edges": manifest["circuit_graph"]["edges"],
+            "boundary": manifest["circuit_graph"]["boundary"],
+            "circuits": lowered_circuits,
+        },
+    }
     lowered_index_path.write_text(json.dumps(lowered_index))
     optimizer_stage = initialize_optimizer_stage(
         package_id=str(manifest["package_id"]),

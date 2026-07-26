@@ -47,6 +47,7 @@ non-finite number, or internally inconsistent contract.
 | Contract | Responsibility |
 | --- | --- |
 | `optimization_scope.v1` | Semantic region and its exact boundary |
+| `optimization_scope_catalog.v1` | Deduplicated scopes, linked source contracts, and rejected-scope diagnostics |
 | `source_behavior_contract.v1` | Observable source behavior and exact implementation |
 | `algebraic_evidence.v1` | Analyzer identity, structural claims, and evidence artifacts |
 | `hardware_process_profile.v1` | Target identity, processes, measurements, and provenance |
@@ -100,6 +101,36 @@ not an exhaustive list.
 Descriptor JSON is included in the package compiler fingerprint. Changing the
 available representation vocabulary therefore cannot silently reuse a compiled
 package fingerprint from different optimizer semantics.
+
+## Semantic optimization scopes
+
+The scope enumerator walks the lowered semantic module trees together with the
+inter-component dependency graph. It emits architecture-neutral regions for
+individual source operators, unambiguously owned leaf modules, generic coupled
+sibling modules, token mixers, feature transforms, complete layers, state
+writer/reader systems, corresponding modules across layers, adjacent
+producer/consumer representation boundaries, and complete input, output,
+sampling, or feedback transducers.
+
+Scopes refer to qualified component/module/node identities. A cross-component
+representation island contains only the executable producer and consumer at
+that connection; it does not accidentally absorb both complete components.
+Every internal cross-component dependency retains its edge identity, endpoint,
+connection kind, temporal-delay metadata, and covered consumers. The linked
+source contract also references the lowered execution-graph artifact, so a
+feedback or transport boundary cannot be presented as exact while silently
+discarding its wiring semantics.
+Scopes with the same executable semantic region are merged once and retain all
+applicable classifications. Ambiguous module ownership or dependency
+boundaries are rejected into deterministic diagnostics rather than becoming
+optimization candidates.
+
+Every accepted scope records exact external data inputs, outputs, parameter
+references, state reads/writes, controls, and explicit or implicit randomness.
+It is paired one-to-one with an immutable source-behavior contract referencing
+the exact lowered artifacts. The self-contained catalog lives at
+`optimization/scopes.json`; its content-derived identity, link digests,
+classification counts, and stage reference all fail closed on drift.
 
 ## Candidate lifecycle
 

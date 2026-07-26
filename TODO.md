@@ -59,28 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 5. Enumerate semantic optimization scopes
-
-- Traverse the existing semantic module tree and lowered dependency graph.
-- Emit scopes for:
-  - individual operators;
-  - semantic leaf modules;
-  - coupled sibling operations;
-  - token-mixer and feature-transform regions;
-  - complete layers;
-  - state writer/state/state reader systems;
-  - repeated corresponding modules across layers;
-  - adjacent producer/consumer representation islands; and
-  - whole input, output, sampling, or feedback transducers where applicable.
-- Derive exact input, output, parameter, state, randomness, and control
-  boundaries for every scope.
-- Reject scopes with ambiguous ownership or dependencies.
-- Avoid duplicate scopes that describe the same semantic region.
-
-Completion requires architecture-neutral tests over attention, recurrent,
-convolutional, dense-MLP, sparse-MoE, multimodal, sampler, and transducer
-fixtures.
-
 ### 6. Implement the algebraic and structural analysis engine
 
 - Provide analyzers for exact and approximate:
