@@ -156,6 +156,19 @@ def summarize_calibration_run(profile: Json, plan: Json, run: Json) -> Json:
         "workloads": workload_summaries,
         "coverage": coverage,
     }
+    if missing_processes:
+        unreliable = [
+            {
+                "workload_id": workload["workload_id"],
+                "diagnostics": workload["diagnostics"],
+            }
+            for workload in workload_summaries
+            if not workload["reliable"]
+        ]
+        raise CalibrationContractError(
+            "calibration summary has unreliable hardware processes "
+            f"{missing_processes}; unreliable workloads={unreliable}"
+        )
     validate_calibration_summary(document)
     return document
 

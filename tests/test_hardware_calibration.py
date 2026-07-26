@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from nerve.compilation import ModelCompileCancelled
+from nerve.compilation import ModelCompileCancelled, ModelCompileError
 from nerve.compiler_target import CompilerTarget
 from nerve.hardware_calibration import orchestrator
 from nerve.hardware_calibration.contracts import (
@@ -628,3 +628,57 @@ def test_orchestrator_cancellation_leaves_no_partial_collection(
             cancel_requested=lambda: True,
         )
     assert not destination.exists()
+
+
+def test_orchestrator_preserves_raw_failed_run_for_reliability_diagnosis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = hardware_profile()
+    target = CompilerTarget(
+        devices=(),
+        hardware_profiles=(ContractDocument.from_json(profile),),
+    )
+
+    def fake_run(
+        command: list[str],
+        _cancelled: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[-1] == "--fingerprint":
+            return subprocess.CompletedProcess(command, 0, FINGERPRINT + "\n", "")
+        plan_path = Path(command[command.index("--plan") + 1])
+        run_path = Path(command[command.index("--output") + 1])
+        artifact_directory = Path(command[command.index("--artifacts") + 1])
+        plan = json.loads(plan_path.read_bytes())
+        run = completed_run(plan)
+        steady = [
+            sample
+            for sample in run["workloads"][0]["samples"]
+            if sample["phase"] == "steady"
+        ]
+        for index, sample in enumerate(steady):
+            sample["duration_ns"] = 100 if index % 2 == 0 else 10_000_000
+            sample["device_duration_ns"] = sample["duration_ns"]
+        artifact_directory.mkdir(parents=True)
+        for workload in run["workloads"]:
+            for artifact in workload["artifacts"]:
+                (artifact_directory / artifact["relative_path"]).write_bytes(b"x")
+        run_path.write_text(json.dumps(run))
+        return subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+    monkeypatch.setattr(orchestrator, "_calibrator_command", lambda _path: ["fake"])
+    monkeypatch.setattr(orchestrator, "_run_cancellable", fake_run)
+    destination = tmp_path / "calibration"
+
+    with pytest.raises(ModelCompileError, match="raw failed calibration preserved"):
+        orchestrator.calibrate_hardware(
+            destination,
+            target=target,
+            policy=calibration_policy(),
+        )
+
+    failure = tmp_path / ".calibration.failed"
+    assert not destination.exists()
+    assert (failure / "failure.json").is_file()
+    assert list((failure / ".working").rglob("plan.json"))
+    assert list((failure / ".working").rglob("run.json"))

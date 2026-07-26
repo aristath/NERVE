@@ -152,9 +152,14 @@ def calibrate_hardware(
             source_profile_ids=tuple(source_profile_ids),
             calibrated_profile_ids=tuple(calibrated_profile_ids),
         )
-    except BaseException:
+    except ModelCompileCancelled:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    except BaseException as error:
+        failure = _preserve_failed_calibration(staging, destination, error)
+        raise ModelCompileError(
+            f"{error}; raw failed calibration preserved at {failure}"
+        ) from error
 
 
 def validate_calibration_collection(destination: Path) -> Json:
@@ -417,6 +422,31 @@ def _replace_directory_atomically(staging: Path, destination: Path) -> None:
         raise
     if previous.exists():
         shutil.rmtree(previous)
+
+
+def _preserve_failed_calibration(
+    staging: Path,
+    destination: Path,
+    error: BaseException,
+) -> Path:
+    failure = destination.with_name(f".{destination.name}.failed")
+    if failure.exists():
+        shutil.rmtree(failure)
+    failure_document: Json = {
+        "schema": "nerve.optimizer.hardware_calibration_failure.v1",
+        "error_type": type(error).__name__,
+        "diagnostic": str(error),
+    }
+    (staging / "failure.json").write_bytes(
+        canonical_json_bytes(failure_document) + b"\n"
+    )
+    staging.replace(failure)
+    descriptor = os.open(failure.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return failure
 
 
 def _path_from_env(name: str) -> Path | None:
