@@ -59,30 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 7. Define the representation-provider interface and registry
-
-Each provider must implement:
-
-- a semantic and structural matcher;
-- an evidence analyzer;
-- candidate synthesis;
-- backend-neutral representation IR emission;
-- target-specific lowering;
-- static feasibility and cost estimation;
-- construction and mount requirements;
-- proof obligations or an approximation error contract;
-- benchmark workloads; and
-- validation requirements.
-
-Providers may decline a scope without error. Candidate generation must be
-evidence-driven; the presence of a texture unit, ray unit, or other hardware
-feature alone is not evidence that a source component has a suitable
-representation.
-
-Completion requires provider isolation tests, deterministic candidate IDs,
-duplicate-candidate elimination, and registration without central
-model-specific conditionals.
-
 ### 8. Extend the IR for alternative representations and representation islands
 
 - Represent non-dense signals, parameters, state, and topology explicitly.

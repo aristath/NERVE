@@ -134,6 +134,28 @@ def algebraic_evidence_id(document: Json) -> str:
     return stable_contract_id("evidence", unsigned)
 
 
+def representation_candidate_id(document: Json) -> str:
+    unsigned = deepcopy(document)
+    unsigned.pop("candidate_id", None)
+    return stable_contract_id("candidate", unsigned)
+
+
+def representation_candidate_equivalence_key(document: Json) -> str:
+    return stable_contract_id(
+        "candidate_equivalence",
+        {
+            "scope_ids": document.get("scope_ids"),
+            "source_contract_digests": document.get(
+                "source_contract_digests"
+            ),
+            "descriptor_id": document.get("descriptor_id"),
+            "representation": document.get("representation"),
+            "target_predicate": document.get("target_predicate"),
+            "behavioral_contract": document.get("behavioral_contract"),
+        },
+    )
+
+
 def optimization_scope_catalog_id(document: Json) -> str:
     unsigned = deepcopy(document)
     unsigned.pop("catalog_id", None)
@@ -800,6 +822,8 @@ def _validate_representation_candidate(document: Json) -> None:
             "scope_ids",
             "source_contract_digests",
             "provider",
+            "descriptor_id",
+            "evidence_refs",
             "representation",
             "target_predicate",
             "behavioral_contract",
@@ -822,6 +846,21 @@ def _validate_representation_candidate(document: Json) -> None:
     for index, digest in enumerate(source_digests):
         _require_digest(digest, f"source_contract_digests[{index}]")
     _require_implementation_identity(document["provider"], "provider")
+    _require_stable_id(
+        document["descriptor_id"],
+        "representation_descriptor",
+        "descriptor_id",
+    )
+    evidence_refs = _require_sorted_nonempty_unique_strings(
+        document["evidence_refs"],
+        "evidence_refs",
+    )
+    for index, evidence_id in enumerate(evidence_refs):
+        _require_stable_id(
+            evidence_id,
+            "evidence",
+            f"evidence_refs[{index}]",
+        )
     representation = _require_object(document["representation"], "representation")
     _require_fields(
         representation,
@@ -858,6 +897,11 @@ def _validate_representation_candidate(document: Json) -> None:
     _require_artifact_refs(
         document["artifact_declarations"], "artifact_declarations"
     )
+    expected_id = representation_candidate_id(document)
+    if document["candidate_id"] != expected_id:
+        raise ContractValidationError(
+            "candidate_id must match canonical representation candidate content"
+        )
 
 
 def _validate_representation_descriptor(document: Json) -> None:

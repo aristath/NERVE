@@ -157,6 +157,35 @@ and fail validation after content drift. This stage records hypotheses and
 proof evidence only: it neither synthesizes a replacement nor mutates the
 compiled package.
 
+## Representation providers
+
+A representation provider is a complete, independently registered strategy for
+turning evidence into one alternative physical implementation. The provider
+boundary requires separate semantic and structural matchers, provider-specific
+evidence interpretation, candidate synthesis, backend-neutral representation
+IR, target lowering, static feasibility and cost estimates, construction and
+mount requirements, a proof or approximation contract, benchmark workloads,
+and validation requirements. A provider can decline a scope normally at either
+matcher or after evidence analysis.
+
+`ProviderProblem` validates and freezes the selected scopes, their one-to-one
+source contracts, algebraic evidence, and hardware profile. Each provider sees
+copy-out documents bound to its registered data-defined representation
+descriptor. A structural match and accepted evidence analysis must cite
+evidence inside that problem; the resulting candidate permanently records the
+same evidence references and descriptor identity. Hardware availability by
+itself cannot pass the structural matcher.
+
+`ProviderRegistry` has no model-family dispatch table. Providers register by
+identity and descriptor and are evaluated in deterministic identity order. A
+provider failure is reported without preventing independent providers from
+running. Candidate identities derive from canonical candidate content, and the
+registry removes semantically equivalent candidates across providers while
+retaining an audit record of the kept and discarded identities. Candidate
+plans retain the provider's representation IR, target lowering, estimates,
+requirements, benchmark workloads, and validation obligations for subsequent
+staging.
+
 ## Candidate lifecycle
 
 A candidate moves only through the following evidence-carrying sequence:

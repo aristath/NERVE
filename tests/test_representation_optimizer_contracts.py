@@ -20,6 +20,7 @@ from nerve.representation_optimizer.contracts import (
     algebraic_evidence_id,
     canonical_json_bytes,
     contract_digest,
+    representation_candidate_id,
     source_behavior_contract_digest,
     stable_contract_id,
     validate_contract,
@@ -190,7 +191,29 @@ def contract_fixtures() -> list[dict[str, object]]:
     source_digest = str(source["contract_digest"])
     scope_members = fixture_scope_members()
     scope_id = fixture_scope_id()
-    candidate_id = stable_contract_id("candidate", scope_id, "provider", "field")
+    candidate = {
+        "schema": REPRESENTATION_CANDIDATE_SCHEMA,
+        "candidate_id": "",
+        "scope_ids": [scope_id],
+        "source_contract_digests": [source_digest],
+        "provider": {"id": "sampled_field", "version": "1"},
+        "representation": {
+            "kind": "sampled_field",
+            "signal_formats": [{"name": "field_coordinate"}],
+            "parameter_format": {"kind": "sampled_grid"},
+            "state_format": {"kind": "none"},
+            "topology": {"kind": "single_scope"},
+        },
+        "target_predicate": {"process": "texture_sampling"},
+        "behavioral_contract": {
+            "mode": "approximate",
+            "proof_obligations": ["bounded_interpolation_error"],
+            "error_contract": {"maximum_absolute_error": 0.001},
+        },
+        "artifact_declarations": [
+            {"path": "optimization/candidates/field/grid.bin"}
+        ],
+    }
     evidence = {
         "schema": ALGEBRAIC_EVIDENCE_SCHEMA,
         "evidence_id": "",
@@ -208,6 +231,13 @@ def contract_fixtures() -> list[dict[str, object]]:
         "artifacts": [{"path": "optimization/evidence/spectral.json"}],
     }
     evidence["evidence_id"] = algebraic_evidence_id(evidence)
+    candidate["descriptor_id"] = (
+        "representation_descriptor_"
+        "11111111111111111111111111111111"
+    )
+    candidate["evidence_refs"] = [evidence["evidence_id"]]
+    candidate["candidate_id"] = representation_candidate_id(candidate)
+    candidate_id = candidate["candidate_id"]
     return [
         {
             "schema": OPTIMIZATION_SCOPE_SCHEMA,
@@ -221,29 +251,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         source,
         evidence,
         hardware_profile_contract(),
-        {
-            "schema": REPRESENTATION_CANDIDATE_SCHEMA,
-            "candidate_id": candidate_id,
-            "scope_ids": [scope_id],
-            "source_contract_digests": [source_digest],
-            "provider": {"id": "sampled_field", "version": "1"},
-            "representation": {
-                "kind": "sampled_field",
-                "signal_formats": [{"name": "field_coordinate"}],
-                "parameter_format": {"kind": "sampled_grid"},
-                "state_format": {"kind": "none"},
-                "topology": {"kind": "single_scope"},
-            },
-            "target_predicate": {"process": "texture_sampling"},
-            "behavioral_contract": {
-                "mode": "approximate",
-                "proof_obligations": ["bounded_interpolation_error"],
-                "error_contract": {"maximum_absolute_error": 0.001},
-            },
-            "artifact_declarations": [
-                {"path": "optimization/candidates/field/grid.bin"}
-            ],
-        },
+        candidate,
         {
             "schema": CANDIDATE_CONSTRUCTION_SCHEMA,
             "construction_id": stable_contract_id(
