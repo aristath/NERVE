@@ -10,6 +10,7 @@ use chrono::{DateTime, FixedOffset, Local};
 use nerve_runtime::{
     CircuitPort, ComponentEdgePlacement, ComponentPlacement, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID,
     RUNTIME_TOPOLOGY_SCHEMA, RuntimeAvailableDevice, RuntimeBoundDevice, RuntimeEdgeRouteTarget,
+    HardwareProcessInventory,
     RuntimeEdgeRoutes, RuntimeCompiledExecutionGraphSummary, RuntimeDeviceBindings,
     RuntimeDeviceSliceReport, RuntimeDeviceTickPlanReport, RuntimeEffectiveExecutionGraphTopology,
     RuntimeFeedbackExecutionReport, RuntimeLocalEdgeBufferReport, RuntimePackageInspectionReport,
@@ -20,7 +21,6 @@ use nerve_runtime::{
     RuntimePlacementReport, RuntimePromptTimingReport, RuntimeRemoteEdgeBufferReport, RuntimeSourceComponent,
     RuntimeSparseMoeWorkReport, RuntimeTokenizerOptionsReport, RuntimeTopologyReport, VulkanComputeDevice,
     VulkanComputeDeviceCatalog, VulkanComputeDeviceInfo, VulkanResidentExecutionCounters,
-    VulkanComputeTargetCapabilities,
     VulkanResidentFeedbackExecutionStats,
     VulkanResidentHfTokenizerTextCodec, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageDeviceSlice,
@@ -29,7 +29,8 @@ use nerve_runtime::{
     VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
     VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats, discover_runtime_devices,
-    reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
+    discover_cpu_hardware_profile, reset_vulkan_resident_execution_counters,
+    vulkan_resident_execution_counters,
 };
 use minijinja::{Environment, Error as TemplateError, ErrorKind as TemplateErrorKind};
 use serde::Serialize;
@@ -117,13 +118,6 @@ impl Default for Args {
             json: false,
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct RuntimeDeviceCapabilitiesReport {
-    ok: bool,
-    schema: &'static str,
-    devices: Vec<VulkanComputeTargetCapabilities>,
 }
 
 fn sampler_runtime_config(args: &Args) -> VulkanResidentSamplerRuntimeConfig {

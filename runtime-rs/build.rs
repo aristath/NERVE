@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 const COMPILER_FINGERPRINT_SCHEMA: &str = "nerve.package_compiler_sha256.v2";
 const COMPILER_SOURCE_MANIFEST: &str = "compiler_sources.txt";
+const HARDWARE_DISCOVERY_FINGERPRINT_SCHEMA: &str = "nerve.hardware_discovery_sha256.v1";
 
 fn directory_files(path: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
     fs::read_dir(path)
@@ -95,5 +96,37 @@ fn main() {
     println!(
         "cargo:rustc-env=NERVE_PACKAGE_COMPILER_FINGERPRINT={COMPILER_FINGERPRINT_SCHEMA}:{:x}",
         digest.finalize()
+    );
+
+    let hardware_discovery_sources = [
+        "Cargo.lock",
+        "Cargo.toml",
+        "build.rs",
+        "src/hardware_profile.rs",
+        "src/hardware_profile/cpu.rs",
+        "src/hardware_profile/schema.rs",
+        "src/lib.rs",
+        "src/vulkan_compute.rs",
+        "src/vulkan_compute/device_catalog.rs",
+        "src/vulkan_compute/device_types.rs",
+        "src/vulkan_compute/features.rs",
+        "src/vulkan_compute/hardware_profile.rs",
+        "src/vulkan_compute/physical_device_capabilities.rs",
+    ];
+    let mut hardware_digest = Sha256::new();
+    for relative in hardware_discovery_sources {
+        let path = manifest_dir.join(relative);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = fs::read(&path).unwrap_or_else(|error| {
+            panic!("failed to read hardware-discovery input {path:?}: {error}")
+        });
+        hardware_digest.update((relative.len() as u64).to_le_bytes());
+        hardware_digest.update(relative.as_bytes());
+        hardware_digest.update((source.len() as u64).to_le_bytes());
+        hardware_digest.update(source);
+    }
+    println!(
+        "cargo:rustc-env=NERVE_HARDWARE_DISCOVERY_FINGERPRINT={HARDWARE_DISCOVERY_FINGERPRINT_SCHEMA}:{:x}",
+        hardware_digest.finalize()
     );
 }

@@ -1,5 +1,100 @@
 {
-  "schema": "nerve.compiler_target.v1",
+  "schema": "nerve.compiler_target.v2",
+  "hardware_profiles": [
+    {
+      "schema": "nerve.optimizer.hardware_process_profile.v1",
+      "profile_id": "hardware_profile_9b75ea741e45b1ec169778014a1530e4",
+      "hardware_identity": {
+        "device_kind": "gpu",
+        "stable_device_id": "test-device-0",
+        "name": "test device 0",
+        "vendor_id": "0x0000",
+        "device_id": "0x0000",
+        "architecture": "synthetic_vendor_0000_device_0000",
+        "physical_location": "test-device-0"
+      },
+      "capability_class": "hardware_capability_ca4c2c93116b35239e1e7a86efdc53e2",
+      "processes": [
+        {
+          "name": "shader_arithmetic",
+          "category": "arithmetic",
+          "availability": "available",
+          "programmability": "direct",
+          "api": "vulkan",
+          "operations": [
+            "add",
+            "multiply"
+          ],
+          "numeric_formats": [
+            "bf16",
+            "f32",
+            "i32",
+            "u32"
+          ],
+          "required_extensions": [],
+          "required_features": [
+            "shader_bfloat16_type"
+          ],
+          "limits": {
+            "max_compute_work_group_invocations": 1024,
+            "max_compute_work_group_size_x": 1024,
+            "subgroup_size": 64
+          },
+          "properties": {}
+        }
+      ],
+      "memory_domains": [
+        {
+          "name": "synthetic_device_memory",
+          "kind": "device_local_heap",
+          "capacity_bytes": 1,
+          "host_visible": false,
+          "device_local": true,
+          "coherent": false,
+          "cached": false,
+          "minimum_alignment_bytes": 1,
+          "properties": {}
+        }
+      ],
+      "interconnects": [],
+      "measurements": [],
+      "provenance": {
+        "api": "vulkan",
+        "api_version": "1.4.0",
+        "driver": "synthetic",
+        "driver_version": "test",
+        "compiler": "nerve-test",
+        "operating_system": "synthetic",
+        "discovery_backend": "test_fixture"
+      },
+      "capability_extensions": {
+        "vulkan_compiler_capabilities": {
+          "shader_features": [
+            "shader_bfloat16_type"
+          ],
+          "subgroup_operations": [],
+          "subgroup_compute_supported": true,
+          "subgroup_size": 64,
+          "max_compute_work_group_invocations": 1024,
+          "max_compute_work_group_size_x": 1024,
+          "cooperative_float16_shapes": [],
+          "cooperative_bfloat16_shapes": [],
+          "cooperative_float8_e4m3_shapes": []
+        }
+      },
+      "identity_extensions": {},
+      "runtime_bindings": {
+        "vulkan_runtime_binding": {
+          "physical_device_index": 0,
+          "physical_device_id": "test-device-0",
+          "device_name": "test device 0",
+          "device_type": "discrete_gpu",
+          "vendor_id": 0,
+          "device_id": 0
+        }
+      }
+    }
+  ],
   "devices": [
     {
       "physical_device_index": 0,
@@ -11,9 +106,12 @@
       "shader_features": [
         "shader_bfloat16_type"
       ],
+      "subgroup_operations": [],
+      "subgroup_compute_supported": true,
       "subgroup_size": 64,
       "max_compute_work_group_invocations": 1024,
       "max_compute_work_group_size_x": 1024,
+      "cooperative_float16_shapes": [],
       "cooperative_bfloat16_shapes": [],
       "cooperative_float8_e4m3_shapes": []
     }

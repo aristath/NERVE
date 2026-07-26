@@ -8,8 +8,10 @@ import pytest
 from nerve.compilation import ModelCompileError
 from nerve.compiler_target import (
     CompilerTarget,
+    CompilerTargetDevice,
     compiler_device_probe_command,
     discover_compiler_target,
+    synthetic_hardware_profile,
 )
 
 
@@ -32,32 +34,44 @@ def device_payload(
         "subgroup_size": 32,
         "max_compute_work_group_invocations": 1024,
         "max_compute_work_group_size_x": 1024,
+        "cooperative_float16_shapes": [[16, 16, 16]],
         "cooperative_bfloat16_shapes": [[16, 16, 16]],
         "cooperative_float8_e4m3_shapes": [[16, 16, 32]],
     }
 
 
+def hardware_inventory(*devices: dict[str, object]) -> dict[str, object]:
+    profiles = [
+        synthetic_hardware_profile(CompilerTargetDevice.from_json(device))
+        for device in devices
+    ]
+    profiles.sort(
+        key=lambda profile: profile["hardware_identity"]["stable_device_id"]
+    )
+    return {
+        "schema": "nerve.hardware_process_inventory.v1",
+        "profiles": profiles,
+    }
+
+
 def test_compiler_target_preserves_dtype_supported_by_any_gpu() -> None:
-    target = CompilerTarget.from_device_capabilities_json(
-        {
-            "schema": "nerve.device_capabilities.v1",
-            "devices": [
-                device_payload(
-                    index=0,
-                    device_type="discrete_gpu",
-                    features=["shader_float16"],
-                ),
-                device_payload(
-                    index=1,
-                    device_type="discrete_gpu",
-                    features=[
-                        "shader_float8",
-                        "shader_mixed_float_dot_product_float8_acc_float32",
-                        "shader_bfloat16_type",
-                    ],
-                ),
-            ],
-        }
+    target = CompilerTarget.from_hardware_inventory_json(
+        hardware_inventory(
+            device_payload(
+                index=0,
+                device_type="discrete_gpu",
+                features=["shader_float16"],
+            ),
+            device_payload(
+                index=1,
+                device_type="discrete_gpu",
+                features=[
+                    "shader_float8",
+                    "shader_mixed_float_dot_product_float8_acc_float32",
+                    "shader_bfloat16_type",
+                ],
+            ),
+        )
     )
 
     assert target.supports_native_dtype("F8_E4M3")
@@ -74,37 +88,79 @@ def test_compiler_target_preserves_dtype_supported_by_any_gpu() -> None:
         == 1024
     )
     assert target.devices[0].cooperative_bfloat16_shapes == ((16, 16, 16),)
+    assert target.devices[0].cooperative_float16_shapes == ((16, 16, 16),)
     assert target.devices[0].cooperative_float8_e4m3_shapes == ((16, 16, 32),)
+    assert len(target.hardware_profiles) == 2
     assert CompilerTarget.from_json(target.to_json()) == target
+
+
+def test_identical_gpu_capabilities_share_a_class_without_sharing_identity() -> None:
+    peer = device_payload(
+        index=1,
+        device_type="discrete_gpu",
+        features=["shader_float16"],
+    )
+    peer["device_id"] = 0
+    first = hardware_inventory(
+        device_payload(
+            index=0,
+            device_type="discrete_gpu",
+            features=["shader_float16"],
+        ),
+        peer,
+    )
+    profiles = first["profiles"]
+
+    assert profiles[0]["capability_class"] == profiles[1]["capability_class"]
+    assert profiles[0]["profile_id"] != profiles[1]["profile_id"]
 
 
 def test_compiler_target_ignores_cpu_vulkan_devices_and_requires_a_gpu() -> None:
     with pytest.raises(ModelCompileError, match="at least one Vulkan GPU"):
-        CompilerTarget.from_device_capabilities_json(
-            {
-                "schema": "nerve.device_capabilities.v1",
-                "devices": [
-                    device_payload(
-                        index=0,
-                        device_type="cpu",
-                        features=[
-                            "shader_float8",
-                            "shader_mixed_float_dot_product_float8_acc_float32",
-                        ],
-                    )
-                ],
-            }
+        CompilerTarget.from_hardware_inventory_json(
+            hardware_inventory(
+                device_payload(
+                    index=0,
+                    device_type="cpu",
+                    features=[
+                        "shader_float8",
+                        "shader_mixed_float_dot_product_float8_acc_float32",
+                    ],
+                )
+            )
         )
 
 
 def test_compiler_target_rejects_malformed_device_entries() -> None:
-    with pytest.raises(ModelCompileError, match="invalid compiler target device"):
-        CompilerTarget.from_device_capabilities_json(
+    with pytest.raises(ModelCompileError, match="invalid hardware profile"):
+        CompilerTarget.from_hardware_inventory_json(
             {
-                "schema": "nerve.device_capabilities.v1",
-                "devices": ["not a device"],
+                "schema": "nerve.hardware_process_inventory.v1",
+                "profiles": ["not a profile"],
             }
         )
+
+
+def test_compiler_target_rejects_duplicate_vulkan_runtime_indices() -> None:
+    peer = device_payload(
+        index=1,
+        device_type="discrete_gpu",
+        features=["shader_float16"],
+    )
+    inventory = hardware_inventory(
+        device_payload(
+            index=0,
+            device_type="discrete_gpu",
+            features=["shader_float16"],
+        ),
+        peer,
+    )
+    inventory["profiles"][1]["runtime_bindings"]["vulkan_runtime_binding"][
+        "physical_device_index"
+    ] = 0
+
+    with pytest.raises(ModelCompileError, match="duplicate Vulkan physical indices"):
+        CompilerTarget.from_hardware_inventory_json(inventory)
 
 
 def test_compiler_target_discovery_validates_runtime_report(
@@ -114,19 +170,16 @@ def test_compiler_target_discovery_validates_runtime_report(
         returncode = 0
         stderr = ""
         stdout = json.dumps(
-            {
-                "schema": "nerve.device_capabilities.v1",
-                "devices": [
-                    device_payload(
-                        index=2,
-                        device_type="discrete_gpu",
-                        features=[
-                            "shader_float8",
-                            "shader_mixed_float_dot_product_float8_acc_float32",
-                        ],
-                    )
-                ],
-            }
+            hardware_inventory(
+                device_payload(
+                    index=2,
+                    device_type="discrete_gpu",
+                    features=[
+                        "shader_float8",
+                        "shader_mixed_float_dot_product_float8_acc_float32",
+                    ],
+                )
+            )
         )
 
     monkeypatch.setattr(

@@ -203,30 +203,31 @@ fn inspect_available_devices(
 
 fn inspect_device_capabilities(args: &Args) -> Result<(), Box<dyn Error>> {
     let catalog = VulkanComputeDeviceCatalog::discover()?;
-    let devices = catalog.available_target_capabilities()?;
+    let mut profiles = catalog.available_hardware_profiles()?;
+    profiles.push(discover_cpu_hardware_profile()?);
+    let inventory = HardwareProcessInventory::new(profiles)?;
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&RuntimeDeviceCapabilitiesReport {
-                ok: true,
-                schema: "nerve.device_capabilities.v1",
-                devices,
-            })?
-        );
+        println!("{}", serde_json::to_string_pretty(&inventory)?);
         return Ok(());
     }
 
-    for device in devices {
+    for profile in inventory.profiles {
         println!(
             "{} {} ({})",
-            device.physical_device_index, device.device_name, device.physical_device_id
+            profile.hardware_identity.device_kind.as_str(),
+            profile.hardware_identity.name,
+            profile.hardware_identity.stable_device_id,
         );
         println!(
-            "  shader_features: {}",
-            device
-                .shader_features
+            "  available_processes: {}",
+            profile
+                .processes
                 .iter()
-                .map(ToString::to_string)
+                .filter(|process| {
+                    process.availability
+                        == nerve_runtime::HardwareProcessAvailability::Available
+                })
+                .map(|process| process.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         );

@@ -205,6 +205,7 @@ pub struct VulkanComputeTargetCapabilities {
     pub subgroup_size: u32,
     pub max_compute_work_group_invocations: u32,
     pub max_compute_work_group_size_x: u32,
+    pub cooperative_float16_shapes: BTreeSet<(u32, u32, u32)>,
     pub cooperative_bfloat16_shapes: BTreeSet<(u32, u32, u32)>,
     pub cooperative_float8_e4m3_shapes: BTreeSet<(u32, u32, u32)>,
 }

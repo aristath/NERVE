@@ -285,6 +285,11 @@ def _validate_algebraic_evidence(document: Json) -> None:
 
 
 def _validate_hardware_process_profile(document: Json) -> None:
+    if "extensions" in document:
+        raise ContractValidationError(
+            "hardware profile extensions must be classified as capability_extensions, "
+            "identity_extensions, or runtime_bindings"
+        )
     _require_fields(
         document,
         {
@@ -293,8 +298,13 @@ def _validate_hardware_process_profile(document: Json) -> None:
             "hardware_identity",
             "capability_class",
             "processes",
+            "memory_domains",
+            "interconnects",
             "measurements",
             "provenance",
+            "capability_extensions",
+            "identity_extensions",
+            "runtime_bindings",
         },
     )
     _require_stable_id(document["profile_id"], "hardware_profile", "profile_id")
@@ -306,19 +316,246 @@ def _validate_hardware_process_profile(document: Json) -> None:
             "vendor_id",
             "device_id",
             "stable_device_id",
+            "name",
+            "architecture",
+            "physical_location",
         },
     )
     if identity["device_kind"] not in {"cpu", "gpu"}:
         raise ContractValidationError("hardware_identity.device_kind must be cpu or gpu")
-    for field in ("vendor_id", "device_id", "stable_device_id"):
+    for field in (
+        "vendor_id",
+        "device_id",
+        "stable_device_id",
+        "name",
+        "architecture",
+        "physical_location",
+    ):
         _require_nonempty_string(identity[field], f"hardware_identity.{field}")
-    _require_nonempty_string(document["capability_class"], "capability_class")
-    _require_named_records(document["processes"], "processes")
-    _require_named_records(document["measurements"], "measurements")
+    _require_stable_id(
+        document["capability_class"],
+        "hardware_capability",
+        "capability_class",
+    )
+    processes = _require_list(document["processes"], "processes")
+    if not processes:
+        raise ContractValidationError("processes must not be empty")
+    process_names = []
+    for index, raw_process in enumerate(processes):
+        path = f"processes[{index}]"
+        process = _require_object(raw_process, path)
+        _require_fields(
+            process,
+            {
+                "name",
+                "category",
+                "availability",
+                "programmability",
+                "api",
+                "operations",
+                "numeric_formats",
+                "required_extensions",
+                "required_features",
+                "limits",
+                "properties",
+            },
+        )
+        process_names.append(_require_nonempty_string(process["name"], f"{path}.name"))
+        if process["category"] not in {
+            "arithmetic",
+            "control_flow",
+            "memory",
+            "transfer",
+            "synchronization",
+            "scheduling",
+            "sampling",
+            "graphics",
+            "ray_traversal",
+            "media",
+        }:
+            raise ContractValidationError(f"{path}.category is unsupported")
+        if process["availability"] not in {
+            "available",
+            "unavailable",
+            "opaque",
+            "unknown",
+        }:
+            raise ContractValidationError(f"{path}.availability is unsupported")
+        if process["programmability"] not in {"direct", "indirect", "none"}:
+            raise ContractValidationError(f"{path}.programmability is unsupported")
+        if (
+            process["availability"] == "available"
+            and process["programmability"] == "none"
+        ):
+            raise ContractValidationError(
+                f"{path} is available but not programmable"
+            )
+        if (
+            process["availability"] == "unavailable"
+            and process["programmability"] != "none"
+        ):
+            raise ContractValidationError(
+                f"{path} is unavailable but claims programmability"
+            )
+        _require_nonempty_string(process["api"], f"{path}.api")
+        for field in (
+            "operations",
+            "numeric_formats",
+            "required_extensions",
+            "required_features",
+        ):
+            _require_sorted_unique_strings(process[field], f"{path}.{field}")
+        _require_unsigned_integer_map(process["limits"], f"{path}.limits")
+        _require_string_map(process["properties"], f"{path}.properties")
+    _require_sorted_unique_names(process_names, "processes")
+
+    memory_domains = _require_list(document["memory_domains"], "memory_domains")
+    if not memory_domains:
+        raise ContractValidationError("memory_domains must not be empty")
+    memory_names = []
+    for index, raw_domain in enumerate(memory_domains):
+        path = f"memory_domains[{index}]"
+        domain = _require_object(raw_domain, path)
+        _require_fields(
+            domain,
+            {
+                "name",
+                "kind",
+                "capacity_bytes",
+                "host_visible",
+                "device_local",
+                "coherent",
+                "cached",
+                "minimum_alignment_bytes",
+                "properties",
+            },
+        )
+        memory_names.append(_require_nonempty_string(domain["name"], f"{path}.name"))
+        _require_nonempty_string(domain["kind"], f"{path}.kind")
+        for field in ("host_visible", "device_local", "coherent", "cached"):
+            if not isinstance(domain[field], bool):
+                raise ContractValidationError(f"{path}.{field} must be boolean")
+        for field in ("capacity_bytes", "minimum_alignment_bytes"):
+            _require_positive_integer(domain[field], f"{path}.{field}")
+        alignment = int(domain["minimum_alignment_bytes"])
+        if alignment & (alignment - 1):
+            raise ContractValidationError(
+                f"{path}.minimum_alignment_bytes must be a power of two"
+            )
+        _require_string_map(domain["properties"], f"{path}.properties")
+    _require_sorted_unique_names(memory_names, "memory_domains")
+
+    interconnects = _require_list(document["interconnects"], "interconnects")
+    interconnect_names = []
+    for index, raw_interconnect in enumerate(interconnects):
+        path = f"interconnects[{index}]"
+        interconnect = _require_object(raw_interconnect, path)
+        _require_fields(
+            interconnect,
+            {
+                "name",
+                "kind",
+                "availability",
+                "api",
+                "operations",
+                "properties",
+            },
+        )
+        interconnect_names.append(
+            _require_nonempty_string(interconnect["name"], f"{path}.name")
+        )
+        _require_nonempty_string(interconnect["kind"], f"{path}.kind")
+        _require_nonempty_string(interconnect["api"], f"{path}.api")
+        if interconnect["availability"] not in {
+            "available",
+            "unavailable",
+            "opaque",
+            "unknown",
+        }:
+            raise ContractValidationError(f"{path}.availability is unsupported")
+        _require_sorted_unique_strings(
+            interconnect["operations"], f"{path}.operations"
+        )
+        _require_string_map(interconnect["properties"], f"{path}.properties")
+    _require_sorted_unique_names(interconnect_names, "interconnects")
+
+    measurements = _require_list(document["measurements"], "measurements")
+    measurement_names = []
+    for index, raw_measurement in enumerate(measurements):
+        path = f"measurements[{index}]"
+        measurement = _require_object(raw_measurement, path)
+        _require_fields(measurement, {"name", "unit", "regime", "samples"})
+        measurement_names.append(
+            _require_nonempty_string(measurement["name"], f"{path}.name")
+        )
+        _require_nonempty_string(measurement["unit"], f"{path}.unit")
+        _require_string_map(measurement["regime"], f"{path}.regime")
+        samples = _require_list(measurement["samples"], f"{path}.samples")
+        if not samples:
+            raise ContractValidationError(f"{path}.samples must not be empty")
+        for sample_index, sample in enumerate(samples):
+            _require_nonnegative_integer(
+                sample,
+                f"{path}.samples[{sample_index}]",
+            )
+    _require_sorted_unique_names(measurement_names, "measurements")
+
     provenance = _require_object(document["provenance"], "provenance")
-    _require_fields(provenance, {"api", "driver", "compiler"})
+    _require_fields(
+        provenance,
+        {
+            "api",
+            "api_version",
+            "driver",
+            "driver_version",
+            "compiler",
+            "operating_system",
+            "discovery_backend",
+        },
+    )
     for field in provenance:
         _require_nonempty_string(provenance[field], f"provenance.{field}")
+    capability_extensions = _require_object(
+        document["capability_extensions"],
+        "capability_extensions",
+    )
+    identity_extensions = _require_object(
+        document["identity_extensions"],
+        "identity_extensions",
+    )
+    _require_object(document["runtime_bindings"], "runtime_bindings")
+    capability_body = {
+        "device_kind": identity["device_kind"],
+        "architecture": identity["architecture"],
+        "processes": processes,
+        "memory_domains": memory_domains,
+        "interconnects": interconnects,
+        "api": provenance["api"],
+        "api_version": provenance["api_version"],
+        "capability_extensions": capability_extensions,
+    }
+    expected_capability = stable_contract_id(
+        "hardware_capability",
+        capability_body,
+    )
+    if document["capability_class"] != expected_capability:
+        raise ContractValidationError(
+            "capability_class does not match canonical hardware capabilities"
+        )
+    expected_profile = stable_contract_id(
+        "hardware_profile",
+        [
+            identity,
+            document["capability_class"],
+            provenance,
+            identity_extensions,
+            measurements,
+        ],
+    )
+    if document["profile_id"] != expected_profile:
+        raise ContractValidationError(
+            "profile_id does not match canonical hardware profile identity"
+        )
 
 
 def _validate_representation_candidate(document: Json) -> None:
@@ -622,6 +859,46 @@ def _require_unique_strings(
     if len(values) != len(set(values)):
         raise ContractValidationError(f"{path} must contain unique values")
     return values
+
+
+def _require_sorted_unique_strings(value: Any, path: str) -> list[str]:
+    values = _require_string_list(value, path)
+    if values != sorted(set(values)):
+        raise ContractValidationError(f"{path} must contain unique sorted values")
+    return values
+
+
+def _require_sorted_unique_names(values: list[str], path: str) -> None:
+    if values != sorted(set(values)):
+        raise ContractValidationError(f"{path} must have unique sorted names")
+
+
+def _require_nonnegative_integer(value: Any, path: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ContractValidationError(f"{path} must be a non-negative integer")
+    return value
+
+
+def _require_positive_integer(value: Any, path: str) -> int:
+    parsed = _require_nonnegative_integer(value, path)
+    if parsed == 0:
+        raise ContractValidationError(f"{path} must be positive")
+    return parsed
+
+
+def _require_unsigned_integer_map(value: Any, path: str) -> None:
+    mapping = _require_object(value, path)
+    for key, item in mapping.items():
+        _require_nonempty_string(key, f"{path} key")
+        _require_nonnegative_integer(item, f"{path}.{key}")
+
+
+def _require_string_map(value: Any, path: str) -> None:
+    mapping = _require_object(value, path)
+    for key, item in mapping.items():
+        _require_nonempty_string(key, f"{path} key")
+        if not isinstance(item, str):
+            raise ContractValidationError(f"{path}.{key} must be a string")
 
 
 def _require_reference_list(value: Any, path: str) -> None:

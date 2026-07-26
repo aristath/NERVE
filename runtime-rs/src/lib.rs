@@ -1,6 +1,7 @@
 #[cfg(feature = "vulkan")]
 pub mod editor;
 pub mod execution_schedule;
+pub mod hardware_profile;
 pub mod stream_circuit;
 pub mod stream_plan;
 pub mod stream_prefix_cache;
@@ -22,6 +23,7 @@ pub mod vulkan_stream_circuit;
 #[cfg(feature = "vulkan")]
 pub use editor::*;
 pub use execution_schedule::*;
+pub use hardware_profile::*;
 pub use stream_circuit::*;
 pub use stream_plan::*;
 pub use stream_prefix_cache::*;

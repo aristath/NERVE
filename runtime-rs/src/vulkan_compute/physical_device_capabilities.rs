@@ -269,6 +269,8 @@ fn vulkan_shader_feature_for_spirv_capability(capability: u32) -> Option<VulkanS
         5118 => VulkanShaderFeature::ShaderBfloat16CooperativeMatrix,
         6018 => VulkanShaderFeature::ShaderIntegerDotProduct,
         6019 => VulkanShaderFeature::ShaderIntegerDotProduct,
+        6912 => VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat32,
+        6913 => VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat16,
         6914 => VulkanShaderFeature::ShaderMixedFloatDotProductBfloat16Acc,
         6915 => VulkanShaderFeature::ShaderMixedFloatDotProductFloat8AccFloat32,
         5345 => VulkanShaderFeature::VulkanMemoryModel,
@@ -568,6 +570,16 @@ fn physical_device_supported_shader_features(
     )? {
         let mixed =
             physical_device_shader_mixed_float_dot_product_support(instance, physical_device);
+        if mixed.shader_float16_acc_float32 {
+            supported.insert(
+                VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat32,
+            );
+        }
+        if mixed.shader_float16_acc_float16 {
+            supported.insert(
+                VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat16,
+            );
+        }
         if mixed.shader_bfloat16_acc {
             supported.insert(VulkanShaderFeature::ShaderMixedFloatDotProductBfloat16Acc);
         }
@@ -631,6 +643,10 @@ fn physical_device_shader_mixed_float_dot_product_support(
         instance.get_physical_device_features2(physical_device, &mut features);
     }
     VulkanShaderMixedFloatDotProductSupport {
+        shader_float16_acc_float32: mixed_float_dot_product.shader_float16_acc_float32
+            == vk::TRUE,
+        shader_float16_acc_float16: mixed_float_dot_product.shader_float16_acc_float16
+            == vk::TRUE,
         shader_bfloat16_acc: mixed_float_dot_product.shader_bfloat16_acc == vk::TRUE,
         shader_float8_acc_float32: mixed_float_dot_product.shader_float8_acc_float32 == vk::TRUE,
     }
@@ -681,6 +697,19 @@ fn physical_device_cooperative_bfloat16_shapes(
         instance,
         physical_device,
         vk::ComponentTypeKHR::from_raw(VK_COMPONENT_TYPE_BFLOAT16_KHR),
+    )
+}
+
+fn physical_device_cooperative_float16_shapes(
+    entry: &Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<BTreeSet<(u32, u32, u32)>, VulkanError> {
+    physical_device_cooperative_matrix_shapes(
+        entry,
+        instance,
+        physical_device,
+        vk::ComponentTypeKHR::FLOAT16,
     )
 }
 

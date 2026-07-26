@@ -79,6 +79,20 @@ impl VulkanComputeDeviceCatalog {
                 } else {
                     BTreeSet::new()
                 };
+                let cooperative_float16_shapes = if BTreeSet::from([
+                    VulkanShaderFeature::CooperativeMatrix,
+                    VulkanShaderFeature::ShaderFloat16,
+                ])
+                .is_subset(&shader_features)
+                {
+                    physical_device_cooperative_float16_shapes(
+                        &self.context._entry,
+                        &self.context.instance,
+                        physical_device,
+                    )?
+                } else {
+                    BTreeSet::new()
+                };
                 let cooperative_float8_e4m3_shapes = if BTreeSet::from([
                     VulkanShaderFeature::CooperativeMatrix,
                     VulkanShaderFeature::ShaderFloat8,
@@ -115,6 +129,7 @@ impl VulkanComputeDeviceCatalog {
                     max_compute_work_group_size_x: properties
                         .limits
                         .max_compute_work_group_size[0],
+                    cooperative_float16_shapes,
                     cooperative_bfloat16_shapes,
                     cooperative_float8_e4m3_shapes,
                 })
@@ -194,6 +209,12 @@ impl VulkanComputeDeviceCatalog {
                     .contains(&VulkanShaderFeature::ShaderBfloat16CooperativeMatrix),
             };
             let mixed_float_dot_product_support = VulkanShaderMixedFloatDotProductSupport {
+                shader_float16_acc_float32: enabled_shader_features.contains(
+                    &VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat32,
+                ),
+                shader_float16_acc_float16: enabled_shader_features.contains(
+                    &VulkanShaderFeature::ShaderMixedFloatDotProductFloat16AccFloat16,
+                ),
                 shader_bfloat16_acc: enabled_shader_features
                     .contains(&VulkanShaderFeature::ShaderMixedFloatDotProductBfloat16Acc),
                 shader_float8_acc_float32: enabled_shader_features.contains(
@@ -387,9 +408,15 @@ impl VulkanComputeDeviceCatalog {
                 enabled_device_extensions
                     .insert(VK_KHR_SHADER_BFLOAT16_NAME.to_string_lossy().into_owned());
             }
-            if mixed_float_dot_product_support.shader_bfloat16_acc
+            if mixed_float_dot_product_support.shader_float16_acc_float32
+                || mixed_float_dot_product_support.shader_float16_acc_float16
+                || mixed_float_dot_product_support.shader_bfloat16_acc
                 || mixed_float_dot_product_support.shader_float8_acc_float32
             {
+                mixed_float_dot_product_features.shader_float16_acc_float32 =
+                    bool32(mixed_float_dot_product_support.shader_float16_acc_float32);
+                mixed_float_dot_product_features.shader_float16_acc_float16 =
+                    bool32(mixed_float_dot_product_support.shader_float16_acc_float16);
                 mixed_float_dot_product_features.shader_bfloat16_acc =
                     bool32(mixed_float_dot_product_support.shader_bfloat16_acc);
                 mixed_float_dot_product_features.shader_float8_acc_float32 =
@@ -444,7 +471,9 @@ impl VulkanComputeDeviceCatalog {
                 shader_bfloat16_features.p_next = device_info.p_next.cast_mut();
                 device_info.p_next = std::ptr::from_ref(&shader_bfloat16_features).cast();
             }
-            if mixed_float_dot_product_support.shader_bfloat16_acc
+            if mixed_float_dot_product_support.shader_float16_acc_float32
+                || mixed_float_dot_product_support.shader_float16_acc_float16
+                || mixed_float_dot_product_support.shader_bfloat16_acc
                 || mixed_float_dot_product_support.shader_float8_acc_float32
             {
                 mixed_float_dot_product_features.p_next = device_info.p_next.cast_mut();

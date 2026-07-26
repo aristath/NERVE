@@ -72,6 +72,117 @@ def source_contract() -> dict[str, object]:
     return document
 
 
+def hardware_profile_contract() -> dict[str, object]:
+    identity = {
+        "device_kind": "gpu",
+        "stable_device_id": "vulkan:fixture",
+        "name": "fixture GPU",
+        "vendor_id": "0x1002",
+        "device_id": "0xfixture",
+        "architecture": "fixture_architecture",
+        "physical_location": "fixture_slot",
+    }
+    processes = [
+        {
+            "name": "texture_sampling",
+            "category": "sampling",
+            "availability": "available",
+            "programmability": "direct",
+            "api": "vulkan",
+            "operations": ["linear_interpolation", "nearest_sampling"],
+            "numeric_formats": ["f16", "f32"],
+            "required_extensions": [],
+            "required_features": [],
+            "limits": {"max_image_dimension_2d": 16384},
+            "properties": {},
+        },
+        {
+            "name": "vector_fma",
+            "category": "arithmetic",
+            "availability": "available",
+            "programmability": "direct",
+            "api": "vulkan",
+            "operations": ["fused_multiply_add"],
+            "numeric_formats": ["f16", "f32"],
+            "required_extensions": [],
+            "required_features": ["shader_float16"],
+            "limits": {},
+            "properties": {},
+        },
+    ]
+    memory_domains = [
+        {
+            "name": "device_memory",
+            "kind": "device_local_heap",
+            "capacity_bytes": 1_073_741_824,
+            "host_visible": False,
+            "device_local": True,
+            "coherent": False,
+            "cached": False,
+            "minimum_alignment_bytes": 256,
+            "properties": {},
+        }
+    ]
+    interconnects = [
+        {
+            "name": "host_staging",
+            "kind": "host_staging",
+            "availability": "available",
+            "api": "vulkan",
+            "operations": ["device_to_host", "host_to_device"],
+            "properties": {},
+        }
+    ]
+    provenance = {
+        "api": "vulkan",
+        "api_version": "1.4.0",
+        "driver": "fixture",
+        "driver_version": "1",
+        "compiler": "fixture",
+        "operating_system": "linux",
+        "discovery_backend": "fixture",
+    }
+    capability_extensions: dict[str, object] = {}
+    identity_extensions: dict[str, object] = {}
+    runtime_bindings: dict[str, object] = {}
+    capability_class = stable_contract_id(
+        "hardware_capability",
+        {
+            "device_kind": identity["device_kind"],
+            "architecture": identity["architecture"],
+            "processes": processes,
+            "memory_domains": memory_domains,
+            "interconnects": interconnects,
+            "api": provenance["api"],
+            "api_version": provenance["api_version"],
+            "capability_extensions": capability_extensions,
+        },
+    )
+    return {
+        "schema": HARDWARE_PROCESS_PROFILE_SCHEMA,
+        "profile_id": stable_contract_id(
+            "hardware_profile",
+            [
+                identity,
+                capability_class,
+                provenance,
+                identity_extensions,
+                [],
+            ],
+        ),
+        "hardware_identity": identity,
+        "capability_class": capability_class,
+        "processes": processes,
+        "memory_domains": memory_domains,
+        "interconnects": interconnects,
+        "measurements": [],
+        "provenance": provenance,
+        "capability_extensions": capability_extensions,
+        "identity_extensions": identity_extensions,
+        "runtime_bindings": runtime_bindings,
+    }
+
+
 def contract_fixtures() -> list[dict[str, object]]:
     source = source_contract()
     source_digest = str(source["contract_digest"])
@@ -105,31 +216,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             ],
             "artifacts": [{"path": "optimization/evidence/spectral.json"}],
         },
-        {
-            "schema": HARDWARE_PROCESS_PROFILE_SCHEMA,
-            "profile_id": stable_contract_id(
-                "hardware_profile", "gpu:fixture", "driver", "compiler"
-            ),
-            "hardware_identity": {
-                "device_kind": "gpu",
-                "vendor_id": "0x1002",
-                "device_id": "0xfixture",
-                "stable_device_id": "vulkan:fixture",
-            },
-            "capability_class": "gpu.fixture",
-            "processes": [
-                {"name": "vector_fma", "supported": True},
-                {"name": "texture_sampling", "supported": True},
-            ],
-            "measurements": [
-                {"name": "vector_fma_f16", "unit": "operations_per_second"}
-            ],
-            "provenance": {
-                "api": "Vulkan 1.4",
-                "driver": "fixture",
-                "compiler": "fixture",
-            },
-        },
+        hardware_profile_contract(),
         {
             "schema": REPRESENTATION_CANDIDATE_SCHEMA,
             "candidate_id": candidate_id,
@@ -297,3 +384,74 @@ def test_contract_validation_rejects_unknown_fields_and_nonfinite_numbers() -> N
 def test_unknown_schema_fails_closed() -> None:
     with pytest.raises(ContractValidationError, match="unsupported"):
         validate_contract({"schema": "nerve.optimizer.future.v99"})
+
+
+def test_hardware_profile_rejects_capability_drift_and_unsorted_processes() -> None:
+    profile = hardware_profile_contract()
+    profile["processes"][0]["limits"]["max_image_dimension_2d"] = 8192
+    with pytest.raises(ContractValidationError, match="capability_class"):
+        validate_contract(profile)
+
+    profile = hardware_profile_contract()
+    profile["processes"].reverse()
+    with pytest.raises(ContractValidationError, match="unique sorted names"):
+        validate_contract(profile)
+
+
+def test_hardware_profile_rejects_unavailable_programmable_process() -> None:
+    profile = hardware_profile_contract()
+    profile["processes"][0]["availability"] = "unavailable"
+    with pytest.raises(ContractValidationError, match="claims programmability"):
+        validate_contract(profile)
+
+
+def test_hardware_measurements_are_part_of_profile_identity_not_capability_class() -> None:
+    profile = hardware_profile_contract()
+    old_profile_id = profile["profile_id"]
+    capability_class = profile["capability_class"]
+    profile["measurements"] = [
+        {
+            "name": "texture_sampling_throughput",
+            "unit": "samples_per_second",
+            "regime": {"format": "f16"},
+            "samples": [100, 101, 99],
+        }
+    ]
+    profile["profile_id"] = stable_contract_id(
+        "hardware_profile",
+        [
+            profile["hardware_identity"],
+            capability_class,
+            profile["provenance"],
+            profile["identity_extensions"],
+            profile["measurements"],
+        ],
+    )
+
+    validate_contract(profile)
+    assert profile["capability_class"] == capability_class
+    assert profile["profile_id"] != old_profile_id
+
+
+def test_runtime_binding_changes_do_not_change_stable_hardware_identity() -> None:
+    profile = hardware_profile_contract()
+    profile["runtime_bindings"] = {
+        "vulkan_runtime_binding": {"physical_device_index": 2}
+    }
+
+    validate_contract(profile)
+    profile_id = profile["profile_id"]
+    profile["runtime_bindings"]["vulkan_runtime_binding"][
+        "physical_device_index"
+    ] = 4
+    validate_contract(profile)
+
+    assert profile["profile_id"] == profile_id
+
+
+def test_hardware_profile_rejects_unclassified_extensions() -> None:
+    profile = hardware_profile_contract()
+    profile["extensions"] = {"possibly_capability_relevant": True}
+
+    with pytest.raises(ContractValidationError, match="must be classified"):
+        validate_contract(profile)
