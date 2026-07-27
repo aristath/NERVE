@@ -101,6 +101,10 @@ class PackageTensorRepository:
             and isinstance(record.get("path"), str)
             and isinstance(record.get("safetensors_header_bytes"), int)
         }
+        self._observations: dict[
+            tuple[str, int | None, int],
+            TensorObservation,
+        ] = {}
 
     def metadata(self, tensor_name: str) -> Json:
         try:
@@ -117,6 +121,14 @@ class PackageTensorRepository:
         exhaustive_element_limit: int | None,
         sampled_element_limit: int,
     ) -> TensorObservation:
+        key = (
+            tensor_name,
+            exhaustive_element_limit,
+            sampled_element_limit,
+        )
+        cached = self._observations.get(key)
+        if cached is not None:
+            return cached
         info = self.metadata(tensor_name)
         logical_shape = tuple(
             int(value) for value in info.get("logical_shape", info.get("shape", []))
@@ -144,15 +156,19 @@ class PackageTensorRepository:
             logical_shape,
             indices,
         )
-        return TensorObservation(
+        observed_values = np.asarray(values, dtype=np.float32)
+        observed_values.flags.writeable = False
+        observation = TensorObservation(
             tensor_name=tensor_name,
-            values=np.asarray(values, dtype=np.float32),
+            values=observed_values,
             logical_shape=logical_shape,
             storage_dtype=str(info.get("dtype", "")),
             exhaustive=exhaustive,
             sample_indices=indices,
             effective_values=effective,
         )
+        self._observations[key] = observation
+        return observation
 
     def _decode(
         self,

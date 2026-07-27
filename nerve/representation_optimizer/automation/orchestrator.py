@@ -11,7 +11,7 @@ from nerve.compilation import (
     check_compile_cancelled,
 )
 from nerve.representation_optimizer.analysis.context import AnalysisBudget
-from nerve.representation_optimizer.analysis.engine import analyze_scope
+from nerve.representation_optimizer.analysis.engine import ScopeAnalysisEngine
 from nerve.representation_optimizer.automation.budgets import BudgetLedger
 from nerve.representation_optimizer.automation.contracts import (
     OPTIMIZER_RUN_SCHEMA,
@@ -126,6 +126,10 @@ def run_automated_optimizer(
     )
     try:
         check_compile_cancelled(cancel_requested)
+        analysis_engine = ScopeAnalysisEngine.from_package(
+            source,
+            cancel_requested=cancel_requested,
+        )
         scopes = tuple(sorted(catalog["scopes"], key=lambda item: item["scope_id"]))
         contracts = {
             str(item["scope_id"]): item for item in catalog["source_contracts"]
@@ -153,8 +157,7 @@ def run_automated_optimizer(
                 continue
             analysis_directory = run_root / "analysis" / scope_id
             try:
-                analysis = analyze_scope(
-                    package_dir=source,
+                analysis = analysis_engine.analyze_scope(
                     scope_id=scope_id,
                     budget=analysis_budget,
                     output_dir=analysis_directory,

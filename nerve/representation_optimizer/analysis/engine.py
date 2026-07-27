@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -67,62 +68,145 @@ def analyze_scope(
     output_dir: Path | None = None,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> AnalysisRun:
-    check_compile_cancelled(cancel_requested)
-    budget = budget or AnalysisBudget()
-    catalog = load_optimization_scope_catalog(
-        package_dir / "optimization" / "scopes.json"
+    engine = ScopeAnalysisEngine.from_package(
+        package_dir,
+        analyzers=analyzers,
+        tensors=tensors,
+        cancel_requested=cancel_requested,
     )
-    check_compile_cancelled(cancel_requested)
-    scope = _unique_record(catalog["scopes"], "scope_id", scope_id)
-    source_contract = _unique_record(
-        catalog["source_contracts"],
-        "scope_id",
-        scope_id,
-    )
-    graph = _load_semantic_graph(package_dir)
-    context = ScopeAnalysisContext(
-        package_id=str(catalog["package_id"]),
-        scope=scope,
-        source_contract=source_contract,
-        tensors=tensors or PackageTensorRepository(package_dir),
-        nodes=_scope_nodes(graph, scope),
+    return engine.analyze_scope(
+        scope_id=scope_id,
         budget=budget,
         activation_trace=activation_trace,
+        output_dir=output_dir,
+        cancel_requested=cancel_requested,
     )
-    selected = tuple(analyzers or builtin_analyzers())
-    identities = [(analyzer.analyzer_id, analyzer.version) for analyzer in selected]
-    if len(identities) != len(set(identities)):
-        raise ModelCompileError("analysis run contains duplicate analyzer identities")
-    evidence = []
-    details = []
-    for analyzer in selected:
+
+
+class ScopeAnalysisEngine:
+    """One package-level analysis environment reused across overlapping scopes."""
+
+    def __init__(
+        self,
+        *,
+        package_dir: Path,
+        catalog: Json,
+        graph: SemanticDependencyGraph,
+        scopes: dict[str, Json],
+        source_contracts: dict[str, Json],
+        nodes: dict[str, Json],
+        analyzers: tuple[StructuralAnalyzer, ...],
+        tensors: TensorRepository,
+    ) -> None:
+        self.package_dir = package_dir
+        self.catalog = catalog
+        self.graph = graph
+        self.scopes = scopes
+        self.source_contracts = source_contracts
+        self.nodes = nodes
+        self.analyzers = analyzers
+        self.tensors = tensors
+
+    @classmethod
+    def from_package(
+        cls,
+        package_dir: Path,
+        *,
+        analyzers: Iterable[StructuralAnalyzer] | None = None,
+        tensors: TensorRepository | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> ScopeAnalysisEngine:
         check_compile_cancelled(cancel_requested)
-        result = analyzer.analyze(context)
+        package_dir = package_dir.resolve()
+        catalog = load_optimization_scope_catalog(
+            package_dir / "optimization" / "scopes.json"
+        )
         check_compile_cancelled(cancel_requested)
-        evidence_document, details_document = build_evidence(
+        graph = _load_semantic_graph(package_dir)
+        selected = tuple(analyzers or builtin_analyzers())
+        identities = [
+            (analyzer.analyzer_id, analyzer.version)
+            for analyzer in selected
+        ]
+        if len(identities) != len(set(identities)):
+            raise ModelCompileError(
+                "analysis run contains duplicate analyzer identities"
+            )
+        check_compile_cancelled(cancel_requested)
+        scopes = {
+            str(scope["scope_id"]): scope
+            for scope in catalog["scopes"]
+        }
+        source_contracts = {
+            str(contract["scope_id"]): contract
+            for contract in catalog["source_contracts"]
+        }
+        return cls(
+            package_dir=package_dir,
+            catalog=catalog,
+            graph=graph,
+            scopes=scopes,
+            source_contracts=source_contracts,
+            nodes=_scope_node_index(graph),
+            analyzers=selected,
+            tensors=tensors or PackageTensorRepository(package_dir),
+        )
+
+    def analyze_scope(
+        self,
+        *,
+        scope_id: str,
+        budget: AnalysisBudget | None = None,
+        activation_trace: ActivationTrace | None = None,
+        output_dir: Path | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> AnalysisRun:
+        check_compile_cancelled(cancel_requested)
+        budget = budget or AnalysisBudget()
+        try:
+            scope = self.scopes[scope_id]
+            source_contract = self.source_contracts[scope_id]
+        except KeyError as error:
+            raise ModelCompileError(
+                f"expected one optimizer record with scope_id={scope_id!r}"
+            ) from error
+        context = ScopeAnalysisContext(
+            package_id=str(self.catalog["package_id"]),
+            scope=scope,
+            source_contract=source_contract,
+            tensors=self.tensors,
+            nodes=_scope_nodes_from_index(self.nodes, scope),
+            budget=budget,
+            activation_trace=activation_trace,
+        )
+        evidence = []
+        details = []
+        for analyzer in self.analyzers:
+            check_compile_cancelled(cancel_requested)
+            result = analyzer.analyze(context)
+            check_compile_cancelled(cancel_requested)
+            evidence_document, details_document = build_evidence(
+                scope_id=scope_id,
+                source_contract_digest=context.source_contract_digest,
+                analyzer_id=analyzer.analyzer_id,
+                analyzer_version=analyzer.version,
+                claims=result.claims,
+                details=result.details,
+            )
+            evidence.append(evidence_document)
+            details.append(details_document)
+        run = build_analysis_run(
+            package_id=context.package_id,
             scope_id=scope_id,
             source_contract_digest=context.source_contract_digest,
-            analyzer_id=analyzer.analyzer_id,
-            analyzer_version=analyzer.version,
-            claims=result.claims,
-            details=result.details,
+            budget=budget.to_json(),
+            evidence=tuple(evidence),
+            details=tuple(details),
         )
-        evidence.append(evidence_document)
-        details.append(details_document)
-    run = build_analysis_run(
-        package_id=context.package_id,
-        scope_id=scope_id,
-        source_contract_digest=context.source_contract_digest,
-        budget=budget.to_json(),
-        evidence=tuple(evidence),
-        details=tuple(details),
-    )
-    if output_dir is not None:
-        check_compile_cancelled(cancel_requested)
-        write_analysis_run(run, output_dir)
-    return run
-
-
+        if output_dir is not None:
+            check_compile_cancelled(cancel_requested)
+            write_analysis_run(run, output_dir)
+        return run
 def _load_semantic_graph(package_dir: Path) -> SemanticDependencyGraph:
     stage = read_json(package_dir / "optimization" / "stage.json")
     baseline = stage.get("exact_baseline")
@@ -142,18 +226,18 @@ def _load_semantic_graph(package_dir: Path) -> SemanticDependencyGraph:
     )
 
 
-def _scope_nodes(
+def _scope_node_index(
     graph: SemanticDependencyGraph,
-    scope: Json,
-) -> tuple[Json, ...]:
-    selected = set(str(value) for value in scope["members"]["source_node_ids"])
-    result = []
+) -> dict[str, Json]:
+    index = {}
     for component in graph.components:
         for raw_node in component.nodes:
             local_id = str(raw_node["id"])
             qualified_id = f"{component.component_id}/{local_id}"
-            if qualified_id not in selected:
-                continue
+            if qualified_id in index:
+                raise ModelCompileError(
+                    f"semantic graph contains duplicate node {qualified_id!r}"
+                )
             node = dict(raw_node)
             node["id"] = qualified_id
             node["component_id"] = component.component_id
@@ -166,27 +250,20 @@ def _scope_nodes(
                 f"{component.component_id}/{signal}"
                 for signal in raw_node.get("outputs", [])
             ]
-            result.append(node)
-    found = {str(node["id"]) for node in result}
-    missing = sorted(selected - found)
+            index[qualified_id] = node
+    return index
+
+
+def _scope_nodes_from_index(
+    nodes: dict[str, Json],
+    scope: Json,
+) -> tuple[Json, ...]:
+    selected = sorted(
+        str(value) for value in scope["members"]["source_node_ids"]
+    )
+    missing = [node_id for node_id in selected if node_id not in nodes]
     if missing:
         raise ModelCompileError(
             f"analysis scope references missing source nodes: {missing}"
         )
-    return tuple(sorted(result, key=lambda node: str(node["id"])))
-
-
-def _unique_record(records: object, field: str, value: str) -> Json:
-    if not isinstance(records, list):
-        raise ModelCompileError("compiled optimizer catalog is malformed")
-    matches = [
-        record
-        for record in records
-        if isinstance(record, dict) and record.get(field) == value
-    ]
-    if len(matches) != 1:
-        raise ModelCompileError(
-            f"expected one optimizer record with {field}={value!r}, "
-            f"found {len(matches)}"
-        )
-    return matches[0]
+    return tuple(deepcopy(nodes[node_id]) for node_id in selected)

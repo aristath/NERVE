@@ -220,5 +220,14 @@ def test_package_repository_sampling_is_deterministic_and_declared(tmp_path: Pat
         sampled_element_limit=9,
     )
     assert first.exhaustive is False
+    assert first is second
+    assert first.values.flags.writeable is False
     assert first.sample_indices == second.sample_indices
     np.testing.assert_array_equal(first.values, second.values)
+    different_budget = repository.observe(
+        "large",
+        exhaustive_element_limit=16,
+        sampled_element_limit=4,
+    )
+    assert different_budget is not first
+    assert different_budget.values.size <= 4
