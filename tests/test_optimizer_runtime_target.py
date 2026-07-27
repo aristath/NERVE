@@ -61,6 +61,25 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
     device.write_text(f"{64 * 1024 * 1024}\n")
     assert probe.target_idle_state_digest(target) == expected
 
+    small_context = proc / "41"
+    (small_context / "fdinfo").mkdir(parents=True)
+    (small_context / "comm").write_text("vulkan-inspector\n")
+    (small_context / "fdinfo" / "5").write_text(
+        "drm-pdev:\t0000:03:00.0\n"
+        "drm-memory-vram:\t12 KiB\n"
+        "drm-memory-gtt:\t2048 KiB\n"
+    )
+    assert probe.require_idle((profile,))[0]["resident_processes"] == []
+    (small_context / "fdinfo" / "5").write_text(
+        "drm-pdev:\t0000:03:00.0\n"
+        "drm-memory-vram:\t12 KiB\n"
+        "drm-memory-gtt:\t2048 KiB\n"
+        "drm-engine-compute:\t1 ns\n"
+    )
+    with pytest.raises(ModelCompileError, match="resident DRM consumers"):
+        probe.require_idle((profile,))
+    (small_context / "fdinfo" / "5").unlink()
+
     process = proc / "42"
     (process / "fdinfo").mkdir(parents=True)
     (process / "comm").write_text("resident-model\n")

@@ -23,6 +23,8 @@ class DeviceIdlePolicy:
 
     maximum_vram_fraction_ppm: int = 10_000
     maximum_busy_percent: int = 0
+    maximum_driver_context_vram_bytes: int = 1 * 1024 * 1024
+    maximum_driver_context_gtt_bytes: int = 16 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not 0 <= self.maximum_vram_fraction_ppm <= 1_000_000:
@@ -33,12 +35,29 @@ class DeviceIdlePolicy:
             raise ModelCompileError(
                 "idle-device busy percentage must be between 0 and 100"
             )
+        for field in (
+            "maximum_driver_context_vram_bytes",
+            "maximum_driver_context_gtt_bytes",
+        ):
+            value = getattr(self, field)
+            if value < 0:
+                raise ModelCompileError(
+                    f"idle-device {field} must not be negative"
+                )
 
     def to_json(self) -> Json:
         return {
             "maximum_vram_fraction_ppm": self.maximum_vram_fraction_ppm,
             "maximum_busy_percent": self.maximum_busy_percent,
-            "resident_process_policy": "no_process_with_drm_vram_or_engine_activity",
+            "maximum_driver_context_vram_bytes": (
+                self.maximum_driver_context_vram_bytes
+            ),
+            "maximum_driver_context_gtt_bytes": (
+                self.maximum_driver_context_gtt_bytes
+            ),
+            "resident_process_policy": (
+                "no_engine_activity_or_process_above_driver_context_envelope"
+            ),
         }
 
 
@@ -251,7 +270,9 @@ class LinuxAmdDeviceStateProbe:
             fdinfo_root = process / "fdinfo"
             if not fdinfo_root.is_dir():
                 continue
-            has_activity = False
+            vram_bytes = 0
+            gtt_bytes = 0
+            engine_time_ns = 0
             for fdinfo in fdinfo_root.iterdir():
                 try:
                     fields = _fdinfo_fields(fdinfo.read_text(errors="replace"))
@@ -266,10 +287,24 @@ class LinuxAmdDeviceStateProbe:
                     continue
                 if current_pci != pci_address:
                     continue
-                if _fdinfo_has_gpu_residency(fields):
-                    has_activity = True
-                    break
-            if not has_activity:
+                vram_bytes += _memory_bytes(
+                    fields.get("drm-memory-vram", "0")
+                )
+                gtt_bytes += _memory_bytes(
+                    fields.get("drm-memory-gtt", "0")
+                )
+                engine_time_ns += sum(
+                    _duration_nanoseconds(value)
+                    for key, value in fields.items()
+                    if key.startswith("drm-engine-")
+                )
+            if (
+                engine_time_ns == 0
+                and vram_bytes
+                <= self.policy.maximum_driver_context_vram_bytes
+                and gtt_bytes
+                <= self.policy.maximum_driver_context_gtt_bytes
+            ):
                 continue
             try:
                 command = (process / "comm").read_text(errors="replace").strip()
@@ -278,6 +313,9 @@ class LinuxAmdDeviceStateProbe:
             residents[pid] = {
                 "pid": pid,
                 "command": command or "unknown",
+                "vram_bytes": vram_bytes,
+                "gtt_bytes": gtt_bytes,
+                "engine_time_ns": engine_time_ns,
             }
         return tuple(residents[pid] for pid in sorted(residents))
 
@@ -362,18 +400,39 @@ def _fdinfo_fields(payload: str) -> dict[str, str]:
     return fields
 
 
-def _fdinfo_has_gpu_residency(fields: dict[str, str]) -> bool:
-    for key, value in fields.items():
-        if key.startswith("drm-memory-") and _leading_integer(value) > 0:
-            return True
-        if key.startswith("drm-engine-") and _leading_integer(value) > 0:
-            return True
-    return False
+def _memory_bytes(value: str) -> int:
+    amount, unit = _quantity(value)
+    multiplier = {
+        "": 1,
+        "B": 1,
+        "KiB": 1024,
+        "MiB": 1024 * 1024,
+        "GiB": 1024 * 1024 * 1024,
+    }.get(unit)
+    if multiplier is None:
+        raise ModelCompileError(f"unsupported DRM memory unit {unit!r}")
+    return amount * multiplier
 
 
-def _leading_integer(value: str) -> int:
-    match = re.match(r"^\s*(\d+)", value)
-    return int(match.group(1)) if match is not None else 0
+def _duration_nanoseconds(value: str) -> int:
+    amount, unit = _quantity(value)
+    multiplier = {
+        "": 1,
+        "ns": 1,
+        "us": 1_000,
+        "ms": 1_000_000,
+        "s": 1_000_000_000,
+    }.get(unit)
+    if multiplier is None:
+        raise ModelCompileError(f"unsupported DRM engine-time unit {unit!r}")
+    return amount * multiplier
+
+
+def _quantity(value: str) -> tuple[int, str]:
+    match = re.match(r"^\s*(\d+)(?:\s+([A-Za-z]+))?", value)
+    if match is None:
+        return 0, ""
+    return int(match.group(1)), match.group(2) or ""
 
 
 def _required_text(document: Json, field: str) -> str:
