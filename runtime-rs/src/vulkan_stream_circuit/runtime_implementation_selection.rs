@@ -383,8 +383,24 @@ impl VulkanResidentRuntimeModel {
                     &effective_edges,
                     &self.runtime_graph.boundary,
                 )?;
+                let source_execution = self
+                    .component_executions
+                    .iter()
+                    .find(|execution| {
+                        execution.component_id
+                            == matching_instances[0].instance_id
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "implementation cannot find source execution for runtime instance {:?}",
+                            matching_instances[0].instance_id,
+                        ))
+                    })?;
                 rebase_overlay_shader_paths(
                     &mut overlay.execution,
+                    &source_execution,
+                    package_root,
                     &loaded.candidate_root,
                 )?;
                 mount_runtime_component_overlay(
@@ -542,6 +558,20 @@ fn contained_candidate_artifact(
     reference: &str,
     label: &str,
 ) -> Result<PathBuf, VulkanResidentTokenModelPackageError> {
+    contained_regular_artifact(
+        candidate_root,
+        reference,
+        label,
+        "candidate bundle",
+    )
+}
+
+fn contained_regular_artifact(
+    root: &Path,
+    reference: &str,
+    label: &str,
+    root_label: &str,
+) -> Result<PathBuf, VulkanResidentTokenModelPackageError> {
     let relative = Path::new(reference);
     if reference.is_empty()
         || relative.is_absolute()
@@ -551,20 +581,34 @@ fn contained_candidate_artifact(
         || relative.to_string_lossy() != reference
     {
         return Err(VulkanResidentTokenModelPackageError::new(format!(
-            "{label} reference is not a canonical candidate-relative path"
+            "{label} reference is not a canonical {root_label}-relative path"
         )));
     }
-    let path = candidate_root
-        .join(relative)
-        .canonicalize()
-        .map_err(|error| {
+    let mut lexical = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            unreachable!("relative components were validated above");
+        };
+        lexical.push(component);
+        let metadata = fs::symlink_metadata(&lexical).map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
                 "{label} is missing or unreadable: {error}"
             ))
         })?;
-    if !path.starts_with(candidate_root) || !path.is_file() {
+        if metadata.file_type().is_symlink() {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                format!("{label} crosses a symbolic link"),
+            ));
+        }
+    }
+    let path = lexical.canonicalize().map_err(|error| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "{label} is missing or unreadable: {error}"
+        ))
+    })?;
+    if !path.starts_with(root) || !path.is_file() {
         return Err(VulkanResidentTokenModelPackageError::new(format!(
-            "{label} escapes its candidate bundle"
+            "{label} escapes its {root_label}"
         )));
     }
     Ok(path)
@@ -689,29 +733,84 @@ fn validate_runtime_component_overlay(
 
 fn rebase_overlay_shader_paths(
     execution: &mut VulkanResidentComponentExecutionSpec,
+    source_execution: &VulkanResidentComponentExecutionSpec,
+    package_root: &Path,
     candidate_root: &Path,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
     for kernel in &mut execution.kernels {
-        kernel.shader_path = contained_candidate_artifact(
-            candidate_root,
+        let source_kernel = source_execution
+            .kernels
+            .iter()
+            .find(|source| source.node_id == kernel.node_id);
+        kernel.shader_path = rebase_overlay_shader_path(
             &kernel.shader_path,
+            source_kernel.map(|source| source.shader_path.as_str()),
+            package_root,
+            candidate_root,
             "runtime implementation shader",
-        )?
-        .to_string_lossy()
-        .into_owned();
+        )?;
         for implementation in &mut kernel.batch_implementations {
-            for stage in &mut implementation.stages {
-                stage.shader_path = contained_candidate_artifact(
-                    candidate_root,
+            let source_implementation = source_kernel.and_then(|source| {
+                source.batch_implementations.iter().find(|candidate| {
+                    candidate.execution_domain
+                        == implementation.execution_domain
+                        && candidate.lane_tile_width
+                            == implementation.lane_tile_width
+                })
+            });
+            for (stage_index, stage) in
+                implementation.stages.iter_mut().enumerate()
+            {
+                let source_path = source_implementation
+                    .and_then(|source| source.stages.get(stage_index))
+                    .map(|source| source.shader_path.as_str());
+                stage.shader_path = rebase_overlay_shader_path(
                     &stage.shader_path,
+                    source_path,
+                    package_root,
+                    candidate_root,
                     "runtime implementation batch shader",
-                )?
-                .to_string_lossy()
-                .into_owned();
+                )?;
             }
         }
     }
     Ok(())
+}
+
+fn rebase_overlay_shader_path(
+    overlay_reference: &str,
+    source_reference: Option<&str>,
+    package_root: &Path,
+    candidate_root: &Path,
+    label: &str,
+) -> Result<String, VulkanResidentTokenModelPackageError> {
+    let path = if source_reference == Some(overlay_reference) {
+        contained_package_artifact(
+            package_root,
+            overlay_reference,
+            label,
+        )?
+    } else {
+        contained_candidate_artifact(
+            candidate_root,
+            overlay_reference,
+            label,
+        )?
+    };
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn contained_package_artifact(
+    package_root: &Path,
+    reference: &str,
+    label: &str,
+) -> Result<PathBuf, VulkanResidentTokenModelPackageError> {
+    contained_regular_artifact(
+        package_root,
+        reference,
+        label,
+        "source package",
+    )
 }
 
 fn mount_runtime_component_overlay(

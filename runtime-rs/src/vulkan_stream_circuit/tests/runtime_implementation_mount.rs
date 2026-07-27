@@ -114,24 +114,11 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
     let mut execution = source_execution.clone();
     execution.implementation =
         "verified_alternative_representation".to_string();
-    for kernel in &execution.kernels {
-        let source = package_root.join(&kernel.shader_path);
-        let destination = candidate_root.join(&kernel.shader_path);
-        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        std::fs::copy(source, destination).unwrap();
-        for implementation in &kernel.batch_implementations {
-            for stage in &implementation.stages {
-                let source = package_root.join(&stage.shader_path);
-                let destination =
-                    candidate_root.join(&stage.shader_path);
-                std::fs::create_dir_all(
-                    destination.parent().unwrap(),
-                )
-                .unwrap();
-                std::fs::copy(source, destination).unwrap();
-            }
-        }
-    }
+    let changed_shader = "kernels/candidate_only.spv";
+    let candidate_shader = candidate_root.join(changed_shader);
+    std::fs::create_dir_all(candidate_shader.parent().unwrap()).unwrap();
+    std::fs::write(&candidate_shader, b"candidate shader").unwrap();
+    execution.kernels[0].shader_path = changed_shader.to_string();
     let overlay_ref = "overlays/layer_00.json";
     let overlay_path = candidate_root.join(overlay_ref);
     std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
@@ -305,14 +292,95 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
         .find(|execution| execution.component_id == "layer_00")
         .unwrap();
     assert!(
+        Path::new(&mounted_execution.kernels[0].shader_path)
+            .starts_with(&candidate_root)
+    );
+    assert!(
+        mounted_execution.kernels[1..]
+            .iter()
+            .all(|kernel| Path::new(&kernel.shader_path)
+                .starts_with(&package_root))
+    );
+    assert!(
         mounted_execution
             .kernels
             .iter()
-            .all(|kernel| Path::new(&kernel.shader_path)
-                .starts_with(&candidate_root))
+            .flat_map(|kernel| &kernel.batch_implementations)
+            .flat_map(|implementation| &implementation.stages)
+            .all(|stage| Path::new(&stage.shader_path)
+                .starts_with(&package_root))
     );
     assert!(mounted.implementation_selection.is_some());
     mounted.load_runtime_tensor_index(&package_root).unwrap();
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_overlay_shader_resolution_rejects_path_spoofing_and_symlinks() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nerve-runtime-overlay-paths-{}-{unique}",
+        std::process::id()
+    ));
+    let package_root = root.join("package");
+    let candidate_root = root.join("candidate");
+    std::fs::create_dir_all(&package_root).unwrap();
+    std::fs::create_dir_all(&candidate_root).unwrap();
+    std::fs::write(package_root.join("source.spv"), b"source").unwrap();
+    std::fs::write(candidate_root.join("candidate.spv"), b"candidate")
+        .unwrap();
+
+    let inherited = rebase_overlay_shader_path(
+        "source.spv",
+        Some("source.spv"),
+        &package_root,
+        &candidate_root,
+        "shader",
+    )
+    .unwrap();
+    assert!(Path::new(&inherited).starts_with(&package_root));
+    let changed = rebase_overlay_shader_path(
+        "candidate.spv",
+        Some("source.spv"),
+        &package_root,
+        &candidate_root,
+        "shader",
+    )
+    .unwrap();
+    assert!(Path::new(&changed).starts_with(&candidate_root));
+    assert!(
+        rebase_overlay_shader_path(
+            "../source.spv",
+            Some("source.spv"),
+            &package_root,
+            &candidate_root,
+            "shader",
+        )
+        .is_err()
+    );
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            package_root.join("source.spv"),
+            candidate_root.join("linked.spv"),
+        )
+        .unwrap();
+        assert!(
+            rebase_overlay_shader_path(
+                "linked.spv",
+                Some("source.spv"),
+                &package_root,
+                &candidate_root,
+                "shader",
+            )
+            .is_err()
+        );
+    }
 
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -188,6 +188,12 @@ fn fused_head_norm_rope_kernel_receives_stream_control_metadata() {
 
     assert!(metadata.uses_stream_tick);
     assert!(metadata.push_constants().is_empty());
+
+    let codebook_metadata = VulkanKernelStreamMetadata::for_op(
+        "parallel_head_norm_rope_2way_codebook_u8",
+    );
+    assert!(codebook_metadata.uses_stream_tick);
+    assert!(codebook_metadata.push_constants().is_empty());
 }
 
 #[test]

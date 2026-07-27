@@ -426,6 +426,67 @@ mod tests {
     }
 
     #[test]
+    fn infers_exact_codebook_head_norm_rope_shapes_and_abi() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "codebook_head_norm_rope".to_string(),
+            op: "parallel_head_norm_rope_2way_codebook_u8".to_string(),
+            inputs: vec!["query".to_string(), "key".to_string()],
+            outputs: vec![
+                "positioned_query".to_string(),
+                "positioned_key".to_string(),
+            ],
+            params: vec![
+                "query_addresses".to_string(),
+                "key_addresses".to_string(),
+                "codebook".to_string(),
+            ],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({}),
+        };
+        let signal = |id: &str, width: usize| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: vec![node.id.clone()],
+            shape: Some(vec![width]),
+            element_bytes: None,
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let signals = BTreeMap::from([
+            ("query".to_string(), signal("query", 6144)),
+            ("key".to_string(), signal("key", 1024)),
+        ]);
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "attention",
+                &node,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![6144]), Some(vec![1024])]
+        );
+
+        let mut invalid = node;
+        invalid.params.pop();
+        assert!(
+            infer_node_output_shapes(
+                "attention",
+                &invalid,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap_err()
+            .0
+            .contains("3 parameters")
+        );
+    }
+
+    #[test]
     fn infers_per_head_softplus_gate_output_shape_from_attention_frame() {
         let node = crate::stream_circuit::CircuitNode {
             id: "attention_output_gate".to_string(),

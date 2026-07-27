@@ -57,11 +57,21 @@ fn infer_node_output_shapes(
             outputs,
         )),
         "sigmoid_scalar_multiply" => Ok(repeat_shape(first_input_shape(node, signals), outputs)),
-        "parallel_head_norm_rope_2way" => {
-            if node.inputs.len() != 2 || node.outputs.len() != 2 || node.params.len() != 2 {
+        "parallel_head_norm_rope_2way"
+        | "parallel_head_norm_rope_2way_codebook_u8" => {
+            let expected_parameters =
+                if node.op == "parallel_head_norm_rope_2way" {
+                    2
+                } else {
+                    3
+                };
+            if node.inputs.len() != 2
+                || node.outputs.len() != 2
+                || node.params.len() != expected_parameters
+            {
                 return Err(CircuitPlanError(format!(
-                    "{} node {} requires two head-norm/rope inputs, outputs, and parameters",
-                    component_id, node.id
+                    "{} node {} requires two head-norm/rope inputs and outputs and {} parameters",
+                    component_id, node.id, expected_parameters
                 )));
             }
             Ok(node

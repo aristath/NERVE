@@ -123,6 +123,7 @@ impl VulkanKernelStreamMetadata {
                 op,
                 "rotary_position_embedding"
                     | "parallel_head_norm_rope_2way"
+                    | "parallel_head_norm_rope_2way_codebook_u8"
                     | "append_state_update"
                     | "scaled_dot_product_attention"
                     | "append_scaled_dot_product_attention"
