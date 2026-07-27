@@ -227,9 +227,7 @@ class ResidentComponentExecutionSession:
         )
         executor_session = adapter.executor_client.open(
             ResidentExecutorMountSpec(
-                implementation_id=request.implementation[
-                    "implementation_id"
-                ],
+                implementation_id=request.implementation["implementation_id"],
                 component_id=component_id,
                 physical_node_id=physical_node_id,
                 phase=phase,
@@ -242,12 +240,9 @@ class ResidentComponentExecutionSession:
             )
         )
         payload = executor_session.mount_payload
-        if (
-            request.implementation["implementation_id"].startswith(
-                "staged-representation:"
-            )
-            != (payload["candidate_id"] is not None)
-        ):
+        if request.implementation["implementation_id"].startswith(
+            "staged-representation:"
+        ) != (payload["candidate_id"] is not None):
             executor_session.close(
                 request_identity={
                     "plan_id": request.plan_id,
@@ -272,25 +267,20 @@ class ResidentComponentExecutionSession:
 
     def execute(self, request: BenchmarkExecutionRequest) -> Json:
         if self.closed:
-            raise ModelCompileError(
-                "resident component execution session is closed"
-            )
+            raise ModelCompileError("resident component execution session is closed")
         if (
             request.plan_id != self.request.plan_id
             or request.role != self.request.role
             or request.implementation_id
             != self.request.implementation["implementation_id"]
-            or request.workload["workload_id"]
-            != self.request.workload["workload_id"]
+            or request.workload["workload_id"] != self.request.workload["workload_id"]
             or request.seed != self.request.seed
             or request.reset_to_initial_state is not True
         ):
             raise ModelCompileError(
                 "resident component execution request changed its mounted trial"
             )
-        useful_units = int(
-            request.workload["useful_work"]["minimum_units"]
-        )
+        useful_units = int(request.workload["useful_work"]["minimum_units"])
         execution = self.executor_session.execute(
             useful_units=useful_units,
             seed=request.seed,
@@ -305,9 +295,7 @@ class ResidentComponentExecutionSession:
 
     def close(self) -> Json:
         if self.closed:
-            raise ModelCompileError(
-                "resident component execution session closed twice"
-            )
+            raise ModelCompileError("resident component execution session closed twice")
         self.closed = True
         release = self.executor_session.close(
             request_identity={
@@ -319,9 +307,7 @@ class ResidentComponentExecutionSession:
             action="unmount",
             duration_ns=release.host_release_ns,
             before=self.mount_payload["mounted_state_digest"],
-            after=self.request.matched_conditions[
-                "idle_device_state_digest"
-            ],
+            after=self.request.matched_conditions["idle_device_state_digest"],
             released=True,
         )
 
@@ -335,9 +321,7 @@ class ResidentComponentExecutionSession:
     ) -> Json:
         controls = request.workload["controls"]
         expected_phase = required_text(controls, "phase")
-        expected_width = int(
-            request.workload["regime"]["activation_batch_width"]
-        )
+        expected_width = int(request.workload["regime"]["activation_batch_width"])
         if (
             required_text(report, "component_id")
             != required_text(controls, "component_id")
@@ -357,9 +341,7 @@ class ResidentComponentExecutionSession:
             report.get("useful_units"),
             "executor report useful_units",
         )
-        expected_units = int(
-            request.workload["useful_work"]["minimum_units"]
-        )
+        expected_units = int(request.workload["useful_work"]["minimum_units"])
         if useful_units != expected_units:
             raise ModelCompileError(
                 "resident executor changed the requested useful work"
@@ -419,6 +401,7 @@ class ResidentComponentExecutionSession:
             "workload_id": request.workload["workload_id"],
             "phase": request.phase,
             "seed": request.seed,
+            "block_index": request.block_index,
             "pair_index": request.pair_index,
             "order_index": request.order_index,
             "matched_conditions_digest": request.matched_conditions_digest,
@@ -428,13 +411,9 @@ class ResidentComponentExecutionSession:
                 if request.workload["initial_state"] is None
                 else request.workload["initial_state"]["digest"]
             ),
-            "controls_digest": contract_digest(
-                request.workload["controls"]
-            ),
+            "controls_digest": contract_digest(request.workload["controls"]),
             "status": "completed",
-            "stop_reason": request.workload["useful_work"][
-                "completion_condition"
-            ],
+            "stop_reason": request.workload["useful_work"]["completion_condition"],
             "timing": {
                 "setup_ns": 0,
                 "execution_ns": host_execution_ns,
@@ -464,9 +443,7 @@ class ResidentComponentExecutionSession:
             "device": {
                 "measurement_ns": measurement_ns,
                 "busy_ns": device_busy_ns,
-                "utilization_ppm": round(
-                    device_busy_ns * 1_000_000 / measurement_ns
-                ),
+                "utilization_ppm": round(device_busy_ns * 1_000_000 / measurement_ns),
             },
             "synchronization": {
                 "operation_count": synchronization_count,
@@ -490,9 +467,7 @@ class ResidentComponentExecutionSession:
                 "queue_wait_ns": queue_wait_ns,
                 "device_execution_ns": device_busy_ns,
                 "host_execution_ns": host_execution_ns,
-                "activation_batch_width": report[
-                    "activation_batch_width"
-                ],
+                "activation_batch_width": report["activation_batch_width"],
             },
             "diagnostics": [],
         }
@@ -508,7 +483,8 @@ class ResidentComponentExecutionSession:
             f"traces/executor/{self.adapter.run_nonce}/"
             f"{self.session_nonce}/"
             f"{request.workload['workload_id']}/{request.role}/"
-            f"{request.seed}/{request.phase}/{request.order_index}/"
+            f"{request.seed}/{request.block_index}/"
+            f"{request.phase}/{request.order_index}/"
             f"{request.pair_index}"
         )
         payloads = {
@@ -542,15 +518,9 @@ class ResidentComponentExecutionSession:
                     }
                     for window in report["throughput_windows"]
                 ],
-                "physical_dispatch_count": report[
-                    "physical_dispatch_count"
-                ],
-                "queue_submission_count": report[
-                    "queue_submission_count"
-                ],
-                "synchronization_wait_count": report[
-                    "synchronization_wait_count"
-                ],
+                "physical_dispatch_count": report["physical_dispatch_count"],
+                "queue_submission_count": report["queue_submission_count"],
+                "synchronization_wait_count": report["synchronization_wait_count"],
             },
         }
         return {
@@ -582,9 +552,7 @@ class ResidentComponentExecutionSession:
             "schema": BENCHMARK_RESIDENCY_EVENT_SCHEMA,
             "event_id": "",
             "plan_id": self.request.plan_id,
-            "implementation_id": self.request.implementation[
-                "implementation_id"
-            ],
+            "implementation_id": self.request.implementation["implementation_id"],
             "role": self.request.role,
             "workload_id": self.request.workload["workload_id"],
             "seed": self.request.seed,
@@ -593,21 +561,15 @@ class ResidentComponentExecutionSession:
             "duration_ns": duration_ns,
             "permanent_bytes": permanent_bytes,
             "peak_transient_bytes": transient_bytes,
-            "matched_conditions_digest": (
-                self.request.matched_conditions_digest
-            ),
+            "matched_conditions_digest": (self.request.matched_conditions_digest),
             "device_state_before_digest": before,
             "device_state_after_digest": after,
             "released": released,
             "default_statistics": {
                 "execution_path": "resident_targeted_component",
                 "action": action,
-                "physical_device_id": self.mount_payload[
-                    "physical_device_id"
-                ],
-                "logical_device_id": self.mount_payload[
-                    "logical_device_id"
-                ],
+                "physical_device_id": self.mount_payload["physical_device_id"],
+                "logical_device_id": self.mount_payload["logical_device_id"],
             },
         }
         document["event_id"] = benchmark_residency_event_id(document)

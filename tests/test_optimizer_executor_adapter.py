@@ -163,9 +163,7 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     )
     assert "VK_ICD_FILENAMES" not in environment
     assert executor.commands[0]["candidate_id"] == candidate_id
-    assert executor.commands[0]["candidate_root"] == str(
-        candidate_root.resolve()
-    )
+    assert executor.commands[0]["candidate_root"] == str(candidate_root.resolve())
     assert executor.commands[0]["physical_device_id"] == "vulkan:amd-fixture"
     assert executor.commands[0]["maximum_quantum_wait_ns"] == 9_000_000
     assert executor.commands[1]["useful_units"] == 8
@@ -187,10 +185,7 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
         assert b"".join(adapter.iter_trace_artifact(artifact["path"]))
     assert mount["released"] is False
     assert unmount["released"] is True
-    assert (
-        mount["device_state_after_digest"]
-        == unmount["device_state_before_digest"]
-    )
+    assert mount["device_state_after_digest"] == unmount["device_state_before_digest"]
     assert executor.closed is True
     assert executor.aborted is False
 
@@ -214,25 +209,21 @@ def test_resident_component_schedule_trace_excludes_timing_jitter(
             execution_count += 1
             duration_ns = 400 + execution_count
             response["payload"]["execution_ns"] = duration_ns
-            response["payload"]["throughput_windows"][0][
-                "duration_ns"
-            ] = duration_ns
+            response["payload"]["throughput_windows"][0]["duration_ns"] = duration_ns
         return response
 
     executor.request = variably_timed  # type: ignore[method-assign]
     session = adapter.open_session(mount_request)
-    first = BenchmarkObservation.from_json(
-        session.execute(execution_request)
-    ).to_json()
+    first = BenchmarkObservation.from_json(session.execute(execution_request)).to_json()
     second = BenchmarkObservation.from_json(
         session.execute(replace(execution_request, pair_index=1))
     ).to_json()
     session.close()
 
     assert first["timing"]["execution_ns"] != second["timing"]["execution_ns"]
-    assert first["traces"]["schedule"]["digest"] == second["traces"][
-        "schedule"
-    ]["digest"]
+    assert (
+        first["traces"]["schedule"]["digest"] == second["traces"]["schedule"]["digest"]
+    )
     assert all(
         first["traces"][name]["digest"] == second["traces"][name]["digest"]
         for name in ("distribution", "tokens", "state", "random_draws")
@@ -336,9 +327,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         "exclusive_residency": True,
     }
     plan_id = stable_contract_id("validation_plan", str(tmp_path))
-    implementation = {
-        "implementation_id": f"staged-representation:{candidate_id}"
-    }
+    implementation = {"implementation_id": f"staged-representation:{candidate_id}"}
     backend = ResidentComponentValidationBackend(
         executor_client=adapter.executor_client,
         trace_store=adapter.trace_store,
@@ -517,6 +506,7 @@ def _requests(
         matched_conditions_digest=contract_digest(matched_conditions),
         phase="measured",
         seed=17,
+        block_index=0,
         pair_index=0,
         order_index=1,
     )

@@ -72,29 +72,46 @@ def summarize_benchmark(
         or construction["schema"] != CANDIDATE_CONSTRUCTION_SCHEMA
         or construction["status"] != "completed"
         or construction["candidate_id"] != plan_document["candidate_id"]
-        or construction_record.digest
-        != plan_document["construction_record_digest"]
+        or construction_record.digest != plan_document["construction_record_digest"]
     ):
         raise ModelCompileError(
             "benchmark plan, run, and candidate construction do not match"
         )
     observations = run_document["observations"]
+    sampling_by_workload = {
+        outcome["workload_id"]: outcome for outcome in run_document["sampling_outcomes"]
+    }
     summaries = []
     reproducibility = []
     decisions = []
     decision_reasons: list[str] = []
     for workload in plan_document["workloads"]:
-        summary, groups = _summarize_workload(
+        sampling = sampling_by_workload.get(workload["workload_id"])
+        if sampling is None:
+            raise ModelCompileError(
+                "benchmark run has no adaptive sampling outcome for workload"
+            )
+        summary, groups = summarize_workload_samples(
             workload,
             observations,
             plan_document["policy"],
+            sampling["warmup_groups"],
         )
+        if (
+            summary["decision"] != sampling["decision"]
+            or summary["reasons"] != sampling["reasons"]
+            or summary["sample_count_per_role"]
+            != sampling["measured_pairs_per_seed"]
+            * len(workload["randomness"]["seeds"])
+        ):
+            raise ModelCompileError(
+                "adaptive sampling outcome disagrees with benchmark evidence"
+            )
         summaries.append(summary)
         reproducibility.extend(groups)
         decisions.append(summary["decision"])
         decision_reasons.extend(
-            f"{workload['workload_id']}: {reason}"
-            for reason in summary["reasons"]
+            f"{workload['workload_id']}: {reason}" for reason in summary["reasons"]
         )
     decision = _overall_decision(decisions)
     if decision == "not_materially_faster" and not decision_reasons:
@@ -108,12 +125,10 @@ def summarize_benchmark(
         "plan_digest": contract_digest(plan_document),
         "run_digest": contract_digest(run_document),
         "construction_record_digest": construction_record.digest,
-        "reference_implementation_id": plan_document["implementations"][
-            "reference"
-        ]["implementation_id"],
-        "matched_conditions_digest": plan_document[
-            "matched_conditions_digest"
+        "reference_implementation_id": plan_document["implementations"]["reference"][
+            "implementation_id"
         ],
+        "matched_conditions_digest": plan_document["matched_conditions_digest"],
         "workloads": summaries,
         "reproducibility": sorted(
             reproducibility,
@@ -152,10 +167,11 @@ def summarize_benchmark(
     )
 
 
-def _summarize_workload(
+def summarize_workload_samples(
     workload: Json,
     observations: list[Json],
     policy: Json,
+    warmup_groups: list[Json],
 ) -> tuple[Json, list[Json]]:
     selected = [
         observation
@@ -164,10 +180,8 @@ def _summarize_workload(
     ]
     warmup = {
         role: _warmup_summary(
-            workload,
-            selected,
             role,
-            policy,
+            warmup_groups,
         )
         for role in ("reference", "candidate")
     }
@@ -175,41 +189,28 @@ def _summarize_workload(
         role: [
             observation
             for observation in selected
-            if observation["phase"] == "measured"
-            and observation["role"] == role
+            if observation["phase"] == "measured" and observation["role"] == role
         ]
         for role in ("reference", "candidate")
     }
     paired = _paired_summary(measured)
     sustained = _sustained_summary(measured, policy)
     reproducibility = _reproducibility(workload, measured)
-    reasons = []
+    reasons: list[str] = []
     decision = "materially_faster"
     if any(
-        group["classification"] == "correctness_defect"
-        for group in reproducibility
+        group["classification"] == "correctness_defect" for group in reproducibility
     ):
         decision = "invalid"
         reasons.append("fixed-seed repetitions exposed a correctness defect")
-    if any(
-        observation["transport"]["timeout_count"] > 0
-        for observation in selected
-    ):
+    if any(observation["transport"]["timeout_count"] > 0 for observation in selected):
         decision = "invalid"
         reasons.append("runtime reported transport or bounded-wait timeouts")
     if decision != "invalid" and any(
-        not warmup[role]["converged"]
-        for role in ("reference", "candidate")
+        not warmup[role]["converged"] for role in ("reference", "candidate")
     ):
         decision = "inconclusive"
-        reasons.append("warmup did not converge under fixed matched sampling")
-    if (
-        decision != "invalid"
-        and paired["relative_ci_width_ppm"]
-        > policy["maximum_relative_ci_width_ppm"]
-    ):
-        decision = "inconclusive"
-        reasons.append("paired confidence interval is too wide")
+        reasons.append("warmup did not converge within the declared adaptive bound")
     if (
         decision != "invalid"
         and paired["order_bias_ppm"] > policy["maximum_order_bias_ppm"]
@@ -219,17 +220,25 @@ def _summarize_workload(
     if decision != "invalid" and not sustained["passed"]:
         decision = "inconclusive"
         reasons.append("candidate throughput degrades across sustained windows")
-    if decision == "materially_faster" and paired[
-        "confidence_interval_low_ppm"
-    ] <= policy["minimum_material_improvement_ppm"]:
-        decision = "not_materially_faster"
-        reasons.append(
-            "paired speedup did not clear the declared "
-            "material-improvement floor"
-        )
+    if decision == "materially_faster":
+        material_floor = policy["minimum_material_improvement_ppm"]
+        if paired["confidence_interval_high_ppm"] <= material_floor:
+            decision = "not_materially_faster"
+            reasons.append(
+                "paired confidence interval is decisively below the declared "
+                "material-improvement floor"
+            )
+        elif paired["confidence_interval_low_ppm"] <= material_floor:
+            decision = "inconclusive"
+            reasons.append(
+                "paired confidence interval still crosses the declared "
+                "material-improvement floor"
+            )
+        elif paired["relative_ci_width_ppm"] > policy["maximum_relative_ci_width_ppm"]:
+            decision = "inconclusive"
+            reasons.append("paired confidence interval is too wide")
     role_summaries = {
-        role: _role_summary(measured[role])
-        for role in ("reference", "candidate")
+        role: _role_summary(measured[role]) for role in ("reference", "candidate")
     }
     return (
         {
@@ -247,45 +256,44 @@ def _summarize_workload(
     )
 
 
-def _warmup_summary(
-    workload: Json,
+def warmup_group_summary(
     observations: list[Json],
-    role: str,
     policy: Json,
 ) -> Json:
-    maximum_shift = 0
-    sample_count = 0
-    for seed in workload["randomness"]["seeds"]:
-        samples = [
-            _throughput(observation)
-            for observation in observations
-            if observation["phase"] == "warmup"
-            and observation["role"] == role
-            and observation["seed"] == seed
-        ]
-        sample_count += len(samples)
-        midpoint = len(samples) // 2
-        if midpoint == 0 or len(samples) - midpoint == 0:
-            maximum_shift = 2**63 - 1
-            continue
-        previous = statistics.median(samples[:midpoint])
-        current = statistics.median(samples[midpoint:])
-        shift = (
+    window = policy["warmup_stability_window_samples"]
+    samples = [_throughput(observation) for observation in observations]
+    if len(samples) < 2 * window:
+        maximum_shift = 2**63 - 1
+    else:
+        previous = statistics.median(samples[-2 * window : -window])
+        current = statistics.median(samples[-window:])
+        maximum_shift = (
             round(abs(current - previous) * 1_000_000 / previous)
             if previous
             else (0 if current == 0 else 2**63 - 1)
         )
-        maximum_shift = max(maximum_shift, shift)
-    expected = (
-        len(workload["randomness"]["seeds"]) * policy["warmup_samples"]
-    )
     return {
-        "sample_count": sample_count,
+        "sample_count": len(samples),
         "maximum_shift_ppm": maximum_shift,
         "converged": (
-            sample_count == expected
+            len(samples) >= policy["minimum_warmup_samples"]
             and maximum_shift <= policy["maximum_warmup_shift_ppm"]
         ),
+    }
+
+
+def _warmup_summary(
+    role: str,
+    groups: list[Json],
+) -> Json:
+    selected = [group for group in groups if group["role"] == role]
+    return {
+        "sample_count": sum(group["sample_count"] for group in selected),
+        "maximum_shift_ppm": max(
+            (group["maximum_shift_ppm"] for group in selected),
+            default=2**63 - 1,
+        ),
+        "converged": bool(selected) and all(group["converged"] for group in selected),
     }
 
 
@@ -332,11 +340,7 @@ def _paired_summary(measured: dict[str, list[Json]]) -> Json:
         if values
     ]
     order_bias = (
-        round(
-            abs(order_ratios[0] - order_ratios[1])
-            * 1_000_000
-            / ratio
-        )
+        round(abs(order_ratios[0] - order_ratios[1]) * 1_000_000 / ratio)
         if len(order_ratios) == 2
         else 2**63 - 1
     )
@@ -362,11 +366,7 @@ def _sustained_summary(
         for role, observations in measured.items()
     }
     median = {
-        role: (
-            round(statistics.median(values))
-            if values
-            else 0
-        )
+        role: (round(statistics.median(values)) if values else 0)
         for role, values in slopes.items()
     }
     reference_regression = max(0, -median["reference"])
@@ -393,9 +393,9 @@ def _reproducibility(
     for role in ("reference", "candidate"):
         grouped: dict[tuple[int, int], list[Json]] = defaultdict(list)
         for observation in measured[role]:
-            grouped[
-                (observation["seed"], observation["order_index"])
-            ].append(observation)
+            grouped[(observation["seed"], observation["order_index"])].append(
+                observation
+            )
         for (seed, order_index), observations in sorted(grouped.items()):
             if len(observations) < 2:
                 continue
@@ -412,8 +412,7 @@ def _reproducibility(
                 semantic_fields = ("distribution", "tokens", "state")
                 semantic_equal = all(
                     all(
-                        trace[field]["digest"]
-                        == traces[0][field]["digest"]
+                        trace[field]["digest"] == traces[0][field]["digest"]
                         for field in semantic_fields
                     )
                     for trace in traces[1:]
@@ -424,27 +423,21 @@ def _reproducibility(
                     for trace in traces[1:]
                 )
                 schedule_equal = all(
-                    trace["schedule"]["digest"]
-                    == traces[0]["schedule"]["digest"]
+                    trace["schedule"]["digest"] == traces[0]["schedule"]["digest"]
                     for trace in traces[1:]
                 )
                 if (
                     semantic_equal
                     and random_equal
                     and not schedule_equal
-                    and randomness[
-                        "permit_speculative_schedule_variance"
-                    ]
+                    and randomness["permit_speculative_schedule_variance"]
                     and any(
                         observation["work"]["speculative_units"] > 0
                         for observation in observations
                     )
                 ):
                     classification = "speculative_scheduling"
-                elif (
-                    not random_equal
-                    and randomness["permit_sampling_variance"]
-                ):
+                elif not random_equal and randomness["permit_sampling_variance"]:
                     classification = "permitted_sampling_variance"
                 elif (
                     not semantic_equal
@@ -462,8 +455,7 @@ def _reproducibility(
                     "order_index": order_index,
                     "classification": classification,
                     "observation_ids": [
-                        observation["observation_id"]
-                        for observation in observations
+                        observation["observation_id"] for observation in observations
                     ],
                 }
             )
@@ -474,23 +466,18 @@ def _role_summary(observations: list[Json]) -> Json:
     if not observations:
         raise ModelCompileError("benchmark role has no measured observations")
     measurement_ns = sum(
-        observation["device"]["measurement_ns"]
-        for observation in observations
+        observation["device"]["measurement_ns"] for observation in observations
     )
-    busy_ns = sum(
-        observation["device"]["busy_ns"] for observation in observations
-    )
+    busy_ns = sum(observation["device"]["busy_ns"] for observation in observations)
     return {
         "latency_ns": _distribution(
-            observation["timing"]["execution_ns"]
-            for observation in observations
+            observation["timing"]["execution_ns"] for observation in observations
         ),
         "throughput_per_second": _distribution(
             round(_throughput(observation)) for observation in observations
         ),
         "permanent_bytes": max(
-            observation["memory"]["permanent_bytes"]
-            for observation in observations
+            observation["memory"]["permanent_bytes"] for observation in observations
         ),
         "peak_transient_bytes": max(
             observation["memory"]["peak_transient_bytes"]
@@ -501,8 +488,7 @@ def _role_summary(observations: list[Json]) -> Json:
             for observation in observations
         ),
         "resident_peak_bytes": max(
-            observation["memory"]["resident_peak_bytes"]
-            for observation in observations
+            observation["memory"]["resident_peak_bytes"] for observation in observations
         ),
         "resident_after_bytes": max(
             observation["memory"]["resident_after_bytes"]
@@ -521,21 +507,16 @@ def _role_summary(observations: list[Json]) -> Json:
             for observation in observations
         ),
         "utilization_ppm": (
-            round(busy_ns * 1_000_000 / measurement_ns)
-            if measurement_ns
-            else 0
+            round(busy_ns * 1_000_000 / measurement_ns) if measurement_ns else 0
         ),
         "synchronization_wait_ns": sum(
-            observation["synchronization"]["wait_ns"]
-            for observation in observations
+            observation["synchronization"]["wait_ns"] for observation in observations
         ),
         "transport_bytes": sum(
-            observation["transport"]["bytes"]
-            for observation in observations
+            observation["transport"]["bytes"] for observation in observations
         ),
         "transport_ns": sum(
-            observation["transport"]["duration_ns"]
-            for observation in observations
+            observation["transport"]["duration_ns"] for observation in observations
         ),
         "queue_wait_ns": sum(
             observation["timing"]["queue_wait_ns"]
@@ -543,12 +524,10 @@ def _role_summary(observations: list[Json]) -> Json:
             for observation in observations
         ),
         "timeout_count": sum(
-            observation["transport"]["timeout_count"]
-            for observation in observations
+            observation["transport"]["timeout_count"] for observation in observations
         ),
         "useful_units": sum(
-            observation["work"]["useful_units"]
-            for observation in observations
+            observation["work"]["useful_units"] for observation in observations
         ),
         "wasted_units": sum(
             observation["work"]["speculative_units"]
@@ -583,42 +562,29 @@ def _resource_measurements(construction: Json, run: Json) -> Json:
             if event["role"] == role and event["action"] == "unmount"
         ]
         measured_ns = sum(
-            observation["device"]["measurement_ns"]
-            for observation in observations
+            observation["device"]["measurement_ns"] for observation in observations
         )
-        busy_ns = sum(
-            observation["device"]["busy_ns"] for observation in observations
-        )
+        busy_ns = sum(observation["device"]["busy_ns"] for observation in observations)
         roles[role] = {
             "setup_ns": (
                 sum(event["duration_ns"] for event in mounts)
-                + sum(
-                    observation["timing"]["setup_ns"]
-                    for observation in observations
-                )
+                + sum(observation["timing"]["setup_ns"] for observation in observations)
             ),
             "teardown_ns": (
                 sum(event["duration_ns"] for event in unmounts)
                 + sum(
-                    observation["timing"]["teardown_ns"]
-                    for observation in observations
+                    observation["timing"]["teardown_ns"] for observation in observations
                 )
             ),
             "host_elapsed_ns": sum(
-                elapsed[observation["observation_id"]]
-                for observation in observations
+                elapsed[observation["observation_id"]] for observation in observations
             ),
             "permanent_bytes": max(
-                (
-                    event["permanent_bytes"]
-                    for event in mounts
-                ),
+                (event["permanent_bytes"] for event in mounts),
                 default=0,
             ),
             "peak_transient_bytes": max(
-                [
-                    event["peak_transient_bytes"] for event in mounts
-                ]
+                [event["peak_transient_bytes"] for event in mounts]
                 + [
                     observation["memory"]["peak_transient_bytes"]
                     for observation in observations
@@ -661,9 +627,7 @@ def _resource_measurements(construction: Json, run: Json) -> Json:
             "device_measurement_ns": measured_ns,
             "device_busy_ns": busy_ns,
             "utilization_ppm": (
-                round(busy_ns * 1_000_000 / measured_ns)
-                if measured_ns
-                else 0
+                round(busy_ns * 1_000_000 / measured_ns) if measured_ns else 0
             ),
             "synchronization_count": sum(
                 observation["synchronization"]["operation_count"]
@@ -674,12 +638,10 @@ def _resource_measurements(construction: Json, run: Json) -> Json:
                 for observation in observations
             ),
             "transport_bytes": sum(
-                observation["transport"]["bytes"]
-                for observation in observations
+                observation["transport"]["bytes"] for observation in observations
             ),
             "transport_ns": sum(
-                observation["transport"]["duration_ns"]
-                for observation in observations
+                observation["transport"]["duration_ns"] for observation in observations
             ),
             "queue_wait_count": sum(
                 observation["transport"]["queue_wait_count"]
@@ -695,24 +657,19 @@ def _resource_measurements(construction: Json, run: Json) -> Json:
                 for observation in observations
             ),
             "useful_units": sum(
-                observation["work"]["useful_units"]
-                for observation in observations
+                observation["work"]["useful_units"] for observation in observations
             ),
             "speculative_units": sum(
-                observation["work"]["speculative_units"]
-                for observation in observations
+                observation["work"]["speculative_units"] for observation in observations
             ),
             "cancelled_units": sum(
-                observation["work"]["cancelled_units"]
-                for observation in observations
+                observation["work"]["cancelled_units"] for observation in observations
             ),
             "discarded_units": sum(
-                observation["work"]["discarded_units"]
-                for observation in observations
+                observation["work"]["discarded_units"] for observation in observations
             ),
             "corrective_units": sum(
-                observation["work"]["corrective_units"]
-                for observation in observations
+                observation["work"]["corrective_units"] for observation in observations
             ),
         }
     return {
@@ -769,10 +726,12 @@ def _throughput_slope(windows: list[Json]) -> int:
     denominator = sum((value - x_mean) ** 2 for value in x_values)
     if denominator == 0 or y_mean == 0:
         return 0
-    slope = sum(
-        (x - x_mean) * (y - y_mean)
-        for x, y in zip(x_values, y_values, strict=True)
-    ) / denominator
+    slope = (
+        sum(
+            (x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values, strict=True)
+        )
+        / denominator
+    )
     return round(slope * 1_000_000 / y_mean)
 
 
@@ -781,8 +740,6 @@ def _overall_decision(decisions: list[str]) -> str:
         return "invalid"
     if "inconclusive" in decisions:
         return "inconclusive"
-    if decisions and all(
-        decision == "materially_faster" for decision in decisions
-    ):
+    if decisions and all(decision == "materially_faster" for decision in decisions):
         return "materially_faster"
     return "not_materially_faster"

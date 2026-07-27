@@ -17,15 +17,11 @@ from nerve.representation_optimizer.contracts import (
 
 
 BENCHMARK_WORKLOAD_SCHEMA = "nerve.optimizer.benchmark_workload.v1"
-BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v2"
-BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v1"
-BENCHMARK_RESIDENCY_EVENT_SCHEMA = (
-    "nerve.optimizer.benchmark_residency_event.v2"
-)
-BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v2"
-BENCHMARK_EVIDENCE_INTEGRITY_SCHEMA = (
-    "nerve.optimizer.benchmark_evidence_integrity.v1"
-)
+BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v3"
+BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v2"
+BENCHMARK_RESIDENCY_EVENT_SCHEMA = "nerve.optimizer.benchmark_residency_event.v2"
+BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v3"
+BENCHMARK_EVIDENCE_INTEGRITY_SCHEMA = "nerve.optimizer.benchmark_evidence_integrity.v1"
 
 _ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
 _CONTRACT_DIGEST_PREFIX = "nerve.optimizer.canonical_json_sha256.v1:"
@@ -336,8 +332,7 @@ def validate_benchmark_workload(document: Json) -> None:
                         or segment[index + 1] not in {"0", "1"}
                     ):
                         raise BenchmarkContractError(
-                            "declared output limit JSON pointer has an "
-                            "invalid escape"
+                            "declared output limit JSON pointer has an invalid escape"
                         )
                     index += 2 if segment[index] == "~" else 1
             if basis["declared_limit"] != allowance:
@@ -508,6 +503,7 @@ def validate_benchmark_observation(document: Json) -> None:
             "workload_id",
             "phase",
             "seed",
+            "block_index",
             "pair_index",
             "order_index",
             "matched_conditions_digest",
@@ -544,6 +540,7 @@ def validate_benchmark_observation(document: Json) -> None:
     if document["phase"] not in _PHASES:
         raise BenchmarkContractError("observation phase is unsupported")
     _u32(document["seed"], "seed")
+    _nonnegative(document["block_index"], "block_index")
     _nonnegative(document["pair_index"], "pair_index")
     if document["order_index"] not in {0, 1}:
         raise BenchmarkContractError("order_index must be zero or one")
@@ -579,9 +576,7 @@ def validate_benchmark_observation(document: Json) -> None:
             "completed observation must have positive execution time"
         )
     if timing["queue_wait_ns"] > timing["execution_ns"]:
-        raise BenchmarkContractError(
-            "timing.queue_wait_ns exceeds execution time"
-        )
+        raise BenchmarkContractError("timing.queue_wait_ns exceeds execution time")
     work = _object(document["work"], "work")
     _fields(
         work,
@@ -651,9 +646,7 @@ def validate_benchmark_observation(document: Json) -> None:
     )
     if busy > measured or utilization > 1_000_000:
         raise BenchmarkContractError("device utilization counters are invalid")
-    expected_utilization = (
-        round(busy * 1_000_000 / measured) if measured else 0
-    )
+    expected_utilization = round(busy * 1_000_000 / measured) if measured else 0
     if utilization != expected_utilization:
         raise BenchmarkContractError(
             "device.utilization_ppm does not match busy and measurement time"
@@ -693,9 +686,7 @@ def validate_benchmark_observation(document: Json) -> None:
             f"throughput_windows[{index}]",
         )
         if window["index"] != index:
-            raise BenchmarkContractError(
-                "throughput window indexes must be contiguous"
-            )
+            raise BenchmarkContractError("throughput window indexes must be contiguous")
         if window["start_unit"] != expected_start:
             raise BenchmarkContractError(
                 "throughput window useful-work ranges must be contiguous"
@@ -737,14 +728,10 @@ def validate_benchmark_observation(document: Json) -> None:
     for field, artifact in traces.items():
         _artifact_ref(artifact, f"traces.{field}")
         if not artifact["path"].startswith("traces/"):
-            raise BenchmarkContractError(
-                f"traces.{field}.path must live below traces/"
-            )
+            raise BenchmarkContractError(f"traces.{field}.path must live below traces/")
         trace_paths.append(artifact["path"])
     if len(trace_paths) != len(set(trace_paths)):
-        raise BenchmarkContractError(
-            "observation trace artifact paths must be unique"
-        )
+        raise BenchmarkContractError("observation trace artifact paths must be unique")
     if not _object(document["default_statistics"], "default_statistics"):
         raise BenchmarkContractError(
             "normal runtime default statistics must not be empty"
@@ -842,6 +829,7 @@ def validate_benchmark_run(document: Json) -> None:
             "execution_order",
             "observations",
             "residency_events",
+            "sampling_outcomes",
             "host_elapsed_ns",
             "diagnostics",
         },
@@ -856,24 +844,16 @@ def validate_benchmark_run(document: Json) -> None:
         BenchmarkObservation.from_json(observation)
         for observation in _list(document["observations"], "observations")
     ]
-    observation_ids = [
-        observation.observation_id for observation in observations
-    ]
+    observation_ids = [observation.observation_id for observation in observations]
     trace_paths = [
         trace["path"]
         for observation in observations
         for trace in observation.to_json()["traces"].values()
     ]
     if len(trace_paths) != len(set(trace_paths)):
-        raise BenchmarkContractError(
-            "benchmark run reuses a raw trace artifact path"
-        )
+        raise BenchmarkContractError("benchmark run reuses a raw trace artifact path")
     order = _string_list(document["execution_order"], "execution_order")
-    if (
-        not observation_ids
-        or order != observation_ids
-        or len(order) != len(set(order))
-    ):
+    if not observation_ids or order != observation_ids or len(order) != len(set(order)):
         raise BenchmarkContractError(
             "benchmark execution_order must exactly cover observations"
         )
@@ -887,15 +867,123 @@ def validate_benchmark_run(document: Json) -> None:
         for event in _list(document["residency_events"], "residency_events")
     ]
     if not events:
-        raise BenchmarkContractError(
-            "benchmark run must retain residency evidence"
-        )
-    if any(
-        event.to_json()["plan_id"] != document["plan_id"]
-        for event in events
-    ):
+        raise BenchmarkContractError("benchmark run must retain residency evidence")
+    if any(event.to_json()["plan_id"] != document["plan_id"] for event in events):
         raise BenchmarkContractError(
             "benchmark residency event belongs to another plan"
+        )
+    outcomes = _list(document["sampling_outcomes"], "sampling_outcomes")
+    outcome_ids = []
+    for index, outcome in enumerate(outcomes):
+        path = f"sampling_outcomes[{index}]"
+        outcome = _object(outcome, path)
+        _fields(
+            outcome,
+            {
+                "workload_id",
+                "warmup_groups",
+                "measured_pairs_per_seed",
+                "decision",
+                "reasons",
+                "termination",
+            },
+            path,
+        )
+        outcome_ids.append(
+            _stable_id(
+                outcome["workload_id"],
+                "benchmark_workload",
+                f"{path}.workload_id",
+            )
+        )
+        groups = _list(outcome["warmup_groups"], f"{path}.warmup_groups")
+        group_keys = []
+        for group_index, group in enumerate(groups):
+            group_path = f"{path}.warmup_groups[{group_index}]"
+            group = _object(group, group_path)
+            _fields(
+                group,
+                {
+                    "role",
+                    "seed",
+                    "cycle_index",
+                    "order_block_index",
+                    "sample_count",
+                    "maximum_shift_ppm",
+                    "converged",
+                    "observation_ids",
+                },
+                group_path,
+            )
+            if group["role"] not in _ROLES:
+                raise BenchmarkContractError(f"{group_path}.role is unsupported")
+            seed = _u32(group["seed"], f"{group_path}.seed")
+            cycle_index = group["cycle_index"]
+            order_block_index = group["order_block_index"]
+            if cycle_index is not None:
+                _nonnegative(cycle_index, f"{group_path}.cycle_index")
+            if order_block_index is not None:
+                if order_block_index not in {0, 1}:
+                    raise BenchmarkContractError(
+                        f"{group_path}.order_block_index must be zero, one, or null"
+                    )
+            if (cycle_index is None) != (order_block_index is None):
+                raise BenchmarkContractError(
+                    f"{group_path} cycle and order block must both be null or set"
+                )
+            _positive(group["sample_count"], f"{group_path}.sample_count")
+            _nonnegative(
+                group["maximum_shift_ppm"],
+                f"{group_path}.maximum_shift_ppm",
+            )
+            _boolean(group["converged"], f"{group_path}.converged")
+            group_observation_ids = _string_list(
+                group["observation_ids"],
+                f"{group_path}.observation_ids",
+            )
+            if len(group_observation_ids) != group["sample_count"] or len(
+                group_observation_ids
+            ) != len(set(group_observation_ids)):
+                raise BenchmarkContractError(
+                    f"{group_path}.observation_ids must exactly cover the group"
+                )
+            for observation_index, observation_id in enumerate(group_observation_ids):
+                _stable_id(
+                    observation_id,
+                    "benchmark_observation",
+                    f"{group_path}.observation_ids[{observation_index}]",
+                )
+            group_keys.append(
+                (
+                    seed,
+                    -1 if cycle_index is None else cycle_index,
+                    -1 if order_block_index is None else order_block_index,
+                    _ROLES.index(group["role"]),
+                )
+            )
+        if not groups or group_keys != sorted(set(group_keys)):
+            raise BenchmarkContractError(
+                f"{path}.warmup_groups must be non-empty, sorted, and unique"
+            )
+        _positive(
+            outcome["measured_pairs_per_seed"],
+            f"{path}.measured_pairs_per_seed",
+        )
+        _decision(outcome["decision"], f"{path}.decision")
+        _string_list(outcome["reasons"], f"{path}.reasons")
+        if outcome["termination"] not in {
+            "decisive_material_win",
+            "decisive_non_win",
+            "invalid",
+            "warmup_exhausted",
+            "evidence_budget_exhausted",
+        }:
+            raise BenchmarkContractError(f"{path}.termination is unsupported")
+    if (document["status"] == "completed" and not outcome_ids) or outcome_ids != sorted(
+        set(outcome_ids)
+    ):
+        raise BenchmarkContractError(
+            "benchmark sampling outcomes must be non-empty, sorted, and unique"
         )
     elapsed = _list(document["host_elapsed_ns"], "host_elapsed_ns")
     if len(elapsed) != len(observations):
@@ -916,8 +1004,7 @@ def validate_benchmark_run(document: Json) -> None:
         _positive(record["duration_ns"], f"host_elapsed_ns[{index}].duration_ns")
     _string_list(document["diagnostics"], "diagnostics")
     if document["status"] == "completed" and any(
-        observation.to_json()["status"] != "completed"
-        for observation in observations
+        observation.to_json()["status"] != "completed" for observation in observations
     ):
         raise BenchmarkContractError(
             "completed benchmark run contains incomplete observations"
@@ -1102,9 +1189,7 @@ def validate_benchmark_record(document: Json) -> None:
             raise BenchmarkContractError(f"{path}.role is unsupported")
         _u32(record["seed"], f"{path}.seed")
         if record["order_index"] not in {0, 1}:
-            raise BenchmarkContractError(
-                f"{path}.order_index must be zero or one"
-            )
+            raise BenchmarkContractError(f"{path}.order_index must be zero or one")
         if record["classification"] not in {
             "identical",
             "permitted_sampling_variance",
@@ -1112,9 +1197,7 @@ def validate_benchmark_record(document: Json) -> None:
             "speculative_scheduling",
             "correctness_defect",
         }:
-            raise BenchmarkContractError(
-                f"{path}.classification is unsupported"
-            )
+            raise BenchmarkContractError(f"{path}.classification is unsupported")
         ids = _string_list(record["observation_ids"], f"{path}.observation_ids")
         if len(ids) < 2 or len(ids) != len(set(ids)):
             raise BenchmarkContractError(
@@ -1135,9 +1218,7 @@ def validate_benchmark_record(document: Json) -> None:
             )
         )
     if repro_keys != sorted(set(repro_keys)):
-        raise BenchmarkContractError(
-            "reproducibility groups must be sorted and unique"
-        )
+        raise BenchmarkContractError("reproducibility groups must be sorted and unique")
     resources = _object(
         document["resource_measurements"],
         "resource_measurements",
@@ -1195,9 +1276,7 @@ def validate_benchmark_record(document: Json) -> None:
     _decision(document["decision"], "decision")
     reasons = _string_list(document["decision_reasons"], "decision_reasons")
     if document["decision"] != "materially_faster" and not reasons:
-        raise BenchmarkContractError(
-            "non-winning benchmark decision requires reasons"
-        )
+        raise BenchmarkContractError("non-winning benchmark decision requires reasons")
     _content_identity(
         document,
         "benchmark",
@@ -1297,9 +1376,7 @@ def _distribution(value: Any, path: str) -> None:
     ):
         _nonnegative(distribution[field], f"{path}.{field}")
     if not (
-        distribution["minimum"]
-        <= distribution["median"]
-        <= distribution["maximum"]
+        distribution["minimum"] <= distribution["median"] <= distribution["maximum"]
     ):
         raise BenchmarkContractError(f"{path} median is outside its range")
     if (
@@ -1346,9 +1423,7 @@ def _resource_role(value: Any, path: str) -> None:
     for field, value in record.items():
         _nonnegative(value, f"{path}.{field}")
     if record["device_busy_ns"] > record["device_measurement_ns"]:
-        raise BenchmarkContractError(
-            f"{path}.device_busy_ns exceeds measurement time"
-        )
+        raise BenchmarkContractError(f"{path}.device_busy_ns exceeds measurement time")
     if record["resident_peak_bytes"] < max(
         record["resident_before_bytes"],
         record["resident_after_bytes"],
@@ -1357,11 +1432,7 @@ def _resource_role(value: Any, path: str) -> None:
             f"{path}.resident_peak_bytes is below a residency endpoint"
         )
     expected = (
-        round(
-            record["device_busy_ns"]
-            * 1_000_000
-            / record["device_measurement_ns"]
-        )
+        round(record["device_busy_ns"] * 1_000_000 / record["device_measurement_ns"])
         if record["device_measurement_ns"]
         else 0
     )
@@ -1469,8 +1540,7 @@ def validate_matched_conditions(conditions: Json) -> None:
             "matched placement, controls, and environment must be explicit"
         )
     if any(
-        not isinstance(device_id, str)
-        or device_id not in device_ids
+        not isinstance(device_id, str) or device_id not in device_ids
         for device_id in placement.values()
     ):
         raise BenchmarkContractError(
@@ -1490,8 +1560,12 @@ def _benchmark_policy(policy: Json) -> None:
     _fields(
         policy,
         {
-            "warmup_samples",
-            "measured_pairs_per_seed",
+            "minimum_warmup_samples",
+            "maximum_warmup_samples",
+            "warmup_stability_window_samples",
+            "measured_pairs_per_block",
+            "minimum_measured_pairs_per_seed",
+            "maximum_measured_pairs_per_seed",
             "confidence_level_ppm",
             "minimum_material_improvement_ppm",
             "maximum_relative_ci_width_ppm",
@@ -1501,17 +1575,44 @@ def _benchmark_policy(policy: Json) -> None:
         },
         "policy",
     )
-    if _positive(policy["warmup_samples"], "policy.warmup_samples") < 4:
-        raise BenchmarkContractError("policy.warmup_samples must be at least four")
-    if (
-        _positive(
-            policy["measured_pairs_per_seed"],
-            "policy.measured_pairs_per_seed",
+    minimum_warmup = _positive(
+        policy["minimum_warmup_samples"],
+        "policy.minimum_warmup_samples",
+    )
+    maximum_warmup = _positive(
+        policy["maximum_warmup_samples"],
+        "policy.maximum_warmup_samples",
+    )
+    stability_window = _positive(
+        policy["warmup_stability_window_samples"],
+        "policy.warmup_stability_window_samples",
+    )
+    if maximum_warmup < minimum_warmup or maximum_warmup < 2 * stability_window:
+        raise BenchmarkContractError(
+            "policy warmup bound must cover the minimum and two stability windows"
         )
-        < 5
+    pairs_per_block = _positive(
+        policy["measured_pairs_per_block"],
+        "policy.measured_pairs_per_block",
+    )
+    minimum_pairs = _positive(
+        policy["minimum_measured_pairs_per_seed"],
+        "policy.minimum_measured_pairs_per_seed",
+    )
+    maximum_pairs = _positive(
+        policy["maximum_measured_pairs_per_seed"],
+        "policy.maximum_measured_pairs_per_seed",
+    )
+    counterbalanced_cycle_pairs = 2 * pairs_per_block
+    if (
+        minimum_pairs < 6
+        or maximum_pairs < minimum_pairs
+        or minimum_pairs % counterbalanced_cycle_pairs != 0
+        or maximum_pairs % counterbalanced_cycle_pairs != 0
     ):
         raise BenchmarkContractError(
-            "policy.measured_pairs_per_seed must be at least five"
+            "policy measured-pair bounds must cover at least six pairs and "
+            "contain whole counterbalanced cycles"
         )
     if policy["confidence_level_ppm"] != 950_000:
         raise BenchmarkContractError(
@@ -1662,10 +1763,7 @@ def _stable_id(value: Any, prefix: str, path: str) -> str:
     if (
         not identifier.startswith(f"{prefix}_")
         or len(identifier) != len(prefix) + 33
-        or any(
-            character not in "0123456789abcdef"
-            for character in hexadecimal
-        )
+        or any(character not in "0123456789abcdef" for character in hexadecimal)
     ):
         raise BenchmarkContractError(f"{path} is not a stable {prefix} id")
     return identifier

@@ -46,6 +46,7 @@ class BenchmarkExecutionRequest:
     matched_conditions_digest: str
     phase: str
     seed: int
+    block_index: int
     pair_index: int
     order_index: int
     reset_to_initial_state: bool = True
@@ -60,6 +61,7 @@ class BenchmarkExecutionRequest:
             "matched_conditions_digest": self.matched_conditions_digest,
             "phase": self.phase,
             "seed": self.seed,
+            "block_index": self.block_index,
             "pair_index": self.pair_index,
             "order_index": self.order_index,
             "reset_to_initial_state": self.reset_to_initial_state,

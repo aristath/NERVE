@@ -24,8 +24,12 @@ from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
 
 @dataclass(frozen=True)
 class BenchmarkPolicy:
-    warmup_samples: int = 4
-    measured_pairs_per_seed: int = 5
+    minimum_warmup_samples: int = 4
+    maximum_warmup_samples: int = 12
+    warmup_stability_window_samples: int = 2
+    measured_pairs_per_block: int = 3
+    minimum_measured_pairs_per_seed: int = 6
+    maximum_measured_pairs_per_seed: int = 30
     confidence_level_ppm: int = 950_000
     minimum_material_improvement_ppm: int = 50_000
     maximum_relative_ci_width_ppm: int = 100_000
@@ -84,9 +88,7 @@ def create_benchmark_workload(
             "seeds": sorted(set(seeds)),
             "deterministic_replay_required": deterministic_replay_required,
             "permit_sampling_variance": permit_sampling_variance,
-            "permit_numerical_nondeterminism": (
-                permit_numerical_nondeterminism
-            ),
+            "permit_numerical_nondeterminism": (permit_numerical_nondeterminism),
             "permit_speculative_schedule_variance": (
                 permit_speculative_schedule_variance
             ),
@@ -137,14 +139,9 @@ def build_benchmark_plan(
             expected_schema=HARDWARE_PROCESS_PROFILE_SCHEMA,
         )
     candidate = candidate_plan.candidate.to_json()
-    capability_classes = {
-        profile["capability_class"] for profile in profiles
-    }
+    capability_classes = {profile["capability_class"] for profile in profiles}
     target_capability = candidate["target_predicate"].get("capability_class")
-    if (
-        target_capability is not None
-        and target_capability not in capability_classes
-    ):
+    if target_capability is not None and target_capability not in capability_classes:
         raise ModelCompileError(
             "candidate target predicate does not match benchmark hardware"
         )

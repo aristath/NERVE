@@ -58,12 +58,10 @@ class BudgetLedger:
             # not a cumulative allocation across the run.
             transient_bytes=max(before.transient_bytes, cost.transient_bytes),
             construction_nanoseconds=(
-                before.construction_nanoseconds
-                + (cost.construction_nanoseconds or 0)
+                before.construction_nanoseconds + (cost.construction_nanoseconds or 0)
             ),
             execution_nanoseconds=(
-                before.execution_nanoseconds
-                + (cost.execution_nanoseconds or 0)
+                before.execution_nanoseconds + (cost.execution_nanoseconds or 0)
             ),
             experiment_invocations=(
                 before.experiment_invocations + cost.experiment_invocations
@@ -82,8 +80,7 @@ class BudgetLedger:
             maximum = getattr(self._budget, field)
             if maximum is not None and proposed_value > maximum:
                 reasons.append(
-                    f"whole candidate exceeds {field}: "
-                    f"{proposed_value} > {maximum}"
+                    f"whole candidate exceeds {field}: {proposed_value} > {maximum}"
                 )
         construction_limit = self._budget.maximum_construction_nanoseconds
         if construction_limit is not None:
@@ -131,14 +128,23 @@ def planned_experiment_invocations(
 ) -> int:
     """Count every reference/candidate execution admitted by the full funnel."""
 
-    benchmark = sum(
-        len(workload.to_json()["randomness"]["seeds"])
-        * 2
-        * (policy.warmup_samples + policy.measured_pairs_per_seed)
-        for workload in plan.benchmark_workloads
-    )
+    benchmark = 0
+    for workload in plan.benchmark_workloads:
+        document = workload.to_json()
+        warmup_blocks = (
+            policy.maximum_measured_pairs_per_seed // policy.measured_pairs_per_block
+            if document["regime"]["mount_mode"] == "resident_reuse"
+            else 1
+        )
+        benchmark += (
+            len(document["randomness"]["seeds"])
+            * 2
+            * (
+                warmup_blocks * policy.maximum_warmup_samples
+                + policy.maximum_measured_pairs_per_seed
+            )
+        )
     validation = sum(
-        len(check["seeds"]) * 2
-        for check in plan.validation_requirements.checks
+        len(check["seeds"]) * 2 for check in plan.validation_requirements.checks
     )
     return benchmark + validation

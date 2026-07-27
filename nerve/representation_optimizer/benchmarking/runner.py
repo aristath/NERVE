@@ -20,6 +20,10 @@ from nerve.representation_optimizer.benchmarking.protocols import (
     NormalExecutionAdapter,
     NormalExecutionSession,
 )
+from nerve.representation_optimizer.benchmarking.statistics import (
+    summarize_workload_samples,
+    warmup_group_summary,
+)
 from nerve.representation_optimizer.contracts import contract_digest
 
 
@@ -34,6 +38,7 @@ def execute_benchmark_plan(
     observations: list[Json] = []
     events: list[Json] = []
     elapsed: list[Json] = []
+    sampling_outcomes: list[Json] = []
     diagnostics: list[str] = []
     trace_paths: set[str] = set()
     run_status = "completed"
@@ -48,22 +53,22 @@ def execute_benchmark_plan(
         workload: Json,
         phase: str,
         seed: int,
+        block_index: int,
         pair_index: int,
         order_index: int,
-    ) -> bool:
+    ) -> Json | None:
         nonlocal run_status
         _checkpoint(cancel_requested)
         request = BenchmarkExecutionRequest(
             plan_id=document["plan_id"],
             role=role,
-            implementation_id=document["implementations"][role][
-                "implementation_id"
-            ],
+            implementation_id=document["implementations"][role]["implementation_id"],
             workload=workload,
             matched_conditions=document["matched_conditions"],
             matched_conditions_digest=document["matched_conditions_digest"],
             phase=phase,
             seed=seed,
+            block_index=block_index,
             pair_index=pair_index,
             order_index=order_index,
         )
@@ -96,116 +101,286 @@ def execute_benchmark_plan(
                 f"{pair_index} ended as {run_status}: "
                 f"{observation_document['stop_reason']}"
             )
-            return False
-        return True
+            return None
+        return observation_document
+
+    def open_session(
+        *,
+        workload: Json,
+        role: str,
+        seed: int,
+    ) -> tuple[NormalExecutionSession, BenchmarkResidencyEvent, int]:
+        nonlocal block_index
+        _checkpoint(cancel_requested)
+        current_block = block_index
+        session, mount = _open_session(
+            plan,
+            adapter,
+            workload=workload,
+            role=role,
+            seed=seed,
+            block_index=current_block,
+            cancel_requested=cancel_requested,
+        )
+        block_index += 1
+        events.append(mount.to_json())
+        return session, mount, current_block
+
+    def close_session(
+        session: NormalExecutionSession,
+        mount: BenchmarkResidencyEvent,
+    ) -> None:
+        unmount = BenchmarkResidencyEvent.from_json(session.close())
+        _validate_unmount(plan, mount, unmount)
+        events.append(unmount.to_json())
+
+    def resident_block(
+        *,
+        workload: Json,
+        role: str,
+        seed: int,
+        cycle_index: int,
+        order_block_index: int,
+        order_index: int,
+        pair_start: int,
+    ) -> Json:
+        session, mount, current_block = open_session(
+            workload=workload,
+            role=role,
+            seed=seed,
+        )
+        warmup_observations: list[Json] = []
+        try:
+            for warmup_index in range(policy["maximum_warmup_samples"]):
+                observation = execute(
+                    session,
+                    role=role,
+                    workload=workload,
+                    phase="warmup",
+                    seed=seed,
+                    block_index=current_block,
+                    pair_index=warmup_index,
+                    order_index=order_index,
+                )
+                if observation is None:
+                    break
+                warmup_observations.append(observation)
+                if warmup_group_summary(
+                    warmup_observations,
+                    policy,
+                )["converged"]:
+                    break
+            if run_status == "completed":
+                for offset in range(policy["measured_pairs_per_block"]):
+                    if (
+                        execute(
+                            session,
+                            role=role,
+                            workload=workload,
+                            phase="measured",
+                            seed=seed,
+                            block_index=current_block,
+                            pair_index=pair_start + offset,
+                            order_index=order_index,
+                        )
+                        is None
+                    ):
+                        break
+        finally:
+            close_session(session, mount)
+        summary = warmup_group_summary(warmup_observations, policy)
+        return {
+            "role": role,
+            "seed": seed,
+            "cycle_index": cycle_index,
+            "order_block_index": order_block_index,
+            **summary,
+            "observation_ids": [
+                observation["observation_id"] for observation in warmup_observations
+            ],
+        }
+
+    def cold_observation(
+        *,
+        workload: Json,
+        role: str,
+        phase: str,
+        seed: int,
+        pair_index: int,
+        order_index: int,
+    ) -> Json | None:
+        session, mount, current_block = open_session(
+            workload=workload,
+            role=role,
+            seed=seed,
+        )
+        try:
+            return execute(
+                session,
+                role=role,
+                workload=workload,
+                phase=phase,
+                seed=seed,
+                block_index=current_block,
+                pair_index=pair_index,
+                order_index=order_index,
+            )
+        finally:
+            close_session(session, mount)
 
     try:
         for workload_index, workload in enumerate(document["workloads"]):
-            for seed_index, seed in enumerate(workload["randomness"]["seeds"]):
-                if workload["regime"]["mount_mode"] == "resident_reuse":
-                    roles = _role_order(seed_index)
-                    for order_index, role in enumerate(roles):
-                        _checkpoint(cancel_requested)
-                        session, mount = _open_session(
-                            plan,
-                            adapter,
-                            workload=workload,
-                            role=role,
-                            seed=seed,
-                            block_index=block_index,
-                            cancel_requested=cancel_requested,
-                        )
-                        block_index += 1
-                        events.append(mount.to_json())
-                        keep_running = True
-                        unmount: BenchmarkResidencyEvent | None = None
-                        try:
-                            for warmup_index in range(policy["warmup_samples"]):
-                                keep_running = execute(
-                                    session,
-                                    role=role,
-                                    workload=workload,
-                                    phase="warmup",
-                                    seed=seed,
-                                    pair_index=warmup_index,
-                                    order_index=order_index,
-                                )
-                                if not keep_running:
-                                    break
-                            if keep_running:
-                                for pair_index in range(
-                                    policy["measured_pairs_per_seed"]
-                                ):
-                                    keep_running = execute(
-                                        session,
-                                        role=role,
-                                        workload=workload,
-                                        phase="measured",
-                                        seed=seed,
-                                        pair_index=pair_index,
-                                        order_index=order_index,
-                                    )
-                                    if not keep_running:
-                                        break
-                        finally:
-                            unmount = BenchmarkResidencyEvent.from_json(
-                                session.close()
+            warmup_groups: list[Json] = []
+            seeds = workload["randomness"]["seeds"]
+            if workload["regime"]["mount_mode"] == "cold":
+                for seed_index, seed in enumerate(seeds):
+                    by_role: dict[str, list[Json]] = {
+                        "reference": [],
+                        "candidate": [],
+                    }
+                    for warmup_index in range(policy["maximum_warmup_samples"]):
+                        roles = _role_order(workload_index + seed_index + warmup_index)
+                        for order_index, role in enumerate(roles):
+                            observation = cold_observation(
+                                workload=workload,
+                                role=role,
+                                phase="warmup",
+                                seed=seed,
+                                pair_index=warmup_index,
+                                order_index=order_index,
                             )
-                            _validate_unmount(plan, mount, unmount)
-                            events.append(unmount.to_json())
-                        if not keep_running:
+                            if observation is None:
+                                break
+                            by_role[role].append(observation)
+                        if run_status != "completed":
                             break
+                        if all(
+                            warmup_group_summary(by_role[role], policy)["converged"]
+                            for role in ("reference", "candidate")
+                        ):
+                            break
+                    for role in ("reference", "candidate"):
+                        summary = warmup_group_summary(by_role[role], policy)
+                        warmup_groups.append(
+                            {
+                                "role": role,
+                                "seed": seed,
+                                "cycle_index": None,
+                                "order_block_index": None,
+                                **summary,
+                                "observation_ids": [
+                                    observation["observation_id"]
+                                    for observation in by_role[role]
+                                ],
+                            }
+                        )
                     if run_status != "completed":
                         break
-                else:
-                    for phase, count in (
-                        ("warmup", policy["warmup_samples"]),
-                        ("measured", policy["measured_pairs_per_seed"]),
-                    ):
-                        for pair_index in range(count):
-                            roles = _role_order(
-                                workload_index + seed_index + pair_index
-                            )
-                            for order_index, role in enumerate(roles):
-                                _checkpoint(cancel_requested)
-                                session, mount = _open_session(
-                                    plan,
-                                    adapter,
-                                    workload=workload,
-                                    role=role,
-                                    seed=seed,
-                                    block_index=block_index,
-                                    cancel_requested=cancel_requested,
-                                )
-                                block_index += 1
-                                events.append(mount.to_json())
-                                keep_running = True
-                                try:
-                                    keep_running = execute(
-                                        session,
-                                        role=role,
+            if run_status != "completed":
+                break
+
+            pairs_per_cycle = 2 * policy["measured_pairs_per_block"]
+            maximum_cycles = (
+                policy["maximum_measured_pairs_per_seed"] // pairs_per_cycle
+            )
+            summary: Json | None = None
+            for cycle_index in range(maximum_cycles):
+                for seed_index, seed in enumerate(seeds):
+                    for order_block_index in (0, 1):
+                        roles = _role_order(
+                            workload_index + seed_index + order_block_index
+                        )
+                        pair_start = (
+                            cycle_index * pairs_per_cycle
+                            + order_block_index * policy["measured_pairs_per_block"]
+                        )
+                        for order_index, role in enumerate(roles):
+                            if workload["regime"]["mount_mode"] == "resident_reuse":
+                                warmup_groups.append(
+                                    resident_block(
                                         workload=workload,
-                                        phase=phase,
+                                        role=role,
                                         seed=seed,
-                                        pair_index=pair_index,
+                                        cycle_index=cycle_index,
+                                        order_block_index=order_block_index,
                                         order_index=order_index,
+                                        pair_start=pair_start,
                                     )
-                                finally:
-                                    unmount = BenchmarkResidencyEvent.from_json(
-                                        session.close()
-                                    )
-                                    _validate_unmount(plan, mount, unmount)
-                                    events.append(unmount.to_json())
-                                if not keep_running:
-                                    break
+                                )
+                            else:
+                                for offset in range(policy["measured_pairs_per_block"]):
+                                    if (
+                                        cold_observation(
+                                            workload=workload,
+                                            role=role,
+                                            phase="measured",
+                                            seed=seed,
+                                            pair_index=pair_start + offset,
+                                            order_index=order_index,
+                                        )
+                                        is None
+                                    ):
+                                        break
                             if run_status != "completed":
                                 break
                         if run_status != "completed":
                             break
                     if run_status != "completed":
                         break
+                if run_status != "completed":
+                    break
+                summary, _ = summarize_workload_samples(
+                    workload,
+                    observations,
+                    policy,
+                    warmup_groups,
+                )
+                measured_pairs = (cycle_index + 1) * pairs_per_cycle
+                if measured_pairs < policy["minimum_measured_pairs_per_seed"]:
+                    continue
+                if any(not group["converged"] for group in warmup_groups):
+                    termination = "warmup_exhausted"
+                    break
+                if summary["decision"] == "invalid":
+                    termination = "invalid"
+                    break
+                if summary["decision"] == "materially_faster":
+                    termination = "decisive_material_win"
+                    break
+                if summary["decision"] == "not_materially_faster":
+                    termination = "decisive_non_win"
+                    break
+                if measured_pairs == policy["maximum_measured_pairs_per_seed"]:
+                    termination = "evidence_budget_exhausted"
+                    break
             if run_status != "completed":
                 break
+            if summary is None:
+                raise ModelCompileError(
+                    "adaptive benchmark collected no measured cycle"
+                )
+            sampling_outcomes.append(
+                {
+                    "workload_id": workload["workload_id"],
+                    "warmup_groups": sorted(
+                        warmup_groups,
+                        key=lambda group: (
+                            group["seed"],
+                            -1
+                            if group["cycle_index"] is None
+                            else group["cycle_index"],
+                            -1
+                            if group["order_block_index"] is None
+                            else group["order_block_index"],
+                            ("reference", "candidate").index(group["role"]),
+                        ),
+                    ),
+                    "measured_pairs_per_seed": measured_pairs,
+                    "decision": summary["decision"],
+                    "reasons": summary["reasons"],
+                    "termination": termination,
+                }
+            )
     except ModelCompileCancelled as error:
         if not observations:
             raise
@@ -222,6 +397,7 @@ def execute_benchmark_plan(
         ],
         "observations": observations,
         "residency_events": events,
+        "sampling_outcomes": sampling_outcomes,
         "host_elapsed_ns": elapsed,
         "diagnostics": diagnostics,
     }
@@ -243,96 +419,63 @@ def validate_complete_run_against_plan(
         or run_document["plan_id"] != plan_document["plan_id"]
     ):
         raise ModelCompileError("completed benchmark run does not match its plan")
-    expected_trials, expected_residency = _expected_execution(plan_document)
-    observed_trials = [
-        (
-            observation["workload_id"],
-            observation["role"],
-            observation["seed"],
-            observation["phase"],
-            observation["pair_index"],
-            observation["order_index"],
-        )
-        for observation in run_document["observations"]
-    ]
-    if observed_trials != expected_trials:
-        raise ModelCompileError(
-            "completed benchmark execution order does not exactly match its plan"
-        )
-    observed = {
-        trial[:5]: observation
-        for trial, observation in zip(
-            observed_trials,
-            run_document["observations"],
-            strict=True,
-        )
+    policy = plan_document["policy"]
+    observations = run_document["observations"]
+    observation_by_id = {
+        observation["observation_id"]: observation for observation in observations
     }
-    for key in sorted(
-        {
-            (
-                observation["workload_id"],
-                observation["seed"],
-                observation["phase"],
-                observation["pair_index"],
-            )
-            for observation in run_document["observations"]
-        }
-    ):
-        reference = observed[(key[0], "reference", *key[1:])]
-        candidate = observed[(key[0], "candidate", *key[1:])]
+    workloads = {
+        workload["workload_id"]: (index, workload)
+        for index, workload in enumerate(plan_document["workloads"])
+    }
+    outcomes = {
+        outcome["workload_id"]: outcome for outcome in run_document["sampling_outcomes"]
+    }
+    if set(outcomes) != set(workloads):
+        raise ModelCompileError(
+            "completed benchmark sampling outcomes do not exactly cover its plan"
+        )
+
+    expected_idle = plan_document["matched_conditions"]["idle_device_state_digest"]
+    events = run_document["residency_events"]
+    if len(events) % 2:
+        raise ModelCompileError(
+            "completed benchmark has an incomplete residency lifecycle"
+        )
+    mounts: dict[int, Json] = {}
+    for expected_block, event_index in enumerate(range(0, len(events), 2)):
+        mount = events[event_index]
+        unmount = events[event_index + 1]
         if (
-            reference["work"]["unit"] != candidate["work"]["unit"]
-            or reference["work"]["useful_units"]
-            != candidate["work"]["useful_units"]
+            mount["action"] != "mount"
+            or unmount["action"] != "unmount"
+            or mount["block_index"] != expected_block
+            or unmount["block_index"] != expected_block
+            or any(
+                mount[field] != unmount[field]
+                for field in (
+                    "plan_id",
+                    "implementation_id",
+                    "role",
+                    "workload_id",
+                    "seed",
+                    "block_index",
+                    "matched_conditions_digest",
+                )
+            )
         ):
             raise ModelCompileError(
-                "matched benchmark pair performed different useful work"
+                "completed benchmark residency order is not paired and contiguous"
             )
-    expected_idle = plan_document["matched_conditions"][
-        "idle_device_state_digest"
-    ]
-    mounts: dict[tuple[str, int], Json] = {}
-    unmounts: dict[tuple[str, int], Json] = {}
-    residency_sequence = []
-    for event in run_document["residency_events"]:
-        residency_sequence.append(
-            (
-                event["action"],
-                event["workload_id"],
-                event["role"],
-                event["seed"],
-                event["block_index"],
-            )
-        )
-        key = (event["role"], event["block_index"])
-        destination = mounts if event["action"] == "mount" else unmounts
-        if key in destination:
+        if (
+            mount["matched_conditions_digest"]
+            != plan_document["matched_conditions_digest"]
+            or mount["implementation_id"]
+            != plan_document["implementations"][mount["role"]]["implementation_id"]
+        ):
             raise ModelCompileError(
-                "benchmark run duplicates a residency lifecycle event"
+                "benchmark residency changed its implementation or conditions"
             )
-        destination[key] = event
-        if event["matched_conditions_digest"] != plan_document[
-            "matched_conditions_digest"
-        ]:
-            raise ModelCompileError(
-                "benchmark residency event changed matched conditions"
-            )
-        if event["implementation_id"] != plan_document["implementations"][
-            event["role"]
-        ]["implementation_id"]:
-            raise ModelCompileError(
-                "benchmark residency event names the wrong implementation"
-            )
-    if residency_sequence != expected_residency:
-        raise ModelCompileError(
-            "completed benchmark residency order does not match its plan"
-        )
-    if set(mounts) != set(unmounts):
-        raise ModelCompileError(
-            "benchmark run did not pair every mount with an unmount"
-        )
-    for key, mount in mounts.items():
-        unmount = unmounts[key]
         if (
             mount["device_state_before_digest"] != expected_idle
             or unmount["device_state_after_digest"] != expected_idle
@@ -342,82 +485,273 @@ def validate_complete_run_against_plan(
             raise ModelCompileError(
                 "benchmark device residency did not return to matched idle state"
             )
+        mounts[expected_block] = mount
 
+    by_block: dict[int, list[Json]] = {}
+    previous_block = -1
+    for observation in observations:
+        block = observation["block_index"]
+        if block < previous_block:
+            raise ModelCompileError(
+                "benchmark observations are not in residency-block order"
+            )
+        previous_block = block
+        mount = mounts.get(block)
+        if mount is None or any(
+            observation[field] != mount[field]
+            for field in ("role", "workload_id", "seed", "block_index")
+        ):
+            raise ModelCompileError(
+                "benchmark observation does not belong to its residency block"
+            )
+        if (
+            observation["implementation_id"] != mount["implementation_id"]
+            or observation["matched_conditions_digest"]
+            != mount["matched_conditions_digest"]
+        ):
+            raise ModelCompileError(
+                "benchmark observation changed its mounted implementation"
+            )
+        by_block.setdefault(block, []).append(observation)
+    if set(by_block) != set(mounts):
+        raise ModelCompileError(
+            "benchmark residency blocks do not exactly cover observations"
+        )
+    for block, block_observations in by_block.items():
+        phases = [observation["phase"] for observation in block_observations]
+        if phases != sorted(phases, key=("warmup", "measured").index):
+            raise ModelCompileError("benchmark block measured before completing warmup")
+        workload = workloads[mounts[block]["workload_id"]][1]
+        if workload["regime"]["mount_mode"] == "cold" and len(block_observations) != 1:
+            raise ModelCompileError(
+                "cold benchmark residency block executed more than one trial"
+            )
 
-def _expected_execution(
-    plan_document: Json,
-) -> tuple[list[tuple[str, str, int, str, int, int]], list[tuple[str, str, str, int, int]]]:
-    trials = []
-    residency = []
-    policy = plan_document["policy"]
-    block_index = 0
-    for workload_index, workload in enumerate(plan_document["workloads"]):
-        workload_id = workload["workload_id"]
-        for seed_index, seed in enumerate(workload["randomness"]["seeds"]):
-            if workload["regime"]["mount_mode"] == "resident_reuse":
-                for order_index, role in enumerate(_role_order(seed_index)):
-                    residency.append(
-                        ("mount", workload_id, role, seed, block_index)
-                    )
-                    for phase, count in (
-                        ("warmup", policy["warmup_samples"]),
-                        ("measured", policy["measured_pairs_per_seed"]),
-                    ):
-                        trials.extend(
-                            (
-                                workload_id,
-                                role,
-                                seed,
-                                phase,
-                                pair_index,
-                                order_index,
-                            )
-                            for pair_index in range(count)
-                        )
-                    residency.append(
-                        ("unmount", workload_id, role, seed, block_index)
-                    )
-                    block_index += 1
-            else:
-                for phase, count in (
-                    ("warmup", policy["warmup_samples"]),
-                    ("measured", policy["measured_pairs_per_seed"]),
+    warmup_ids: list[str] = []
+    pairs_per_cycle = 2 * policy["measured_pairs_per_block"]
+    for workload_id, (workload_index, workload) in workloads.items():
+        outcome = outcomes[workload_id]
+        measured_pairs = outcome["measured_pairs_per_seed"]
+        if (
+            measured_pairs < policy["minimum_measured_pairs_per_seed"]
+            or measured_pairs > policy["maximum_measured_pairs_per_seed"]
+            or measured_pairs % pairs_per_cycle
+        ):
+            raise ModelCompileError(
+                "adaptive benchmark measured-pair count violates its plan"
+            )
+        expected_group_keys: set[tuple[int, int | None, int | None, str]] = set()
+        if workload["regime"]["mount_mode"] == "cold":
+            expected_group_keys = {
+                (seed, None, None, role)
+                for seed in workload["randomness"]["seeds"]
+                for role in ("reference", "candidate")
+            }
+        else:
+            cycle_count = measured_pairs // pairs_per_cycle
+            expected_group_keys = {
+                (seed, cycle_index, order_block_index, role)
+                for seed in workload["randomness"]["seeds"]
+                for cycle_index in range(cycle_count)
+                for order_block_index in (0, 1)
+                for role in ("reference", "candidate")
+            }
+        observed_group_keys = {
+            (
+                group["seed"],
+                group["cycle_index"],
+                group["order_block_index"],
+                group["role"],
+            )
+            for group in outcome["warmup_groups"]
+        }
+        if observed_group_keys != expected_group_keys:
+            raise ModelCompileError(
+                "adaptive warmup groups do not cover the declared sampling blocks"
+            )
+        for group in outcome["warmup_groups"]:
+            selected = []
+            for observation_id in group["observation_ids"]:
+                observation = observation_by_id.get(observation_id)
+                if (
+                    observation is None
+                    or observation["phase"] != "warmup"
+                    or observation["workload_id"] != workload_id
+                    or observation["role"] != group["role"]
+                    or observation["seed"] != group["seed"]
                 ):
-                    for pair_index in range(count):
-                        roles = _role_order(
-                            workload_index + seed_index + pair_index
+                    raise ModelCompileError(
+                        "adaptive warmup group cites a mismatched observation"
+                    )
+                selected.append(observation)
+                warmup_ids.append(observation_id)
+            if [observation["observation_id"] for observation in selected] != [
+                observation["observation_id"]
+                for observation in observations
+                if observation["observation_id"] in set(group["observation_ids"])
+            ]:
+                raise ModelCompileError(
+                    "adaptive warmup group changed raw observation order"
+                )
+            computed = warmup_group_summary(selected, policy)
+            if any(
+                group[field] != computed[field]
+                for field in (
+                    "sample_count",
+                    "maximum_shift_ppm",
+                    "converged",
+                )
+            ):
+                raise ModelCompileError(
+                    "adaptive warmup outcome disagrees with raw observations"
+                )
+            if not (
+                policy["minimum_warmup_samples"]
+                <= group["sample_count"]
+                <= policy["maximum_warmup_samples"]
+            ):
+                raise ModelCompileError(
+                    "adaptive warmup sample count violates its plan"
+                )
+            blocks = {observation["block_index"] for observation in selected}
+            if workload["regime"]["mount_mode"] == "resident_reuse":
+                if (
+                    group["cycle_index"] is None
+                    or group["order_block_index"] is None
+                    or len(blocks) != 1
+                ):
+                    raise ModelCompileError(
+                        "resident warmup group is not bound to one measured block"
+                    )
+                block = next(iter(blocks))
+                measured_in_block = [
+                    observation
+                    for observation in by_block[block]
+                    if observation["phase"] == "measured"
+                ]
+                pair_start = (
+                    group["cycle_index"] * pairs_per_cycle
+                    + group["order_block_index"] * policy["measured_pairs_per_block"]
+                )
+                seed_index = workload["randomness"]["seeds"].index(group["seed"])
+                expected_roles = _role_order(
+                    workload_index + seed_index + group["order_block_index"]
+                )
+                if (
+                    len(measured_in_block) != policy["measured_pairs_per_block"]
+                    or {observation["pair_index"] for observation in measured_in_block}
+                    != set(
+                        range(
+                            pair_start,
+                            pair_start + policy["measured_pairs_per_block"],
                         )
-                        for order_index, role in enumerate(roles):
-                            residency.append(
-                                (
-                                    "mount",
-                                    workload_id,
-                                    role,
-                                    seed,
-                                    block_index,
-                                )
-                            )
-                            trials.append(
-                                (
-                                    workload_id,
-                                    role,
-                                    seed,
-                                    phase,
-                                    pair_index,
-                                    order_index,
-                                )
-                            )
-                            residency.append(
-                                (
-                                    "unmount",
-                                    workload_id,
-                                    role,
-                                    seed,
-                                    block_index,
-                                )
-                            )
-                            block_index += 1
-    return trials, residency
+                    )
+                    or any(
+                        observation["role"] != group["role"]
+                        or observation["order_index"]
+                        != expected_roles.index(group["role"])
+                        for observation in measured_in_block
+                    )
+                ):
+                    raise ModelCompileError(
+                        "resident sampling block disagrees with its "
+                        "counterbalanced cycle"
+                    )
+            elif (
+                group["cycle_index"] is not None
+                or group["order_block_index"] is not None
+                or len(blocks) != len(selected)
+            ):
+                raise ModelCompileError(
+                    "cold warmup group is not composed of independent mounts"
+                )
+        selected_workload = [
+            observation
+            for observation in observations
+            if observation["workload_id"] == workload_id
+        ]
+        for seed_index, seed in enumerate(workload["randomness"]["seeds"]):
+            measured = [
+                observation
+                for observation in selected_workload
+                if observation["phase"] == "measured" and observation["seed"] == seed
+            ]
+            by_pair: dict[int, dict[str, Json]] = {}
+            for observation in measured:
+                roles = by_pair.setdefault(observation["pair_index"], {})
+                if observation["role"] in roles:
+                    raise ModelCompileError(
+                        "adaptive benchmark duplicated a role in one pair"
+                    )
+                roles[observation["role"]] = observation
+            if set(by_pair) != set(range(measured_pairs)) or any(
+                set(roles) != {"reference", "candidate"} for roles in by_pair.values()
+            ):
+                raise ModelCompileError(
+                    "adaptive benchmark did not exactly cover matched pairs"
+                )
+            for pair_index, roles in by_pair.items():
+                order_block = (pair_index // policy["measured_pairs_per_block"]) % 2
+                expected_roles = _role_order(workload_index + seed_index + order_block)
+                for role, observation in roles.items():
+                    if observation["order_index"] != expected_roles.index(role):
+                        raise ModelCompileError(
+                            "adaptive benchmark pair is not counterbalanced"
+                        )
+                reference = roles["reference"]
+                candidate = roles["candidate"]
+                if (
+                    reference["work"]["unit"] != candidate["work"]["unit"]
+                    or reference["work"]["useful_units"]
+                    != candidate["work"]["useful_units"]
+                ):
+                    raise ModelCompileError(
+                        "matched benchmark pair performed different useful work"
+                    )
+        summary, _ = summarize_workload_samples(
+            workload,
+            observations,
+            policy,
+            outcome["warmup_groups"],
+        )
+        if (
+            outcome["decision"] != summary["decision"]
+            or outcome["reasons"] != summary["reasons"]
+        ):
+            raise ModelCompileError(
+                "adaptive benchmark termination disagrees with its evidence"
+            )
+        warmup_failed = any(
+            not group["converged"] for group in outcome["warmup_groups"]
+        )
+        expected_termination = (
+            "warmup_exhausted"
+            if warmup_failed
+            else {
+                "invalid": "invalid",
+                "materially_faster": "decisive_material_win",
+                "not_materially_faster": "decisive_non_win",
+                "inconclusive": "evidence_budget_exhausted",
+            }[summary["decision"]]
+        )
+        if outcome["termination"] != expected_termination or (
+            expected_termination == "evidence_budget_exhausted"
+            and measured_pairs != policy["maximum_measured_pairs_per_seed"]
+        ):
+            raise ModelCompileError(
+                "adaptive benchmark stopped before satisfying its termination rule"
+            )
+    observed_warmup_ids = [
+        observation["observation_id"]
+        for observation in observations
+        if observation["phase"] == "warmup"
+    ]
+    if len(warmup_ids) != len(set(warmup_ids)) or set(warmup_ids) != set(
+        observed_warmup_ids
+    ):
+        raise ModelCompileError(
+            "adaptive warmup groups do not exactly partition warmup evidence"
+        )
 
 
 def _open_session(
@@ -469,13 +803,11 @@ def _validate_mount(
         document["action"] != "mount"
         or document["plan_id"] != request.plan_id
         or document["role"] != request.role
-        or document["implementation_id"]
-        != request.implementation["implementation_id"]
+        or document["implementation_id"] != request.implementation["implementation_id"]
         or document["workload_id"] != request.workload["workload_id"]
         or document["seed"] != request.seed
         or document["block_index"] != request.block_index
-        or document["matched_conditions_digest"]
-        != request.matched_conditions_digest
+        or document["matched_conditions_digest"] != request.matched_conditions_digest
         or document["device_state_before_digest"] != expected_idle
     ):
         raise ModelCompileError(
@@ -523,8 +855,7 @@ def _validate_emergency_release(
     if (
         released["action"] != "unmount"
         or not released["released"]
-        or released["matched_conditions_digest"]
-        != contract_digest(conditions)
+        or released["matched_conditions_digest"] != contract_digest(conditions)
         or released["device_state_after_digest"]
         != conditions["idle_device_state_digest"]
     ):
@@ -548,6 +879,7 @@ def _validate_observation(
         "workload_id": workload["workload_id"],
         "phase": request.phase,
         "seed": request.seed,
+        "block_index": request.block_index,
         "pair_index": request.pair_index,
         "order_index": request.order_index,
         "matched_conditions_digest": request.matched_conditions_digest,
@@ -567,17 +899,11 @@ def _validate_observation(
         )
     if (
         document["status"] == "completed"
-        and document["work"]["useful_units"]
-        < workload["useful_work"]["minimum_units"]
+        and document["work"]["useful_units"] < workload["useful_work"]["minimum_units"]
     ):
-        raise ModelCompileError(
-            "normal execution stopped before minimum useful work"
-        )
+        raise ModelCompileError("normal execution stopped before minimum useful work")
     allowance = workload["useful_work"]["output_allowance"]
-    if (
-        allowance is not None
-        and document["work"]["useful_units"] > allowance
-    ):
+    if allowance is not None and document["work"]["useful_units"] > allowance:
         raise ModelCompileError(
             "normal execution exceeded the declared output allowance"
         )
@@ -599,10 +925,7 @@ def _validate_observation(
                     f"normal execution trace {name!r} yielded a non-byte chunk"
                 )
             digest.update(chunk)
-        actual = (
-            "nerve.optimizer.artifact_sha256.v1:"
-            f"{digest.hexdigest()}"
-        )
+        actual = f"nerve.optimizer.artifact_sha256.v1:{digest.hexdigest()}"
         if actual != trace["digest"]:
             raise ModelCompileError(
                 f"normal execution trace {name!r} failed digest validation"
@@ -661,10 +984,7 @@ def _verify_fixture_artifacts(
                     raise ModelCompileError(
                         "benchmark limit-evidence artifact exceeds 1 MiB"
                     )
-        actual = (
-            "nerve.optimizer.artifact_sha256.v1:"
-            f"{digest.hexdigest()}"
-        )
+        actual = f"nerve.optimizer.artifact_sha256.v1:{digest.hexdigest()}"
         if actual != expected_digest:
             raise ModelCompileError(
                 f"benchmark fixture failed digest validation: {relative_path!r}"
@@ -704,22 +1024,14 @@ def _validate_declared_limit(
         raise ModelCompileError(
             f"benchmark output-limit JSON pointer is unresolved: {json_pointer!r}"
         ) from error
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value != expected_limit
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected_limit:
         raise ModelCompileError(
             "benchmark output allowance does not match its immutable evidence"
         )
 
 
 def _role_order(index: int) -> tuple[str, str]:
-    return (
-        ("reference", "candidate")
-        if index % 2 == 0
-        else ("candidate", "reference")
-    )
+    return ("reference", "candidate") if index % 2 == 0 else ("candidate", "reference")
 
 
 def _checkpoint(cancel_requested: Callable[[], bool] | None) -> None:

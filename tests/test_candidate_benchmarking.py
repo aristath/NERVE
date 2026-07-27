@@ -64,6 +64,8 @@ class AdapterBehavior:
     order_biased_candidate: bool = False
     candidate_sustained_regression: bool = False
     candidate_warmup_drift: bool = False
+    candidate_initial_warmup_penalty_samples: int = 0
+    candidate_initial_noisy_measured_pairs: int = 0
     timeout_count: int = 0
     reproducibility_defect: bool = False
     speculative_schedule_variance: bool = False
@@ -157,21 +159,13 @@ class FixtureExecutionSession:
         ]
         remaining_duration = duration
         for index in range(window_count):
-            end = (
-                useful_units
-                if index == window_count - 1
-                else start + width
-            )
+            end = useful_units if index == window_count - 1 else start + width
             window_duration = (
                 remaining_duration
                 if index == window_count - 1
                 else max(
                     1,
-                    round(
-                        duration
-                        * window_weights[index]
-                        / sum(window_weights)
-                    ),
+                    round(duration * window_weights[index] / sum(window_weights)),
                 )
             )
             remaining_duration -= window_duration
@@ -192,24 +186,16 @@ class FixtureExecutionSession:
             token_label += f":sampling:{request.pair_index}"
         if behavior.numerical_variance and request.role == "candidate":
             token_label += f":numerical:{request.pair_index}"
-        distribution_label = (
-            f"distribution:{request.seed}:{request.role}"
-        )
+        distribution_label = f"distribution:{request.seed}:{request.role}"
         state_label = f"state:{request.seed}:{request.role}"
         random_label = f"random:{request.seed}"
-        schedule_label = (
-            f"schedule:{request.seed}:{request.role}:"
-            f"{request.order_index}"
-        )
+        schedule_label = f"schedule:{request.seed}:{request.role}:{request.order_index}"
         if behavior.sampling_variance and request.role == "candidate":
             random_label += f":{request.pair_index}"
         if behavior.numerical_variance and request.role == "candidate":
             distribution_label += f":{request.pair_index}"
             state_label += f":{request.pair_index}"
-        if (
-            behavior.speculative_schedule_variance
-            and request.role == "candidate"
-        ):
+        if behavior.speculative_schedule_variance and request.role == "candidate":
             schedule_label += f":{request.pair_index}"
         trace_payloads = {
             "distribution": distribution_label.encode(),
@@ -222,7 +208,8 @@ class FixtureExecutionSession:
         for name, payload in trace_payloads.items():
             path = (
                 f"traces/{workload['workload_id']}/{request.role}/"
-                f"{request.seed}/{request.phase}/{request.order_index}/"
+                f"{request.seed}/{request.block_index}/"
+                f"{request.phase}/{request.order_index}/"
                 f"{request.pair_index}/{name}.bin"
             )
             self.adapter.trace_artifacts[path] = payload
@@ -240,6 +227,7 @@ class FixtureExecutionSession:
             "workload_id": workload["workload_id"],
             "phase": request.phase,
             "seed": request.seed,
+            "block_index": request.block_index,
             "pair_index": request.pair_index,
             "order_index": request.order_index,
             "matched_conditions_digest": request.matched_conditions_digest,
@@ -274,9 +262,7 @@ class FixtureExecutionSession:
                 "resident_after_bytes": 128,
             },
             "representation": {
-                "conversion_bytes": (
-                    16 if request.role == "candidate" else 0
-                ),
+                "conversion_bytes": (16 if request.role == "candidate" else 0),
                 "conversion_ns": 1_000 if request.role == "candidate" else 0,
                 "boundary_count": 1 if request.role == "candidate" else 0,
             },
@@ -291,9 +277,7 @@ class FixtureExecutionSession:
             },
             "transport": {
                 "bytes": (
-                    32
-                    if workload["regime"]["boundary_mode"] == "cross_device"
-                    else 0
+                    32 if workload["regime"]["boundary_mode"] == "cross_device" else 0
                 ),
                 "duration_ns": 500,
                 "queue_wait_count": 1,
@@ -334,7 +318,11 @@ class FixtureExecutionSession:
         )
         jitter = (-2, -1, 0, 1, 2)[request.pair_index % 5]
         duration += jitter * 1_000
-        if behavior.noisy_candidate and request.role == "candidate":
+        if (
+            behavior.noisy_candidate
+            and request.role == "candidate"
+            and request.phase == "measured"
+        ):
             duration = (500_000, 1_500_000, 600_000, 1_400_000, 800_000)[
                 request.pair_index % 5
             ]
@@ -350,6 +338,18 @@ class FixtureExecutionSession:
             and request.phase == "warmup"
         ):
             duration = round(duration * (1.0 + 0.10 * request.pair_index))
+        if (
+            request.role == "candidate"
+            and request.phase == "warmup"
+            and request.pair_index < behavior.candidate_initial_warmup_penalty_samples
+        ):
+            duration = round(duration * 1.50)
+        if (
+            request.role == "candidate"
+            and request.phase == "measured"
+            and request.pair_index < behavior.candidate_initial_noisy_measured_pairs
+        ):
+            duration = round(duration * (1.30 if request.pair_index % 2 == 0 else 0.75))
         return duration
 
     def _event(self, *, action, before, after, released):
@@ -439,9 +439,7 @@ def _fixture(
         matched_conditions={
             "devices": [
                 {
-                    "device_id": profile["hardware_identity"][
-                        "stable_device_id"
-                    ],
+                    "device_id": profile["hardware_identity"]["stable_device_id"],
                     "hardware_profile_digest": contract_digest(profile),
                     "capability_class": profile["capability_class"],
                     "api": profile["provenance"]["api"],
@@ -450,9 +448,7 @@ def _fixture(
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": device_state_digest(
-                {"fixture_state": "idle"}
-            ),
+            "idle_device_state_digest": device_state_digest({"fixture_state": "idle"}),
             "exclusive_residency": True,
         },
     )
@@ -484,15 +480,11 @@ def test_matched_benchmark_promotes_only_statistical_material_speedup(
         workload["paired"]["confidence_interval_low_ppm"] > 50_000
         for workload in record["workloads"]
     )
-    assert record["resource_measurements"]["roles"]["candidate"][
-        "discarded_units"
-    ] > 0
-    assert record["resource_measurements"]["roles"]["candidate"][
-        "conversion_bytes"
-    ] > 0
-    assert record["resource_measurements"]["roles"]["reference"][
-        "permanent_bytes"
-    ] == 256
+    assert record["resource_measurements"]["roles"]["candidate"]["discarded_units"] > 0
+    assert record["resource_measurements"]["roles"]["candidate"]["conversion_bytes"] > 0
+    assert (
+        record["resource_measurements"]["roles"]["reference"]["permanent_bytes"] == 256
+    )
     candidate_resources = record["resource_measurements"]["roles"]["candidate"]
     assert candidate_resources["setup_ns"] > 0
     assert candidate_resources["teardown_ns"] > 0
@@ -507,8 +499,7 @@ def test_matched_benchmark_promotes_only_statistical_material_speedup(
         candidate_resources["resident_after_bytes"],
     )
     assert all(
-        item["classification"] == "identical"
-        for item in record["reproducibility"]
+        item["classification"] == "identical" for item in record["reproducibility"]
     )
     assert set(adapter.fixture_candidate_ids) == {plan.candidate_id}
     lifecycle = next(
@@ -542,13 +533,11 @@ def test_matched_benchmark_promotes_only_statistical_material_speedup(
     assert any(regime["stream_count"] > 1 for regime in regimes)
     assert any(regime["boundary_mode"] == "cross_device" for regime in regimes)
     assert all(
-        observation["default_statistics"]["execution_path"]
-        == "normal_fixture_runtime"
+        observation["default_statistics"]["execution_path"] == "normal_fixture_runtime"
         for observation in outcome.run.to_json()["observations"]
     )
     assert all(
-        event["default_statistics"]["execution_path"]
-        == "normal_fixture_runtime"
+        event["default_statistics"]["execution_path"] == "normal_fixture_runtime"
         for event in outcome.run.to_json()["residency_events"]
     )
 
@@ -567,6 +556,13 @@ def test_slower_candidate_is_not_materially_faster(tmp_path: Path) -> None:
 
     assert record["decision"] == "not_materially_faster"
     assert record["workloads"][0]["paired"]["geometric_speedup_ppm"] < 0
+    assert {
+        outcome["termination"] for outcome in run.to_json()["sampling_outcomes"]
+    } == {"decisive_non_win"}
+    assert {
+        outcome["measured_pairs_per_seed"]
+        for outcome in run.to_json()["sampling_outcomes"]
+    } == {plan.policy["minimum_measured_pairs_per_seed"]}
 
 
 def test_small_speedup_below_declared_material_floor_does_not_win(
@@ -605,8 +601,15 @@ def test_nonstationary_warmup_is_inconclusive(tmp_path: Path) -> None:
 
     assert record["decision"] == "inconclusive"
     assert any(
-        "warmup did not converge" in reason
-        for reason in record["decision_reasons"]
+        "warmup did not converge" in reason for reason in record["decision_reasons"]
+    )
+    outcomes = run.to_json()["sampling_outcomes"]
+    assert {outcome["termination"] for outcome in outcomes} == {"warmup_exhausted"}
+    assert all(
+        group["sample_count"] == plan.policy["maximum_warmup_samples"]
+        for outcome in outcomes
+        for group in outcome["warmup_groups"]
+        if group["role"] == "candidate"
     )
 
 
@@ -623,10 +626,111 @@ def test_noisy_candidate_is_inconclusive(tmp_path: Path) -> None:
     ).to_json()
 
     assert record["decision"] == "inconclusive"
-    assert any(
-        "confidence interval" in reason
-        for reason in record["decision_reasons"]
+    assert any("confidence interval" in reason for reason in record["decision_reasons"])
+    assert {
+        outcome["measured_pairs_per_seed"]
+        for outcome in run.to_json()["sampling_outcomes"]
+    } == {plan.policy["maximum_measured_pairs_per_seed"]}
+    assert {
+        outcome["termination"] for outcome in run.to_json()["sampling_outcomes"]
+    } == {"evidence_budget_exhausted"}
+
+
+def test_adaptive_warmup_discards_initial_cold_sample(
+    tmp_path: Path,
+) -> None:
+    _, construction, _, plan, adapter = _fixture(
+        tmp_path,
+        AdapterBehavior(candidate_initial_warmup_penalty_samples=1),
     )
+    run = execute_benchmark_plan(plan, adapter)
+    record = summarize_benchmark(
+        plan=plan,
+        run=run,
+        construction_record=construction.record,
+    ).to_json()
+
+    candidate_groups = [
+        group
+        for outcome in run.to_json()["sampling_outcomes"]
+        for group in outcome["warmup_groups"]
+        if group["role"] == "candidate"
+    ]
+    assert candidate_groups
+    assert all(group["converged"] for group in candidate_groups)
+    assert all(
+        group["sample_count"] > plan.policy["minimum_warmup_samples"]
+        for group in candidate_groups
+    )
+    assert record["decision"] == "materially_faster"
+
+
+def test_adaptive_sampling_extends_past_noisy_initial_cycle(
+    tmp_path: Path,
+) -> None:
+    _, construction, _, plan, adapter = _fixture(
+        tmp_path,
+        AdapterBehavior(
+            candidate_duration_ns=600_000,
+            candidate_initial_noisy_measured_pairs=6,
+        ),
+    )
+    run = execute_benchmark_plan(plan, adapter)
+    record = summarize_benchmark(
+        plan=plan,
+        run=run,
+        construction_record=construction.record,
+    ).to_json()
+
+    measured_counts = {
+        outcome["measured_pairs_per_seed"]
+        for outcome in run.to_json()["sampling_outcomes"]
+    }
+    assert min(measured_counts) > plan.policy["minimum_measured_pairs_per_seed"]
+    assert max(measured_counts) <= plan.policy["maximum_measured_pairs_per_seed"]
+    assert record["decision"] == "materially_faster"
+
+
+def test_measured_pairs_are_temporally_counterbalanced(
+    tmp_path: Path,
+) -> None:
+    _, _, _, plan, adapter = _fixture(tmp_path)
+    run = execute_benchmark_plan(plan, adapter).to_json()
+    block_width = plan.policy["measured_pairs_per_block"]
+
+    for workload_index, workload in enumerate(plan.to_json()["workloads"]):
+        outcome = next(
+            item
+            for item in run["sampling_outcomes"]
+            if item["workload_id"] == workload["workload_id"]
+        )
+        for seed_index, seed in enumerate(workload["randomness"]["seeds"]):
+            references = sorted(
+                (
+                    observation
+                    for observation in run["observations"]
+                    if observation["workload_id"] == workload["workload_id"]
+                    and observation["seed"] == seed
+                    and observation["phase"] == "measured"
+                    and observation["role"] == "reference"
+                ),
+                key=lambda observation: observation["pair_index"],
+            )
+            assert len(references) == outcome["measured_pairs_per_seed"]
+            for observation in references:
+                order_block = (observation["pair_index"] // block_width) % 2
+                expected = (
+                    (
+                        "reference",
+                        "candidate",
+                    )
+                    if (workload_index + seed_index + order_block) % 2 == 0
+                    else (
+                        "candidate",
+                        "reference",
+                    )
+                )
+                assert observation["order_index"] == expected.index("reference")
 
 
 def test_counterbalanced_order_bias_is_inconclusive(tmp_path: Path) -> None:
@@ -678,9 +782,7 @@ def test_default_runtime_timeout_counter_invalidates_benchmark(
     ).to_json()
 
     assert record["decision"] == "invalid"
-    assert record["resource_measurements"]["roles"]["candidate"][
-        "timeout_count"
-    ] > 0
+    assert record["resource_measurements"]["roles"]["candidate"]["timeout_count"] > 0
 
 
 def test_fixed_seed_trace_divergence_is_a_correctness_defect(
@@ -699,8 +801,7 @@ def test_fixed_seed_trace_divergence_is_a_correctness_defect(
 
     assert record["decision"] == "invalid"
     assert any(
-        item["role"] == "candidate"
-        and item["classification"] == "correctness_defect"
+        item["role"] == "candidate" and item["classification"] == "correctness_defect"
         for item in record["reproducibility"]
     )
 
@@ -744,14 +845,10 @@ def test_permitted_fixed_seed_variance_is_classified_from_raw_traces(
     ).to_json()
 
     candidate_groups = [
-        group
-        for group in record["reproducibility"]
-        if group["role"] == "candidate"
+        group for group in record["reproducibility"] if group["role"] == "candidate"
     ]
     assert candidate_groups
-    assert {group["classification"] for group in candidate_groups} == {
-        expected
-    }
+    assert {group["classification"] for group in candidate_groups} == {expected}
     assert record["decision"] == "materially_faster"
 
 
@@ -983,9 +1080,7 @@ def test_plan_identity_is_deterministic_and_supports_multiple_devices(
     devices = sorted(
         (
             {
-                "device_id": hardware["hardware_identity"][
-                    "stable_device_id"
-                ],
+                "device_id": hardware["hardware_identity"]["stable_device_id"],
                 "hardware_profile_digest": contract_digest(hardware),
                 "capability_class": hardware["capability_class"],
                 "api": hardware["provenance"]["api"],
@@ -1014,9 +1109,7 @@ def test_plan_identity_is_deterministic_and_supports_multiple_devices(
         matched_conditions=conditions,
     )
     assert len(multi_device.matched_conditions["devices"]) == 2
-    assert multi_device.matched_conditions["placement"] == conditions[
-        "placement"
-    ]
+    assert multi_device.matched_conditions["placement"] == conditions["placement"]
 
 
 def test_output_allowance_requires_verifiable_non_arbitrary_evidence(
@@ -1029,9 +1122,7 @@ def test_output_allowance_requires_verifiable_non_arbitrary_evidence(
         for item in document["workloads"]
         if item["useful_work"]["output_allowance"] is not None
     )
-    workload["useful_work"]["output_allowance_basis"][
-        "declared_limit"
-    ] -= 1
+    workload["useful_work"]["output_allowance_basis"]["declared_limit"] -= 1
     workload["workload_id"] = benchmark_workload_id(workload)
     document["plan_id"] = stable_contract_id("benchmark_plan", "wrong")
 
@@ -1053,9 +1144,7 @@ def test_output_allowance_value_is_checked_against_immutable_evidence(
         if item["useful_work"]["output_allowance"] is not None
     )
     workload["useful_work"]["output_allowance"] = 65_000
-    workload["useful_work"]["output_allowance_basis"][
-        "declared_limit"
-    ] = 65_000
+    workload["useful_work"]["output_allowance_basis"]["declared_limit"] = 65_000
     workload["workload_id"] = benchmark_workload_id(workload)
     document["workloads"].sort(key=lambda item: item["workload_id"])
     document["plan_id"] = benchmark_plan_id(document)

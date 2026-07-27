@@ -370,7 +370,7 @@ def test_experiment_budget_counts_every_planned_role_execution(
     target, lease = _target()
     budget = replace(
         _budget(),
-        maximum_experiment_invocations=93,
+        maximum_experiment_invocations=789,
     )
 
     outcome = run_automated_optimizer(
@@ -386,10 +386,10 @@ def test_experiment_budget_counts_every_planned_role_execution(
     decision = json.loads(
         (tmp_path / "run" / candidate["budget_decision_ref"]).read_text()
     )
-    assert decision["cost"]["experiment_invocations"] == 94
+    assert decision["cost"]["experiment_invocations"] == 790
     assert candidate["status"] == "rejected"
     assert any(
-        "maximum_experiment_invocations: 94 > 93" in reason
+        "maximum_experiment_invocations: 790 > 789" in reason
         for reason in candidate["rejection_reasons"]
     )
     assert lease.acquisitions == 0
