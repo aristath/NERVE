@@ -171,6 +171,58 @@
                 .contains("belongs to semantic modules")
         );
 
+        let mut represented = circuit.clone();
+        represented.semantic_execution_nodes = represented.nodes.clone();
+        represented.parameters.refs.remove("weight");
+        represented.parameters.refs.insert(
+            "weight_codebook".to_string(),
+            ParameterRef {
+                tensor: Some("layer.weight.codebook".to_string()),
+                role: Some("exact_codebook".to_string()),
+                extra: Map::new(),
+            },
+        );
+        represented.nodes[0].params = vec!["weight_codebook".to_string()];
+        represented.nodes[0].attrs = serde_json::json!({
+            "parameter_representation": {
+                "kind": "shared_codebook",
+                "source_parameter_ids": ["weight"]
+            }
+        });
+        represented.validate_contract().unwrap();
+
+        let mut unknown_representation_source = represented.clone();
+        unknown_representation_source.nodes[0].attrs = serde_json::json!({
+            "parameter_representation": {
+                "kind": "shared_codebook",
+                "source_parameter_ids": ["unknown_weight"]
+            }
+        });
+        assert!(
+            unknown_representation_source
+                .validate_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("absent from semantic execution")
+        );
+
+        let mut duplicate_physical_storage = represented;
+        duplicate_physical_storage.parameters.refs.insert(
+            "weight".to_string(),
+            ParameterRef {
+                tensor: Some("layer.weight".to_string()),
+                role: Some("source_weight".to_string()),
+                extra: Map::new(),
+            },
+        );
+        assert!(
+            duplicate_physical_storage
+                .validate_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("remains physically bound")
+        );
+
         let mut missing_state = circuit;
         missing_state
             .semantic_module_tree

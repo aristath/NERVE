@@ -285,7 +285,12 @@ impl StreamCircuit {
                 ));
             }
         }
-        let param_ids: BTreeSet<_> = self.parameters.refs.keys().collect();
+        let param_ids = self
+            .parameters
+            .refs
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let mut node_ids = BTreeSet::new();
 
         for node in &self.nodes {
@@ -360,6 +365,16 @@ impl StreamCircuit {
             } else {
                 &self.semantic_execution_nodes
             };
+            let represented_param_ids = represented_source_parameter_ids(
+                &self.nodes,
+                &param_ids,
+                semantic_nodes,
+                &mut issues,
+            );
+            let semantic_param_ids = param_ids
+                .union(&represented_param_ids)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let semantic_node_ids = semantic_nodes
                 .iter()
                 .map(|node| node.id.clone())
@@ -380,7 +395,7 @@ impl StreamCircuit {
                 semantic_nodes,
                 &semantic_node_ids,
                 &state_ids,
-                &param_ids,
+                &semantic_param_ids,
                 &semantic_signals,
                 &mut issues,
             );
@@ -403,7 +418,7 @@ impl StreamCircuit {
         semantic_nodes: &[CircuitNode],
         node_ids: &BTreeSet<String>,
         state_ids: &BTreeSet<&String>,
-        param_ids: &BTreeSet<&String>,
+        param_ids: &BTreeSet<String>,
         known_signals: &BTreeSet<String>,
         issues: &mut Vec<String>,
     ) {
@@ -554,6 +569,98 @@ impl StreamCircuit {
             ));
         }
     }
+}
+
+fn represented_source_parameter_ids(
+    physical_nodes: &[CircuitNode],
+    physical_param_ids: &BTreeSet<String>,
+    semantic_nodes: &[CircuitNode],
+    issues: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let logical_param_ids = semantic_nodes
+        .iter()
+        .flat_map(|node| node.params.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut represented = BTreeSet::new();
+    let mut owners = BTreeMap::new();
+    for node in physical_nodes {
+        let Some(raw_representation) = node.attrs.get("parameter_representation")
+        else {
+            continue;
+        };
+        let Some(representation) = raw_representation.as_object() else {
+            issues.push(format!(
+                "node {} parameter_representation must be an object",
+                node.id
+            ));
+            continue;
+        };
+        if representation
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            issues.push(format!(
+                "node {} parameter_representation requires a non-empty kind",
+                node.id
+            ));
+        }
+        let Some(source_parameters) = representation
+            .get("source_parameter_ids")
+            .and_then(Value::as_array)
+        else {
+            issues.push(format!(
+                "node {} parameter_representation requires source_parameter_ids",
+                node.id
+            ));
+            continue;
+        };
+        if source_parameters.is_empty() {
+            issues.push(format!(
+                "node {} parameter_representation source_parameter_ids must not be empty",
+                node.id
+            ));
+        }
+        let mut local = BTreeSet::new();
+        for raw_parameter in source_parameters {
+            let Some(parameter) = raw_parameter.as_str().filter(|value| !value.is_empty()) else {
+                issues.push(format!(
+                    "node {} parameter_representation contains an invalid source parameter id",
+                    node.id
+                ));
+                continue;
+            };
+            if !local.insert(parameter.to_string()) {
+                issues.push(format!(
+                    "node {} parameter_representation repeats source parameter {:?}",
+                    node.id, parameter
+                ));
+                continue;
+            }
+            if physical_param_ids.contains(parameter) {
+                issues.push(format!(
+                    "node {} represented source parameter {:?} remains physically bound",
+                    node.id, parameter
+                ));
+            }
+            if let Some(previous) = owners.insert(parameter.to_string(), node.id.as_str()) {
+                issues.push(format!(
+                    "source parameter {:?} is represented by physical nodes {:?} and {:?}",
+                    parameter, previous, node.id
+                ));
+            }
+            represented.insert(parameter.to_string());
+        }
+    }
+    for parameter in &represented {
+        if !logical_param_ids.contains(parameter) {
+            issues.push(format!(
+                "represented source parameter {:?} is absent from semantic execution",
+                parameter
+            ));
+        }
+    }
+    represented
 }
 
 fn visit_semantic_module<'a>(
