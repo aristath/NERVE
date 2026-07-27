@@ -449,7 +449,9 @@ def _build_plan(
             "compile",
             "semantic_construction",
             0,
-            json_contract("nerve.optimizer.conversation_fixture.v1"),
+            json_contract(
+                "nerve.optimizer.validation_conversation.v1"
+            ),
         ),
         _output(
             DECODE_SHADER_PATH,

@@ -27,7 +27,16 @@ pub struct VulkanComputeDevice {
     immediate_kernel_sequence: RefCell<Option<VulkanResidentKernelSequence>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+)]
 pub struct VulkanResidentExecutionCounters {
     pub resident_sequence_prepare_calls: u64,
     pub resident_sequence_recorded_command_buffers: u64,

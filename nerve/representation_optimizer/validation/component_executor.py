@@ -20,6 +20,9 @@ from nerve.representation_optimizer.validation.contracts import (
     validation_residency_event_id,
     validation_role_result_id,
 )
+from nerve.representation_optimizer.validation.comparison import (
+    compare_exact_role_results,
+)
 from nerve.representation_optimizer.validation.protocols import (
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
@@ -107,38 +110,20 @@ class ResidentComponentValidationBackend:
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:
-        behavioral = request["behavioral_contract"]
-        if behavioral["mode"] != "exact":
+        if request["behavioral_contract"]["mode"] != "exact":
             raise ModelCompileError(
                 "approximate component validation requires a declared "
                 "metric comparator"
             )
-        identical = (
-            reference_result["output_digest"]
-            == candidate_result["output_digest"]
-            and reference_result["state_digest"]
-            == candidate_result["state_digest"]
-        )
-        return {
-            "metrics": [
-                {
-                    "name": name,
-                    "reference_value": 1.0,
-                    "candidate_value": 1.0 if identical else 0.0,
-                    "error": 0.0 if identical else 1.0,
-                    "unit": "exact_match",
-                }
-                for name in request["check"]["metrics"]
-            ],
-            "diagnostics": (
-                []
-                if identical
-                else [
-                    "candidate component output or transient state "
-                    "diverged from the exact implementation"
-                ]
+        return compare_exact_role_results(
+            request,
+            reference_result,
+            candidate_result,
+            divergence_diagnostic=(
+                "candidate component output or transient state "
+                "diverged from the exact implementation"
             ),
-        }
+        )
 
 class ResidentComponentValidationSession:
     def __init__(

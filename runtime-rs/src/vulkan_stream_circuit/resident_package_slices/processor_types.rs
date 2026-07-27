@@ -19,6 +19,34 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {
+    fn resident_state_snapshot_digest(
+        &self,
+    ) -> Result<[u8; 32], VulkanResidentInProcessPlacedRuntimeError> {
+        use sha2::{Digest, Sha256};
+
+        let mut digest = Sha256::new();
+        for slice in &self.device_slices {
+            update_digest_frame(&mut digest, slice.device_id.as_bytes());
+            for state in &slice.mounted.buffers.state_buffers {
+                update_digest_frame(&mut digest, state.component_id.as_bytes());
+                update_digest_frame(&mut digest, state.state_id.as_bytes());
+                update_digest_frame(&mut digest, state.state_type.as_bytes());
+                update_digest_frame(
+                    &mut digest,
+                    &state.byte_capacity.to_le_bytes(),
+                );
+                let bytes = state
+                    .buffer
+                    .read_bytes(state.byte_capacity)
+                    .map_err(
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                    )?;
+                update_digest_frame(&mut digest, &bytes);
+            }
+        }
+        Ok(digest.finalize().into())
+    }
+
     fn mounted_state_buffer_with_device_id(
         &self,
         key: &TransientStateKey,
@@ -58,6 +86,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 })
             })
     }
+}
+
+fn update_digest_frame(digest: &mut sha2::Sha256, bytes: &[u8]) {
+    use sha2::Digest;
+
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
 }
 
 fn create_placed_state_transactions<'a, F>(

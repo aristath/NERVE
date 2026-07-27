@@ -211,6 +211,35 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.active_input_event.is_none() && self.pending_input_events.is_empty()
     }
 
+    pub fn resident_state_digest(
+        &self,
+    ) -> Result<String, VulkanResidentInProcessPlacedRuntimeError> {
+        use sha2::{Digest, Sha256};
+
+        if !self.is_idle() || self.pending_scheduler_activation.is_some() {
+            return Err(placed_scheduler_divergence(
+                "cannot snapshot placed prompt stream state while work is pending",
+            ));
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.processor.resident_state_snapshot_digest()?);
+        let pages = self.transient_state_pages.snapshot_bytes();
+        digest.update((pages.len() as u64).to_le_bytes());
+        digest.update(pages);
+        for value in [
+            self.session.next_stream_tick as u64,
+            self.session.completed_prompt_event_count as u64,
+            self.session.generated_token_count as u64,
+            self.session.output_token_count as u64,
+        ] {
+            digest.update(value.to_le_bytes());
+        }
+        Ok(format!(
+            "nerve.optimizer.artifact_sha256.v1:{:x}",
+            digest.finalize()
+        ))
+    }
+
     fn quiesce_and_discard_transaction_work(
         &mut self,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {

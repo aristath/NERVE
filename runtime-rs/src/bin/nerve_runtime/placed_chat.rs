@@ -86,35 +86,19 @@ fn run_placed_chat(
                 .saturating_add(prepared.user_token_delta.len())
                 .saturating_add(
                     prepared.generation_prompt_token_delta.len(),
-                );
+            );
             let mut previous_output_at = None;
             let mut sustained_decode_samples = Vec::new();
-            reset_vulkan_resident_execution_counters();
-            let run_start = Instant::now();
-
-            let user_run = engine.submit_input_event_until_idle(
+            let transaction = execute_vulkan_resident_chat_transaction(
+                &mut engine,
                 "main",
-                VulkanResidentTokenInputEvent::new(
-                    format!("chat_{turn_index}_user"),
-                    prepared.user_token_delta.clone(),
-                    0,
-                )
-                .with_origin("cli_chat_canonical_user"),
-            )?;
-            let mut generation_event = VulkanResidentTokenInputEvent::new(
-                format!("chat_{turn_index}_generation"),
-                prepared.generation_prompt_token_delta.clone(),
+                chat_session,
+                &transcript_codec,
+                &stop_token_ids,
+                turn_index,
+                input_text,
+                prepared,
                 args.max_new_tokens,
-            )
-            .with_origin("cli_chat_generation_branch");
-            let generation_event_id = generation_event.id.clone();
-            if !stop_token_ids.is_empty() {
-                generation_event = generation_event.with_stop_tokens(stop_token_ids.clone());
-            }
-            let generation_run = engine
-                .submit_input_event_transactionally_until_idle_with_output(
-                "main",
-                generation_event,
                 |output_event| {
                     let output_at = Instant::now();
                     if let Some(previous) = previous_output_at {
@@ -157,36 +141,15 @@ fn run_placed_chat(
                     }
                 },
             )?;
-            let assistant_content_ids = assistant_content_token_ids(
-                &generation_run.generated_token_ids,
-                &stop_token_ids,
-            );
-            let assistant_content = transcript_codec.decode_tokens(assistant_content_ids)?;
-            let (assistant_commit_delta, canonical_committed_token_ids) = chat_session
-                .render_assistant_commit_token_delta(
-                    prepared,
-                    input_text,
-                    &assistant_content,
-                    &transcript_codec,
-                )?;
-            let commit_run = engine.submit_input_event_until_idle(
-                "main",
-                VulkanResidentTokenInputEvent::new(
-                    format!("chat_{turn_index}_assistant_commit"),
-                    assistant_commit_delta.clone(),
-                    0,
-                )
-                .with_origin("cli_chat_canonical_assistant"),
-            )?;
-            let run_time_ns = elapsed_nanos_u64(run_start);
-            let execution_counters = vulkan_resident_execution_counters();
-            let submitted_run = generation_run
+            let submitted_run = transaction
+                .generation_run
                 .engine_run
                 .input_runs
                 .iter()
                 .find(|input_run| {
                     input_run.stream_id == "main"
-                        && input_run.submitted_run.input_event.id == generation_event_id
+                        && input_run.submitted_run.input_event.id
+                            == transaction.generation_event_id
                 })
                 .ok_or_else(|| {
                     io::Error::new(
@@ -195,9 +158,9 @@ fn run_placed_chat(
                     )
                 })?;
             let engine_runs = [
-                &user_run.engine_run,
-                &generation_run.engine_run,
-                &commit_run.engine_run,
+                &transaction.user_run.engine_run,
+                &transaction.generation_run.engine_run,
+                &transaction.commit_run.engine_run,
             ];
             let prefill_activation_count = engine_runs
                 .iter()
@@ -209,13 +172,13 @@ fn run_placed_chat(
                 .sum();
             let timing = runtime_prompt_timing_report(
                 0,
-                run_time_ns,
+                transaction.elapsed_ns,
                 prepared
                     .user_token_delta
                     .len()
                     .saturating_add(prepared.generation_prompt_token_delta.len())
-                    .saturating_add(assistant_commit_delta.len()),
-                generation_run.generated_token_ids.len(),
+                    .saturating_add(transaction.assistant_commit_token_ids.len()),
+                transaction.generated_token_ids.len(),
                 engine_runs.iter().map(|run| run.scheduler_step_count).sum(),
                 engine_runs
                     .iter()
@@ -259,94 +222,62 @@ fn run_placed_chat(
                     .run
                     .scheduler_turn_count,
             );
-            let prefix_state_cache = commit_run.engine_run.prefix_state_cache.clone();
+            let prefix_state_cache =
+                transaction.commit_run.engine_run.prefix_state_cache.clone();
             if let Some(error) = output_error {
                 return Err(Box::new(io::Error::new(io::ErrorKind::InvalidData, error)));
             }
+            let speculative_decode =
+                submitted_run.submitted_run.session_run.run.speculative_decode.clone();
+            let resident_feedback = runtime_feedback_execution_report(
+                submitted_run
+                    .submitted_run
+                    .session_run
+                    .run
+                    .resident_feedback
+                    .clone(),
+            );
+            let transport_edges = runtime_placed_transport_edge_reports(
+                &submitted_run
+                    .submitted_run
+                    .session_run
+                    .run
+                    .transport_stats,
+            );
             Ok(RuntimeChatTurn {
-                generated_token_ids: generation_run.generated_token_ids,
-                canonical_committed_token_ids,
+                generated_token_ids: transaction.generated_token_ids,
+                canonical_committed_token_ids:
+                    transaction.canonical_committed_token_ids,
                 streamed: true,
                 timing,
                 sustained_decode:
                     RuntimeSustainedDecodeReport::from_samples(
                         &sustained_decode_samples,
-                    ),
-                implementation_selection: implementation_selection.clone(),
-                execution_counters,
-                prefix_state_cache,
-                speculative_cycle_count: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .cycle_count,
-                speculative_rollback_cycle_count: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .rollback_cycle_count,
-                proposed_draft_token_count: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .proposed_draft_token_count,
-                accepted_draft_token_count: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .accepted_draft_token_count,
-                speculative_emitted_token_count: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .emitted_token_count,
-                speculative_draft_time_ns: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .draft_time_ns,
-                speculative_target_verification_time_ns: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .target_verification_time_ns,
-                speculative_draft_catch_up_time_ns: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .draft_catch_up_time_ns,
-                speculative_total_time_ns: submitted_run
-                    .submitted_run
-                    .session_run
-                    .run
-                    .speculative_decode
-                    .total_time_ns,
-                resident_feedback: runtime_feedback_execution_report(
-                    submitted_run
-                        .submitted_run
-                        .session_run
-                        .run
-                        .resident_feedback,
                 ),
+                implementation_selection: implementation_selection.clone(),
+                execution_counters: transaction.execution_counters,
+                prefix_state_cache,
+                speculative_cycle_count: speculative_decode.cycle_count,
+                speculative_rollback_cycle_count:
+                    speculative_decode.rollback_cycle_count,
+                proposed_draft_token_count:
+                    speculative_decode.proposed_draft_token_count,
+                accepted_draft_token_count:
+                    speculative_decode.accepted_draft_token_count,
+                speculative_emitted_token_count:
+                    speculative_decode.emitted_token_count,
+                speculative_draft_time_ns: speculative_decode.draft_time_ns,
+                speculative_target_verification_time_ns:
+                    speculative_decode.target_verification_time_ns,
+                speculative_draft_catch_up_time_ns:
+                    speculative_decode.draft_catch_up_time_ns,
+                speculative_total_time_ns: speculative_decode.total_time_ns,
+                resident_feedback,
                 sparse_moe: sparse_moe_contract.work_report(
                     prefill_activation_count,
                     decode_activation_count,
                 ),
-                transport_edges: runtime_placed_transport_edge_reports(
-                    &submitted_run
-                        .submitted_run
-                        .session_run
-                        .run
-                        .transport_stats,
-                ),
+                transport_edges,
             })
         },
     )

@@ -87,13 +87,22 @@ def component_fixture_from_geometry(
 
 def conversation_fixture() -> Json:
     return {
-        "schema": "nerve.optimizer.conversation_fixture.v1",
+        "schema": "nerve.optimizer.validation_conversation.v1",
         "enable_thinking": True,
         "turns": [
             "Who are you?",
             "What is the capital of Greece?",
             "Explain why RMS normalization is useful in one concise paragraph.",
             ("I asked you earlier for the capital of a country. Which country was it?"),
+        ],
+        "teacher_forced_assistant_turns": [
+            "I am a language model.",
+            "The capital of Greece is Athens.",
+            (
+                "RMS normalization stabilizes activation scale while avoiding "
+                "mean subtraction, which makes it simple and efficient."
+            ),
+            "You asked about Greece.",
         ],
     }
 

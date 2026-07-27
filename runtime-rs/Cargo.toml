@@ -28,6 +28,11 @@ name = "nerve-optimizer-executor"
 path = "src/bin/nerve_optimizer_executor.rs"
 required-features = ["vulkan"]
 
+[[bin]]
+name = "nerve-validation-executor"
+path = "src/bin/nerve_validation_executor.rs"
+required-features = ["vulkan", "tokenizers"]
+
 [features]
 default = []
 vulkan = ["dep:ash"]

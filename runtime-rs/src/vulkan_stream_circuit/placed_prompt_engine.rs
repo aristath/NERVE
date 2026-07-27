@@ -88,6 +88,38 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         self.streams.get(stream_id)
     }
 
+    pub fn stream_resident_state_digest(
+        &self,
+        stream_id: &str,
+    ) -> Result<String, VulkanResidentInProcessPlacedPromptEngineError> {
+        let stream = self.streams.get(stream_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                stream_id: stream_id.to_string(),
+            }
+        })?;
+        let mut digest = sha2::Sha256::new();
+        use sha2::Digest;
+        let resident = stream.resident_state_digest()?;
+        digest.update((resident.len() as u64).to_le_bytes());
+        digest.update(resident.as_bytes());
+        let history = self.stream_histories.get(stream_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                stream_id: stream_id.to_string(),
+            }
+        })?;
+        for token_id in &history.committed_state_token_ids {
+            digest.update(token_id.to_le_bytes());
+        }
+        digest.update([0xff]);
+        for token_id in &history.pending_feedback_token_ids {
+            digest.update(token_id.to_le_bytes());
+        }
+        Ok(format!(
+            "nerve.optimizer.artifact_sha256.v1:{:x}",
+            digest.finalize()
+        ))
+    }
+
     pub fn fork_stream(
         &mut self,
         source_stream_id: &str,

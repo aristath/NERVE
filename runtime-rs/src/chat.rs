@@ -3,14 +3,19 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
 use chrono::{DateTime, FixedOffset, Local};
 use minijinja::{Environment, Error as TemplateError, ErrorKind as TemplateErrorKind};
 use serde::Serialize;
 
 use crate::{
-    VulkanResidentHfTokenizerTextCodec, VulkanResidentModelPackageManifest,
-    VulkanResidentTokenTextCodec,
+    VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
+    VulkanResidentInProcessPlacedPromptEngine,
+    VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun, VulkanResidentModelPackageManifest,
+    VulkanResidentTokenInputEvent, VulkanResidentTokenRuntimeSchedulerOutputEvent,
+    VulkanResidentTokenTextCodec, reset_vulkan_resident_execution_counters,
+    vulkan_resident_execution_counters,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -31,6 +36,108 @@ pub struct RuntimePreparedChatTurn {
     pub canonical_user_token_ids: Vec<u32>,
     pub user_token_delta: Vec<u32>,
     pub generation_prompt_token_delta: Vec<u32>,
+}
+
+pub struct VulkanResidentChatTransactionRun {
+    pub generated_token_ids: Vec<u32>,
+    pub assistant_content: String,
+    pub canonical_committed_token_ids: Vec<u32>,
+    pub assistant_commit_token_ids: Vec<u32>,
+    pub generation_event_id: String,
+    pub user_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+    pub generation_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+    pub commit_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+    pub execution_counters: VulkanResidentExecutionCounters,
+    pub elapsed_ns: u64,
+}
+
+pub fn execute_vulkan_resident_chat_transaction<T, F>(
+    engine: &mut VulkanResidentInProcessPlacedPromptEngine,
+    stream_id: &str,
+    chat_session: &RuntimeChatSession,
+    transcript_codec: &T,
+    stop_token_ids: &[u32],
+    turn_index: usize,
+    user_content: &str,
+    prepared: &RuntimePreparedChatTurn,
+    max_new_tokens: usize,
+    mut on_output_event: F,
+) -> Result<VulkanResidentChatTransactionRun, Box<dyn Error>>
+where
+    T: VulkanResidentTokenTextCodec,
+    F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
+{
+    reset_vulkan_resident_execution_counters();
+    let started = Instant::now();
+    let user_run = engine.submit_input_event_until_idle(
+        stream_id,
+        VulkanResidentTokenInputEvent::new(
+            format!("chat_{turn_index}_user"),
+            prepared.user_token_delta.clone(),
+            0,
+        )
+        .with_origin("runtime_chat_canonical_user"),
+    )?;
+    let mut generation_event = VulkanResidentTokenInputEvent::new(
+        format!("chat_{turn_index}_generation"),
+        prepared.generation_prompt_token_delta.clone(),
+        max_new_tokens,
+    )
+    .with_origin("runtime_chat_generation_branch");
+    let generation_event_id = generation_event.id.clone();
+    if !stop_token_ids.is_empty() {
+        generation_event = generation_event.with_stop_tokens(stop_token_ids.to_vec());
+    }
+    let generation_run = engine.submit_input_event_transactionally_until_idle_with_output(
+        stream_id,
+        generation_event,
+        &mut on_output_event,
+    )?;
+    let assistant_content = transcript_codec.decode_tokens(assistant_content_token_ids(
+        &generation_run.generated_token_ids,
+        stop_token_ids,
+    ))?;
+    let (assistant_commit_token_ids, canonical_committed_token_ids) = chat_session
+        .render_assistant_commit_token_delta(
+            prepared,
+            user_content,
+            &assistant_content,
+            transcript_codec,
+        )?;
+    let commit_run = engine.submit_input_event_until_idle(
+        stream_id,
+        VulkanResidentTokenInputEvent::new(
+            format!("chat_{turn_index}_assistant_commit"),
+            assistant_commit_token_ids.clone(),
+            0,
+        )
+        .with_origin("runtime_chat_canonical_assistant"),
+    )?;
+    Ok(VulkanResidentChatTransactionRun {
+        generated_token_ids: generation_run.generated_token_ids.clone(),
+        assistant_content,
+        canonical_committed_token_ids,
+        assistant_commit_token_ids,
+        generation_event_id,
+        user_run,
+        generation_run,
+        commit_run,
+        execution_counters: vulkan_resident_execution_counters(),
+        elapsed_ns: u64::try_from(started.elapsed().as_nanos())
+            .unwrap_or(u64::MAX)
+            .max(1),
+    })
+}
+
+pub fn assistant_content_token_ids<'a>(
+    generated_token_ids: &'a [u32],
+    stop_token_ids: &[u32],
+) -> &'a [u32] {
+    let mut content_len = generated_token_ids.len();
+    while content_len > 0 && stop_token_ids.contains(&generated_token_ids[content_len - 1]) {
+        content_len -= 1;
+    }
+    &generated_token_ids[..content_len]
 }
 
 pub fn chat_transcript_codec(

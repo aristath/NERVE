@@ -32,6 +32,7 @@ use nerve_runtime::{
     RuntimeChatSession, RuntimePreparedChatTurn,
     chat_stop_token_ids_from_manifest, chat_transcript_codec,
     discover_cpu_hardware_profile, reset_vulkan_resident_execution_counters,
+    execute_vulkan_resident_chat_transaction,
     runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters,
 };

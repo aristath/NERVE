@@ -26,6 +26,39 @@ pub struct VulkanResidentTransientStatePageBinding {
 }
 
 impl VulkanResidentTransientStatePageTable {
+    pub(crate) fn snapshot_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(
+            &self
+                .states
+                .iter()
+                .map(|(key, pages)| {
+                    serde_json::json!({
+                        "node_instance_id": key.node_instance_id,
+                        "state_id": key.state_id,
+                        "block_activation_capacity": pages.block_activation_capacity,
+                        "logical_to_physical": pages.logical_to_physical,
+                        "logical_page_blocks": pages
+                            .logical_page_blocks
+                            .iter()
+                            .map(|block| block.map(|value| value.0))
+                            .collect::<Vec<_>>(),
+                        "block_to_physical": pages
+                            .block_to_physical
+                            .iter()
+                            .map(|(block, physical)| (block.0, *physical))
+                            .collect::<Vec<_>>(),
+                        "free_physical_pages": pages
+                            .free_physical_pages
+                            .iter()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("transient-state page table snapshot is serializable")
+    }
+
     pub fn clear(&mut self) {
         self.states.clear();
     }
