@@ -44,26 +44,35 @@ class CompleteSemanticConstructor:
         source_path: str | None = None,
         stream_source: bool = False,
         stream_parameter: bool = False,
+        source_regions: tuple[tuple[int, int], ...] | None = None,
     ) -> None:
         self.calls = calls
         self.source_path = source_path
         self.stream_source = stream_source
         self.stream_parameter = stream_parameter
+        self.source_regions = source_regions
 
     def construct_semantic_artifacts(self, context) -> None:
         self.calls.append("semantic_construction")
         if self.source_path is not None:
-            source = (
-                b"".join(
-                    context.iter_source_artifact(
-                        self.source_path,
-                        chunk_bytes=5,
+            if self.source_regions is not None:
+                assert context.read_source_artifact_regions(
+                    self.source_path,
+                    self.source_regions,
+                    chunk_bytes=5,
+                ) == (b"immutable", b"source", b"parameter")
+            else:
+                source = (
+                    b"".join(
+                        context.iter_source_artifact(
+                            self.source_path,
+                            chunk_bytes=5,
+                        )
                     )
+                    if self.stream_source
+                    else context.read_source_artifact(self.source_path)
                 )
-                if self.stream_source
-                else context.read_source_artifact(self.source_path)
-            )
-            assert source == b"immutable source parameter"
+                assert source == b"immutable source parameter"
         context.account_transient_bytes(4096)
         for path in (
             "codebooks/table.bin",
@@ -327,6 +336,44 @@ def test_declared_source_input_is_digest_checked_and_sealed(
     assert source_path.read_bytes() == b"immutable source parameter"
 
 
+def test_declared_source_regions_are_streamed_and_whole_file_digest_checked(
+    tmp_path: Path,
+) -> None:
+    package_dir, session = _package(tmp_path)
+    source_path = package_dir / "weights" / "source.bin"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"immutable source parameter")
+    plan = _plan()
+    build_document = plan.construction_requirements.to_json()
+    build_document["source_inputs"] = [
+        {
+            "path": "weights/source.bin",
+            "digest": staged_artifact_digest(source_path.read_bytes()),
+        }
+    ]
+    plan = replace(
+        plan,
+        construction_requirements=CandidateBuildPlan.from_json(build_document),
+    )
+    session = _session_with_candidate(session, plan)
+
+    outcome = stage_candidate(
+        package_dir=package_dir,
+        workspace_root=tmp_path / "workspace",
+        plan=plan,
+        session=session,
+        semantic_constructor=CompleteSemanticConstructor(
+            [],
+            source_path="weights/source.bin",
+            source_regions=((0, 9), (10, 6), (17, 9)),
+        ),
+        ordinary_relowerer=CompleteRelowerer([]),
+        physical_optimizer=CompletePhysicalOptimizer([]),
+    )
+
+    assert outcome.status == "completed"
+
+
 def test_failed_phase_is_isolated_and_leaves_no_candidate_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -560,7 +607,7 @@ def test_loader_rejects_construction_record_tampering(
     plan = _plan()
     session = _session_with_candidate(session, plan)
     workspace = tmp_path / "workspace"
-    outcome = stage_candidate(
+    stage_candidate(
         package_dir=package_dir,
         workspace_root=workspace,
         plan=plan,

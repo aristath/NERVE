@@ -149,6 +149,75 @@ class CandidateConstructionContext:
     def read_source_artifact(self, relative_path: str) -> bytes:
         return b"".join(self.iter_source_artifact(relative_path))
 
+    def read_source_artifact_regions(
+        self,
+        relative_path: str,
+        ranges: Iterable[tuple[int, int]],
+        *,
+        chunk_bytes: int = 8 * 1024 * 1024,
+    ) -> tuple[bytes, ...]:
+        requested = tuple(ranges)
+        for index, region in enumerate(requested):
+            if (
+                not isinstance(region, tuple)
+                or len(region) != 2
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in region
+                )
+                or region[0] < 0
+                or region[1] < 0
+            ):
+                raise ModelCompileError(
+                    f"candidate source region {index} must contain "
+                    "non-negative integer offset and byte count"
+                )
+        if not requested:
+            raise ModelCompileError(
+                "candidate source region read requires at least one region"
+            )
+        buffers = [bytearray() for _ in requested]
+        cursor = 0
+        for chunk in self.iter_source_artifact(
+            relative_path,
+            chunk_bytes=chunk_bytes,
+        ):
+            chunk_end = cursor + len(chunk)
+            for index, (offset, byte_count) in enumerate(requested):
+                end = offset + byte_count
+                overlap_start = max(cursor, offset)
+                overlap_end = min(chunk_end, end)
+                if overlap_start < overlap_end:
+                    buffers[index].extend(
+                        chunk[
+                            overlap_start - cursor : overlap_end - cursor
+                        ]
+                    )
+            cursor = chunk_end
+        for index, ((offset, byte_count), payload) in enumerate(
+            zip(requested, buffers, strict=True)
+        ):
+            if len(payload) != byte_count:
+                raise ModelCompileError(
+                    f"candidate source region {index} exceeds artifact "
+                    f"{relative_path!r} at offset {offset}"
+                )
+        return tuple(bytes(payload) for payload in buffers)
+
+    def read_source_artifact_region(
+        self,
+        relative_path: str,
+        offset: int,
+        byte_count: int,
+        *,
+        chunk_bytes: int = 8 * 1024 * 1024,
+    ) -> bytes:
+        return self.read_source_artifact_regions(
+            relative_path,
+            ((offset, byte_count),),
+            chunk_bytes=chunk_bytes,
+        )[0]
+
     def iter_source_artifact(
         self,
         relative_path: str,

@@ -113,6 +113,7 @@ def test_package_source_artifacts_read_exact_storage_and_copy_out_metadata(
 
     assert tensor.metadata["dtype"] == "BF16"
     assert tensor.payload_byte_count == len(payload)
+    assert resolver.read_path("tensors.json") == (package / "tensors.json").read_bytes()
     assert resolver.read_tensor_storage(tensor_name) == payload
 
 

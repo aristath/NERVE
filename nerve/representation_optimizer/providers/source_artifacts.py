@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from nerve.compilation import Json, ModelCompileError, read_json
-from nerve.representation_optimizer.staging.contracts import staged_file_digest
+from nerve.representation_optimizer.staging.contracts import (
+    staged_artifact_digest,
+    staged_file_digest,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,8 @@ class SourceTensorArtifact:
 
 class SourceArtifactResolver(Protocol):
     def resolve_path(self, package_relative_path: str) -> SourceArtifact: ...
+
+    def read_path(self, package_relative_path: str) -> bytes: ...
 
     def resolve_tensor(self, tensor_name: str) -> SourceTensorArtifact: ...
 
@@ -166,22 +171,25 @@ class PackageSourceArtifactResolver:
             payload_byte_count=payload_bytes,
         )
 
+    def read_path(self, package_relative_path: str) -> bytes:
+        artifact = self.resolve_path(package_relative_path)
+        _, path = self._package_file(artifact.path)
+        payload = _read_regular_file(path, artifact.byte_count)
+        if staged_artifact_digest(payload) != artifact.digest:
+            raise ModelCompileError(
+                f"provider source artifact changed while being read: {artifact.path!r}"
+            )
+        return payload
+
     def read_tensor_storage(self, tensor_name: str) -> bytes:
         tensor = self.resolve_tensor(tensor_name)
         _, path = self._package_file(tensor.storage.path)
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(path, flags)
-            try:
-                payload = os.pread(
-                    descriptor,
-                    tensor.payload_byte_count,
-                    tensor.payload_byte_offset,
-                )
-            finally:
-                os.close(descriptor)
+            payload = _read_regular_file_region(
+                path,
+                tensor.payload_byte_offset,
+                tensor.payload_byte_count,
+            )
         except OSError as error:
             raise ModelCompileError(
                 f"compiled tensor {tensor_name!r} cannot be read safely"
@@ -279,3 +287,39 @@ def _sha256_hex(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _read_regular_file(path: Path, expected_bytes: int) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        payload = bytearray()
+        while len(payload) < expected_bytes:
+            chunk = os.read(descriptor, min(8 * 1024 * 1024, expected_bytes - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if os.read(descriptor, 1):
+            raise ModelCompileError(
+                f"provider source artifact grew while being read: {path}"
+            )
+    finally:
+        os.close(descriptor)
+    if len(payload) != expected_bytes:
+        raise ModelCompileError(
+            f"provider source artifact was truncated while being read: {path}"
+        )
+    return bytes(payload)
+
+
+def _read_regular_file_region(path: Path, offset: int, byte_count: int) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        return os.pread(descriptor, byte_count, offset)
+    finally:
+        os.close(descriptor)
