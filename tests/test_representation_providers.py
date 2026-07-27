@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from nerve.compilation import ModelCompileCancelled
 from nerve.representation_optimizer.benchmarking.planning import (
     create_benchmark_workload,
 )
@@ -777,6 +778,32 @@ def test_provider_failures_are_isolated_from_other_registered_providers():
     }
     assert len(report.candidates) == 1
     assert report.candidates[0].provider == healthy.identity
+
+
+def test_provider_cancellation_is_not_converted_to_provider_failure():
+    cancel_state = {"requested": False}
+
+    class CancellingProvider(FixtureProvider):
+        def match_semantics(self, context):
+            cancel_state["requested"] = True
+            context.checkpoint()
+            raise AssertionError("provider checkpoint did not cancel")
+
+    registry = ProviderRegistry.from_providers(
+        descriptors=_descriptors(),
+        providers=(
+            CancellingProvider(
+                "fixture.cancelling",
+                _descriptor_id(),
+            ),
+        ),
+    )
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled"):
+        registry.run(
+            _problem(),
+            cancel_requested=lambda: cancel_state["requested"],
+        )
 
 
 def test_semantically_duplicate_candidates_are_eliminated_across_providers():

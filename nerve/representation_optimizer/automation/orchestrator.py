@@ -234,7 +234,10 @@ def run_automated_optimizer(
                     hardware_profile=target.synthesis_profile,
                     source_artifacts=source_artifacts,
                 )
-                registry_report = providers.run(problem)
+                registry_report = providers.run(
+                    problem,
+                    cancel_requested=cancel_requested,
+                )
                 check_compile_cancelled(cancel_requested)
                 evaluations = build_provider_records(
                     scope_id=scope_id,
@@ -313,6 +316,7 @@ def run_automated_optimizer(
                         admission = ledger.admit_candidate(
                             plan,
                             execution_nanoseconds=execution_cost,
+                            benchmark_policy=target.benchmark_policy,
                         )
                         budget_path = write_new_json(
                             run_root
@@ -433,12 +437,20 @@ def run_automated_optimizer(
                 session=session,
                 cancel_requested=cancel_requested,
             )
-            published_stage = load_optimizer_stage(
-                publication_path / "optimization" / "stage.json",
-                package_dir=publication_path,
-            )
-            session = OptimizationSession.from_json(published_stage["session"])
             for promotion in ordered:
+                session = session.transition_candidate(
+                    promotion.candidate_plan.candidate_id,
+                    CandidateState.PUBLISHED,
+                    evidence_refs=(
+                        str(
+                            publication_path
+                            / promotion.registry_entry["evidence"][
+                                "promotion_decision_ref"
+                            ]
+                        ),
+                    ),
+                    reason=promotion.decision.to_json()["reason"],
+                )
                 finish_candidate(
                     candidate_records[promotion.candidate_plan.candidate_id],
                     session,

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
-from nerve.compilation import Json
+from nerve.compilation import Json, check_compile_cancelled
 from nerve.representation_optimizer.contracts import (
     ALGEBRAIC_EVIDENCE_SCHEMA,
     HARDWARE_PROCESS_PROFILE_SCHEMA,
@@ -130,6 +130,7 @@ class ProviderContext:
     _hardware_profile: ContractDocument
     _descriptor: ContractDocument
     _source_artifacts: SourceArtifactResolver | None
+    _cancel_requested: Callable[[], bool] | None = None
 
     @property
     def scopes(self) -> tuple[Json, ...]:
@@ -170,12 +171,18 @@ class ProviderContext:
 
     @property
     def source_artifacts(self) -> SourceArtifactResolver:
+        self.checkpoint()
         if self._source_artifacts is None:
             raise ContractValidationError(
                 "representation provider requires source artifact access, but "
                 "this optimization problem has no source artifact resolver"
             )
         return self._source_artifacts
+
+    def checkpoint(self) -> None:
+        """Stop provider work promptly without weakening phase isolation."""
+
+        check_compile_cancelled(self._cancel_requested)
 
 
 @dataclass(frozen=True)
@@ -276,6 +283,8 @@ class ProviderProblem:
     def bind_descriptor(
         self,
         descriptor: ContractDocument,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> ProviderContext:
         if descriptor.schema != REPRESENTATION_DESCRIPTOR_SCHEMA:
             raise ContractValidationError(
@@ -289,6 +298,7 @@ class ProviderProblem:
             _hardware_profile=self._hardware_profile,
             _descriptor=descriptor,
             _source_artifacts=self._source_artifacts,
+            _cancel_requested=cancel_requested,
         )
 
 

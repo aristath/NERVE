@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
-from nerve.compilation import Json
+from nerve.compilation import (
+    Json,
+    ModelCompileCancelled,
+    check_compile_cancelled,
+)
 from nerve.representation_optimizer.benchmarking.contracts import (
     BenchmarkWorkload,
 )
@@ -120,15 +124,28 @@ class ProviderRegistry:
             ),
         )
 
-    def run(self, problem: ProviderProblem) -> ProviderRegistryReport:
-        evaluations = tuple(
-            self._evaluate_provider(provider, problem) for provider in self.providers
-        )
+    def run(
+        self,
+        problem: ProviderProblem,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> ProviderRegistryReport:
+        evaluations = []
+        for provider in self.providers:
+            check_compile_cancelled(cancel_requested)
+            evaluations.append(
+                self._evaluate_provider(
+                    provider,
+                    problem,
+                    cancel_requested=cancel_requested,
+                )
+            )
+        check_compile_cancelled(cancel_requested)
         unique, duplicates = _deduplicate_candidates(
             plan for evaluation in evaluations for plan in evaluation.candidates
         )
         return ProviderRegistryReport(
-            evaluations=evaluations,
+            evaluations=tuple(evaluations),
             candidates=unique,
             duplicate_candidates=duplicates,
         )
@@ -137,13 +154,19 @@ class ProviderRegistry:
         self,
         provider: RepresentationProvider,
         problem: ProviderProblem,
+        *,
+        cancel_requested: Callable[[], bool] | None,
     ) -> ProviderEvaluation:
         descriptor = self.descriptors.get(provider.descriptor_id)
-        context = problem.bind_descriptor(descriptor)
+        context = problem.bind_descriptor(
+            descriptor,
+            cancel_requested=cancel_requested,
+        )
         semantic: MatchAssessment | None = None
         structural: MatchAssessment | None = None
         evidence: EvidenceAssessment | None = None
         try:
+            context.checkpoint()
             semantic = _match_assessment(
                 provider.match_semantics(context),
                 "semantic",
@@ -156,6 +179,7 @@ class ProviderRegistry:
                     status="declined",
                     semantic=semantic,
                 )
+            context.checkpoint()
             structural = _match_assessment(
                 provider.match_structure(context),
                 "structural",
@@ -169,6 +193,7 @@ class ProviderRegistry:
                     semantic=semantic,
                     structural=structural,
                 )
+            context.checkpoint()
             evidence = _evidence_assessment(
                 provider.analyze_evidence(context),
                 context,
@@ -181,11 +206,13 @@ class ProviderRegistry:
                     structural=structural,
                     evidence=evidence,
                 )
+            context.checkpoint()
             if not set(structural.evidence_ids).issubset(evidence.evidence_ids):
                 raise ContractValidationError(
                     "provider evidence analysis dropped structural match evidence"
                 )
             raw_candidates = provider.synthesize_candidates(context, evidence)
+            context.checkpoint()
             if not isinstance(raw_candidates, tuple) or not raw_candidates:
                 raise ContractValidationError(
                     "matched provider must synthesize a non-empty candidate tuple"
@@ -196,6 +223,7 @@ class ProviderRegistry:
                     context,
                     evidence,
                     raw_candidate,
+                    cancel_requested=cancel_requested,
                 )
                 for raw_candidate in raw_candidates
             )
@@ -213,6 +241,8 @@ class ProviderRegistry:
                     sorted(candidates, key=lambda item: item.candidate_id)
                 ),
             )
+        except ModelCompileCancelled:
+            raise
         except Exception as error:
             return _evaluation(
                 provider,
@@ -232,7 +262,10 @@ def _candidate_plan(
     context: ProviderContext,
     evidence: EvidenceAssessment,
     raw_candidate: Json,
+    *,
+    cancel_requested: Callable[[], bool] | None,
 ) -> ProviderCandidatePlan:
+    check_compile_cancelled(cancel_requested)
     candidate = ContractDocument.from_json(
         raw_candidate,
         expected_schema=REPRESENTATION_CANDIDATE_SCHEMA,
@@ -250,6 +283,7 @@ def _candidate_plan(
     representation_ir = RepresentationGraphDocument.from_json(
         provider.emit_representation_ir(context, candidate.to_json())
     )
+    check_compile_cancelled(cancel_requested)
     _validate_representation_ir_source(
         representation_ir.to_json(),
         document,
@@ -263,6 +297,7 @@ def _candidate_plan(
         ),
         "target lowering",
     )
+    check_compile_cancelled(cancel_requested)
     estimate = provider.estimate_static_cost(
         context,
         candidate.to_json(),
@@ -273,6 +308,7 @@ def _candidate_plan(
         raise ContractValidationError(
             "provider static cost estimator must return StaticEstimate"
         )
+    check_compile_cancelled(cancel_requested)
     construction = CandidateBuildPlan.from_json(
         provider.construction_requirements(context, candidate.to_json())
     )
@@ -287,6 +323,7 @@ def _candidate_plan(
         candidate_id=str(document["candidate_id"]),
         build_plan=construction,
     )
+    check_compile_cancelled(cancel_requested)
     proof = _provider_document(
         provider.proof_or_error_contract(context, candidate.to_json()),
         "proof or error contract",
@@ -296,6 +333,7 @@ def _candidate_plan(
         raise ContractValidationError(
             "provider proof or error contract disagrees with candidate"
         )
+    check_compile_cancelled(cancel_requested)
     raw_workloads = provider.benchmark_workloads(context, candidate.to_json())
     if not isinstance(raw_workloads, tuple) or not raw_workloads:
         raise ContractValidationError(
@@ -305,9 +343,11 @@ def _candidate_plan(
         BenchmarkWorkload.from_json(workload)
         for workload in raw_workloads
     )
+    check_compile_cancelled(cancel_requested)
     validation = ValidationRequirements.from_json(
         provider.validation_requirements(context, candidate.to_json())
     )
+    check_compile_cancelled(cancel_requested)
     return ProviderCandidatePlan(
         provider=provider.identity,
         candidate=candidate,

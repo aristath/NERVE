@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from nerve.representation_optimizer.benchmarking.planning import BenchmarkPolicy
 from nerve.representation_optimizer.automation.contracts import (
     BudgetAdmission,
     BudgetUsage,
@@ -32,6 +33,7 @@ class BudgetLedger:
         plan: ProviderCandidatePlan,
         *,
         execution_nanoseconds: int | None,
+        benchmark_policy: BenchmarkPolicy,
     ) -> BudgetAdmission:
         estimate = plan.static_estimate
         cost = CandidateResourceCost(
@@ -39,8 +41,10 @@ class BudgetLedger:
             transient_bytes=estimate.transient_bytes,
             construction_nanoseconds=estimate.construction_nanoseconds,
             execution_nanoseconds=execution_nanoseconds,
-            # sanity + matched benchmark + full-local + whole-model
-            experiment_invocations=4,
+            experiment_invocations=planned_experiment_invocations(
+                plan,
+                benchmark_policy,
+            ),
         )
         before = self._usage
         reasons = []
@@ -119,3 +123,22 @@ class BudgetLedger:
             usage_before=before,
             usage_after=self._usage,
         )
+
+
+def planned_experiment_invocations(
+    plan: ProviderCandidatePlan,
+    policy: BenchmarkPolicy,
+) -> int:
+    """Count every reference/candidate execution admitted by the full funnel."""
+
+    benchmark = sum(
+        len(workload.to_json()["randomness"]["seeds"])
+        * 2
+        * (policy.warmup_samples + policy.measured_pairs_per_seed)
+        for workload in plan.benchmark_workloads
+    )
+    validation = sum(
+        len(check["seeds"]) * 2
+        for check in plan.validation_requirements.checks
+    )
+    return benchmark + validation

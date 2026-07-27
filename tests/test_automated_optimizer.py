@@ -244,7 +244,7 @@ def _budget(*, maximum_candidates: int = 1) -> OptimizationBudget:
         maximum_transient_bytes=1_000_000,
         maximum_construction_nanoseconds=1_000_000_000,
         maximum_execution_nanoseconds=1_000_000_000,
-        maximum_experiment_invocations=maximum_candidates * 4,
+        maximum_experiment_invocations=maximum_candidates * 1_000,
     )
 
 
@@ -360,6 +360,38 @@ def test_bounded_construction_budget_rejects_uncalibrated_estimate(
     assert lease.acquisitions == 0
 
 
+def test_experiment_budget_counts_every_planned_role_execution(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, lease = _target()
+    budget = replace(
+        _budget(),
+        maximum_experiment_invocations=93,
+    )
+
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        output_package_dir=tmp_path / "unused-output",
+        run_root=tmp_path / "run",
+        providers=_providers(),
+        targets=(target,),
+        budget=budget,
+    )
+
+    candidate = outcome.report["candidates"][0]
+    decision = json.loads(
+        (tmp_path / "run" / candidate["budget_decision_ref"]).read_text()
+    )
+    assert decision["cost"]["experiment_invocations"] == 94
+    assert candidate["status"] == "rejected"
+    assert any(
+        "maximum_experiment_invocations: 94 > 93" in reason
+        for reason in candidate["rejection_reasons"]
+    )
+    assert lease.acquisitions == 0
+
+
 def test_candidate_failure_is_audited_and_releases_every_lease(
     tmp_path: Path,
 ) -> None:
@@ -421,6 +453,20 @@ def test_failed_candidate_does_not_prevent_independent_candidate_promotion(
     assert outcome.report["summary"]["promotion_count"] == 1
     assert lease.maximum_active == 1
     assert lease.acquisitions == lease.releases == 3
+    lifecycle_states = {
+        candidate["candidate_id"]: candidate["state"]
+        for candidate in outcome.report["session"]["candidates"]
+    }
+    assert lifecycle_states == {
+        candidate["candidate_id"]: candidate["status"]
+        for candidate in outcome.report["candidates"]
+    }
+    assert (
+        tmp_path
+        / "run"
+        / "promotions"
+        / f"{candidates['fixture.good-construction']['promotion_id']}.json"
+    ).is_file()
 
 
 def test_device_target_cannot_use_noop_lease_manager(tmp_path: Path) -> None:
@@ -513,6 +559,28 @@ def test_report_detects_truncated_event_journal(tmp_path: Path) -> None:
     events.write_text("\n".join(lines[:-1]) + "\n")
 
     with pytest.raises(ModelCompileError, match="event count"):
+        validate_report_directory(tmp_path / "run")
+
+
+def test_report_detects_missing_event_evidence(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    target, _ = _target()
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        output_package_dir=tmp_path / "unused-output",
+        run_root=tmp_path / "run",
+        providers=_providers(),
+        targets=(target,),
+        budget=_budget(maximum_candidates=0),
+    )
+    decision = (
+        tmp_path
+        / "run"
+        / outcome.report["candidates"][0]["budget_decision_ref"]
+    )
+    decision.unlink()
+
+    with pytest.raises(ModelCompileError, match="evidence is missing"):
         validate_report_directory(tmp_path / "run")
 
 

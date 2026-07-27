@@ -26,6 +26,11 @@ class EventJournal:
             0o644,
         )
         os.close(descriptor)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def record(
         self,
@@ -81,5 +86,49 @@ def read_event_journal(path: Path) -> tuple[Json, ...]:
                 raise ModelCompileError(
                     "optimizer event journal is malformed or non-contiguous"
                 )
+            if set(document) != {
+                "schema",
+                "sequence",
+                "phase",
+                "status",
+                "scope_id",
+                "target_id",
+                "candidate_id",
+                "evidence_refs",
+                "details",
+            }:
+                raise ModelCompileError(
+                    "optimizer event journal contains unknown or missing fields"
+                )
+            if not all(
+                isinstance(document[field], str) and document[field]
+                for field in ("phase", "status")
+            ):
+                raise ModelCompileError(
+                    "optimizer event phase and status must be non-empty strings"
+                )
+            if any(
+                document[field] is not None
+                and (
+                    not isinstance(document[field], str)
+                    or not document[field]
+                )
+                for field in ("scope_id", "target_id", "candidate_id")
+            ):
+                raise ModelCompileError(
+                    "optimizer event optional identities are invalid"
+                )
+            if (
+                not isinstance(document["evidence_refs"], list)
+                or not all(
+                    isinstance(value, str) and value
+                    for value in document["evidence_refs"]
+                )
+                or not isinstance(document["details"], dict)
+            ):
+                raise ModelCompileError(
+                    "optimizer event evidence or details are malformed"
+                )
+            canonical_json_bytes(document)
             events.append(document)
     return tuple(events)

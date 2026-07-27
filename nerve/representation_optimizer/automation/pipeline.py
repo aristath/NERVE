@@ -11,6 +11,10 @@ from nerve.compilation import (
     check_compile_cancelled,
 )
 from nerve.representation_optimizer.automation.events import EventJournal
+from nerve.representation_optimizer.automation.storage import (
+    relative_ref,
+    write_new_json,
+)
 from nerve.representation_optimizer.automation.target import OptimizationTarget
 from nerve.representation_optimizer.benchmarking.orchestrator import (
     benchmark_candidate,
@@ -279,14 +283,19 @@ def execute_candidate(
     )
     session = promotion.session
     updates["promotion_id"] = promotion.decision.to_json()["promotion_id"]
+    promotion_path = write_new_json(
+        run_root
+        / "promotions"
+        / f"{promotion.decision.to_json()['promotion_id']}.json",
+        promotion.decision.to_json(),
+    )
+    promotion_ref = relative_ref(run_root, promotion_path)
     journal.record(
         phase="promotion",
         status="prepared",
         target_id=target.target_id,
         candidate_id=candidate_id,
-        evidence_refs=(
-            f"promotions/{promotion.decision.to_json()['promotion_id']}.json",
-        ),
+        evidence_refs=(promotion_ref,),
         details={"implementation_id": promotion.implementation_id},
     )
     cancelled = _cancelled_session(

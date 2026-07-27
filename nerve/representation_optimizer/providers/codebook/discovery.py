@@ -82,6 +82,7 @@ class DiscoveryResult:
 
 
 def discover_head_norm_codebook(context: ProviderContext) -> DiscoveryResult:
+    context.checkpoint()
     if len(context.scopes) != 1 or len(context.source_contracts) != 1:
         return DiscoveryResult(
             None,
@@ -202,6 +203,7 @@ def discover_head_norm_codebook(context: ProviderContext) -> DiscoveryResult:
     resolver = context.source_artifacts
     branch_inputs = []
     for operator in operators:
+        context.checkpoint()
         parameter_ref_id = str(operator["params"][0])
         tensor_name = parameter_tensors[parameter_ref_id]
         tensor = resolver.resolve_tensor(tensor_name)
@@ -229,6 +231,7 @@ def discover_head_norm_codebook(context: ProviderContext) -> DiscoveryResult:
         )
         branch_inputs.append((operator, parameter_ref_id, tensor_name, tensor, values))
 
+    context.checkpoint()
     codebook_values = tuple(
         sorted({value for item in branch_inputs for value in item[4]})
     )
