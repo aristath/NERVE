@@ -68,6 +68,13 @@ struct MountedValidation {
 }
 
 fn main() {
+    if std::env::args()
+        .skip(1)
+        .eq(["--package-compiler-fingerprint"])
+    {
+        println!("{}", nerve_runtime::VULKAN_PACKAGE_COMPILER_FINGERPRINT);
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("nerve-validation-executor error: {error}");
         std::process::exit(1);

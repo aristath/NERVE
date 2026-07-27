@@ -4,12 +4,14 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
+from nerve.compiler_fingerprint import COMPILER_FINGERPRINT_SCHEMA
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
     LinuxAmdDeviceStateProbe,
@@ -44,6 +46,8 @@ from nerve.representation_optimizer.validation.proofs import (
 class RuntimeOptimizationPolicy:
     model_residency_fraction_ppm: int = 850_000
     component_quantum_wait_ns: int = 1_000_000_000
+    context_lifecycle_required_observations: int = 2
+    maximum_context_lifecycle_attempts: int = 5
 
     def __post_init__(self) -> None:
         if not 0 < self.model_residency_fraction_ppm <= 1_000_000:
@@ -53,6 +57,17 @@ class RuntimeOptimizationPolicy:
         if self.component_quantum_wait_ns <= 0:
             raise ModelCompileError(
                 "component execution quantum wait must be positive"
+            )
+        if self.context_lifecycle_required_observations < 2:
+            raise ModelCompileError(
+                "context lifecycle requires at least two matching endpoints"
+            )
+        if (
+            self.maximum_context_lifecycle_attempts
+            < self.context_lifecycle_required_observations
+        ):
+            raise ModelCompileError(
+                "context lifecycle attempt bound must cover required endpoints"
             )
 
 
@@ -94,6 +109,41 @@ def prepare_runtime_optimization_targets(
     check_compile_cancelled(cancel_requested)
     package_manifest = package_manifest.resolve()
     manifest = _read_json(package_manifest, "compiled package manifest")
+    component_command = runtime_executor_command(
+        "nerve-optimizer-executor",
+        explicit=component_executor_bin,
+        features=("vulkan",),
+    )
+    validation_command = runtime_executor_command(
+        "nerve-validation-executor",
+        explicit=validation_executor_bin,
+        features=("vulkan", "tokenizers"),
+    )
+    runtime_command = (
+        runtime_executor_command(
+            "nerve-runtime",
+            explicit=runtime_bin,
+            features=("vulkan", "tokenizers"),
+        )
+        if live_target is None
+        else None
+    )
+    _require_matching_package_compiler_fingerprints(
+        manifest=manifest,
+        commands=tuple(
+            (
+                label,
+                command,
+            )
+            for label, command in (
+                ("runtime", runtime_command),
+                ("component executor", component_command),
+                ("validation executor", validation_command),
+            )
+            if command is not None
+        ),
+        cancel_requested=cancel_requested,
+    )
     package_target = CompilerTarget.from_json(
         _required_object(manifest, "compiler_target")
     )
@@ -188,12 +238,35 @@ def prepare_runtime_optimization_targets(
     check_compile_cancelled(cancel_requested)
     if live_target is None:
         environment = amd_vulkan_environment(drivers)
-        live_target = discover_compiler_target(
-            runtime_bin=runtime_bin,
-            allowed_physical_device_ids=selected_ids,
+        live_target, selected_records = _discover_stable_context_lifecycle(
+            runtime_bin=(
+                Path(runtime_command[0])
+                if runtime_command is not None
+                and len(runtime_command) == 1
+                else runtime_bin
+            ),
+            selected_ids=selected_ids,
+            package_profiles=by_id,
+            idle_probe=probe,
             environment=environment,
-            initialize_device_contexts=True,
+            policy=policy,
             cancel_requested=cancel_requested,
+        )
+    else:
+        live_profiles_for_baseline = {
+            str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
+                profile.to_json()
+            )
+            for profile in live_target.hardware_profiles
+            if _is_amd_vulkan_gpu(profile.to_json())
+        }
+        selected_records = list(
+            probe.capture_stable_idle_baseline(
+                tuple(
+                    live_profiles_for_baseline[device_id]
+                    for device_id in selected_ids
+                )
+            )
         )
     check_compile_cancelled(cancel_requested)
     live_profiles = {
@@ -208,26 +281,11 @@ def prepare_runtime_optimization_targets(
             "live AMD discovery did not return exactly the verified idle devices"
         )
     _require_live_identity_match(by_id, live_profiles, selected_ids)
-    selected_records = list(
-        probe.capture_stable_idle_baseline(
-            tuple(live_profiles[device_id] for device_id in selected_ids)
-        )
-    )
     live_groups = tuple(
         tuple(live_profiles[_device_id(profile)] for profile in group)
         for group in selected_groups
     )
 
-    component_command = runtime_executor_command(
-        "nerve-optimizer-executor",
-        explicit=component_executor_bin,
-        features=("vulkan",),
-    )
-    validation_command = runtime_executor_command(
-        "nerve-validation-executor",
-        explicit=validation_executor_bin,
-        features=("vulkan", "tokenizers"),
-    )
     targets = tuple(
         _build_target(
             package_manifest=package_manifest,
@@ -313,6 +371,159 @@ def amd_vulkan_environment(driver_files: tuple[Path, ...]) -> dict[str, str]:
     )
     environment.pop("VK_ICD_FILENAMES", None)
     return environment
+
+
+def _require_matching_package_compiler_fingerprints(
+    *,
+    manifest: Json,
+    commands: tuple[tuple[str, tuple[str, ...]], ...],
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    expected = manifest.get("compiler_fingerprint")
+    if (
+        not isinstance(expected, str)
+        or not expected.startswith(f"{COMPILER_FINGERPRINT_SCHEMA}:")
+    ):
+        raise ModelCompileError(
+            "compiled package has no valid compiler fingerprint"
+        )
+    mismatches = []
+    for label, command in commands:
+        check_compile_cancelled(cancel_requested)
+        observed = _query_package_compiler_fingerprint(
+            command,
+            cancel_requested=cancel_requested,
+        )
+        if observed != expected:
+            mismatches.append(f"{label} reports {observed}")
+    if mismatches:
+        raise ModelCompileError(
+            f"optimizer executables do not match package fingerprint "
+            f"{expected}: "
+            + "; ".join(mismatches)
+            + "; rebuild the executables or recompile the package before "
+            "starting optimization"
+        )
+
+
+def _query_package_compiler_fingerprint(
+    command: tuple[str, ...],
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> str:
+    invocation = [*command, "--package-compiler-fingerprint"]
+    try:
+        process = subprocess.Popen(
+            invocation,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as error:
+        raise ModelCompileError(
+            f"could not start optimizer executable {command[0]!r}: {error}"
+        ) from error
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.1)
+            break
+        except subprocess.TimeoutExpired:
+            try:
+                check_compile_cancelled(cancel_requested)
+            except BaseException:
+                process.kill()
+                process.communicate()
+                raise
+    check_compile_cancelled(cancel_requested)
+    if process.returncode != 0:
+        diagnostic = stderr.strip() or stdout.strip()
+        raise ModelCompileError(
+            f"optimizer executable {command[0]!r} could not report its "
+            "package compiler fingerprint"
+            + (f": {diagnostic}" if diagnostic else "")
+        )
+    fingerprint = stdout.strip()
+    if (
+        not fingerprint.startswith(f"{COMPILER_FINGERPRINT_SCHEMA}:")
+        or "\n" in fingerprint
+    ):
+        raise ModelCompileError(
+            f"optimizer executable {command[0]!r} returned an invalid "
+            f"package compiler fingerprint {fingerprint!r}"
+        )
+    return fingerprint
+
+
+def _discover_stable_context_lifecycle(
+    *,
+    runtime_bin: Path | None,
+    selected_ids: tuple[str, ...],
+    package_profiles: dict[str, Json],
+    idle_probe: LinuxAmdDeviceStateProbe,
+    environment: dict[str, str],
+    policy: RuntimeOptimizationPolicy,
+    cancel_requested: Callable[[], bool] | None,
+) -> tuple[CompilerTarget, list[Json]]:
+    previous_endpoint: tuple[tuple[str, int], ...] | None = None
+    consecutive_endpoints = 0
+    observed_endpoints: list[tuple[tuple[str, int], ...]] = []
+    last_target: CompilerTarget | None = None
+    last_records: list[Json] = []
+    for _attempt in range(policy.maximum_context_lifecycle_attempts):
+        check_compile_cancelled(cancel_requested)
+        target = discover_compiler_target(
+            runtime_bin=runtime_bin,
+            allowed_physical_device_ids=selected_ids,
+            environment=environment,
+            initialize_device_contexts=True,
+            cancel_requested=cancel_requested,
+        )
+        profiles = {
+            str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
+                profile.to_json()
+            )
+            for profile in target.hardware_profiles
+            if _is_amd_vulkan_gpu(profile.to_json())
+        }
+        if set(profiles) != set(selected_ids):
+            raise ModelCompileError(
+                "live AMD discovery did not return exactly the verified idle "
+                "devices"
+            )
+        _require_live_identity_match(
+            package_profiles,
+            profiles,
+            selected_ids,
+        )
+        records = list(
+            idle_probe.capture_stable_idle_baseline(
+                tuple(profiles[device_id] for device_id in selected_ids)
+            )
+        )
+        endpoint = tuple(
+            (str(record["device_id"]), int(record["vram_used_bytes"]))
+            for record in records
+        )
+        observed_endpoints.append(endpoint)
+        if endpoint == previous_endpoint:
+            consecutive_endpoints += 1
+        else:
+            previous_endpoint = endpoint
+            consecutive_endpoints = 1
+        last_target = target
+        last_records = records
+        if (
+            consecutive_endpoints
+            >= policy.context_lifecycle_required_observations
+        ):
+            return last_target, last_records
+    raise ModelCompileError(
+        "independent Vulkan context lifecycles did not converge on a "
+        "repeatable idle residency endpoint within "
+        f"{policy.maximum_context_lifecycle_attempts} attempts: "
+        f"{observed_endpoints}"
+    )
 
 
 def runtime_executor_command(

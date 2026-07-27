@@ -6,6 +6,13 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    if std::env::args().skip(1).eq(["--package-compiler-fingerprint"]) {
+        println!(
+            "{}",
+            nerve_runtime::VULKAN_PACKAGE_COMPILER_FINGERPRINT
+        );
+        return Ok(());
+    }
     if std::env::args()
         .skip(1)
         .any(|arg| arg == "--help" || arg == "-h")

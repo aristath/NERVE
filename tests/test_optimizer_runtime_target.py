@@ -24,6 +24,11 @@ from nerve.representation_optimizer.automation.runtime_target import (
 from nerve.representation_optimizer.contracts import ContractDocument
 
 
+PACKAGE_COMPILER_FINGERPRINT = (
+    "nerve.package_compiler_sha256.v2:" + "a" * 64
+)
+
+
 def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
     tmp_path: Path,
 ) -> None:
@@ -350,9 +355,18 @@ def test_runtime_target_records_post_context_idle_floor(
         sleep=lambda _seconds: None,
     )
 
+    lifecycle_floors = (
+        initial_vram + 4_096,
+        initial_vram + 12_288,
+        initial_vram + 12_288,
+    )
+    discovery_count = 0
+
     def discover_after_context_initialization(**kwargs) -> CompilerTarget:
+        nonlocal discovery_count
         assert kwargs["initialize_device_contexts"] is True
-        used.write_text(f"{initial_vram + 12_288}\n")
+        used.write_text(f"{lifecycle_floors[discovery_count]}\n")
+        discovery_count += 1
         return target
 
     monkeypatch.setattr(
@@ -364,7 +378,7 @@ def test_runtime_target_records_post_context_idle_floor(
     prepared = prepare_runtime_optimization_targets(
         package_manifest=package,
         run_root=tmp_path / "run",
-        runtime_bin=tmp_path / "nerve-runtime",
+        runtime_bin=_executable(tmp_path / "nerve-runtime"),
         selected_device_ids=(_device_id(pci_address),),
         component_executor_bin=_executable(tmp_path / "component"),
         validation_executor_bin=_executable(tmp_path / "validation"),
@@ -373,10 +387,55 @@ def test_runtime_target_records_post_context_idle_floor(
     )
 
     expected_vram = initial_vram + 12_288
+    assert discovery_count == 3
     assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
     assert prepared.targets[0].matched_conditions["environment"][
         "initial_idle_observations"
     ][0]["vram_used_bytes"] == expected_vram
+
+
+def test_runtime_target_rejects_executor_fingerprint_before_device_work(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:03:00.0"
+    target = _target((pci_address,))
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(100,),
+    )
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=64 * 1024 * 1024,
+        busy_percent=0,
+    )
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+    )
+    mismatched = (
+        "nerve.package_compiler_sha256.v2:" + "b" * 64
+    )
+
+    with pytest.raises(
+        ModelCompileError,
+        match="executables do not match package fingerprint",
+    ):
+        prepare_runtime_optimization_targets(
+            package_manifest=package,
+            run_root=tmp_path / "run",
+            component_executor_bin=_executable(
+                tmp_path / "component",
+                fingerprint=mismatched,
+            ),
+            validation_executor_bin=_executable(tmp_path / "validation"),
+            vulkan_driver_files=(_driver(tmp_path),),
+            idle_probe=probe,
+            live_target=target,
+        )
+
+    assert not (tmp_path / "run").exists()
 
 
 def test_explicit_busy_optimizer_device_is_never_substituted(
@@ -553,6 +612,7 @@ def _package(
     manifest = {
         "schema": "nerve.vulkan_resident_model_package.v4",
         "package_id": "fixture-package",
+        "compiler_fingerprint": PACKAGE_COMPILER_FINGERPRINT,
         "tensor_index_path": "tensors.json",
         "compiler_target": target.to_json(),
         "circuit_graph": {"components": components},
@@ -607,8 +667,19 @@ def _driver(tmp_path: Path) -> Path:
     return path
 
 
-def _executable(path: Path) -> Path:
-    path.write_text("#!/bin/sh\nexit 0\n")
+def _executable(
+    path: Path,
+    *,
+    fingerprint: str = PACKAGE_COMPILER_FINGERPRINT,
+) -> Path:
+    path.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"--package-compiler-fingerprint\" ]; then\n"
+        f"  printf '%s\\n' '{fingerprint}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
     path.chmod(path.stat().st_mode | 0o111)
     return path
 
