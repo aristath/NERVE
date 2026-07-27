@@ -16,6 +16,9 @@ pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.
 pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v1";
 pub const VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER: &str =
     "vulkan_stream_circuit_component_overlay.v1";
+pub const STAGED_CANDIDATE_INTEGRITY_SCHEMA: &str = "nerve.optimizer.staged_candidate_integrity.v1";
+pub const STAGED_CANDIDATE_INTEGRITY_FILE: &str = "integrity.json";
+pub const STAGED_ARTIFACT_DIGEST_SCHEMA: &str = "nerve.optimizer.artifact_sha256.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -208,6 +211,14 @@ pub struct RuntimeMountPlan {
     pub adapter_id: String,
     pub component_replacements: Vec<RuntimeComponentReplacement>,
     pub tensor_index_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeStagedCandidate {
+    pub candidate_id: String,
+    pub candidate_root: PathBuf,
+    pub source_component_ids: Vec<String>,
+    pub mount_plan: RuntimeMountPlan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

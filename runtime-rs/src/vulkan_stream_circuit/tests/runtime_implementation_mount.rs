@@ -18,6 +18,173 @@ fn copy_runtime_implementation_fixture_tree(
     }
 }
 
+fn fixture_sha256(path: &Path) -> String {
+    let bytes = std::fs::read(path).unwrap();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn staged_candidate_integrity_files(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<serde_json::Value>,
+) {
+    let mut entries = std::fs::read_dir(directory)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            staged_candidate_integrity_files(root, &path, output);
+        } else if path.file_name().unwrap() != "integrity.json" {
+            output.push(serde_json::json!({
+                "path": path.strip_prefix(root).unwrap().to_string_lossy(),
+                "byte_count": path.metadata().unwrap().len(),
+                "sha256": fixture_sha256(&path),
+            }));
+        }
+    }
+}
+
+fn seal_staged_runtime_candidate(candidate_root: &Path, candidate_id: &str) {
+    let mut files = Vec::new();
+    staged_candidate_integrity_files(
+        candidate_root,
+        candidate_root,
+        &mut files,
+    );
+    std::fs::write(
+        candidate_root.join("integrity.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": crate::STAGED_CANDIDATE_INTEGRITY_SCHEMA,
+            "candidate_id": candidate_id,
+            "construction_id": "construction_fixture",
+            "files": files,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn staged_runtime_candidate_fixture() -> (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    VulkanResidentRuntimeModel,
+) {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nerve-staged-runtime-candidate-{}-{unique}",
+        std::process::id()
+    ));
+    let package_root = root.join("package");
+    let candidate_root = root.join("candidate");
+    copy_runtime_implementation_fixture_tree(
+        &tiny_model_dir(),
+        &package_root,
+    );
+    let manifest =
+        VulkanResidentModelPackageManifest::from_json_file(
+            package_root.join("vulkan_resident_package.json"),
+        )
+        .unwrap();
+    let runtime_model = manifest
+        .mount_runtime_graph_controls(
+            Some("gpu0"),
+            &BTreeMap::new(),
+            &[],
+            None,
+        )
+        .unwrap();
+    let mut component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let mut execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    component.implementation = "staged_alternative".to_string();
+    component.circuit.implementation = "staged_alternative".to_string();
+    execution.implementation = "staged_alternative".to_string();
+    execution.kernels[0].shader_path =
+        "kernels/staged_candidate.spv".to_string();
+    std::fs::create_dir_all(candidate_root.join("kernels")).unwrap();
+    std::fs::write(
+        candidate_root.join("kernels/staged_candidate.spv"),
+        b"staged candidate shader",
+    )
+    .unwrap();
+    std::fs::create_dir_all(candidate_root.join("overlays")).unwrap();
+    std::fs::write(
+        candidate_root.join("overlays/layer_00.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": crate::VULKAN_COMPONENT_OVERLAY_SCHEMA,
+            "source_component_id": "layer_00",
+            "component": component,
+            "execution": execution,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let candidate_id = "candidate_0123456789abcdef0123456789abcdef";
+    std::fs::create_dir_all(candidate_root.join("contracts")).unwrap();
+    std::fs::write(
+        candidate_root.join("contracts/candidate.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "nerve.optimizer.representation_candidate.v1",
+            "candidate_id": candidate_id,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let source_path = package_root.join("vulkan_resident_package.json");
+    std::fs::write(
+        candidate_root.join("contracts/build_plan.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "nerve.optimizer.candidate_build_plan.v1",
+            "source_inputs": [{
+                "path": "vulkan_resident_package.json",
+                "digest": format!(
+                    "{}:{}",
+                    crate::STAGED_ARTIFACT_DIGEST_SCHEMA,
+                    fixture_sha256(&source_path),
+                ),
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        candidate_root.join("contracts/mount_plan.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": crate::RUNTIME_MOUNT_PLAN_SCHEMA,
+            "candidate_id": candidate_id,
+            "adapter_id": crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
+            "component_replacements": [{
+                "source_component_id": "layer_00",
+                "overlay_ref": "overlays/layer_00.json",
+            }],
+            "tensor_index_refs": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    seal_staged_runtime_candidate(&candidate_root, candidate_id);
+    (root, package_root, candidate_root, runtime_model)
+}
+
 fn runtime_implementation_test_predicate(
 ) -> crate::RuntimeImplementationPredicate {
     crate::RuntimeImplementationPredicate {
@@ -383,4 +550,140 @@ fn runtime_overlay_shader_resolution_rejects_path_spoofing_and_symlinks() {
     }
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sealed_staged_candidate_uses_the_normal_runtime_mount_path() {
+    let (root, package_root, candidate_root, runtime_model) =
+        staged_runtime_candidate_fixture();
+    let candidate = crate::RuntimeStagedCandidate::load(
+        &package_root,
+        &candidate_root,
+    )
+    .unwrap();
+    let mounted = runtime_model
+        .apply_staged_runtime_candidate(&package_root, &candidate)
+        .unwrap();
+
+    let component = mounted
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap();
+    assert_eq!(component.implementation, "staged_alternative");
+    let execution = mounted
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    assert!(
+        Path::new(&execution.kernels[0].shader_path)
+            .starts_with(&candidate_root)
+    );
+    assert!(mounted.implementation_selection.is_none());
+    mounted.load_runtime_tensor_index(&package_root).unwrap();
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn staged_candidate_loader_rejects_artifact_and_source_drift() {
+    let (root, package_root, candidate_root, runtime_model) =
+        staged_runtime_candidate_fixture();
+    let loaded = crate::RuntimeStagedCandidate::load(
+        &package_root,
+        &candidate_root,
+    )
+    .unwrap();
+    let overlay_path = candidate_root.join("overlays/layer_00.json");
+    let overlay = std::fs::read(&overlay_path).unwrap();
+    std::fs::write(&overlay_path, b"tampered").unwrap();
+    assert!(
+        runtime_model
+            .apply_staged_runtime_candidate(&package_root, &loaded)
+            .is_err()
+    );
+    assert!(
+        crate::RuntimeStagedCandidate::load(
+            &package_root,
+            &candidate_root,
+        )
+        .is_err()
+    );
+    std::fs::write(&overlay_path, overlay).unwrap();
+
+    let source_path = package_root.join("vulkan_resident_package.json");
+    let source = std::fs::read(&source_path).unwrap();
+    std::fs::write(&source_path, b"tampered").unwrap();
+    assert!(
+        crate::RuntimeStagedCandidate::load(
+            &package_root,
+            &candidate_root,
+        )
+        .is_err()
+    );
+    std::fs::write(source_path, source).unwrap();
+
+    std::fs::write(
+        candidate_root.join("contracts/build_plan.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "nerve.optimizer.candidate_build_plan.v1",
+            "source_inputs": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    seal_staged_runtime_candidate(
+        &candidate_root,
+        "candidate_0123456789abcdef0123456789abcdef",
+    );
+    assert!(
+        crate::RuntimeStagedCandidate::load(
+            &package_root,
+            &candidate_root,
+        )
+        .is_err()
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_candidate_application_requires_one_connected_island() {
+    let edge = |id: &str, source: &str, destination: &str| {
+        crate::stream_circuit::StreamCircuitGraphEdge {
+            id: id.to_string(),
+            source: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: source.to_string(),
+                port_id: "output".to_string(),
+            },
+            destination: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: destination.to_string(),
+                port_id: "input".to_string(),
+            },
+            connection: crate::stream_circuit::StreamCircuitConnection::Forward,
+        }
+    };
+    let edges = vec![
+        edge("a_to_b", "a", "b"),
+        edge("b_to_c", "b", "c"),
+        edge("x_to_y", "x", "y"),
+    ];
+    assert!(runtime_candidate_island_connected(
+        &BTreeSet::from(["a", "b", "c"]),
+        &edges,
+    ));
+    assert!(!runtime_candidate_island_connected(
+        &BTreeSet::from(["a", "x"]),
+        &edges,
+    ));
+    assert!(runtime_candidate_island_connected(
+        &BTreeSet::from(["a"]),
+        &edges,
+    ));
+    assert!(!runtime_candidate_island_connected(
+        &BTreeSet::new(),
+        &edges,
+    ));
 }

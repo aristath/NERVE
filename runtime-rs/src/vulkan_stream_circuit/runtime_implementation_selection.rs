@@ -265,29 +265,6 @@ impl VulkanResidentRuntimeModel {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let runtime_instances = self
-            .runtime_graph
-            .instances
-            .iter()
-            .map(|instance| {
-                (instance.instance_id.clone(), instance.clone())
-            })
-            .collect::<BTreeMap<_, _>>();
-        let source_components = self
-            .package
-            .circuit_graph
-            .components
-            .iter()
-            .map(|component| {
-                (component.component_id.clone(), component.clone())
-            })
-            .collect::<BTreeMap<_, _>>();
-        let effective_edges = self
-            .runtime_graph
-            .effective_edges()
-            .map_err(|error| {
-                VulkanResidentTokenModelPackageError::new(error.to_string())
-            })?;
         let mut mounted_instances = BTreeSet::new();
         let mut loaded_tensor_fragments = BTreeSet::new();
 
@@ -301,131 +278,20 @@ impl VulkanResidentRuntimeModel {
                     ))
                 })?;
             validate_selected_implementation(selected, loaded)?;
-            let island_instances = selected
-                .instance_ids
-                .iter()
-                .map(|instance_id| {
-                    let instance = runtime_instances
-                        .get(instance_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            VulkanResidentTokenModelPackageError::new(
-                                format!(
-                                    "selected runtime instance {instance_id:?} does not exist"
-                                ),
-                            )
-                        })?;
-                    if !mounted_instances.insert(instance_id.clone()) {
-                        return Err(
-                            VulkanResidentTokenModelPackageError::new(
-                                format!(
-                                    "runtime instance {instance_id:?} has overlapping selected implementations"
-                                ),
-                            ),
-                        );
-                    }
-                    Ok((instance_id.as_str(), instance))
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()?;
-            let island_ids = island_instances
-                .keys()
-                .copied()
-                .collect::<BTreeSet<_>>();
-
-            for replacement in &loaded.mount_plan.component_replacements {
-                let matching_instances = island_instances
-                    .values()
-                    .filter(|instance| {
-                        instance.source_component_id
-                            == replacement.source_component_id
-                    })
-                    .collect::<Vec<_>>();
-                if matching_instances.len() != 1 {
-                    return Err(
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "implementation {:?} does not map source component {:?} exactly once in runtime island {:?}",
-                            selected.implementation_id,
-                            replacement.source_component_id,
-                            selected.instance_ids,
-                        )),
-                    );
-                }
-                let source = source_components
-                    .get(&replacement.source_component_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "implementation references unknown source component {:?}",
-                            replacement.source_component_id
-                        ))
-                    })?;
-                let overlay_path = contained_candidate_artifact(
-                    &loaded.candidate_root,
-                    &replacement.overlay_ref,
-                    "runtime component overlay",
-                )?;
-                let bytes = fs::read(&overlay_path).map_err(|error| {
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to read runtime component overlay {overlay_path:?}: {error}"
-                    ))
-                })?;
-                let mut overlay: VulkanRuntimeComponentOverlay =
-                    serde_json::from_slice(&bytes).map_err(|error| {
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "invalid runtime component overlay {overlay_path:?}: {error}"
-                        ))
-                    })?;
-                validate_runtime_component_overlay(
-                    &overlay,
-                    &source,
-                    matching_instances[0].instance_id.as_str(),
-                    &island_ids,
-                    &effective_edges,
-                    &self.runtime_graph.boundary,
-                )?;
-                let source_execution = self
-                    .component_executions
-                    .iter()
-                    .find(|execution| {
-                        execution.component_id
-                            == matching_instances[0].instance_id
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "implementation cannot find source execution for runtime instance {:?}",
-                            matching_instances[0].instance_id,
-                        ))
-                    })?;
-                rebase_overlay_shader_paths(
-                    &mut overlay.execution,
-                    &source_execution,
-                    package_root,
-                    &loaded.candidate_root,
-                )?;
-                mount_runtime_component_overlay(
-                    &mut self,
-                    matching_instances[0].instance_id.as_str(),
-                    overlay,
-                )?;
-            }
-            for reference in &loaded.mount_plan.tensor_index_refs {
-                let index_path = contained_candidate_artifact(
-                    &loaded.candidate_root,
-                    reference,
-                    "runtime tensor-index fragment",
-                )?;
-                if loaded_tensor_fragments.insert(index_path.clone()) {
-                    self.tensor_index_fragments.push(
-                        VulkanRuntimeTensorIndexFragment {
-                            index_path,
-                            candidate_root: loaded
-                                .candidate_root
-                                .clone(),
-                        },
-                    );
-                }
-            }
+            mount_runtime_candidate_application(
+                &mut self,
+                package_root,
+                RuntimeCandidateApplication {
+                    candidate_root: &loaded.candidate_root,
+                    mount_plan: &loaded.mount_plan,
+                    application_id: &selected.implementation_id,
+                    instance_ids: &selected.instance_ids,
+                },
+                RuntimeCandidateMountLedger {
+                    mounted_instances: &mut mounted_instances,
+                    loaded_tensor_fragments: &mut loaded_tensor_fragments,
+                },
+            )?;
         }
         let source_roles = self
             .package
@@ -474,6 +340,92 @@ impl VulkanResidentRuntimeModel {
         Ok(self)
     }
 
+    pub fn apply_staged_runtime_candidate(
+        mut self,
+        package_root: impl AsRef<Path>,
+        candidate: &crate::RuntimeStagedCandidate,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        let package_root = package_root
+            .as_ref()
+            .canonicalize()
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to resolve runtime package root: {error}"
+                ))
+            })?;
+        let verified = crate::RuntimeStagedCandidate::load(
+            &package_root,
+            &candidate.candidate_root,
+        )
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to verify staged runtime candidate at mount time: {error}",
+            ))
+        })?;
+        if &verified != candidate {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                "staged runtime candidate changed after it was loaded",
+            ));
+        }
+        let mut instance_ids = Vec::new();
+        for source_component_id in &candidate.source_component_ids {
+            let matches = self
+                .runtime_graph
+                .instances
+                .iter()
+                .filter(|instance| {
+                    instance.source_component_id == *source_component_id
+                })
+                .map(|instance| instance.instance_id.clone())
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err(VulkanResidentTokenModelPackageError::new(
+                    format!(
+                        "staged candidate {:?} requires exactly one runtime instance of source component {:?}, found {}",
+                        candidate.candidate_id,
+                        source_component_id,
+                        matches.len(),
+                    ),
+                ));
+            }
+            instance_ids.push(matches[0].clone());
+        }
+        instance_ids.sort();
+        let mut mounted_instances = BTreeSet::new();
+        let mut loaded_tensor_fragments = BTreeSet::new();
+        mount_runtime_candidate_application(
+            &mut self,
+            &package_root,
+            RuntimeCandidateApplication {
+                candidate_root: &candidate.candidate_root,
+                mount_plan: &candidate.mount_plan,
+                application_id: &candidate.candidate_id,
+                instance_ids: &instance_ids,
+            },
+            RuntimeCandidateMountLedger {
+                mounted_instances: &mut mounted_instances,
+                loaded_tensor_fragments: &mut loaded_tensor_fragments,
+            },
+        )?;
+        self.tensor_index_fragments.sort_by(|left, right| {
+            left.index_path.cmp(&right.index_path)
+        });
+        let graph = self
+            .circuit_graph
+            .to_resolved_lowered_execution_graph(PathBuf::from("."))?;
+        validate_component_executions_against_graph(
+            &self.package.package_id,
+            &self.component_executions,
+            &graph,
+        )?;
+        validate_generation_execution_contract(
+            &self.package,
+            &self.circuit_graph,
+        )?;
+        self.load_runtime_tensor_index(&package_root)?;
+        Ok(self)
+    }
+
     pub fn load_runtime_tensor_index(
         &self,
         package_root: impl AsRef<Path>,
@@ -511,6 +463,205 @@ impl VulkanResidentRuntimeModel {
         }
         Ok(tensor_index)
     }
+}
+
+struct RuntimeCandidateApplication<'a> {
+    candidate_root: &'a Path,
+    mount_plan: &'a crate::RuntimeMountPlan,
+    application_id: &'a str,
+    instance_ids: &'a [String],
+}
+
+struct RuntimeCandidateMountLedger<'a> {
+    mounted_instances: &'a mut BTreeSet<String>,
+    loaded_tensor_fragments: &'a mut BTreeSet<PathBuf>,
+}
+
+fn mount_runtime_candidate_application(
+    runtime_model: &mut VulkanResidentRuntimeModel,
+    package_root: &Path,
+    application: RuntimeCandidateApplication<'_>,
+    ledger: RuntimeCandidateMountLedger<'_>,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let RuntimeCandidateApplication {
+        candidate_root,
+        mount_plan,
+        application_id,
+        instance_ids,
+    } = application;
+    let runtime_instances = runtime_model
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| {
+            (instance.instance_id.clone(), instance.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+    let source_components = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .map(|component| {
+            (component.component_id.clone(), component.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+    let effective_edges = runtime_model
+        .runtime_graph
+        .effective_edges()
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(error.to_string())
+        })?;
+    let island_instances = instance_ids
+        .iter()
+        .map(|instance_id| {
+            let instance = runtime_instances
+                .get(instance_id)
+                .cloned()
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "runtime candidate application {application_id:?} references unknown instance {instance_id:?}",
+                    ))
+                })?;
+            if !ledger.mounted_instances.insert(instance_id.clone()) {
+                return Err(VulkanResidentTokenModelPackageError::new(
+                    format!(
+                        "runtime instance {instance_id:?} has overlapping candidate applications",
+                    ),
+                ));
+            }
+            Ok((instance_id.as_str(), instance))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let island_ids = island_instances
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if !runtime_candidate_island_connected(&island_ids, &effective_edges) {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime candidate application {application_id:?} spans a disconnected runtime island",
+        )));
+    }
+
+    for replacement in &mount_plan.component_replacements {
+        let matching_instances = island_instances
+            .values()
+            .filter(|instance| {
+                instance.source_component_id
+                    == replacement.source_component_id
+            })
+            .collect::<Vec<_>>();
+        if matching_instances.len() != 1 {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime candidate application {application_id:?} does not map source component {:?} exactly once in island {:?}",
+                replacement.source_component_id,
+                instance_ids,
+            )));
+        }
+        let source = source_components
+            .get(&replacement.source_component_id)
+            .cloned()
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime candidate application {application_id:?} references unknown source component {:?}",
+                    replacement.source_component_id
+                ))
+            })?;
+        let overlay_path = contained_candidate_artifact(
+            candidate_root,
+            &replacement.overlay_ref,
+            "runtime component overlay",
+        )?;
+        let bytes = fs::read(&overlay_path).map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to read runtime component overlay {overlay_path:?}: {error}"
+            ))
+        })?;
+        let mut overlay: VulkanRuntimeComponentOverlay =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "invalid runtime component overlay {overlay_path:?}: {error}"
+                ))
+            })?;
+        validate_runtime_component_overlay(
+            &overlay,
+            &source,
+            matching_instances[0].instance_id.as_str(),
+            &island_ids,
+            &effective_edges,
+            &runtime_model.runtime_graph.boundary,
+        )?;
+        let source_execution = runtime_model
+            .component_executions
+            .iter()
+            .find(|execution| {
+                execution.component_id
+                    == matching_instances[0].instance_id
+            })
+            .cloned()
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime candidate application {application_id:?} cannot find source execution for instance {:?}",
+                    matching_instances[0].instance_id,
+                ))
+            })?;
+        rebase_overlay_shader_paths(
+            &mut overlay.execution,
+            &source_execution,
+            package_root,
+            candidate_root,
+        )?;
+        mount_runtime_component_overlay(
+            runtime_model,
+            matching_instances[0].instance_id.as_str(),
+            overlay,
+        )?;
+    }
+    for reference in &mount_plan.tensor_index_refs {
+        let index_path = contained_candidate_artifact(
+            candidate_root,
+            reference,
+            "runtime tensor-index fragment",
+        )?;
+        if ledger.loaded_tensor_fragments.insert(index_path.clone()) {
+            runtime_model.tensor_index_fragments.push(
+                VulkanRuntimeTensorIndexFragment {
+                    index_path,
+                    candidate_root: candidate_root.to_path_buf(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn runtime_candidate_island_connected(
+    island_ids: &BTreeSet<&str>,
+    edges: &[crate::stream_circuit::StreamCircuitGraphEdge],
+) -> bool {
+    let Some(first) = island_ids.first().copied() else {
+        return false;
+    };
+    let mut reached = BTreeSet::from([first]);
+    let mut pending = VecDeque::from([first]);
+    while let Some(current) = pending.pop_front() {
+        for edge in edges {
+            let neighbor = if edge.source.component_id == current {
+                Some(edge.destination.component_id.as_str())
+            } else if edge.destination.component_id == current {
+                Some(edge.source.component_id.as_str())
+            } else {
+                None
+            };
+            if let Some(neighbor) = neighbor
+                && island_ids.contains(neighbor)
+                && reached.insert(neighbor)
+            {
+                pending.push_back(neighbor);
+            }
+        }
+    }
+    reached.len() == island_ids.len()
 }
 
 fn checked_selection_total(

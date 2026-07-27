@@ -6,12 +6,15 @@ use super::{
     VALIDATION_RECORD_SCHEMA, VULKAN_COMPONENT_OVERLAY_SCHEMA,
     VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
 };
-use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+
+use super::artifacts::{
+    array, confined_path, from_value, invalid, invalid_error, object, read_json, read_object,
+    require_schema, required, strictly_sorted_unique, string_array, text, unsigned, unsigned_u64,
+};
 
 impl RuntimeImplementationCatalog {
     pub fn load(
@@ -20,7 +23,7 @@ impl RuntimeImplementationCatalog {
         package_id: &str,
     ) -> io::Result<Self> {
         let package_root = package_root.as_ref().canonicalize()?;
-        let stage_path = package_path(&package_root, stage_reference, "optimizer stage")?;
+        let stage_path = confined_path(&package_root, stage_reference, "optimizer stage")?;
         let stage = read_object(&stage_path, "optimizer stage")?;
         require_schema(&stage, OPTIMIZER_STAGE_SCHEMA, "optimizer stage")?;
         let stage_status = text(&stage, "status", "optimizer stage")?;
@@ -42,7 +45,7 @@ impl RuntimeImplementationCatalog {
         }
 
         let registry_ref = object(&stage, "implementation_registry", "optimizer stage")?;
-        let registry_path = package_path(
+        let registry_path = confined_path(
             &package_root,
             text(
                 registry_ref,
@@ -78,7 +81,7 @@ impl RuntimeImplementationCatalog {
         }
 
         let scope_ref = object(&stage, "scope_catalog", "optimizer stage")?;
-        let scope_path = package_path(
+        let scope_path = confined_path(
             &package_root,
             text(scope_ref, "artifact_ref", "scope catalog reference")?,
             "scope catalog",
@@ -188,7 +191,7 @@ fn load_implementation(
         return invalid("runtime registry contains an unqualified implementation");
     }
 
-    let root = package_path(
+    let root = confined_path(
         package_root,
         &implementation.artifact_bundle.root_ref,
         "implementation artifact bundle",
@@ -196,11 +199,11 @@ fn load_implementation(
     if !root.is_dir() {
         return invalid("implementation artifact bundle is missing");
     }
-    let candidate_root = package_path(&root, "candidate", "implementation candidate bundle")?;
+    let candidate_root = confined_path(&root, "candidate", "implementation candidate bundle")?;
     if !candidate_root.is_dir() {
         return invalid("implementation candidate bundle is missing");
     }
-    let mount_plan_path = package_path(
+    let mount_plan_path = confined_path(
         package_root,
         &implementation.artifact_bundle.mount_plan_ref,
         "runtime mount plan",
@@ -215,7 +218,7 @@ fn load_implementation(
         &implementation.candidate_id,
         &source_component_ids,
     )?;
-    let promotion_path = package_path(
+    let promotion_path = confined_path(
         package_root,
         &implementation.evidence.promotion_decision_ref,
         "promotion decision",
@@ -235,7 +238,7 @@ fn load_implementation(
         );
     }
 
-    let validation_path = package_path(
+    let validation_path = confined_path(
         package_root,
         &implementation.evidence.validation_record_ref,
         "validation record",
@@ -250,7 +253,7 @@ fn load_implementation(
         return invalid("runtime implementation validation evidence is not passed");
     }
 
-    let benchmark_path = package_path(
+    let benchmark_path = confined_path(
         package_root,
         &implementation.evidence.benchmark_record_ref,
         "benchmark record",
@@ -275,7 +278,7 @@ fn load_implementation(
         implementation.evidence.construction_record_ref.as_str(),
         implementation.evidence.prebenchmark_record_ref.as_str(),
     ] {
-        let path = package_path(package_root, reference, "implementation evidence")?;
+        let path = confined_path(package_root, reference, "implementation evidence")?;
         if !path.is_file() {
             return invalid("runtime implementation evidence is incomplete");
         }
@@ -290,7 +293,7 @@ fn load_implementation(
     })
 }
 
-fn validate_mount_plan(
+pub(super) fn validate_mount_plan(
     candidate_root: &Path,
     mount_plan: &RuntimeMountPlan,
     candidate_id: &str,
@@ -323,7 +326,7 @@ fn validate_mount_plan(
             return invalid("runtime mount plan reuses an artifact reference");
         }
         let overlay = read_object(
-            &package_path(
+            &confined_path(
                 candidate_root,
                 &replacement.overlay_ref,
                 "runtime component overlay",
@@ -357,7 +360,7 @@ fn validate_mount_plan(
             return invalid("runtime mount plan reuses an artifact reference");
         }
         let fragment = read_object(
-            &package_path(candidate_root, reference, "runtime tensor-index fragment")?,
+            &confined_path(candidate_root, reference, "runtime tensor-index fragment")?,
             "runtime tensor-index fragment",
         )?;
         require_schema(
@@ -453,139 +456,4 @@ fn load_workload_metrics(
         return invalid("registry comparison and benchmark workload coverage differ");
     }
     Ok(metrics)
-}
-
-fn package_path(root: &Path, reference: &str, label: &str) -> io::Result<PathBuf> {
-    if reference.is_empty() {
-        return invalid(format!("{label} path must not be empty"));
-    }
-    let relative = Path::new(reference);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        || relative.to_string_lossy() != reference
-    {
-        return invalid(format!("{label} must be a canonical package-relative path"));
-    }
-    let path = root.join(relative);
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| invalid_error(format!("{label} is missing or unreadable: {error}")))?;
-    if !canonical.starts_with(root) {
-        return invalid(format!("{label} escapes the compiled package"));
-    }
-    Ok(canonical)
-}
-
-fn read_json<T: DeserializeOwned>(path: &Path, label: &str) -> io::Result<T> {
-    let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| invalid_error(format!("invalid {label} JSON: {error}")))
-}
-
-fn read_object(path: &Path, label: &str) -> io::Result<Map<String, Value>> {
-    let value: Value = read_json(path, label)?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| invalid_error(format!("{label} must be a JSON object")))
-}
-
-fn from_value<T: DeserializeOwned>(value: Value, label: &str) -> io::Result<T> {
-    serde_json::from_value(value)
-        .map_err(|error| invalid_error(format!("invalid {label}: {error}")))
-}
-
-fn require_schema(document: &Map<String, Value>, expected: &str, label: &str) -> io::Result<()> {
-    let schema = text(document, "schema", label)?;
-    if schema != expected {
-        return invalid(format!("unsupported {label} schema {schema:?}"));
-    }
-    Ok(())
-}
-
-fn required<'a>(
-    document: &'a Map<String, Value>,
-    field: &str,
-    label: &str,
-) -> io::Result<&'a Value> {
-    document
-        .get(field)
-        .ok_or_else(|| invalid_error(format!("{label} is missing {field:?}")))
-}
-
-fn text<'a>(document: &'a Map<String, Value>, field: &str, label: &str) -> io::Result<&'a str> {
-    required(document, field, label)?
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| invalid_error(format!("{label} {field:?} must be non-empty text")))
-}
-
-fn object<'a>(
-    document: &'a Map<String, Value>,
-    field: &str,
-    label: &str,
-) -> io::Result<&'a Map<String, Value>> {
-    required(document, field, label)?
-        .as_object()
-        .ok_or_else(|| invalid_error(format!("{label} {field:?} must be an object")))
-}
-
-fn array<'a>(
-    document: &'a Map<String, Value>,
-    field: &str,
-    label: &str,
-) -> io::Result<&'a Vec<Value>> {
-    required(document, field, label)?
-        .as_array()
-        .ok_or_else(|| invalid_error(format!("{label} {field:?} must be an array")))
-}
-
-fn string_array(
-    document: &Map<String, Value>,
-    field: &str,
-    label: &str,
-) -> io::Result<Vec<String>> {
-    let values = array(document, field, label)?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    invalid_error(format!(
-                        "{label} {field:?} must contain only non-empty text"
-                    ))
-                })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    if !strictly_sorted_unique(&values.iter().map(String::as_str).collect::<Vec<_>>()) {
-        return invalid(format!("{label} {field:?} must be sorted and unique"));
-    }
-    Ok(values)
-}
-
-fn unsigned(document: &Map<String, Value>, field: &str, label: &str) -> io::Result<usize> {
-    let value = unsigned_u64(document, field, label)?;
-    usize::try_from(value).map_err(|_| invalid_error(format!("{label} {field:?} exceeds usize")))
-}
-
-fn unsigned_u64(document: &Map<String, Value>, field: &str, label: &str) -> io::Result<u64> {
-    required(document, field, label)?
-        .as_u64()
-        .ok_or_else(|| invalid_error(format!("{label} {field:?} must be an unsigned integer")))
-}
-
-fn strictly_sorted_unique(values: &[&str]) -> bool {
-    values.windows(2).all(|pair| pair[0] < pair[1])
-}
-
-fn invalid<T>(message: impl Into<String>) -> io::Result<T> {
-    Err(invalid_error(message))
-}
-
-fn invalid_error(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
