@@ -1,4 +1,7 @@
-fn source_components(manifest: &VulkanResidentModelPackageManifest) -> Vec<RuntimeEditorSourceComponent> {
+fn source_components(
+    manifest: &VulkanResidentModelPackageManifest,
+    implementation_catalog: &crate::RuntimeImplementationCatalog,
+) -> Vec<RuntimeEditorSourceComponent> {
     let execution_by_component = manifest
         .component_executions
         .iter()
@@ -9,6 +12,49 @@ fn source_components(manifest: &VulkanResidentModelPackageManifest) -> Vec<Runti
         .components
         .iter()
         .map(|component| {
+            let implementation_options = implementation_catalog
+                .implementations
+                .iter()
+                .filter(|loaded| {
+                    loaded
+                        .source_component_ids
+                        .contains(&component.component_id)
+                })
+                .map(|loaded| {
+                    let implementation = &loaded.implementation;
+                    RuntimeEditorImplementationOption {
+                        implementation_id: implementation
+                            .implementation_id
+                            .clone(),
+                        candidate_id: implementation
+                            .candidate_id
+                            .clone(),
+                        scope_ids: implementation.scope_ids.clone(),
+                        runtime_predicate: implementation
+                            .runtime_predicate
+                            .clone(),
+                        representation: implementation
+                            .representation
+                            .clone(),
+                        provenance: implementation.provenance.clone(),
+                        benchmark_id: implementation
+                            .comparison
+                            .benchmark_id
+                            .clone(),
+                        validation_id: implementation
+                            .comparison
+                            .validation_id
+                            .clone(),
+                        validation_status: implementation
+                            .comparison
+                            .validation_status
+                            .clone(),
+                        decision_reason: implementation
+                            .decision_reason
+                            .clone(),
+                    }
+                })
+                .collect();
             let execution = execution_by_component
                 .get(component.component_id.as_str())
                 .copied();
@@ -66,6 +112,7 @@ fn source_components(manifest: &VulkanResidentModelPackageManifest) -> Vec<Runti
             },
             semantic_modules,
             semantic_module_root_id,
+            implementation_options,
         }})
         .collect()
 }

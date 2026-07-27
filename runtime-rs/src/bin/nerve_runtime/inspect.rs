@@ -29,6 +29,9 @@ fn inspect_runtime_topology(
     let device_bindings =
         runtime_device_bindings_report(args, &placement_device_ids, &compute_devices);
     let source_components = source_components_report(&manifest);
+    let implementation_catalog = manifest
+        .implementation_catalog(manifest_dir)?
+        .report();
     let payload = RuntimeTopologyReport {
         ok: true,
         schema: RUNTIME_TOPOLOGY_SCHEMA.to_string(),
@@ -38,6 +41,7 @@ fn inspect_runtime_topology(
         compiled_schema: manifest.schema.clone(),
         config_path: manifest.config_path.clone(),
         tokenizer: serde_json::to_value(&manifest.tokenizer)?,
+        implementation_catalog,
         available_devices,
         compiled: RuntimeCompiledExecutionGraphSummary {
             topology: manifest.circuit_graph.topology.clone(),
@@ -109,6 +113,9 @@ fn inspect_package(
         &compute_devices,
     );
     let source_components = source_components_report(&manifest);
+    let implementation_catalog = manifest
+        .implementation_catalog(manifest_dir)?
+        .report();
     let source_component_count = source_components.len();
     let payload = RuntimePackageInspectionReport {
         ok: true,
@@ -118,6 +125,7 @@ fn inspect_package(
         package_id: manifest.package_id.clone(),
         config_path: manifest.config_path.clone(),
         tokenizer: serde_json::to_value(&manifest.tokenizer)?,
+        implementation_catalog,
         compiled_topology: manifest.circuit_graph.topology.clone(),
         runtime_graph: runtime_graph_report(args),
         device_bindings: runtime_device_bindings_report(args, &[], &compute_devices),
@@ -380,8 +388,34 @@ fn inspect_placement(
 ) -> Result<(), Box<dyn Error>> {
     let capacity = choose_runtime_context_size(package_manifest, args.context_size, 1)?;
     let device_ids = runtime_model.placement_device_ids();
-    let placement = runtime_model_placement(manifest_dir, &runtime_model)?;
     let bound_devices = runtime_bound_vulkan_devices(args, &device_ids)?;
+    let (runtime_model, implementation_selection) = runtime_model
+        .select_and_apply_runtime_implementations(
+            manifest_dir,
+            &bound_devices.hardware_profiles,
+            RuntimeExecutionEnvelope {
+                phases: vec![
+                    "decode".to_string(),
+                    "prefill".to_string(),
+                ],
+                activation_batch: RuntimeInclusiveRange {
+                    minimum: 1,
+                    maximum: capacity.max(1),
+                },
+                context_activations: RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: capacity,
+                },
+                state_activations: RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: capacity,
+                },
+            },
+        )?;
+    let placement = runtime_model_placement(
+        manifest_dir,
+        &runtime_model,
+    )?;
     let slices = device_ids
         .iter()
         .map(|device_id| {
@@ -413,6 +447,7 @@ fn inspect_placement(
         ),
         bound_devices: bound_devices_report(&bound_devices),
         edge_routes: bound_edge_routes_report(&bound_devices, &placement.edges),
+        implementation_selection,
         device_count: device_ids.len(),
         device_ids,
         devices: slices,
@@ -422,6 +457,9 @@ fn inspect_placement(
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("device_count={}", payload.device_count);
+        print_runtime_implementation_selection(
+            &payload.implementation_selection,
+        );
         for device in &payload.devices {
             println!(
                 "{} nodes={} incoming={} outgoing={} dispatches={}",

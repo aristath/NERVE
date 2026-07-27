@@ -100,6 +100,24 @@ impl App {
                 NodePropertyDraft::new(schema, value)
             })
             .collect();
+        let (selected_implementation_id, implementation_selection_error) =
+            match editor.runtime_implementation_selection() {
+                Ok(selection) => (
+                    selection
+                        .selected
+                        .iter()
+                        .find(|selected| {
+                            selected
+                                .instance_ids
+                                .contains(instance_id)
+                        })
+                        .map(|selected| {
+                            selected.implementation_id.clone()
+                        }),
+                    None,
+                ),
+                Err(error) => (None, Some(error.to_string())),
+            };
         self.overlay = Some(Overlay::Node(NodeModalState {
             instance_id: instance.instance_id,
             source,
@@ -108,6 +126,8 @@ impl App {
             device_labels,
             device_index,
             original_device_id: instance.device_id,
+            selected_implementation_id,
+            implementation_selection_error,
             enabled: instance.enabled,
             policy,
             policy_targets,

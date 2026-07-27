@@ -28,6 +28,13 @@ fn render_node_modal(frame: &mut Frame<'_>, app: &mut App, modal: &NodeModalStat
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(if modal.anatomy_expanded { 16 } else { 2 }),
+            Constraint::Length(
+                if modal.source.implementation_options.is_empty() {
+                    2
+                } else {
+                    7
+                },
+            ),
             Constraint::Min(4),
             Constraint::Length(2),
         ])
@@ -94,15 +101,16 @@ fn render_node_modal(frame: &mut Frame<'_>, app: &mut App, modal: &NodeModalStat
         app.hit_map.insert(area, HitTarget::ModalRow(index));
     }
     render_module_anatomy(frame, modal, rows[6]);
-    render_node_properties(frame, app, modal, rows[7]);
+    render_implementation_options(frame, modal, rows[7]);
+    render_node_properties(frame, app, modal, rows[8]);
     if let Some(error) = &modal.error {
         frame.render_widget(
             Paragraph::new(truncate(error, rows[7].width as usize))
                 .style(Style::default().fg(FAULT)),
             Rect::new(
-                rows[7].x,
-                rows[7].bottom().saturating_sub(1),
-                rows[7].width,
+                rows[8].x,
+                rows[8].bottom().saturating_sub(1),
+                rows[8].width,
                 1,
             ),
         );
@@ -116,17 +124,102 @@ fn render_node_modal(frame: &mut Frame<'_>, app: &mut App, modal: &NodeModalStat
             Span::styled("[ Cancel ]", cancel_style),
         ]))
         .alignment(Alignment::Center),
-        rows[8],
+        rows[9],
     );
-    let middle = rows[8].x + rows[8].width / 2;
+    let middle = rows[9].x + rows[9].width / 2;
     app.hit_map.insert(
-        Rect::new(middle.saturating_sub(10), rows[8].y, 9, 1),
+        Rect::new(middle.saturating_sub(10), rows[9].y, 9, 1),
         HitTarget::ModalApply,
     );
     app.hit_map.insert(
-        Rect::new(middle + 2, rows[8].y, 10, 1),
+        Rect::new(middle + 2, rows[9].y, 10, 1),
         HitTarget::ModalCancel,
     );
+}
+
+fn render_implementation_options(
+    frame: &mut Frame<'_>,
+    modal: &NodeModalState,
+    area: Rect,
+) {
+    let block = Block::default()
+        .title(" Verified physical implementations ")
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(QUIET));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if modal.source.implementation_options.is_empty() {
+        frame.render_widget(
+            Paragraph::new(if let Some(error) =
+                &modal.implementation_selection_error
+            {
+                format!(
+                    "Selection unavailable: {}",
+                    truncate(error, inner.width as usize)
+                )
+            } else {
+                "Selected: exact baseline".to_string()
+            })
+                .style(Style::default().fg(META)),
+            inner,
+        );
+        return;
+    }
+    let mut lines = Vec::new();
+    lines.push(Line::styled(
+        if let Some(implementation_id) =
+            &modal.selected_implementation_id
+        {
+            format!(
+                "Selected for this placement: {}",
+                truncate(implementation_id, 48)
+            )
+        } else if let Some(error) =
+            &modal.implementation_selection_error
+        {
+            format!(
+                "Selection unavailable: {}",
+                truncate(error, 48)
+            )
+        } else {
+            "Selected for this placement: exact baseline".to_string()
+        },
+        Style::default().fg(COOL),
+    ));
+    for option in modal.source.implementation_options.iter().take(2) {
+        let representation = option
+            .representation
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("custom representation");
+        let provider = option
+            .provenance
+            .get("provider")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|provider| provider.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown provider");
+        lines.push(Line::from(vec![
+            Span::styled(
+                truncate(&option.implementation_id, 38),
+                Style::default().fg(SIGNAL),
+            ),
+            Span::styled(
+                format!(" · {}", option.validation_status),
+                Style::default().fg(COOL),
+            ),
+        ]));
+        lines.push(Line::styled(
+            format!(
+                "{representation} · {provider} · predicate {} · benchmark {} · validation {}",
+                option.runtime_predicate.predicate_id,
+                option.benchmark_id,
+                option.validation_id,
+            ),
+            Style::default().fg(META),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_module_anatomy(frame: &mut Frame<'_>, modal: &NodeModalState, area: Rect) {

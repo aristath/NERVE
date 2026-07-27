@@ -197,12 +197,15 @@ mod tests {
                     measured_cost: None,
                 }],
                 semantic_module_root_id: Some("layer".to_string()),
+                implementation_options: Vec::new(),
             },
             occurrence: 1,
             device_ids: vec!["gpu0".to_string()],
             device_labels: vec!["gpu0 · fixture".to_string()],
             device_index: 0,
             original_device_id: "gpu0".to_string(),
+            selected_implementation_id: None,
+            implementation_selection_error: None,
             enabled: true,
             policy: NodePolicyKind::Independent,
             policy_targets: Vec::new(),
@@ -213,6 +216,67 @@ mod tests {
             focus_row: 5,
             error: None,
         };
+        modal.source.implementation_options.push(
+            crate::RuntimeEditorImplementationOption {
+                implementation_id:
+                    "implementation_verified_fixture".to_string(),
+                candidate_id: "candidate_verified_fixture".to_string(),
+                scope_ids: vec!["scope_layer_00".to_string()],
+                runtime_predicate: serde_json::from_value(
+                    serde_json::json!({
+                        "schema": crate::RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
+                        "predicate_id": "runtime_predicate_fixture",
+                        "hardware": {
+                            "capability_class_counts": [{
+                                "capability_class": "gpu_fixture",
+                                "count": 1
+                            }],
+                            "device_kinds": ["gpu"],
+                            "apis": ["vulkan"],
+                            "required_processes": [],
+                            "required_features": []
+                        },
+                        "execution": {
+                            "phases": ["decode", "prefill"],
+                            "activation_batch": {
+                                "minimum": 1,
+                                "maximum": 65536
+                            },
+                            "context_activations": {
+                                "minimum": 0,
+                                "maximum": 65536
+                            },
+                            "state_activations": {
+                                "minimum": 0,
+                                "maximum": 65536
+                            }
+                        },
+                        "placement": {
+                            "mode": "local",
+                            "minimum_device_count": 1,
+                            "maximum_device_count": 1,
+                            "required_interconnects": []
+                        }
+                    }),
+                )
+                .unwrap(),
+                representation: serde_json::json!({
+                    "kind": "finite_state_recurrence"
+                }),
+                provenance: serde_json::json!({
+                    "provider": {
+                        "id": "fixture_provider",
+                        "version": "1"
+                    }
+                }),
+                benchmark_id: "benchmark_fixture".to_string(),
+                validation_id: "validation_fixture".to_string(),
+                validation_status: "passed".to_string(),
+                decision_reason: "verified measured win".to_string(),
+            },
+        );
+        modal.selected_implementation_id =
+            Some("implementation_verified_fixture".to_string());
         modal.focus_row = modal.apply_row();
         app.overlay = Some(Overlay::Node(modal));
         let rendered = rendered_text(&mut app, 40, 12);
@@ -223,5 +287,9 @@ mod tests {
         let rendered = rendered_text(&mut app, 100, 40);
         assert!(rendered.contains("Editable source layer"));
         assert!(rendered.contains("fused_project"));
+        assert!(rendered.contains("implementation_verified_fixture"));
+        assert!(rendered.contains("finite_state_recurrence"));
+        assert!(rendered.contains("fixture_provider"));
+        assert!(rendered.contains("passed"));
     }
 }

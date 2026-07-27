@@ -18,6 +18,8 @@ pub struct RuntimeAvailableDevice {
     pub device_id: String,
     pub backend: String,
     pub available: bool,
+    #[serde(skip)]
+    pub hardware_profile: Option<crate::HardwareProcessProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +137,7 @@ pub struct RuntimeTopologyReport {
     pub compiled_schema: String,
     pub config_path: String,
     pub tokenizer: Value,
+    pub implementation_catalog: crate::RuntimeImplementationCatalogReport,
     pub available_devices: Vec<RuntimeAvailableDevice>,
     pub compiled: RuntimeCompiledExecutionGraphSummary,
     pub runtime_graph_controls: RuntimeGraphControls,
@@ -151,6 +154,7 @@ pub struct RuntimePackageInspectionReport {
     pub package_id: String,
     pub config_path: String,
     pub tokenizer: Value,
+    pub implementation_catalog: crate::RuntimeImplementationCatalogReport,
     pub compiled_topology: String,
     pub runtime_graph: RuntimeGraphControls,
     pub device_bindings: RuntimeDeviceBindings,
@@ -257,6 +261,8 @@ pub struct RuntimePlacementReport {
     pub device_bindings: RuntimeDeviceBindings,
     pub bound_devices: Vec<RuntimeBoundDevice>,
     pub edge_routes: RuntimeEdgeRoutes,
+    pub implementation_selection:
+        crate::RuntimeImplementationSelectionReport,
     pub device_count: usize,
     pub device_ids: Vec<String>,
     pub devices: Vec<RuntimeDeviceSliceReport>,

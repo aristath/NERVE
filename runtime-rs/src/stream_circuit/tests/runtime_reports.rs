@@ -61,6 +61,7 @@
             device_id: "vulkan:5".to_string(),
             backend: "vulkan_compute".to_string(),
             available: true,
+            hardware_profile: None,
             runtime_device_id: None,
             physical_device_id: Some("vulkan:5".to_string()),
             physical_device_index: Some(5),
@@ -90,6 +91,7 @@
             device_id: "runtime_default".to_string(),
             backend: "vulkan_compute".to_string(),
             available: false,
+            hardware_profile: None,
             runtime_device_id: None,
             physical_device_id: None,
             physical_device_index: None,
@@ -209,10 +211,25 @@
             compiled_schema: "nerve.vulkan_resident_model_package.v4".to_string(),
             config_path: "config.json".to_string(),
             tokenizer: serde_json::json!({"path": "tokenizer"}),
+            implementation_catalog:
+                crate::RuntimeImplementationCatalogReport {
+                    package_id: "model-test".to_string(),
+                    stage_status:
+                        "exact_baseline_retained".to_string(),
+                    exact_baseline: crate::RuntimeExactImplementation {
+                        artifact_ref:
+                            "lowered/execution_graph.circuits.json"
+                                .to_string(),
+                        contract_digest: "fixture".to_string(),
+                        mutable: false,
+                    },
+                    implementations: Vec::new(),
+                },
             available_devices: vec![RuntimeAvailableDevice {
                 device_id: "gpu0".to_string(),
                 backend: "vulkan_compute".to_string(),
                 available: true,
+                hardware_profile: None,
                 runtime_device_id: Some("gpu0".to_string()),
                 physical_device_id: Some("vulkan:0".to_string()),
                 physical_device_index: Some(0),
@@ -336,6 +353,20 @@
             package_id: "model-test".to_string(),
             config_path: "config.json".to_string(),
             tokenizer: serde_json::json!({"path": "tokenizer"}),
+            implementation_catalog:
+                crate::RuntimeImplementationCatalogReport {
+                    package_id: "model-test".to_string(),
+                    stage_status:
+                        "exact_baseline_retained".to_string(),
+                    exact_baseline: crate::RuntimeExactImplementation {
+                        artifact_ref:
+                            "lowered/execution_graph.circuits.json"
+                                .to_string(),
+                        contract_digest: "fixture".to_string(),
+                        mutable: false,
+                    },
+                    implementations: Vec::new(),
+                },
             compiled_topology: "series".to_string(),
             runtime_graph: RuntimeGraphControls {
                 default_device_id: None,
@@ -594,6 +625,35 @@
                 unresolved_target_edge_count: 0,
                 routes: Vec::new(),
             },
+            implementation_selection:
+                crate::RuntimeImplementationSelectionReport {
+                    package_id: "model-test".to_string(),
+                    execution: crate::RuntimeExecutionEnvelope {
+                        phases: vec!["decode".to_string()],
+                        activation_batch:
+                            crate::RuntimeInclusiveRange {
+                                minimum: 1,
+                                maximum: 1,
+                            },
+                        context_activations:
+                            crate::RuntimeInclusiveRange {
+                                minimum: 0,
+                                maximum: 16,
+                            },
+                        state_activations:
+                            crate::RuntimeInclusiveRange {
+                                minimum: 0,
+                                maximum: 16,
+                            },
+                    },
+                    selected: Vec::new(),
+                    exact_instance_ids: Vec::new(),
+                    rejected: Vec::new(),
+                    total_estimated_saved_ns: 0,
+                    total_conversion_ns: 0,
+                    total_conversion_bytes: 0,
+                    total_boundary_count: 0,
+                },
             device_count: 1,
             device_ids: vec!["gpu0".to_string()],
             devices: Vec::new(),

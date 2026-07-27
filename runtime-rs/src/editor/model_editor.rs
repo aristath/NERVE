@@ -30,13 +30,19 @@ impl RuntimeModelEditor {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let manifest = VulkanResidentModelPackageManifest::from_json_file(&manifest_path)?;
+        let implementation_catalog = manifest
+            .implementation_catalog(&package_root)
+            .map_err(|error| RuntimeEditorError(error.to_string()))?;
         let source_graph = manifest
             .resolved_source_graph(package_root.clone())
             .map_err(|error| RuntimeEditorError(error.to_string()))?;
         let draft = manifest
             .runtime_graph_from_controls(None, &BTreeMap::new(), &[], None)
             .map_err(|error| RuntimeEditorError(error.to_string()))?;
-        let source_components = source_components(&manifest);
+        let source_components = source_components(
+            &manifest,
+            &implementation_catalog,
+        );
         let source_by_layer = source_components
             .iter()
             .filter_map(|component| {
@@ -60,6 +66,7 @@ impl RuntimeModelEditor {
             package_manifest_path: manifest_path,
             package_root,
             manifest,
+            implementation_catalog,
             source_graph,
             source_components,
             source_by_layer,
@@ -87,6 +94,90 @@ impl RuntimeModelEditor {
 
     pub fn source_components(&self) -> &[RuntimeEditorSourceComponent] {
         &self.source_components
+    }
+
+    pub fn implementation_catalog(
+        &self,
+    ) -> &crate::RuntimeImplementationCatalog {
+        &self.implementation_catalog
+    }
+
+    pub fn runtime_implementation_selection(
+        &self,
+    ) -> Result<
+        crate::RuntimeImplementationSelectionReport,
+        RuntimeEditorError,
+    > {
+        let runtime_model = self
+            .manifest
+            .clone()
+            .mount_runtime_graph(&self.draft)
+            .map_err(|error| {
+                RuntimeEditorError(error.to_string())
+            })?;
+        let mut profiles = BTreeMap::new();
+        for logical_device_id in runtime_model.placement_device_ids() {
+            let device = self
+                .available_devices
+                .iter()
+                .find(|device| {
+                    device.device_id == logical_device_id
+                        || device.runtime_device_id.as_deref()
+                            == Some(logical_device_id.as_str())
+                })
+                .ok_or_else(|| {
+                    RuntimeEditorError(format!(
+                        "runtime device {logical_device_id:?} is unavailable"
+                    ))
+                })?;
+            let profile = device.hardware_profile.clone().ok_or_else(
+                || {
+                    RuntimeEditorError(format!(
+                        "runtime device {logical_device_id:?} has no hardware-process profile"
+                    ))
+                },
+            )?;
+            profiles.insert(logical_device_id, profile);
+        }
+        let request =
+            crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
+                &runtime_model,
+                &profiles,
+                crate::RuntimeExecutionEnvelope {
+                    phases: vec![
+                        "decode".to_string(),
+                        "prefill".to_string(),
+                    ],
+                    activation_batch:
+                        crate::RuntimeInclusiveRange {
+                            minimum: 1,
+                            maximum: self
+                                .manifest
+                                .max_context_activations,
+                        },
+                    context_activations:
+                        crate::RuntimeInclusiveRange {
+                            minimum: 0,
+                            maximum: self
+                                .manifest
+                                .max_context_activations,
+                        },
+                    state_activations:
+                        crate::RuntimeInclusiveRange {
+                            minimum: 0,
+                            maximum: self
+                                .manifest
+                                .max_context_activations,
+                        },
+                },
+                true,
+            )
+            .map_err(|error| {
+                RuntimeEditorError(error.to_string())
+            })?;
+        self.implementation_catalog
+            .select(&request)
+            .map_err(|error| RuntimeEditorError(error.to_string()))
     }
 
     pub fn available_devices(&self) -> &[RuntimeAvailableDevice] {
@@ -476,6 +567,7 @@ pub(crate) fn load_runtime_model_editor_without_hardware(
             device_id: device_id.clone(),
             backend: "test".to_string(),
             available: true,
+            hardware_profile: None,
             runtime_device_id: Some(device_id),
             physical_device_id: Some("test:0".to_string()),
             physical_device_index: Some(0),

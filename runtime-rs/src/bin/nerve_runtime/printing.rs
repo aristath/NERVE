@@ -86,6 +86,76 @@ fn print_runtime_timing_stats(label: &str, timing: &RuntimePromptTimingReport) {
     }
 }
 
+fn print_runtime_implementation_selection(
+    report: &RuntimeImplementationSelectionReport,
+) {
+    println!("implementations:");
+    println!("  selected={}", report.selected.len());
+    println!(
+        "  exact_instances={}",
+        report.exact_instance_ids.len()
+    );
+    println!(
+        "  estimated_saved_ms={:.3}",
+        nanos_to_millis(report.total_estimated_saved_ns)
+    );
+    println!(
+        "  representation_boundary_ms={:.3}",
+        nanos_to_millis(report.total_conversion_ns)
+    );
+    println!(
+        "  representation_boundary_bytes={}",
+        report.total_conversion_bytes
+    );
+    println!(
+        "  representation_boundary_count={}",
+        report.total_boundary_count
+    );
+    for selection in &report.selected {
+        let representation = selection
+            .representation
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("custom");
+        println!(
+            "  implementation={} instances={:?} predicate={} representation={} benchmark={} validation={}",
+            selection.implementation_id,
+            selection.instance_ids,
+            selection.predicate.predicate_id,
+            representation,
+            selection.benchmark_id,
+            selection.validation_id,
+        );
+    }
+}
+
+fn print_runtime_sustained_decode_stats(
+    report: &RuntimeSustainedDecodeReport,
+) {
+    println!("sustained_decode:");
+    println!(
+        "  measured_inter_token_samples={}",
+        report.measured_token_count
+    );
+    for window in &report.windows {
+        println!(
+            "  window_{}=context:{}-{},state:{}-{},tokens:{},elapsed_ms:{:.3},tokens_per_second:{:.3}",
+            window.ordinal,
+            window.context_activation_start,
+            window.context_activation_end,
+            window.transient_state_activation_start,
+            window.transient_state_activation_end,
+            window.token_count,
+            nanos_to_millis(window.elapsed_ns),
+            generated_tokens_per_second(
+                window.token_count,
+                window.elapsed_ns,
+            )
+            .unwrap_or_default(),
+        );
+    }
+}
+
 fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) {
     println!("execution:");
     println!(

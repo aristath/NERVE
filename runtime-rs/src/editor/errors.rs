@@ -8,9 +8,11 @@ use serde_json::Value;
 
 use crate::{
     CircuitPlacementError, CircuitRuntimeRole, ComponentPlacement, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID,
-    ResolvedLoweredExecutionGraph, RuntimeAvailableDevice, RuntimeAvailableMemoryHeap,
+    ResolvedLoweredExecutionGraph, RuntimeAvailableDevice,
+    RuntimeAvailableMemoryHeap,
     StreamCircuitNodeInstance, StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan,
-    StreamCircuitRuntimeGraph, VulkanComputeDevice, VulkanComputeDeviceInfo,
+    StreamCircuitRuntimeGraph, VulkanComputeDeviceCatalog,
+    VulkanComputeDeviceInfo,
     VulkanResidentModelPackageManifest,
 };
 

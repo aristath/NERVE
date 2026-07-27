@@ -16,6 +16,20 @@ pub struct RuntimeEditorSemanticModule {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeEditorImplementationOption {
+    pub implementation_id: String,
+    pub candidate_id: String,
+    pub scope_ids: Vec<String>,
+    pub runtime_predicate: crate::RuntimeImplementationPredicate,
+    pub representation: Value,
+    pub provenance: Value,
+    pub benchmark_id: String,
+    pub validation_id: String,
+    pub validation_status: String,
+    pub decision_reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeEditorSourceComponent {
     pub source_id: String,
     pub layer_index: Option<usize>,
@@ -33,6 +47,7 @@ pub struct RuntimeEditorSourceComponent {
     pub kernel_count: usize,
     pub semantic_modules: Vec<RuntimeEditorSemanticModule>,
     pub semantic_module_root_id: Option<String>,
+    pub implementation_options: Vec<RuntimeEditorImplementationOption>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -124,6 +139,7 @@ pub struct RuntimeModelEditor {
     package_manifest_path: PathBuf,
     package_root: PathBuf,
     manifest: VulkanResidentModelPackageManifest,
+    implementation_catalog: crate::RuntimeImplementationCatalog,
     source_graph: ResolvedLoweredExecutionGraph,
     source_components: Vec<RuntimeEditorSourceComponent>,
     source_by_layer: BTreeMap<usize, Vec<String>>,

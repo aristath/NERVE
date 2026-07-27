@@ -2,17 +2,55 @@ pub fn discover_runtime_devices(
     default_device_id: &str,
     selected_vulkan_device_index: Option<usize>,
 ) -> Vec<RuntimeAvailableDevice> {
-    match VulkanComputeDevice::available_compute_devices() {
-        Ok(devices) if devices.is_empty() => vec![unavailable_device(
-            default_device_id,
-            "no compute-capable Vulkan physical devices were found",
-            None,
-        )],
-        Ok(devices) => runtime_devices_from_compute_devices(
-            default_device_id,
-            selected_vulkan_device_index,
-            &devices,
-        ),
+    match VulkanComputeDeviceCatalog::discover() {
+        Ok(catalog)
+            if catalog.available_compute_devices().is_empty() =>
+        {
+            vec![unavailable_device(
+                default_device_id,
+                "no compute-capable Vulkan physical devices were found",
+                None,
+            )]
+        }
+        Ok(catalog) => {
+            let profiles = match catalog.available_hardware_profiles() {
+                Ok(profiles) => profiles
+                    .into_iter()
+                    .map(|profile| {
+                        (
+                            profile
+                                .hardware_identity
+                                .stable_device_id
+                                .clone(),
+                            profile,
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+                Err(error) => {
+                    return vec![unavailable_device(
+                        default_device_id,
+                        "Vulkan hardware-profile discovery failed",
+                        Some(error.to_string()),
+                    )];
+                }
+            };
+            runtime_devices_from_compute_devices(
+                default_device_id,
+                selected_vulkan_device_index,
+                catalog.available_compute_devices(),
+            )
+            .into_iter()
+            .map(|mut device| {
+                device.hardware_profile = device
+                    .physical_device_id
+                    .as_ref()
+                    .and_then(|physical_id| {
+                        profiles.get(physical_id).cloned()
+                    });
+                device
+            })
+            .collect()
+        }
         Err(error) => vec![unavailable_device(
             default_device_id,
             "Vulkan device discovery failed",
@@ -50,6 +88,7 @@ pub fn runtime_devices_from_compute_devices(
                 device_id,
                 backend: "vulkan_compute".to_string(),
                 available: true,
+                hardware_profile: None,
                 runtime_device_id,
                 physical_device_id: Some(device.physical_device_id.clone()),
                 physical_device_index: Some(device.physical_device_index),
@@ -104,6 +143,7 @@ fn unavailable_device(
         device_id: device_id.to_string(),
         backend: "vulkan_compute".to_string(),
         available: false,
+        hardware_profile: None,
         runtime_device_id: None,
         physical_device_id: None,
         physical_device_index: None,

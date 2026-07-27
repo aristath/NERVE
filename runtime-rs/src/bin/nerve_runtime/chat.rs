@@ -283,6 +283,8 @@ struct RuntimeChatTurn {
     canonical_committed_token_ids: Vec<u32>,
     streamed: bool,
     timing: RuntimePromptTimingReport,
+    sustained_decode: RuntimeSustainedDecodeReport,
+    implementation_selection: RuntimeImplementationSelectionReport,
     execution_counters: VulkanResidentExecutionCounters,
     prefix_state_cache: VulkanResidentPlacedPrefixStateCacheStats,
     speculative_cycle_count: usize,
@@ -297,6 +299,77 @@ struct RuntimeChatTurn {
     resident_feedback: RuntimeFeedbackExecutionReport,
     transport_edges: Vec<RuntimePlacedTransportEdgeReport>,
     sparse_moe: RuntimeSparseMoeWorkReport,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeSustainedDecodeSample {
+    context_activation: usize,
+    transient_state_activation: u64,
+    inter_token_time_ns: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RuntimeSustainedDecodeReport {
+    measured_token_count: usize,
+    windows: Vec<RuntimeSustainedDecodeWindow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeSustainedDecodeWindow {
+    ordinal: usize,
+    context_activation_start: usize,
+    context_activation_end: usize,
+    transient_state_activation_start: u64,
+    transient_state_activation_end: u64,
+    token_count: usize,
+    elapsed_ns: u64,
+}
+
+impl RuntimeSustainedDecodeReport {
+    fn from_samples(
+        samples: &[RuntimeSustainedDecodeSample],
+    ) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+        let mut windows = Vec::new();
+        for ordinal in 0..4 {
+            let start = ordinal * samples.len() / 4;
+            let end = (ordinal + 1) * samples.len() / 4;
+            if start == end {
+                continue;
+            }
+            let slice = &samples[start..end];
+            windows.push(RuntimeSustainedDecodeWindow {
+                ordinal: windows.len(),
+                context_activation_start:
+                    slice[0].context_activation,
+                context_activation_end: slice
+                    .last()
+                    .expect("non-empty sustained window")
+                    .context_activation,
+                transient_state_activation_start:
+                    slice[0].transient_state_activation,
+                transient_state_activation_end: slice
+                    .last()
+                    .expect("non-empty sustained window")
+                    .transient_state_activation,
+                token_count: slice.len(),
+                elapsed_ns: slice.iter().fold(
+                    0u64,
+                    |elapsed, sample| {
+                        elapsed.saturating_add(
+                            sample.inter_token_time_ns,
+                        )
+                    },
+                ),
+            });
+        }
+        Self {
+            measured_token_count: samples.len(),
+            windows,
+        }
+    }
 }
 
 fn run_chat_repl<C, T, F>(
@@ -407,6 +480,12 @@ where
                 print_chat_response(&generated_text);
             }
             print_runtime_timing_stats("stats", &turn.timing);
+            print_runtime_sustained_decode_stats(
+                &turn.sustained_decode,
+            );
+            print_runtime_implementation_selection(
+                &turn.implementation_selection,
+            );
             print_runtime_execution_counters(&turn.execution_counters);
             print_runtime_prefix_state_cache_stats(&turn.prefix_state_cache);
             print_runtime_speculative_stats(

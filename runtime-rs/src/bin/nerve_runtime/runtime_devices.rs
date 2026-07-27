@@ -65,6 +65,7 @@ fn runtime_model(
 
 struct RuntimeBoundVulkanDevices {
     devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
+    hardware_profiles: BTreeMap<String, HardwareProcessProfile>,
     physical_device_indices: BTreeMap<String, usize>,
     physical_device_ids: BTreeMap<String, String>,
     available_devices: Vec<VulkanComputeDeviceInfo>,
@@ -125,12 +126,14 @@ fn runtime_bound_vulkan_devices(
 ) -> Result<RuntimeBoundVulkanDevices, Box<dyn Error>> {
     let device_catalog = runtime_vulkan_device_catalog(args)?;
     let available_devices = device_catalog.available_compute_devices();
+    let available_profiles = device_catalog.available_hardware_profiles()?;
     let requested_bindings =
         runtime_physical_device_bindings_in(args, logical_device_ids, available_devices)?;
     let mut devices = BTreeMap::new();
     let mut physical_devices: BTreeMap<usize, Rc<VulkanComputeDevice>> = BTreeMap::new();
     let mut physical_device_indices = BTreeMap::new();
     let mut physical_device_ids = BTreeMap::new();
+    let mut hardware_profiles = BTreeMap::new();
 
     for (logical_device_id, physical_device_index) in requested_bindings {
         let available_device = available_devices
@@ -157,10 +160,30 @@ fn runtime_bound_vulkan_devices(
             logical_device_id.clone(),
             available_device.physical_device_id.clone(),
         );
+        let hardware_profile = available_profiles
+            .iter()
+            .find(|profile| {
+                profile.hardware_identity.stable_device_id
+                    == available_device.physical_device_id
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "physical device {:?} has no hardware-process profile",
+                        available_device.physical_device_id
+                    ),
+                )
+            })?;
+        hardware_profiles.insert(
+            logical_device_id.clone(),
+            hardware_profile.clone(),
+        );
     }
 
     Ok(RuntimeBoundVulkanDevices {
         devices,
+        hardware_profiles,
         physical_device_indices,
         physical_device_ids,
         available_devices: available_devices.to_vec(),

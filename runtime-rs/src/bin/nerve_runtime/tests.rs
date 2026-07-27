@@ -17,6 +17,8 @@ mod tests {
 
     use super::{
         Args, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
+        RuntimeSustainedDecodeReport,
+        RuntimeSustainedDecodeSample,
         assistant_content_token_ids, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
         parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
@@ -761,5 +763,46 @@ mod tests {
         let rendered = codec.decode_tokens(&prompt_ids).unwrap();
 
         assert!(rendered.contains("<think>\n\n</think>\n\n"), "{rendered:?}");
+    }
+
+    #[test]
+    fn sustained_decode_report_exposes_early_and_late_context_windows() {
+        let samples = (0..8)
+            .map(|index| RuntimeSustainedDecodeSample {
+                context_activation: 32_000 + index,
+                transient_state_activation: 31_000 + index as u64,
+                inter_token_time_ns: if index < 4 {
+                    10_000_000
+                } else {
+                    20_000_000
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let report =
+            RuntimeSustainedDecodeReport::from_samples(&samples);
+
+        assert_eq!(report.measured_token_count, 8);
+        assert_eq!(report.windows.len(), 4);
+        assert_eq!(
+            report
+                .windows
+                .first()
+                .unwrap()
+                .context_activation_start,
+            32_000
+        );
+        assert_eq!(
+            report
+                .windows
+                .last()
+                .unwrap()
+                .context_activation_end,
+            32_007
+        );
+        assert!(
+            report.windows.last().unwrap().elapsed_ns
+                > report.windows.first().unwrap().elapsed_ns
+        );
     }
 }

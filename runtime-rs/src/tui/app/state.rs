@@ -291,6 +291,8 @@ pub(crate) struct NodeModalState {
     pub device_labels: Vec<String>,
     pub device_index: usize,
     pub original_device_id: String,
+    pub selected_implementation_id: Option<String>,
+    pub implementation_selection_error: Option<String>,
     pub enabled: bool,
     pub policy: NodePolicyKind,
     pub policy_targets: Vec<String>,

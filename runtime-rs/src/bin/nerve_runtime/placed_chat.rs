@@ -20,6 +20,29 @@ fn run_placed_chat(
     let logical_device_ids = runtime_model.placement_device_ids();
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
+    let (runtime_model, implementation_selection) = runtime_model
+        .select_and_apply_runtime_implementations(
+            manifest_dir,
+            &bound_devices.hardware_profiles,
+            RuntimeExecutionEnvelope {
+                phases: vec![
+                    "decode".to_string(),
+                    "prefill".to_string(),
+                ],
+                activation_batch: RuntimeInclusiveRange {
+                    minimum: 1,
+                    maximum: capacity.max(1),
+                },
+                context_activations: RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: capacity,
+                },
+                state_activations: RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: capacity,
+                },
+            },
+        )?;
     let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(
         bound_devices.devices.clone(),
         manifest_dir,
@@ -57,6 +80,15 @@ fn run_placed_chat(
             io::stdout().flush()?;
             let mut decoder = codec.decode_stream();
             let mut output_error = None;
+            let generation_context_start = chat_session
+                .committed_token_ids
+                .len()
+                .saturating_add(prepared.user_token_delta.len())
+                .saturating_add(
+                    prepared.generation_prompt_token_delta.len(),
+                );
+            let mut previous_output_at = None;
+            let mut sustained_decode_samples = Vec::new();
             reset_vulkan_resident_execution_counters();
             let run_start = Instant::now();
 
@@ -84,6 +116,32 @@ fn run_placed_chat(
                 "main",
                 generation_event,
                 |output_event| {
+                    let output_at = Instant::now();
+                    if let Some(previous) = previous_output_at {
+                        sustained_decode_samples.push(
+                            RuntimeSustainedDecodeSample {
+                                context_activation:
+                                    generation_context_start
+                                        .saturating_add(
+                                            output_event
+                                                .output_event
+                                                .output_index,
+                                        ),
+                                transient_state_activation:
+                                    output_event
+                                        .output_event
+                                        .source_stream_tick,
+                                inter_token_time_ns:
+                                    u64::try_from(
+                                        output_at
+                                            .duration_since(previous)
+                                            .as_nanos(),
+                                    )
+                                    .unwrap_or(u64::MAX),
+                            },
+                        );
+                    }
+                    previous_output_at = Some(output_at);
                     if output_error.is_some() {
                         return;
                     }
@@ -210,6 +268,11 @@ fn run_placed_chat(
                 canonical_committed_token_ids,
                 streamed: true,
                 timing,
+                sustained_decode:
+                    RuntimeSustainedDecodeReport::from_samples(
+                        &sustained_decode_samples,
+                    ),
+                implementation_selection: implementation_selection.clone(),
                 execution_counters,
                 prefix_state_cache,
                 speculative_cycle_count: submitted_run
