@@ -45,3 +45,12 @@ fn targeted_component_fixture_is_deterministic_bounded_bf16() {
         assert!(value.abs() <= 4.031_25, "{value}");
     }
 }
+#[test]
+fn targeted_output_identity_remains_an_artifact_digest() {
+    let digest = targeted_finalized_artifact_digest(&[0xAB; 32]);
+
+    assert_eq!(
+        digest,
+        format!("nerve.optimizer.artifact_sha256.v1:{}", "ab".repeat(32))
+    );
+}

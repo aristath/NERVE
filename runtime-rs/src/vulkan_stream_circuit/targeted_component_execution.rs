@@ -1016,7 +1016,7 @@ fn targeted_fixture_bytes(
 
 fn targeted_finalized_artifact_digest(payload: &[u8]) -> String {
     format!(
-        "nerve.optimizer.device_state_sha256.v1:{}",
+        "nerve.optimizer.artifact_sha256.v1:{}",
         payload
             .iter()
             .map(|byte| format!("{byte:02x}"))
