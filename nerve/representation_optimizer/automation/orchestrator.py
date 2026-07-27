@@ -4,7 +4,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Callable, Iterable
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import (
+    Json,
+    ModelCompileCancelled,
+    ModelCompileError,
+    check_compile_cancelled,
+)
 from nerve.representation_optimizer.analysis.context import AnalysisBudget
 from nerve.representation_optimizer.analysis.engine import analyze_scope
 from nerve.representation_optimizer.automation.budgets import BudgetLedger
@@ -19,6 +24,7 @@ from nerve.representation_optimizer.automation.records import (
     error_document,
     finish_candidate,
     new_candidate_record,
+    record_candidate_cancellation,
     record_candidate_failure,
 )
 from nerve.representation_optimizer.automation.report import (
@@ -111,6 +117,7 @@ def run_automated_optimizer(
     analysis_directories: dict[str, Path] = {}
     publication: Json = {"status": "not_attempted", "reason": "no candidates promoted"}
     fatal_error: Exception | None = None
+    cancellation_error: ModelCompileCancelled | None = None
 
     journal.record(
         phase="run",
@@ -118,11 +125,13 @@ def run_automated_optimizer(
         details={"run_id": run_id, "target_ids": [item.target_id for item in targets]},
     )
     try:
+        check_compile_cancelled(cancel_requested)
         scopes = tuple(sorted(catalog["scopes"], key=lambda item: item["scope_id"]))
         contracts = {
             str(item["scope_id"]): item for item in catalog["source_contracts"]
         }
         for scope in scopes:
+            check_compile_cancelled(cancel_requested)
             scope_id = str(scope["scope_id"])
             admitted, reason = ledger.admit_scope()
             if not admitted:
@@ -149,7 +158,25 @@ def run_automated_optimizer(
                     scope_id=scope_id,
                     budget=analysis_budget,
                     output_dir=analysis_directory,
+                    cancel_requested=cancel_requested,
                 )
+            except ModelCompileCancelled as error:
+                record = {
+                    "scope_id": scope_id,
+                    "kind": scope["kind"],
+                    "status": "cancelled",
+                    "reason": str(error),
+                    "analysis_ref": None,
+                    "structures": [],
+                }
+                scope_records.append(record)
+                journal.record(
+                    phase="analysis",
+                    status="cancelled",
+                    scope_id=scope_id,
+                    details=error_document(error),
+                )
+                raise
             except Exception as error:
                 record = {
                     "scope_id": scope_id,
@@ -198,6 +225,7 @@ def run_automated_optimizer(
             )
             source_contract = contracts[scope_id]
             for target in targets:
+                check_compile_cancelled(cancel_requested)
                 problem = ProviderProblem.from_documents(
                     package_id=str(catalog["package_id"]),
                     scopes=(scope,),
@@ -207,6 +235,7 @@ def run_automated_optimizer(
                     source_artifacts=source_artifacts,
                 )
                 registry_report = providers.run(problem)
+                check_compile_cancelled(cancel_requested)
                 evaluations = build_provider_records(
                     scope_id=scope_id,
                     target_id=target.target_id,
@@ -244,6 +273,7 @@ def run_automated_optimizer(
                         },
                     )
                 for plan in registry_report.candidates:
+                    check_compile_cancelled(cancel_requested)
                     equivalence = representation_candidate_equivalence_key(
                         plan.candidate.to_json()
                     )
@@ -339,6 +369,13 @@ def run_automated_optimizer(
                             session,
                             plan.candidate_id,
                         )
+                        if (
+                            candidate_records[plan.candidate_id]["status"]
+                            == CandidateState.CANCELLED.value
+                        ):
+                            raise ModelCompileCancelled(
+                                "candidate execution was cancelled"
+                            )
                         if promotion is not None:
                             promotions.append(promotion)
                             promotion_records.append(
@@ -351,6 +388,23 @@ def run_automated_optimizer(
                                     "reason": promotion.decision.to_json()["reason"],
                                 }
                             )
+                    except ModelCompileCancelled as error:
+                        session = record_candidate_cancellation(
+                            plan=plan,
+                            session=session,
+                            error=error,
+                            journal=journal,
+                            scope_id=scope_id,
+                            target_id=target.target_id,
+                        )
+                        record = candidate_records[plan.candidate_id]
+                        finish_candidate(
+                            record,
+                            session,
+                            plan.candidate_id,
+                            rejection_reasons=[str(error)],
+                        )
+                        raise
                     except Exception as error:
                         session = record_candidate_failure(
                             run_root=run_root,
@@ -370,12 +424,14 @@ def run_automated_optimizer(
                             rejection_reasons=[str(error)],
                         )
         if promotions:
+            check_compile_cancelled(cancel_requested)
             ordered = tuple(sorted(promotions, key=lambda item: item.implementation_id))
             publication_path = publish_promoted_package(
                 source_package_dir=source,
                 destination_package_dir=output,
                 promotions=ordered,
                 session=session,
+                cancel_requested=cancel_requested,
             )
             published_stage = load_optimizer_stage(
                 publication_path / "optimization" / "stage.json",
@@ -413,6 +469,23 @@ def run_automated_optimizer(
             phase="run",
             status=status,
             details={"promotion_count": len(promotions)},
+        )
+    except ModelCompileCancelled as error:
+        cancellation_error = error
+        status = "cancelled"
+        result_package = source
+        publication = {
+            "status": "cancelled",
+            "reason": (
+                "optimization was cancelled before package publication "
+                "committed"
+            ),
+            "error": error_document(error),
+        }
+        journal.record(
+            phase="run",
+            status="cancelled",
+            details=error_document(error),
         )
     except Exception as error:
         fatal_error = error
@@ -453,6 +526,10 @@ def run_automated_optimizer(
         event_count=journal.event_count,
     )
     report_path = publish_report(run_root, report)
+    if cancellation_error is not None:
+        raise ModelCompileCancelled(
+            f"automated optimizer cancelled safely; report: {report_path}"
+        ) from cancellation_error
     if fatal_error is not None:
         raise ModelCompileError(
             f"automated optimizer failed safely; report: {report_path}"

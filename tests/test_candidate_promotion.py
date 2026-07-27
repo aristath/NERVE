@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import nerve.representation_optimizer.promotion.publication as publication
-from nerve.compilation import ModelCompileError, read_json
+from nerve.compilation import ModelCompileCancelled, ModelCompileError, read_json
 from nerve.model_package_validation import validate_compiled_package
 from nerve.representation_optimizer.analysis.evidence import (
     build_analysis_run,
@@ -499,6 +499,34 @@ def test_publication_revalidates_evidence_and_leaves_no_partial_package(
         qualified.package_dir / "vulkan_resident_package.json"
     )
     validate_compiled_package(qualified.package_dir, manifest)
+
+
+def test_publication_cancellation_during_clone_removes_partial_package(
+    tmp_path: Path,
+) -> None:
+    qualified = _qualified_candidate(tmp_path)
+    prepared = _prepare(qualified)
+    source_before = _tree_bytes(qualified.package_dir)
+    destination = tmp_path / "must-not-exist"
+    staging_root = tmp_path / ".nerve-package-staging"
+
+    def cancel_after_first_cloned_file() -> bool:
+        return staging_root.exists() and any(
+            path.is_file() for path in staging_root.rglob("*")
+        )
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled"):
+        publish_promoted_package(
+            source_package_dir=qualified.package_dir,
+            destination_package_dir=destination,
+            promotions=(prepared,),
+            session=prepared.session,
+            cancel_requested=cancel_after_first_cloned_file,
+        )
+
+    assert not destination.exists()
+    assert not staging_root.exists()
+    assert _tree_bytes(qualified.package_dir) == source_before
 
 
 def test_missing_analysis_provenance_cannot_be_promoted(

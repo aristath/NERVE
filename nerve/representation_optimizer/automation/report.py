@@ -116,7 +116,12 @@ def validate_report(document: Json) -> None:
         raise ModelCompileError("automated optimizer report has invalid fields")
     if document["schema"] != OPTIMIZER_REPORT_SCHEMA:
         raise ModelCompileError("automated optimizer report has unsupported schema")
-    if document["status"] not in {"completed", "completed_no_changes", "failed"}:
+    if document["status"] not in {
+        "completed",
+        "completed_no_changes",
+        "cancelled",
+        "failed",
+    }:
         raise ModelCompileError("automated optimizer report has invalid status")
     for field in (
         "budget",

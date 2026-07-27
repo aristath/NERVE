@@ -145,6 +145,39 @@ def record_candidate_failure(
     return next_session
 
 
+def record_candidate_cancellation(
+    *,
+    plan: ProviderCandidatePlan,
+    session: OptimizationSession,
+    error: Exception,
+    journal: EventJournal,
+    scope_id: str,
+    target_id: str,
+) -> OptimizationSession:
+    lifecycle = candidate_lifecycle(session, plan.candidate_id)
+    next_session = session
+    if lifecycle.state not in TERMINAL_CANDIDATE_STATES:
+        next_session = session.transition_candidate(
+            plan.candidate_id,
+            CandidateState.CANCELLED,
+            evidence_refs=(),
+            reason=str(error) or "automated optimizer cancellation requested",
+        )
+    elif lifecycle.state != CandidateState.CANCELLED:
+        raise ModelCompileError(
+            "optimizer cancellation cannot rewrite a terminal candidate"
+        )
+    journal.record(
+        phase="candidate",
+        status="cancelled",
+        scope_id=scope_id,
+        target_id=target_id,
+        candidate_id=plan.candidate_id,
+        details=error_document(error),
+    )
+    return next_session
+
+
 def candidate_lifecycle(
     session: OptimizationSession,
     candidate_id: str,

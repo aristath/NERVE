@@ -7,9 +7,9 @@ import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
     LinuxAmdDeviceStateProbe,
@@ -89,7 +89,9 @@ def prepare_runtime_optimization_targets(
     live_target: CompilerTarget | None = None,
     policy: RuntimeOptimizationPolicy = RuntimeOptimizationPolicy(),
     lease_root: Path | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> PreparedOptimizationTargets:
+    check_compile_cancelled(cancel_requested)
     package_manifest = package_manifest.resolve()
     manifest = _read_json(package_manifest, "compiled package manifest")
     package_target = CompilerTarget.from_json(
@@ -127,6 +129,7 @@ def prepare_runtime_optimization_targets(
     selected_records: list[Json] = []
     excluded_records: list[Json] = []
     for profile in eligible:
+        check_compile_cancelled(cancel_requested)
         device_id = str(profile["hardware_identity"]["stable_device_id"])
         try:
             observation = probe.require_idle((profile,))[0]
@@ -149,6 +152,7 @@ def prepare_runtime_optimization_targets(
         package_manifest.parent,
         manifest,
     )
+    check_compile_cancelled(cancel_requested)
     selected_groups = _select_capability_groups(
         tuple(idle_profiles),
         parameter_bytes=parameter_bytes,
@@ -181,13 +185,16 @@ def prepare_runtime_optimization_targets(
             )
 
     drivers = discover_amd_vulkan_driver_files(vulkan_driver_files)
+    check_compile_cancelled(cancel_requested)
     if live_target is None:
         environment = amd_vulkan_environment(drivers)
         live_target = discover_compiler_target(
             runtime_bin=runtime_bin,
             allowed_physical_device_ids=selected_ids,
             environment=environment,
+            cancel_requested=cancel_requested,
         )
+    check_compile_cancelled(cancel_requested)
     live_profiles = {
         str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
             profile.to_json()
@@ -235,6 +242,7 @@ def prepare_runtime_optimization_targets(
         )
         for profiles in live_groups
     )
+    check_compile_cancelled(cancel_requested)
     return PreparedOptimizationTargets(
         targets=targets,
         selected_devices=tuple(

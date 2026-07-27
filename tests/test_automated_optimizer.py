@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
-from nerve.compilation import ModelCompileError
+from nerve.compilation import (
+    ModelCompileCancelled,
+    ModelCompileError,
+    check_compile_cancelled,
+)
 from nerve.model_package_validation import validate_compiled_package
 from nerve.representation_optimizer.automation import (
     CandidateToolchain,
@@ -34,6 +38,7 @@ from tests.test_candidate_benchmarking import (
     FixtureExecutionAdapter,
 )
 from tests.test_candidate_staging import (
+    CancellingStreamConstructor,
     CompletePhysicalOptimizer,
     CompleteRelowerer,
     CompleteSemanticConstructor,
@@ -77,6 +82,48 @@ class SelectiveToolchains:
         if plan.provider.provider_id == "fixture.bad-construction":
             return FailingToolchains().resolve(plan)
         return CompleteToolchains().resolve(plan)
+
+
+class CancellingToolchains:
+    def __init__(self, cancel_state: dict[str, bool]) -> None:
+        self.cancel_state = cancel_state
+
+    def resolve(self, plan):
+        return CandidateToolchain(
+            semantic_constructor=CancellingStreamConstructor(self.cancel_state),
+            ordinary_relowerer=CompleteRelowerer([]),
+            physical_optimizer=CompletePhysicalOptimizer([]),
+        )
+
+
+class CancellingExecutionSession:
+    def __init__(self, delegate, cancel_state: dict[str, bool]) -> None:
+        self.delegate = delegate
+        self.cancel_state = cancel_state
+
+    @property
+    def mount_event(self):
+        return self.delegate.mount_event
+
+    def execute(self, request):
+        observation = self.delegate.execute(request)
+        self.cancel_state["requested"] = True
+        return observation
+
+    def close(self):
+        return self.delegate.close()
+
+
+class CancellingExecutionAdapter(FixtureExecutionAdapter):
+    def __init__(self, cancel_state: dict[str, bool]) -> None:
+        super().__init__()
+        self.cancel_state = cancel_state
+
+    def open_session(self, request):
+        return CancellingExecutionSession(
+            super().open_session(request),
+            self.cancel_state,
+        )
 
 
 class DistinctFixtureProvider(FixtureProvider):
@@ -510,6 +557,134 @@ def test_publication_failure_leaves_source_and_destination_unambiguous(
         for path in package.rglob("*")
         if path.is_file()
     }
+    assert lease.acquisitions == lease.releases
+
+
+def test_cancellation_before_analysis_publishes_terminal_report(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, lease = _target()
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
+        run_automated_optimizer(
+            package_dir=package,
+            output_package_dir=tmp_path / "optimized",
+            run_root=tmp_path / "run",
+            providers=_providers(),
+            targets=(target,),
+            budget=_budget(),
+            cancel_requested=lambda: True,
+        )
+
+    report = validate_report_directory(tmp_path / "run")
+    assert report["status"] == "cancelled"
+    assert report["publication"]["status"] == "cancelled"
+    assert report["scopes"] == []
+    assert report["candidates"] == []
+    assert report["output_package"] == str(package)
+    assert not (tmp_path / "optimized").exists()
+    assert lease.acquisitions == lease.releases == 0
+
+
+def test_cancellation_during_construction_stops_the_whole_run(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    cancel_state = {"requested": False}
+    target, lease = _target(
+        toolchains=CancellingToolchains(cancel_state),
+    )
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
+        run_automated_optimizer(
+            package_dir=package,
+            output_package_dir=tmp_path / "optimized",
+            run_root=tmp_path / "run",
+            providers=_providers(),
+            targets=(target,),
+            budget=_budget(),
+            cancel_requested=lambda: cancel_state["requested"],
+        )
+
+    report = validate_report_directory(tmp_path / "run")
+    assert report["status"] == "cancelled"
+    assert report["candidates"][0]["status"] == "cancelled"
+    assert not (tmp_path / "optimized").exists()
+    staging = tmp_path / "run" / "workspaces" / "candidates" / ".staging"
+    assert not any(staging.iterdir())
+    assert lease.acquisitions == lease.releases == 0
+
+
+def test_cancellation_during_benchmark_releases_lease_and_stops_run(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    cancel_state = {"requested": False}
+    target, lease = _target()
+    adapter = CancellingExecutionAdapter(cancel_state)
+    target = replace(target, benchmark_adapter=adapter)
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
+        run_automated_optimizer(
+            package_dir=package,
+            output_package_dir=tmp_path / "optimized",
+            run_root=tmp_path / "run",
+            providers=_providers(),
+            targets=(target,),
+            budget=_budget(),
+            cancel_requested=lambda: cancel_state["requested"],
+        )
+
+    report = validate_report_directory(tmp_path / "run")
+    candidate = report["candidates"][0]
+    assert report["status"] == "cancelled"
+    assert candidate["status"] == "cancelled"
+    assert candidate["prebenchmark_status"] == "passed"
+    assert candidate["benchmark_decision"] is None
+    assert adapter.closed_sessions == len(adapter.mount_requests)
+    assert lease.active == 0
+    assert lease.acquisitions == lease.releases == 2
+    assert not (tmp_path / "optimized").exists()
+
+
+def test_cancellation_before_publication_never_commits_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nerve.representation_optimizer.automation.orchestrator as orchestrator
+
+    package = _package(tmp_path)
+    target, lease = _target()
+    cancel_state = {"requested": False}
+
+    def cancel_publication(*, cancel_requested, **_kwargs):
+        cancel_state["requested"] = True
+        check_compile_cancelled(cancel_requested)
+        raise AssertionError("cancellation checkpoint did not stop publication")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "publish_promoted_package",
+        cancel_publication,
+    )
+    with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
+        run_automated_optimizer(
+            package_dir=package,
+            output_package_dir=tmp_path / "optimized",
+            run_root=tmp_path / "run",
+            providers=_providers(),
+            targets=(target,),
+            budget=_budget(),
+            cancel_requested=lambda: cancel_state["requested"],
+        )
+
+    report = validate_report_directory(tmp_path / "run")
+    assert report["status"] == "cancelled"
+    assert report["publication"]["status"] == "cancelled"
+    assert report["summary"]["promotion_count"] == 1
+    assert report["candidates"][0]["status"] == "promotable"
+    assert not (tmp_path / "optimized").exists()
     assert lease.acquisitions == lease.releases
 
 

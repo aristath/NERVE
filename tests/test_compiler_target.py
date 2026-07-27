@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from nerve.compilation import ModelCompileError
+from nerve.compilation import ModelCompileCancelled, ModelCompileError
 from nerve.compiler_target import (
     CompilerTarget,
     CompilerTargetDevice,
@@ -255,3 +256,41 @@ def test_compiler_target_discovery_forwards_stable_allowlist_and_environment(
     assert captured["environment"] == {
         "VK_DRIVER_FILES": "/tmp/radeon.json"
     }
+
+
+def test_compiler_target_discovery_kills_probe_when_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"checks": 0, "killed": False}
+
+    class Process:
+        returncode = None
+
+        def communicate(self, timeout=None):
+            if timeout is not None and not state["killed"]:
+                raise subprocess.TimeoutExpired(
+                    cmd=["nerve-runtime"],
+                    timeout=timeout,
+                )
+            return "", ""
+
+        def kill(self):
+            state["killed"] = True
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "nerve.compiler_target.subprocess.Popen",
+        lambda *args, **kwargs: Process(),
+    )
+
+    def cancel_after_process_start() -> bool:
+        state["checks"] += 1
+        return state["checks"] > 1
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled"):
+        discover_compiler_target(
+            runtime_bin=Path("/tmp/nerve-runtime"),
+            cancel_requested=cancel_after_process_start,
+        )
+
+    assert state["killed"] is True

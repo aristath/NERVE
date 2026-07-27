@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from nerve.compilation import Json, ModelCompileError, read_json
+from nerve.compilation import (
+    Json,
+    ModelCompileError,
+    check_compile_cancelled,
+    read_json,
+)
 from nerve.representation_optimizer.analysis.claims import StructuralAnalyzer
 from nerve.representation_optimizer.analysis.context import (
     ActivationTrace,
@@ -60,11 +65,14 @@ def analyze_scope(
     analyzers: Iterable[StructuralAnalyzer] | None = None,
     tensors: TensorRepository | None = None,
     output_dir: Path | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> AnalysisRun:
+    check_compile_cancelled(cancel_requested)
     budget = budget or AnalysisBudget()
     catalog = load_optimization_scope_catalog(
         package_dir / "optimization" / "scopes.json"
     )
+    check_compile_cancelled(cancel_requested)
     scope = _unique_record(catalog["scopes"], "scope_id", scope_id)
     source_contract = _unique_record(
         catalog["source_contracts"],
@@ -88,7 +96,9 @@ def analyze_scope(
     evidence = []
     details = []
     for analyzer in selected:
+        check_compile_cancelled(cancel_requested)
         result = analyzer.analyze(context)
+        check_compile_cancelled(cancel_requested)
         evidence_document, details_document = build_evidence(
             scope_id=scope_id,
             source_contract_digest=context.source_contract_digest,
@@ -108,6 +118,7 @@ def analyze_scope(
         details=tuple(details),
     )
     if output_dir is not None:
+        check_compile_cancelled(cancel_requested)
         write_analysis_run(run, output_dir)
     return run
 

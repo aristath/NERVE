@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.representation_optimizer.analysis.context import AnalysisBudget
 from nerve.representation_optimizer.automation.contracts import (
     OptimizationBudget,
@@ -53,6 +53,7 @@ def optimize_compiled_package(
     analysis_budget: AnalysisBudget | None = None,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> OptimizePackageOutcome:
+    check_compile_cancelled(cancel_requested)
     package_manifest = resolve_package_manifest(package)
     package_dir = package_manifest.parent
     output = (
@@ -73,7 +74,9 @@ def optimize_compiled_package(
         validation_executor_bin=validation_executor_bin,
         selected_device_ids=selected_device_ids,
         vulkan_driver_files=vulkan_driver_files,
+        cancel_requested=cancel_requested,
     )
+    check_compile_cancelled(cancel_requested)
     outcome = run_automated_optimizer(
         package_dir=package_dir,
         output_package_dir=output,

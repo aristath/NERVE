@@ -6,9 +6,10 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.model_package_integrity import (
     build_package_artifact_integrity,
 )
@@ -61,7 +62,9 @@ def publish_promoted_package(
     destination_package_dir: Path,
     promotions: tuple[PreparedPromotion, ...],
     session: OptimizationSession,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> Path:
+    check_compile_cancelled(cancel_requested)
     if not promotions:
         raise ModelCompileError(
             "optimized package publication requires at least one promotion"
@@ -82,6 +85,7 @@ def publish_promoted_package(
         )
     manifest = _read_object(source / _PACKAGE_MANIFEST_FILE)
     validate_compiled_package(source, manifest)
+    check_compile_cancelled(cancel_requested)
     source_stage_path = (
         source / "optimization" / OPTIMIZER_STAGE_FILE
     )
@@ -90,7 +94,12 @@ def publish_promoted_package(
         package_dir=source,
     )
     _validate_publication_session(source_stage, session, promotions)
-    _revalidate_promotions(source, promotions)
+    _revalidate_promotions(
+        source,
+        promotions,
+        cancel_requested=cancel_requested,
+    )
+    check_compile_cancelled(cancel_requested)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging_root = destination.parent / ".nerve-package-staging"
@@ -104,7 +113,11 @@ def publish_promoted_package(
     _fsync_directory(staging_root)
     published = False
     try:
-        _clone_tree_contents(source, staging)
+        _clone_tree_contents(
+            source,
+            staging,
+            cancel_requested=cancel_requested,
+        )
         registry_path = (
             staging
             / "optimization"
@@ -114,7 +127,12 @@ def publish_promoted_package(
             _read_object(registry_path)
         )
         for promotion in promotions:
-            _publish_implementation_bundle(staging, promotion)
+            check_compile_cancelled(cancel_requested)
+            _publish_implementation_bundle(
+                staging,
+                promotion,
+                cancel_requested=cancel_requested,
+            )
         registry = append_implementation_registry_entries(
             registry,
             (
@@ -157,7 +175,15 @@ def publish_promoted_package(
             staged_manifest,
         )
         validate_compiled_package(staging, staged_manifest)
-        _fsync_tree(staging)
+        check_compile_cancelled(cancel_requested)
+        _fsync_tree(
+            staging,
+            cancel_requested=cancel_requested,
+        )
+        # This is the publication commit point. A cancellation observed before
+        # it leaves no destination; a signal arriving after it applies to the
+        # now-complete package rather than rewriting an atomic publication.
+        check_compile_cancelled(cancel_requested)
         os.replace(staging, destination)
         published = True
         _fsync_directory(staging_root)
@@ -185,7 +211,10 @@ def publish_promoted_package(
 def _publish_implementation_bundle(
     package: Path,
     promotion: PreparedPromotion,
+    *,
+    cancel_requested: Callable[[], bool] | None,
 ) -> None:
+    check_compile_cancelled(cancel_requested)
     entry = promotion.registry_entry
     root = _package_path(
         package,
@@ -200,6 +229,7 @@ def _publish_implementation_bundle(
     _clone_tree(
         promotion.staged_candidate.path,
         root / "candidate",
+        cancel_requested=cancel_requested,
     )
     _write_json(
         root / "construction_record.json",
@@ -218,16 +248,20 @@ def _publish_implementation_bundle(
     _clone_tree(
         promotion.prebenchmark_evidence_path,
         evidence_root / "prebenchmark" / prebenchmark_id,
+        cancel_requested=cancel_requested,
     )
     _clone_tree(
         promotion.benchmark_evidence_path,
         evidence_root / "benchmarks" / benchmark_id,
+        cancel_requested=cancel_requested,
     )
     _clone_tree(
         promotion.validation_evidence_path,
         evidence_root / "validations" / validation_id,
+        cancel_requested=cancel_requested,
     )
     for prepared_run in promotion.analysis_runs:
+        check_compile_cancelled(cancel_requested)
         _clone_tree(
             prepared_run.path,
             (
@@ -235,8 +269,10 @@ def _publish_implementation_bundle(
                 / "analysis"
                 / prepared_run.run.run_id
             ),
+            cancel_requested=cancel_requested,
         )
     for profile in promotion.hardware_profiles:
+        check_compile_cancelled(cancel_requested)
         _write_json(
             (
                 evidence_root
@@ -254,6 +290,8 @@ def _publish_implementation_bundle(
 def _revalidate_promotions(
     source_package: Path,
     promotions: tuple[PreparedPromotion, ...],
+    *,
+    cancel_requested: Callable[[], bool] | None,
 ) -> None:
     implementation_ids = [
         promotion.implementation_id for promotion in promotions
@@ -270,6 +308,7 @@ def _revalidate_promotions(
             "promotions must be sorted by implementation and unique by candidate"
         )
     for promotion in promotions:
+        check_compile_cancelled(cancel_requested)
         integrity = validate_staged_candidate(
             promotion.staged_candidate.path,
             expected_candidate_id=(
@@ -325,6 +364,7 @@ def _revalidate_promotions(
                 "promotion prebenchmark evidence changed before publication"
             )
         for prepared_run in promotion.analysis_runs:
+            check_compile_cancelled(cancel_requested)
             loaded_run = validate_analysis_run_directory(
                 prepared_run.path
             )
@@ -350,6 +390,7 @@ def _revalidate_promotions(
             raise ModelCompileError(
                 "promotion construction record changed before publication"
             )
+    check_compile_cancelled(cancel_requested)
 
 
 def _validate_publication_session(
@@ -465,21 +506,38 @@ def _build_published_session(
     return published
 
 
-def _clone_tree(source: Path, destination: Path) -> None:
+def _clone_tree(
+    source: Path,
+    destination: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    check_compile_cancelled(cancel_requested)
     if destination.exists() or destination.is_symlink():
         raise ModelCompileError(
             f"publication destination already exists: {destination}"
         )
     destination.mkdir(parents=True, exist_ok=False)
-    _clone_tree_contents(source, destination)
+    _clone_tree_contents(
+        source,
+        destination,
+        cancel_requested=cancel_requested,
+    )
 
 
-def _clone_tree_contents(source: Path, destination: Path) -> None:
+def _clone_tree_contents(
+    source: Path,
+    destination: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    check_compile_cancelled(cancel_requested)
     if source.is_symlink() or not source.is_dir():
         raise ModelCompileError(
             f"publication source is not a regular directory: {source}"
-        )
+    )
     for child in sorted(source.iterdir(), key=lambda path: path.name):
+        check_compile_cancelled(cancel_requested)
         if child.is_symlink():
             raise ModelCompileError(
                 f"package publication refuses symbolic link: {child}"
@@ -487,16 +545,30 @@ def _clone_tree_contents(source: Path, destination: Path) -> None:
         target = destination / child.name
         if child.is_dir():
             target.mkdir(exist_ok=False)
-            _clone_tree_contents(child, target)
+            _clone_tree_contents(
+                child,
+                target,
+                cancel_requested=cancel_requested,
+            )
         elif child.is_file():
-            _clone_regular_file(child, target)
+            _clone_regular_file(
+                child,
+                target,
+                cancel_requested=cancel_requested,
+            )
         else:
             raise ModelCompileError(
                 f"package publication refuses special file: {child}"
             )
 
 
-def _clone_regular_file(source: Path, destination: Path) -> None:
+def _clone_regular_file(
+    source: Path,
+    destination: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    check_compile_cancelled(cancel_requested)
     source_flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         source_flags |= os.O_NOFOLLOW
@@ -530,12 +602,11 @@ def _clone_regular_file(source: Path, destination: Path) -> None:
                 os.fdopen(os.dup(source_fd), "rb") as reader,
                 os.fdopen(os.dup(destination_fd), "wb") as writer,
             ):
-                shutil.copyfileobj(
-                    reader,
-                    writer,
-                    length=8 * 1024 * 1024,
-                )
+                while chunk := reader.read(8 * 1024 * 1024):
+                    check_compile_cancelled(cancel_requested)
+                    writer.write(chunk)
                 writer.flush()
+        check_compile_cancelled(cancel_requested)
         os.fsync(destination_fd)
     finally:
         os.close(destination_fd)
@@ -596,8 +667,13 @@ def _package_path(package: Path, value: object, label: str) -> Path:
     return path
 
 
-def _fsync_tree(root: Path) -> None:
+def _fsync_tree(
+    root: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
+        check_compile_cancelled(cancel_requested)
         if path.is_symlink():
             raise ModelCompileError(
                 f"published package contains a symbolic link: {path}"
@@ -610,6 +686,7 @@ def _fsync_tree(root: Path) -> None:
                 os.close(descriptor)
         elif path.is_dir():
             _fsync_directory(path)
+    check_compile_cancelled(cancel_requested)
     _fsync_directory(root)
 
 

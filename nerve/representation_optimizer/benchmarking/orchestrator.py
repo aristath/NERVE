@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-from nerve.compilation import ModelCompileError
+from nerve.compilation import ModelCompileCancelled, ModelCompileError
 from nerve.representation_optimizer.benchmarking.contracts import (
     BenchmarkPlan,
     BenchmarkRun,
@@ -43,10 +44,18 @@ def benchmark_candidate(
     session: OptimizationSession,
     adapter: NormalExecutionAdapter,
     workspace_root: Path,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> CandidateBenchmarkOutcome:
     _validate_session(plan, construction_record, session)
-    run = execute_benchmark_plan(plan, adapter)
-    if run.to_json()["status"] != "completed":
+    run = execute_benchmark_plan(
+        plan,
+        adapter,
+        cancel_requested=cancel_requested,
+    )
+    run_status = run.to_json()["status"]
+    if run_status == "cancelled":
+        raise ModelCompileCancelled("matched candidate benchmark was cancelled")
+    if run_status != "completed":
         raise ModelCompileError(
             "candidate benchmark did not complete all matched observations"
         )

@@ -4,7 +4,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Callable
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import (
+    Json,
+    ModelCompileCancelled,
+    ModelCompileError,
+    check_compile_cancelled,
+)
 from nerve.representation_optimizer.automation.events import EventJournal
 from nerve.representation_optimizer.automation.target import OptimizationTarget
 from nerve.representation_optimizer.benchmarking.orchestrator import (
@@ -13,7 +18,11 @@ from nerve.representation_optimizer.benchmarking.orchestrator import (
 from nerve.representation_optimizer.benchmarking.planning import (
     build_benchmark_plan,
 )
-from nerve.representation_optimizer.lifecycle import OptimizationSession
+from nerve.representation_optimizer.lifecycle import (
+    CandidateState,
+    OptimizationSession,
+    TERMINAL_CANDIDATE_STATES,
+)
 from nerve.representation_optimizer.promotion.orchestrator import (
     PreparedPromotion,
     prepare_candidate_promotion,
@@ -43,6 +52,15 @@ def execute_candidate(
     cancel_requested: Callable[[], bool] | None,
 ) -> tuple[OptimizationSession, PreparedPromotion | None, Json]:
     candidate_id = plan.candidate_id
+    updates: Json = {}
+    cancelled = _cancelled_session(
+        session,
+        candidate_id,
+        cancel_requested=cancel_requested,
+        reason="candidate execution was cancelled before construction",
+    )
+    if cancelled is not None:
+        return cancelled, None, updates
     candidate_workspace = run_root / "workspaces" / "candidates"
     benchmark_workspace = run_root / "workspaces" / "benchmark"
     validation_workspace = run_root / "workspaces" / "validation"
@@ -58,7 +76,7 @@ def execute_candidate(
         artifact_validators=toolchain.artifact_validators,
         cancel_requested=cancel_requested,
     )
-    updates: Json = {
+    updates = {
         "construction_status": construction.status,
         "construction_record_digest": construction.record.digest,
         "construction_diagnostics": deepcopy(
@@ -78,6 +96,14 @@ def execute_candidate(
     if construction.status != "completed":
         return construction.session, None, updates
     session = construction.session
+    cancelled = _cancelled_session(
+        session,
+        candidate_id,
+        cancel_requested=cancel_requested,
+        reason="candidate execution was cancelled after construction",
+    )
+    if cancelled is not None:
+        return cancelled, None, updates
     benchmark_plan = build_benchmark_plan(
         candidate_plan=plan,
         construction_record=construction.record,
@@ -123,14 +149,38 @@ def execute_candidate(
     )
     if prebenchmark.status != "passed":
         return session, None, updates
-    with target.lease_manager.acquire(target):
-        benchmark = benchmark_candidate(
-            plan=benchmark_plan,
-            construction_record=construction.record,
-            session=session,
-            adapter=target.benchmark_adapter,
-            workspace_root=benchmark_workspace,
+    cancelled = _cancelled_session(
+        session,
+        candidate_id,
+        cancel_requested=cancel_requested,
+        reason="candidate execution was cancelled before benchmarking",
+    )
+    if cancelled is not None:
+        return cancelled, None, updates
+    try:
+        with target.lease_manager.acquire(target):
+            benchmark = benchmark_candidate(
+                plan=benchmark_plan,
+                construction_record=construction.record,
+                session=session,
+                adapter=target.benchmark_adapter,
+                workspace_root=benchmark_workspace,
+                cancel_requested=cancel_requested,
+            )
+    except ModelCompileCancelled as error:
+        session = _cancel_candidate(
+            session,
+            candidate_id,
+            reason=str(error),
         )
+        journal.record(
+            phase="benchmark",
+            status="cancelled",
+            target_id=target.target_id,
+            candidate_id=candidate_id,
+            details={"type": type(error).__name__, "message": str(error)},
+        )
+        return session, None, updates
     session = benchmark.session
     decision = str(benchmark.record.to_json()["decision"])
     updates["benchmark_decision"] = decision
@@ -146,6 +196,14 @@ def execute_candidate(
         ),
     )
     if decision == "materially_faster":
+        cancelled = _cancelled_session(
+            session,
+            candidate_id,
+            cancel_requested=cancel_requested,
+            reason="candidate execution was cancelled before full validation",
+        )
+        if cancelled is not None:
+            return cancelled, None, updates
         with target.lease_manager.acquire(target):
             validation = validate_benchmarked_candidate(
                 plan=validation_plan,
@@ -187,6 +245,14 @@ def execute_candidate(
     )
     if validation.status != "passed":
         return session, None, updates
+    cancelled = _cancelled_session(
+        session,
+        candidate_id,
+        cancel_requested=cancel_requested,
+        reason="candidate execution was cancelled before promotion",
+    )
+    if cancelled is not None:
+        return cancelled, None, updates
     evidence_ids = plan.candidate.to_json()["evidence_refs"]
     directories = tuple(
         sorted(
@@ -223,6 +289,15 @@ def execute_candidate(
         ),
         details={"implementation_id": promotion.implementation_id},
     )
+    cancelled = _cancelled_session(
+        session,
+        candidate_id,
+        cancel_requested=cancel_requested,
+        reason="candidate execution was cancelled after promotion preparation",
+    )
+    if cancelled is not None:
+        updates["promotion_id"] = None
+        return cancelled, None, updates
     return session, promotion, updates
 
 
@@ -239,3 +314,47 @@ def _reference_artifacts(package_dir: Path, source_contract: Json) -> tuple[Json
             }
         )
     return tuple(sorted(references, key=lambda item: item["path"]))
+
+
+def _cancelled_session(
+    session: OptimizationSession,
+    candidate_id: str,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+    reason: str,
+) -> OptimizationSession | None:
+    try:
+        check_compile_cancelled(cancel_requested)
+    except ModelCompileCancelled:
+        return _cancel_candidate(session, candidate_id, reason=reason)
+    return None
+
+
+def _cancel_candidate(
+    session: OptimizationSession,
+    candidate_id: str,
+    *,
+    reason: str,
+) -> OptimizationSession:
+    matches = [
+        candidate
+        for candidate in session.candidates
+        if candidate.candidate_id == candidate_id
+    ]
+    if len(matches) != 1:
+        raise ModelCompileError(
+            "candidate cancellation requires one registered lifecycle"
+        )
+    lifecycle = matches[0]
+    if lifecycle.state == CandidateState.CANCELLED:
+        return session
+    if lifecycle.state in TERMINAL_CANDIDATE_STATES:
+        raise ModelCompileError(
+            "candidate cancellation cannot rewrite a terminal lifecycle"
+        )
+    return session.transition_candidate(
+        candidate_id,
+        CandidateState.CANCELLED,
+        evidence_refs=(),
+        reason=reason,
+    )

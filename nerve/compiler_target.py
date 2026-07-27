@@ -6,9 +6,14 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import (
+    Json,
+    ModelCompileCancelled,
+    ModelCompileError,
+    check_compile_cancelled,
+)
 from nerve.representation_optimizer.contracts import (
     HARDWARE_PROCESS_PROFILE_SCHEMA,
     ContractDocument,
@@ -525,18 +530,47 @@ def discover_compiler_target(
     runtime_bin: Path | None = None,
     allowed_physical_device_ids: Iterable[str] = (),
     environment: dict[str, str] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> CompilerTarget:
+    check_compile_cancelled(cancel_requested)
     command = compiler_device_probe_command(
         runtime_bin=runtime_bin,
         allowed_physical_device_ids=allowed_physical_device_ids,
     )
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
+    if cancel_requested is None:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    check_compile_cancelled(cancel_requested)
+                except ModelCompileCancelled:
+                    process.kill()
+                    process.communicate()
+                    raise
+        completed = subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout,
+            stderr,
+        )
+    check_compile_cancelled(cancel_requested)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
         raise ModelCompileError(
