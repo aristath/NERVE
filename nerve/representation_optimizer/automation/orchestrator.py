@@ -29,6 +29,7 @@ from nerve.representation_optimizer.automation.records import (
 )
 from nerve.representation_optimizer.automation.report import (
     AutomatedOptimizationOutcome,
+    build_structure_index,
     build_report,
     publish_report,
 )
@@ -81,9 +82,7 @@ def run_automated_optimizer(
         source / "optimization" / "stage.json",
         package_dir=source,
     )
-    catalog = load_optimization_scope_catalog(
-        source / "optimization" / "scopes.json"
-    )
+    catalog = load_optimization_scope_catalog(source / "optimization" / "scopes.json")
     source_artifacts = PackageSourceArtifactResolver(source)
     session = OptimizationSession.from_json(stage["session"])
     run_id = stable_contract_id(
@@ -201,11 +200,11 @@ def run_automated_optimizer(
                 analysis_directories[str(evidence["evidence_id"])] = analysis_directory
             analysis_ref = relative_ref(run_root, analysis_directory)
             structures = [
-                {
-                    "evidence_id": evidence["evidence_id"],
-                    "analyzer": dict(evidence["analyzer"]),
-                    "claims": deepcopy(evidence["claims"]),
-                }
+                build_structure_index(
+                    run_root=run_root,
+                    analysis_directory=analysis_directory,
+                    evidence=evidence,
+                )
                 for evidence in analysis.evidence
                 if evidence["claims"]
             ]
@@ -322,10 +321,7 @@ def run_automated_optimizer(
                             benchmark_policy=target.benchmark_policy,
                         )
                         budget_path = write_new_json(
-                            run_root
-                            / "decisions"
-                            / plan.candidate_id
-                            / "budget.json",
+                            run_root / "decisions" / plan.candidate_id / "budget.json",
                             admission.to_json(candidate_id=plan.candidate_id),
                         )
                         budget_ref = relative_ref(run_root, budget_path)
@@ -492,8 +488,7 @@ def run_automated_optimizer(
         publication = {
             "status": "cancelled",
             "reason": (
-                "optimization was cancelled before package publication "
-                "committed"
+                "optimization was cancelled before package publication committed"
             ),
             "error": error_document(error),
         }

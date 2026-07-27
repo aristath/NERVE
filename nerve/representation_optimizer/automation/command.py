@@ -33,8 +33,17 @@ class OptimizePackageOutcome:
     targets: PreparedOptimizationTargets
 
     def to_json(self) -> Json:
+        report = self.optimization.report
         return {
-            "optimization": self.optimization.report,
+            "optimization": {
+                "status": report["status"],
+                "report_id": report["report_id"],
+                "report_path": str(self.optimization.report_path),
+                "output_package": str(self.optimization.output_package_dir),
+                "summary": report["summary"],
+                "publication": report["publication"],
+                "event_journal": report["event_journal"],
+            },
             "target_preparation": self.targets.to_json(),
         }
 
@@ -104,6 +113,4 @@ def resolve_package_manifest(package: Path) -> Path:
         return manifest
     if path.is_file() and path.name == RUNTIME_PACKAGE_MANIFEST:
         return path
-    raise ModelCompileError(
-        f"compiled model package path is invalid: {path}"
-    )
+    raise ModelCompileError(f"compiled model package path is invalid: {path}")

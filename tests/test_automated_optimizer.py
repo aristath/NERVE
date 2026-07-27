@@ -28,9 +28,6 @@ from nerve.representation_optimizer.contracts import (
     representation_candidate_id,
 )
 from nerve.representation_optimizer.providers import ProviderRegistry, StaticEstimate
-from nerve.representation_optimizer.staging.contracts import (
-    staged_artifact_digest,
-)
 from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
 )
@@ -158,9 +155,7 @@ class UncalibratedConstructionProvider(FixtureProvider):
             transient_bytes=estimate.transient_bytes,
             construction_nanoseconds=None,
             steady_state_work=estimate.steady_state_work,
-            reasons=(
-                "construction duration has not been calibrated for this target",
-            ),
+            reasons=("construction duration has not been calibrated for this target",),
         )
 
 
@@ -214,9 +209,7 @@ def _target(
         "placement": {"fixture_scope": "vulkan:fixture"},
         "controls": {"scheduler": "normal"},
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": device_state_digest(
-            {"fixture_state": "idle"}
-        ),
+        "idle_device_state_digest": device_state_digest({"fixture_state": "idle"}),
         "exclusive_residency": True,
     }
     return (
@@ -293,6 +286,18 @@ def test_unattended_loop_publishes_only_faster_fully_valid_candidate(
     assert lease.acquisitions == 3
     assert lease.releases == 3
     assert lease.active == 0
+    structures = [
+        structure
+        for scope in outcome.report["scopes"]
+        for structure in scope["structures"]
+    ]
+    assert structures
+    assert all("claims" not in structure for structure in structures)
+    assert all(
+        structure["claim_summary"]["total"] > 0
+        and (tmp_path / "run" / structure["evidence_ref"]).is_file()
+        for structure in structures
+    )
     assert validate_report_directory(tmp_path / "run") == outcome.report
     manifest = validate_compiled_package(
         tmp_path / "optimized",
@@ -417,9 +422,7 @@ def test_candidate_failure_is_audited_and_releases_every_lease(
     assert "ordinary lowering fixture failure" in candidate["rejection_reasons"][0]
     assert lease.active == 0
     assert lease.acquisitions == 0
-    candidate_staging = (
-        tmp_path / "run" / "workspaces" / "candidates" / ".staging"
-    )
+    candidate_staging = tmp_path / "run" / "workspaces" / "candidates" / ".staging"
     assert not any(candidate_staging.iterdir())
 
 
@@ -488,8 +491,9 @@ def test_device_target_cannot_use_noop_lease_manager(tmp_path: Path) -> None:
     )
 
     assert outcome.report["candidates"][0]["status"] == "failed"
-    assert "requires a real device lease manager" in (
-        outcome.report["candidates"][0]["failure"]["message"]
+    assert (
+        "requires a real device lease manager"
+        in (outcome.report["candidates"][0]["failure"]["message"])
     )
 
 
@@ -576,14 +580,40 @@ def test_report_detects_missing_event_evidence(tmp_path: Path) -> None:
         targets=(target,),
         budget=_budget(maximum_candidates=0),
     )
-    decision = (
-        tmp_path
-        / "run"
-        / outcome.report["candidates"][0]["budget_decision_ref"]
-    )
+    decision = tmp_path / "run" / outcome.report["candidates"][0]["budget_decision_ref"]
     decision.unlink()
 
     with pytest.raises(ModelCompileError, match="evidence is missing"):
+        validate_report_directory(tmp_path / "run")
+
+
+def test_report_structure_index_is_checked_against_canonical_evidence(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, _ = _target()
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        output_package_dir=tmp_path / "unused-output",
+        run_root=tmp_path / "run",
+        providers=_providers(),
+        targets=(target,),
+        budget=_budget(maximum_candidates=0),
+    )
+    structure = next(
+        structure
+        for scope in outcome.report["scopes"]
+        for structure in scope["structures"]
+    )
+    evidence_path = tmp_path / "run" / structure["evidence_ref"]
+    evidence = json.loads(evidence_path.read_text())
+    evidence["claims"][0]["facts"]["tampered"] = True
+    evidence_path.write_text(json.dumps(evidence))
+
+    with pytest.raises(
+        ModelCompileError,
+        match="analysis.*digest|identity|evidence_id",
+    ):
         validate_report_directory(tmp_path / "run")
 
 

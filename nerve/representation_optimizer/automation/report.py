@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nerve.compilation import Json, ModelCompileError
+from nerve.representation_optimizer.analysis.evidence import (
+    validate_analysis_run_directory,
+)
 from nerve.representation_optimizer.automation.contracts import (
     OPTIMIZER_REPORT_SCHEMA,
     OPTIMIZER_RUN_SCHEMA,
@@ -28,6 +31,35 @@ class AutomatedOptimizationOutcome:
     report: Json
     output_package_dir: Path
     session: OptimizationSession
+
+
+def build_structure_index(
+    *,
+    run_root: Path,
+    analysis_directory: Path,
+    evidence: Json,
+) -> Json:
+    claims = evidence["claims"]
+    by_kind: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    for claim in claims:
+        kind = str(claim["kind"])
+        status = str(claim["status"])
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+    analyzer = dict(evidence["analyzer"])
+    evidence_path = analysis_directory / "evidence" / f"{analyzer['id']}.json"
+    return {
+        "evidence_id": evidence["evidence_id"],
+        "analyzer": analyzer,
+        "evidence_ref": str(evidence_path.relative_to(run_root)),
+        "claim_summary": {
+            "total": len(claims),
+            "exact": sum(bool(claim["exact"]) for claim in claims),
+            "by_kind": dict(sorted(by_kind.items())),
+            "by_status": dict(sorted(by_status.items())),
+        },
+    }
 
 
 def build_report(
@@ -148,6 +180,7 @@ def validate_report(document: Json) -> None:
                 f"automated optimizer report {field} must be a list"
             )
     OptimizationSession.from_json(document["session"])
+    _validate_scope_indexes(document["scopes"])
     _validate_report_semantics(document)
     unsigned = deepcopy(document)
     report_id = unsigned.pop("report_id")
@@ -163,16 +196,20 @@ def validate_report_directory(run_root: Path) -> Json:
     report = read_object(run_root / "report.json")
     validate_report(report)
     run = read_object(run_root / "run.json")
-    if set(run) != {
-        "schema",
-        "run_id",
-        "package_id",
-        "source_package",
-        "requested_output_package",
-        "exact_baseline_digest",
-        "target_ids",
-        "budget",
-    } or run["schema"] != OPTIMIZER_RUN_SCHEMA:
+    if (
+        set(run)
+        != {
+            "schema",
+            "run_id",
+            "package_id",
+            "source_package",
+            "requested_output_package",
+            "exact_baseline_digest",
+            "target_ids",
+            "budget",
+        }
+        or run["schema"] != OPTIMIZER_RUN_SCHEMA
+    ):
         raise ModelCompileError("automated optimizer run manifest is invalid")
     if (
         run["run_id"] != report["run_id"]
@@ -210,8 +247,37 @@ def validate_report_directory(run_root: Path) -> Json:
         for value in event["evidence_refs"]:
             evidence = _safe_run_ref(run_root, value, "event evidence")
             if not evidence.exists() and not evidence.is_symlink():
+                raise ModelCompileError(f"optimizer event evidence is missing: {value}")
+    for scope in report["scopes"]:
+        if scope["analysis_ref"] is None:
+            continue
+        analysis_directory = _safe_run_ref(
+            run_root,
+            scope["analysis_ref"],
+            "scope analysis",
+        )
+        if not analysis_directory.is_dir():
+            raise ModelCompileError("optimizer scope analysis directory is missing")
+        validate_analysis_run_directory(analysis_directory)
+        for structure in scope["structures"]:
+            evidence_path = _safe_run_ref(
+                run_root,
+                structure["evidence_ref"],
+                "structure evidence",
+            )
+            if evidence_path.parent.parent != analysis_directory:
                 raise ModelCompileError(
-                    f"optimizer event evidence is missing: {value}"
+                    "optimizer structure evidence escapes its scope analysis"
+                )
+            evidence = read_object(evidence_path)
+            expected = build_structure_index(
+                run_root=run_root,
+                analysis_directory=analysis_directory,
+                evidence=evidence,
+            )
+            if structure != expected:
+                raise ModelCompileError(
+                    "optimizer structure index disagrees with canonical evidence"
                 )
     source = Path(report["source_package"])
     requested_output = Path(run["requested_output_package"])
@@ -250,9 +316,7 @@ def _validate_report_semantics(document: Json) -> None:
                 "completed optimizer report requires promoted output"
             )
     elif promotions and status == "completed_no_changes":
-        raise ModelCompileError(
-            "no-change optimizer report cannot contain promotions"
-        )
+        raise ModelCompileError("no-change optimizer report cannot contain promotions")
     elif output != source:
         raise ModelCompileError(
             "unpublished optimizer report must retain the source package"
@@ -263,8 +327,7 @@ def _validate_report_semantics(document: Json) -> None:
         not all(isinstance(value, str) and value for value in candidate_ids)
         or candidate_ids != sorted(set(candidate_ids))
         or any(
-            candidate.get("status")
-            not in {state.value for state in CandidateState}
+            candidate.get("status") not in {state.value for state in CandidateState}
             for candidate in candidates
         )
     ):
@@ -277,18 +340,16 @@ def _validate_report_semantics(document: Json) -> None:
     }
     if any(
         session_by_id.get(candidate["candidate_id"]) is None
-        or session_by_id[candidate["candidate_id"]].state.value
-        != candidate["status"]
+        or session_by_id[candidate["candidate_id"]].state.value != candidate["status"]
         for candidate in candidates
     ):
         raise ModelCompileError(
             "automated optimizer candidate records disagree with lifecycle session"
         )
     promotion_ids = [promotion.get("candidate_id") for promotion in promotions]
-    if (
-        not all(value in set(candidate_ids) for value in promotion_ids)
-        or len(promotion_ids) != len(set(promotion_ids))
-    ):
+    if not all(value in set(candidate_ids) for value in promotion_ids) or len(
+        promotion_ids
+    ) != len(set(promotion_ids)):
         raise ModelCompileError(
             "automated optimizer promotions reference invalid candidates"
         )
@@ -309,6 +370,139 @@ def _validate_report_semantics(document: Json) -> None:
     if document["summary"] != expected_summary:
         raise ModelCompileError(
             "automated optimizer report summary disagrees with its records"
+        )
+
+
+def _validate_scope_indexes(scopes: list[Json]) -> None:
+    scope_ids = []
+    for scope in scopes:
+        if not isinstance(scope, dict) or set(scope) != {
+            "scope_id",
+            "kind",
+            "status",
+            "reason",
+            "analysis_ref",
+            "structures",
+        }:
+            raise ModelCompileError(
+                "automated optimizer scope record has invalid fields"
+            )
+        scope_id = scope["scope_id"]
+        if not isinstance(scope_id, str) or not scope_id:
+            raise ModelCompileError(
+                "automated optimizer scope record has invalid identity"
+            )
+        scope_ids.append(scope_id)
+        if scope["status"] not in {
+            "analyzed",
+            "budget_skipped",
+            "cancelled",
+            "failed",
+        }:
+            raise ModelCompileError(
+                "automated optimizer scope record has invalid status"
+            )
+        if not isinstance(scope["reason"], str) or not scope["reason"]:
+            raise ModelCompileError(
+                "automated optimizer scope record requires a reason"
+            )
+        if not isinstance(scope["structures"], list):
+            raise ModelCompileError(
+                "automated optimizer scope structures must be a list"
+            )
+        if scope["status"] != "analyzed":
+            if scope["analysis_ref"] is not None or scope["structures"]:
+                raise ModelCompileError(
+                    "unanalyzed optimizer scope cannot index evidence"
+                )
+            continue
+        if not isinstance(scope["analysis_ref"], str):
+            raise ModelCompileError(
+                "analyzed optimizer scope requires an analysis reference"
+            )
+        evidence_ids = []
+        analyzer_ids = []
+        for structure in scope["structures"]:
+            if not isinstance(structure, dict) or set(structure) != {
+                "evidence_id",
+                "analyzer",
+                "evidence_ref",
+                "claim_summary",
+            }:
+                raise ModelCompileError("optimizer structure index has invalid fields")
+            evidence_ids.append(structure["evidence_id"])
+            analyzer = structure["analyzer"]
+            if (
+                not isinstance(analyzer, dict)
+                or set(analyzer) != {"id", "version"}
+                or not all(
+                    isinstance(value, str) and value for value in analyzer.values()
+                )
+            ):
+                raise ModelCompileError(
+                    "optimizer structure index has invalid analyzer identity"
+                )
+            analyzer_ids.append(analyzer["id"])
+            if not isinstance(structure["evidence_ref"], str):
+                raise ModelCompileError(
+                    "optimizer structure index has invalid evidence reference"
+                )
+            summary = structure["claim_summary"]
+            if not isinstance(summary, dict) or set(summary) != {
+                "total",
+                "exact",
+                "by_kind",
+                "by_status",
+            }:
+                raise ModelCompileError(
+                    "optimizer structure index has invalid claim summary"
+                )
+            if (
+                not isinstance(summary["total"], int)
+                or isinstance(summary["total"], bool)
+                or summary["total"] <= 0
+                or not isinstance(summary["exact"], int)
+                or isinstance(summary["exact"], bool)
+                or not 0 <= summary["exact"] <= summary["total"]
+            ):
+                raise ModelCompileError(
+                    "optimizer structure index has invalid claim counts"
+                )
+            for field in ("by_kind", "by_status"):
+                counts = summary[field]
+                if (
+                    not isinstance(counts, dict)
+                    or not counts
+                    or any(
+                        not isinstance(key, str)
+                        or not key
+                        or not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value <= 0
+                        for key, value in counts.items()
+                    )
+                    or sum(counts.values()) != summary["total"]
+                ):
+                    raise ModelCompileError(
+                        "optimizer structure index has inconsistent claim counts"
+                    )
+            if set(summary["by_status"]) - {
+                "supported",
+                "rejected",
+                "inconclusive",
+            }:
+                raise ModelCompileError(
+                    "optimizer structure index has invalid claim status"
+                )
+        if len(evidence_ids) != len(set(evidence_ids)) or analyzer_ids != sorted(
+            set(analyzer_ids)
+        ):
+            raise ModelCompileError(
+                "optimizer structure indexes must be sorted and unique"
+            )
+    if scope_ids != sorted(set(scope_ids)):
+        raise ModelCompileError(
+            "automated optimizer scope records must be sorted and unique"
         )
 
 
@@ -335,12 +529,8 @@ def _summary(
         statuses[status] = statuses.get(status, 0) + 1
     return {
         "scope_count": len(scopes),
-        "analyzed_scope_count": sum(
-            scope["status"] == "analyzed" for scope in scopes
-        ),
-        "analysis_failure_count": sum(
-            scope["status"] == "failed" for scope in scopes
-        ),
+        "analyzed_scope_count": sum(scope["status"] == "analyzed" for scope in scopes),
+        "analysis_failure_count": sum(scope["status"] == "failed" for scope in scopes),
         "provider_evaluation_count": len(provider_evaluations),
         "provider_failure_count": sum(
             item["status"] == "failed" for item in provider_evaluations
