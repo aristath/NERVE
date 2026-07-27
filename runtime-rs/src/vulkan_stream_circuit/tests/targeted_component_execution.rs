@@ -54,3 +54,16 @@ fn targeted_output_identity_remains_an_artifact_digest() {
         format!("nerve.optimizer.artifact_sha256.v1:{}", "ab".repeat(32))
     );
 }
+
+#[test]
+fn targeted_prefill_accepts_truthful_stateless_causal_scan_metadata() {
+    assert!(targeted_prefill_batch_mode_is_supported(
+        VulkanResidentComponentKernelBatchMode::CausalScan,
+    ));
+    assert!(targeted_prefill_batch_mode_is_supported(
+        VulkanResidentComponentKernelBatchMode::WeightShared,
+    ));
+    assert!(!targeted_prefill_batch_mode_is_supported(
+        VulkanResidentComponentKernelBatchMode::SerialLanes,
+    ));
+}

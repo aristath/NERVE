@@ -596,7 +596,7 @@ impl VulkanTargetedPrefillExecution {
             )
         })
         .filter(|artifact| {
-            artifact.batch_mode == VulkanResidentComponentKernelBatchMode::WeightShared
+            targeted_prefill_batch_mode_is_supported(artifact.batch_mode)
                 && !dispatch.descriptors.iter().any(|descriptor| {
                     matches!(
                         descriptor.usage,
@@ -607,7 +607,7 @@ impl VulkanTargetedPrefillExecution {
                 })
         })
         .ok_or_else(|| targeted_component_error_value(format!(
-            "dispatch {}.{} has no ordinary independent weight-shared prefill implementation for width {activation_batch_width}",
+            "dispatch {}.{} has no ordinary stateless prefill implementation for width {activation_batch_width}",
             dispatch.component_id, dispatch.node_id
         )))?;
         if artifact.stages.is_empty() {
@@ -955,6 +955,16 @@ impl VulkanTargetedPrefillExecution {
         }
         Ok(())
     }
+}
+
+fn targeted_prefill_batch_mode_is_supported(
+    batch_mode: VulkanResidentComponentKernelBatchMode,
+) -> bool {
+    matches!(
+        batch_mode,
+        VulkanResidentComponentKernelBatchMode::WeightShared
+            | VulkanResidentComponentKernelBatchMode::CausalScan
+    )
 }
 
 fn targeted_execution_quanta(
