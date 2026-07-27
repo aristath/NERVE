@@ -113,6 +113,7 @@ def execute_benchmark_plan(
                             role=role,
                             seed=seed,
                             block_index=block_index,
+                            cancel_requested=cancel_requested,
                         )
                         block_index += 1
                         events.append(mount.to_json())
@@ -174,6 +175,7 @@ def execute_benchmark_plan(
                                     role=role,
                                     seed=seed,
                                     block_index=block_index,
+                                    cancel_requested=cancel_requested,
                                 )
                                 block_index += 1
                                 events.append(mount.to_json())
@@ -426,6 +428,7 @@ def _open_session(
     role: str,
     seed: int,
     block_index: int,
+    cancel_requested: Callable[[], bool] | None,
 ) -> tuple[NormalExecutionSession, BenchmarkResidencyEvent]:
     document = plan.to_json()
     request = BenchmarkMountRequest(
@@ -437,6 +440,7 @@ def _open_session(
         matched_conditions_digest=document["matched_conditions_digest"],
         seed=seed,
         block_index=block_index,
+        cancel_requested=cancel_requested,
     )
     session = adapter.open_session(request)
     try:

@@ -52,7 +52,8 @@ class FixtureExecutor:
         self.closed = False
         self.aborted = False
 
-    def request(self, document: Json) -> Json:
+    def request(self, document: Json, *, cancel_requested=None) -> Json:
+        assert cancel_requested is None or not cancel_requested()
         self.commands.append(document)
         command = document["command"]
         if command == "mount":
@@ -114,7 +115,8 @@ class FixtureExecutor:
             "payload": payload,
         }
 
-    def close(self) -> None:
+    def close(self, *, cancel_requested=None) -> None:
+        assert cancel_requested is None or not cancel_requested()
         self.closed = True
 
     def abort(self) -> None:
@@ -199,8 +201,11 @@ def test_resident_component_adapter_aborts_a_mismatched_mount(
     mount_request, _, _ = _requests(tmp_path)
     original_request = executor.request
 
-    def mismatched(document: Json) -> Json:
-        response = original_request(document)
+    def mismatched(document: Json, *, cancel_requested=None) -> Json:
+        response = original_request(
+            document,
+            cancel_requested=cancel_requested,
+        )
         response["payload"]["physical_device_id"] = "vulkan:wrong-device"
         return response
 

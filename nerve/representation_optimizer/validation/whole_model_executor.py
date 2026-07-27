@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     ExecutorArtifactStore,
     StagedCandidateLoader,
@@ -137,7 +136,10 @@ class ResidentWholeModelValidationBackend:
         started = time.monotonic_ns()
         try:
             response = validated_validation_response(
-                transport.request(command),
+                transport.request(
+                    command,
+                    cancel_requested=request.cancel_requested,
+                ),
                 expected_request_id=command["request_id"],
                 expected_status="mounted",
             )
@@ -334,7 +336,10 @@ class ResidentWholeModelValidationSession:
         }
         started = time.monotonic_ns()
         response = validated_validation_response(
-            self.transport.request(command),
+            self.transport.request(
+                command,
+                cancel_requested=self.request.cancel_requested,
+            ),
             expected_request_id=command["request_id"],
             expected_status="completed",
         )
@@ -406,8 +411,13 @@ class ResidentWholeModelValidationSession:
         if self.closed:
             raise ModelCompileError(
                 "whole-model validation session closed twice"
-            )
+        )
         self.closed = True
+        try:
+            check_compile_cancelled(self.request.cancel_requested)
+        except BaseException:
+            self.transport.abort()
+            raise
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
             "command": "close",
@@ -425,7 +435,10 @@ class ResidentWholeModelValidationSession:
         started = time.monotonic_ns()
         try:
             response = validated_validation_response(
-                self.transport.request(command),
+                self.transport.request(
+                    command,
+                    cancel_requested=self.request.cancel_requested,
+                ),
                 expected_request_id=command["request_id"],
                 expected_status="released",
             )
@@ -437,7 +450,9 @@ class ResidentWholeModelValidationSession:
                 ],
                 physical_device_ids=self.physical_device_ids,
             )
-            self.transport.close()
+            self.transport.close(
+                cancel_requested=self.request.cancel_requested,
+            )
         except BaseException:
             self.transport.abort()
             raise

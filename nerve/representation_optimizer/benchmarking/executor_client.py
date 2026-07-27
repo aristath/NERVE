@@ -5,8 +5,9 @@ import time
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Callable
 
-from nerve.compilation import Json, ModelCompileError
+from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     StagedCandidateLoader,
     resolve_candidate_mount,
@@ -39,6 +40,7 @@ class ResidentExecutorMountSpec:
     dynamic_state_capacity_activations: int
     maximum_quantum_wait_ns: int
     request_identity: Json
+    cancel_requested: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -137,7 +139,10 @@ class ResidentExecutorClient:
         started = time.monotonic_ns()
         try:
             response = validated_response(
-                transport.request(command),
+                transport.request(
+                    command,
+                    cancel_requested=spec.cancel_requested,
+                ),
                 expected_request_id=command["request_id"],
                 expected_status="mounted",
             )
@@ -199,7 +204,10 @@ class ResidentExecutorSession:
         }
         started = time.monotonic_ns()
         response = validated_response(
-            self.transport.request(command),
+            self.transport.request(
+                command,
+                cancel_requested=self.spec.cancel_requested,
+            ),
             expected_request_id=command["request_id"],
             expected_status="completed",
         )
@@ -224,6 +232,11 @@ class ResidentExecutorSession:
         if self.closed:
             raise ModelCompileError("resident executor session closed twice")
         self.closed = True
+        try:
+            check_compile_cancelled(self.spec.cancel_requested)
+        except BaseException:
+            self.transport.abort()
+            raise
         command = {
             "schema": EXECUTOR_COMMAND_SCHEMA,
             "command": "close",
@@ -232,7 +245,10 @@ class ResidentExecutorSession:
         started = time.monotonic_ns()
         try:
             response = validated_response(
-                self.transport.request(command),
+                self.transport.request(
+                    command,
+                    cancel_requested=self.spec.cancel_requested,
+                ),
                 expected_request_id=command["request_id"],
                 expected_status="released",
             )
@@ -245,7 +261,9 @@ class ResidentExecutorSession:
                 raise ModelCompileError(
                     "resident executor did not prove release of its mounted state"
                 )
-            self.transport.close()
+            self.transport.close(
+                cancel_requested=self.spec.cancel_requested,
+            )
         except BaseException:
             self.transport.abort()
             raise

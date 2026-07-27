@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Iterable, Protocol
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Protocol
 
 from nerve.compilation import Json
 
@@ -17,6 +17,11 @@ class BenchmarkMountRequest:
     matched_conditions_digest: str
     seed: int
     block_index: int
+    cancel_requested: Callable[[], bool] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def to_json(self) -> Json:
         return {

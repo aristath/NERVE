@@ -81,6 +81,7 @@ def execute_validation_stage(
                         ),
                         seed=seed,
                         block_index=block_index,
+                        cancel_requested=cancel_requested,
                     )
                     session = adapter.open_session(mount_request)
                     mount: ValidationResidencyEvent | None = None

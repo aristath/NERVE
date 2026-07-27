@@ -237,6 +237,7 @@ class ResidentComponentExecutionSession:
                 dynamic_state_capacity_activations=max(width, 1),
                 maximum_quantum_wait_ns=maximum_wait_ns,
                 request_identity=request.to_json(),
+                cancel_requested=request.cancel_requested,
             )
         )
         payload = executor_session.mount_payload

@@ -41,7 +41,8 @@ class FixtureWholeModelExecutor:
         self.closed = False
         self.aborted = False
 
-    def request(self, document: Json) -> Json:
+    def request(self, document: Json, *, cancel_requested=None) -> Json:
+        assert cancel_requested is None or not cancel_requested()
         self.commands.append(document)
         if document["command"] == "mount":
             payload = {
@@ -112,7 +113,8 @@ class FixtureWholeModelExecutor:
             "payload": payload,
         }
 
-    def close(self) -> None:
+    def close(self, *, cancel_requested=None) -> None:
+        assert cancel_requested is None or not cancel_requested()
         self.closed = True
 
     def abort(self) -> None:
