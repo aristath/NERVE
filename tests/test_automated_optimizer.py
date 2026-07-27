@@ -447,7 +447,7 @@ def test_slower_candidate_is_rejected_without_full_behavioral_execution(
     assert candidate["validation_status"] == "rejected"
     assert candidate["status"] == "rejected"
     assert outcome.report["summary"]["materially_faster_count"] == 0
-    assert lease.acquisitions == lease.releases == 3
+    assert lease.acquisitions == lease.releases == 2
 
 
 def test_report_detects_truncated_event_journal(tmp_path: Path) -> None:

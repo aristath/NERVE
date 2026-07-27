@@ -145,7 +145,21 @@ def execute_candidate(
             f"{benchmark.record.to_json()['benchmark_id']}/record.json",
         ),
     )
-    with target.lease_manager.acquire(target):
+    if decision == "materially_faster":
+        with target.lease_manager.acquire(target):
+            validation = validate_benchmarked_candidate(
+                plan=validation_plan,
+                prebenchmark_record=prebenchmark.record,
+                benchmark_record=benchmark.record,
+                session=session,
+                adapter=target.validation_adapter,
+                workspace_root=validation_workspace,
+                cancel_requested=cancel_requested,
+            )
+    else:
+        # The validation orchestrator records an auditable performance
+        # rejection without opening an execution session. Do not acquire or
+        # probe accelerators for a candidate that cannot be promoted.
         validation = validate_benchmarked_candidate(
             plan=validation_plan,
             prebenchmark_record=prebenchmark.record,
