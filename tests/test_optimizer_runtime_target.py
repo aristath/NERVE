@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -89,6 +88,36 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
     )
     with pytest.raises(ModelCompileError, match="resident DRM consumers"):
         probe.require_idle((profile,))
+
+
+def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address="0000:03:00.0",
+        used_vram=64 * 1024 * 1024,
+        busy_percent=0,
+    )
+    inaccessible = proc / "1" / "fdinfo"
+    inaccessible.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path == inaccessible:
+            raise PermissionError("fixture procfs boundary")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+    )
+
+    observation = probe.require_idle((profile,))
+    assert observation[0]["resident_processes"] == []
 
 
 def test_runtime_target_preparation_selects_minimum_idle_amd_group(

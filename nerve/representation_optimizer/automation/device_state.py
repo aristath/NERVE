@@ -270,10 +270,17 @@ class LinuxAmdDeviceStateProbe:
             fdinfo_root = process / "fdinfo"
             if not fdinfo_root.is_dir():
                 continue
+            try:
+                fdinfo_files = tuple(fdinfo_root.iterdir())
+            except (OSError, PermissionError):
+                # Material hidden residency is still caught by the global
+                # device VRAM and activity counters. Process attribution is
+                # necessarily limited to procfs entries visible to this user.
+                continue
             vram_bytes = 0
             gtt_bytes = 0
             engine_time_ns = 0
-            for fdinfo in fdinfo_root.iterdir():
+            for fdinfo in fdinfo_files:
                 try:
                     fields = _fdinfo_fields(fdinfo.read_text(errors="replace"))
                 except (OSError, PermissionError):
