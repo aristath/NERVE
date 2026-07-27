@@ -382,7 +382,10 @@ def _copy_raw_artifacts(
                 chunks = (
                     source.iter_trace_artifact(relative_path)
                     if relative_path in trace_refs
-                    else source.iter_fixture_artifact(relative_path)
+                    else source.iter_fixture_artifact(
+                        relative_path,
+                        candidate_id=plan.candidate_id,
+                    )
                 )
                 for chunk in chunks:
                     if not isinstance(chunk, bytes):

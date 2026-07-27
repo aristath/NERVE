@@ -76,6 +76,7 @@ class FixtureExecutionAdapter:
         self.mount_requests = []
         self.execution_requests = []
         self.closed_sessions = 0
+        self.fixture_candidate_ids: list[str] = []
         self.trace_artifacts: dict[str, bytes] = {}
         self.fixture_artifacts = {
             "fixtures/decode-input.bin": b"fixture input",
@@ -89,8 +90,10 @@ class FixtureExecutionAdapter:
         self,
         relative_path,
         *,
+        candidate_id,
         chunk_bytes=8 * 1024 * 1024,
     ):
+        self.fixture_candidate_ids.append(candidate_id)
         payload = self.fixture_artifacts[relative_path]
         for offset in range(0, len(payload), chunk_bytes):
             yield payload[offset : offset + chunk_bytes]
@@ -502,6 +505,7 @@ def test_matched_benchmark_promotes_only_statistical_material_speedup(
         item["classification"] == "identical"
         for item in record["reproducibility"]
     )
+    assert set(adapter.fixture_candidate_ids) == {plan.candidate_id}
     lifecycle = next(
         candidate
         for candidate in outcome.session.candidates

@@ -30,6 +30,7 @@ pub struct VulkanTargetedComponentExecutionReport {
     pub component_id: String,
     pub node_id: String,
     pub op: String,
+    pub phase: String,
     pub activation_batch_width: usize,
     pub useful_units: usize,
     pub execution_ns: u64,
@@ -41,6 +42,8 @@ pub struct VulkanTargetedComponentExecutionReport {
     pub physical_dispatch_count: usize,
     pub queue_submission_count: usize,
     pub synchronization_wait_count: usize,
+    pub synchronization_wait_ns: u64,
+    pub queue_wait_ns: u64,
 }
 
 pub struct VulkanResidentTargetedComponentSession {
@@ -78,6 +81,15 @@ struct VulkanTargetedPrefillExecution {
 struct VulkanTargetedPrefillStep {
     dispatch: VulkanResidentKernelDispatch,
     indirect_control: Option<(VulkanResidentComponentBatchControlPayload, usize)>,
+}
+
+struct VulkanTargetedComponentRunCounters {
+    execution_ns: u64,
+    windows: Vec<VulkanTargetedComponentThroughputWindow>,
+    physical_dispatch_count: usize,
+    queue_submission_count: usize,
+    synchronization_wait_ns: u64,
+    queue_wait_ns: u64,
 }
 
 impl VulkanResidentTargetedComponentSession {
@@ -205,8 +217,7 @@ impl VulkanResidentTargetedComponentSession {
             );
         }
         self.reset_state_and_write_fixture(seed)?;
-        let (execution_ns, windows, physical_dispatch_count, submission_count) =
-            match &self.execution {
+        let counters = match &self.execution {
                 VulkanTargetedComponentExecution::Decode(execution) => execution.execute(
                     device,
                     useful_units,
@@ -224,17 +235,24 @@ impl VulkanResidentTargetedComponentSession {
             component_id: self.component_id.clone(),
             node_id: self.node_id.clone(),
             op: self.op.clone(),
+            phase: match self.phase {
+                VulkanTargetedComponentExecutionPhase::Decode => "decode",
+                VulkanTargetedComponentExecutionPhase::Prefill { .. } => "prefill",
+            }
+            .to_string(),
             activation_batch_width: self.phase.activation_batch_width(),
             useful_units,
-            execution_ns,
+            execution_ns: counters.execution_ns,
             output_digest,
             state_digest,
-            throughput_windows: windows,
+            throughput_windows: counters.windows,
             resident_parameter_bytes: self.resident_parameter_bytes,
             resident_transient_bytes: self.resident_transient_bytes(),
-            physical_dispatch_count,
-            queue_submission_count: submission_count,
-            synchronization_wait_count: submission_count,
+            physical_dispatch_count: counters.physical_dispatch_count,
+            queue_submission_count: counters.queue_submission_count,
+            synchronization_wait_count: counters.queue_submission_count,
+            synchronization_wait_ns: counters.synchronization_wait_ns,
+            queue_wait_ns: counters.queue_wait_ns,
         })
     }
 
@@ -445,18 +463,12 @@ impl VulkanTargetedDecodeExecution {
         device: &VulkanComputeDevice,
         useful_units: usize,
         maximum_quantum_wait: Duration,
-    ) -> Result<
-        (
-            u64,
-            Vec<VulkanTargetedComponentThroughputWindow>,
-            usize,
-            usize,
-        ),
-        VulkanResidentTokenModelPackageError,
-    > {
+    ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
         let quanta = targeted_execution_quanta(useful_units, 1)?;
         let mut windows = Vec::with_capacity(quanta.len());
         let mut execution_ns = 0u64;
+        let mut synchronization_wait_ns = 0u64;
+        let mut queue_wait_ns = 0u64;
         let mut start_unit = 0usize;
         for (index, repetitions) in quanta.into_iter().enumerate() {
             self.ensure_sequence(device, repetitions)?;
@@ -464,6 +476,7 @@ impl VulkanTargetedDecodeExecution {
             let sequence = catalog
                 .get(&repetitions)
                 .expect("targeted decode sequence was inserted");
+            let wait_started = Instant::now();
             let duration_ns = device
                 .run_timestamped_recorded_resident_kernel_sequence_for(
                     sequence,
@@ -472,6 +485,11 @@ impl VulkanTargetedDecodeExecution {
                 .map_err(|error| targeted_component_error_value(format!(
                     "targeted decode quantum failed: {error}"
                 )))?;
+            let wait_ns = elapsed_nanoseconds(wait_started);
+            synchronization_wait_ns =
+                synchronization_wait_ns.saturating_add(wait_ns);
+            queue_wait_ns = queue_wait_ns
+                .saturating_add(wait_ns.saturating_sub(duration_ns));
             let end_unit = start_unit + repetitions;
             execution_ns = execution_ns.saturating_add(duration_ns);
             windows.push(VulkanTargetedComponentThroughputWindow {
@@ -483,7 +501,14 @@ impl VulkanTargetedDecodeExecution {
             start_unit = end_unit;
         }
         let submission_count = windows.len();
-        Ok((execution_ns.max(1), windows, 1, submission_count))
+        Ok(VulkanTargetedComponentRunCounters {
+            execution_ns: execution_ns.max(1),
+            windows,
+            physical_dispatch_count: useful_units,
+            queue_submission_count: submission_count,
+            synchronization_wait_ns,
+            queue_wait_ns,
+        })
     }
 
     fn ensure_sequence(
@@ -724,21 +749,15 @@ impl VulkanTargetedPrefillExecution {
         device: &VulkanComputeDevice,
         useful_units: usize,
         maximum_quantum_wait: Duration,
-    ) -> Result<
-        (
-            u64,
-            Vec<VulkanTargetedComponentThroughputWindow>,
-            usize,
-            usize,
-        ),
-        VulkanResidentTokenModelPackageError,
-    > {
+    ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
         let quanta = targeted_execution_quanta(
             useful_units,
             self.activation_batch_width,
         )?;
         let mut windows = Vec::with_capacity(quanta.len());
         let mut execution_ns = 0u64;
+        let mut synchronization_wait_ns = 0u64;
+        let mut queue_wait_ns = 0u64;
         let mut start_unit = 0usize;
         for (index, repetitions) in quanta.into_iter().enumerate() {
             self.ensure_sequence(device, repetitions)?;
@@ -746,6 +765,7 @@ impl VulkanTargetedPrefillExecution {
             let sequence = catalog
                 .get(&repetitions)
                 .expect("targeted prefill sequence was inserted");
+            let wait_started = Instant::now();
             let duration_ns = device
                 .run_timestamped_recorded_resident_kernel_sequence_for(
                     sequence,
@@ -754,6 +774,11 @@ impl VulkanTargetedPrefillExecution {
                 .map_err(|error| targeted_component_error_value(format!(
                     "targeted prefill quantum failed: {error}"
                 )))?;
+            let wait_ns = elapsed_nanoseconds(wait_started);
+            synchronization_wait_ns =
+                synchronization_wait_ns.saturating_add(wait_ns);
+            queue_wait_ns = queue_wait_ns
+                .saturating_add(wait_ns.saturating_sub(duration_ns));
             let quantum_units = repetitions
                 .checked_mul(self.activation_batch_width)
                 .ok_or_else(|| targeted_component_error_value(
@@ -776,12 +801,14 @@ impl VulkanTargetedPrefillExecution {
                 "targeted prefill physical dispatch count overflowed",
             ))?;
         let submission_count = windows.len();
-        Ok((
-            execution_ns.max(1),
+        Ok(VulkanTargetedComponentRunCounters {
+            execution_ns: execution_ns.max(1),
             windows,
             physical_dispatch_count,
-            submission_count,
-        ))
+            queue_submission_count: submission_count,
+            synchronization_wait_ns,
+            queue_wait_ns,
+        })
     }
 
     fn ensure_sequence(
@@ -995,6 +1022,12 @@ fn targeted_finalized_artifact_digest(payload: &[u8]) -> String {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
+}
+
+fn elapsed_nanoseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 fn targeted_component_error<T>(

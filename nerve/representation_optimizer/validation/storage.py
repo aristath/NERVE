@@ -67,6 +67,7 @@ def publish_prebenchmark_evidence(
             else ()
         ),
         artifact_source=artifact_source,
+        candidate_id=plan.candidate_id,
         extra_artifacts=_proof_artifact_readers(
             record_document["proof_results"],
             proof_artifact_source,
@@ -114,6 +115,7 @@ def publish_validation_evidence(
         ),
         trace_refs=_trace_refs(runs),
         artifact_source=artifact_source,
+        candidate_id=plan.candidate_id,
         extra_artifacts=(),
     )
 
@@ -220,6 +222,7 @@ def _publish_evidence(
     fixture_refs: tuple[Json, ...],
     trace_refs: tuple[Json, ...],
     artifact_source: BehavioralValidationAdapter,
+    candidate_id: str,
     extra_artifacts: tuple[tuple[Json, object], ...],
 ) -> Path:
     workspace_root = workspace_root.resolve()
@@ -266,7 +269,10 @@ def _publish_evidence(
         _copy_artifacts(
             staging,
             fixture_refs,
-            artifact_source.iter_fixture_artifact,
+            lambda relative_path: artifact_source.iter_fixture_artifact(
+                relative_path,
+                candidate_id=candidate_id,
+            ),
         )
         _copy_artifacts(
             staging,

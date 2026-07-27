@@ -123,6 +123,7 @@ class BehavioralValidationAdapter(Protocol):
         self,
         relative_path: str,
         *,
+        candidate_id: str,
         chunk_bytes: int = 8 * 1024 * 1024,
     ) -> Iterable[bytes]:
         """Read one immutable validation fixture or counterexample."""

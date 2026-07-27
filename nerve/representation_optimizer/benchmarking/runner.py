@@ -642,7 +642,10 @@ def _verify_fixture_artifacts(
     for relative_path, expected_digest in sorted(artifacts.items()):
         digest = sha256()
         captured = bytearray()
-        for chunk in adapter.iter_fixture_artifact(relative_path):
+        for chunk in adapter.iter_fixture_artifact(
+            relative_path,
+            candidate_id=plan.candidate_id,
+        ):
             if not isinstance(chunk, bytes):
                 raise ModelCompileError(
                     "benchmark fixture source yielded a non-byte chunk"

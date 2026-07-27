@@ -43,7 +43,11 @@ def execute_validation_stage(
             f"validation plan has no checks for stage {stage!r}"
         )
     document = plan.to_json()
-    _verify_fixture_artifacts(checks, adapter)
+    _verify_fixture_artifacts(
+        checks,
+        adapter,
+        candidate_id=plan.candidate_id,
+    )
     mount_request = ValidationStageMountRequest(
         plan_id=plan.plan_id,
         stage=stage,
@@ -257,6 +261,8 @@ def _validate_observation(
 def _verify_fixture_artifacts(
     checks: tuple[Json, ...],
     adapter: BehavioralValidationAdapter,
+    *,
+    candidate_id: str,
 ) -> None:
     fixtures: dict[str, str] = {}
     limits: list[tuple[str, str, int]] = []
@@ -298,11 +304,18 @@ def _verify_fixture_artifacts(
         _verify_streamed_artifact(
             path,
             digest,
-            adapter.iter_fixture_artifact,
+            lambda relative_path, *, chunk_bytes=8 * 1024 * 1024: (
+                adapter.iter_fixture_artifact(
+                    relative_path,
+                    candidate_id=candidate_id,
+                    chunk_bytes=chunk_bytes,
+                )
+            ),
         )
     for path, pointer, expected in limits:
         _verify_declared_limit(
             adapter,
+            candidate_id=candidate_id,
             relative_path=path,
             json_pointer=pointer,
             expected_limit=expected,
@@ -354,12 +367,16 @@ def _verify_streamed_artifact(
 def _verify_declared_limit(
     adapter: BehavioralValidationAdapter,
     *,
+    candidate_id: str,
     relative_path: str,
     json_pointer: str,
     expected_limit: int,
 ) -> None:
     captured = bytearray()
-    for chunk in adapter.iter_fixture_artifact(relative_path):
+    for chunk in adapter.iter_fixture_artifact(
+        relative_path,
+        candidate_id=candidate_id,
+    ):
         if not isinstance(chunk, bytes) or not chunk:
             raise ModelCompileError(
                 "validation limit evidence yielded invalid bytes"

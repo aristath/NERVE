@@ -177,13 +177,16 @@ class FixtureValidationAdapter:
         self.stage_requests = []
         self.execution_requests = []
         self.closed_stages: list[str] = []
+        self.fixture_candidate_ids: list[str] = []
 
     def iter_fixture_artifact(
         self,
         relative_path,
         *,
+        candidate_id,
         chunk_bytes=8 * 1024 * 1024,
     ):
+        self.fixture_candidate_ids.append(candidate_id)
         payload = self.fixture_artifacts[relative_path]
         for offset in range(0, len(payload), chunk_bytes):
             yield payload[offset : offset + chunk_bytes]
@@ -567,6 +570,7 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
         "full_local",
         "whole_model",
     ]
+    assert set(adapter.fixture_candidate_ids) == {fixture[2].candidate_id}
     assert len(
         {
             request.seed
