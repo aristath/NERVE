@@ -224,10 +224,11 @@ def test_matrix_analyzer_finds_known_structures_and_rejects_controls():
     nodes = (
         {
             "id": "component/convolution",
+            "component_id": "component",
             "op": "convolution_1d",
             "inputs": ["component/input"],
             "outputs": ["component/output"],
-            "params": ["convolution"],
+            "params": ["parameter_7"],
         },
     )
     result = MatrixStructureAnalyzer().analyze(
@@ -317,6 +318,22 @@ def test_matrix_analyzer_finds_known_structures_and_rejects_controls():
         )["status"]
         == "supported"
     )
+    assert (
+        _claim(
+            result.claims,
+            "convolutional_structure",
+            tensor="random",
+        )["status"]
+        == "rejected"
+    )
+    convolution_claim = _claim(
+        result.claims,
+        "convolutional_structure",
+        tensor="convolution",
+    )
+    assert convolution_claim["facts"]["source_node_ids"] == [
+        "component/convolution"
+    ]
 
 
 def test_rank_one_residual_matches_full_singular_spectrum():

@@ -10,7 +10,10 @@ from nerve.representation_optimizer.analysis.claims import (
     observation_facts,
     tolerance_threshold,
 )
-from nerve.representation_optimizer.analysis.context import ScopeAnalysisContext
+from nerve.representation_optimizer.analysis.context import (
+    ParameterBinding,
+    ScopeAnalysisContext,
+)
 from nerve.representation_optimizer.analysis.decomposition import (
     ExactMatrixSvd,
     exact_matrix_svd,
@@ -19,7 +22,7 @@ from nerve.representation_optimizer.analysis.decomposition import (
 
 class MatrixStructureAnalyzer:
     analyzer_id = "matrix_and_tensor_structure"
-    version = "2"
+    version = "3"
 
     def analyze(self, context: ScopeAnalysisContext) -> AnalyzerResult:
         claims = []
@@ -75,6 +78,7 @@ class MatrixStructureAnalyzer:
                 )
                 topology_claims, topology_details = _analyze_tensor_topology(
                     context,
+                    parameter,
                     values,
                     base,
                     threshold,
@@ -94,6 +98,7 @@ class MatrixStructureAnalyzer:
             claims.extend(_claims_with_base(matrix_claims, base))
             topology_claims, topology_details = _analyze_tensor_topology(
                 context,
+                parameter,
                 values,
                 base,
                 threshold,
@@ -472,6 +477,7 @@ def _analyze_matrix(
 
 def _analyze_tensor_topology(
     context: ScopeAnalysisContext,
+    parameter: ParameterBinding,
     values: np.ndarray,
     base: dict,
     threshold: float,
@@ -480,8 +486,14 @@ def _analyze_tensor_topology(
     convolution_nodes = [
         str(node["id"])
         for node in context.nodes
-        if "conv" in str(node.get("op", "")).casefold()
-        or "convolution" in str(node.get("attrs", {})).casefold()
+        if (
+            node.get("component_id") == parameter.component_id
+            and parameter.parameter_ref_id in node.get("params", ())
+            and (
+                "conv" in str(node.get("op", "")).casefold()
+                or "convolution" in str(node.get("attrs", {})).casefold()
+            )
+        )
     ]
     convolutional = bool(convolution_nodes) and values.ndim >= 2
     claims = [
