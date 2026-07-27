@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.contracts import device_state_digest
@@ -25,6 +27,9 @@ class DeviceIdlePolicy:
     maximum_busy_percent: int = 0
     maximum_driver_context_vram_bytes: int = 1 * 1024 * 1024
     maximum_driver_context_gtt_bytes: int = 16 * 1024 * 1024
+    quiescence_poll_interval_ns: int = 100_000_000
+    quiescence_required_observations: int = 2
+    maximum_quiescence_wait_ns: int = 5_000_000_000
 
     def __post_init__(self) -> None:
         if not 0 <= self.maximum_vram_fraction_ppm <= 1_000_000:
@@ -44,6 +49,20 @@ class DeviceIdlePolicy:
                 raise ModelCompileError(
                     f"idle-device {field} must not be negative"
                 )
+        for field in (
+            "quiescence_poll_interval_ns",
+            "quiescence_required_observations",
+            "maximum_quiescence_wait_ns",
+        ):
+            value = getattr(self, field)
+            if value <= 0:
+                raise ModelCompileError(
+                    f"idle-device {field} must be positive"
+                )
+        if self.quiescence_poll_interval_ns > self.maximum_quiescence_wait_ns:
+            raise ModelCompileError(
+                "idle-device quiescence polling interval exceeds its wait bound"
+            )
 
     def to_json(self) -> Json:
         return {
@@ -55,6 +74,11 @@ class DeviceIdlePolicy:
             "maximum_driver_context_gtt_bytes": (
                 self.maximum_driver_context_gtt_bytes
             ),
+            "quiescence_poll_interval_ns": self.quiescence_poll_interval_ns,
+            "quiescence_required_observations": (
+                self.quiescence_required_observations
+            ),
+            "maximum_quiescence_wait_ns": self.maximum_quiescence_wait_ns,
             "resident_process_policy": (
                 "no_engine_activity_or_process_above_driver_context_envelope"
             ),
@@ -92,10 +116,14 @@ class LinuxAmdDeviceStateProbe:
         sysfs_drm_root: Path = Path("/sys/class/drm"),
         proc_root: Path = Path("/proc"),
         policy: DeviceIdlePolicy = DeviceIdlePolicy(),
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.sysfs_drm_root = sysfs_drm_root.resolve()
         self.proc_root = proc_root.resolve()
         self.policy = policy
+        self._monotonic_ns = monotonic_ns
+        self._sleep = sleep
 
     def observe(self, profile: Json) -> DeviceIdleObservation:
         identity = profile.get("hardware_identity")
@@ -197,7 +225,6 @@ class LinuxAmdDeviceStateProbe:
                 "device-state probe received an invalid optimization target"
             )
         profiles = tuple(dict(profile) for profile in raw_profiles)
-        observations = self.require_idle(profiles)
         matched = getattr(target, "matched_conditions", None)
         if not isinstance(matched, dict):
             raise ModelCompileError(
@@ -219,25 +246,109 @@ class LinuxAmdDeviceStateProbe:
             for item in baselines
             if isinstance(item, dict)
         }
-        if set(baseline_by_id) != {
-            str(item["device_id"]) for item in observations
-        }:
+        expected_ids = {
+            str(profile["hardware_identity"]["stable_device_id"])
+            for profile in profiles
+        }
+        if set(baseline_by_id) != expected_ids:
             raise ModelCompileError(
                 "optimization target idle baseline does not match its devices"
             )
+        deadline = (
+            self._monotonic_ns()
+            + self.policy.maximum_quiescence_wait_ns
+        )
+        consecutive_idle = 0
+        last_busy: tuple[tuple[str, int], ...] = ()
+        while True:
+            observations = tuple(
+                self.observe(profile).to_json() for profile in profiles
+            )
+            self._require_target_residency_baseline(
+                observations,
+                baseline_by_id,
+            )
+            last_busy = tuple(
+                (
+                    str(observation["device_id"]),
+                    int(observation["busy_percent"]),
+                )
+                for observation in observations
+                if (
+                    observation["busy_percent"]
+                    > self.policy.maximum_busy_percent
+                )
+            )
+            consecutive_idle = (
+                0 if last_busy else consecutive_idle + 1
+            )
+            if (
+                consecutive_idle
+                >= self.policy.quiescence_required_observations
+            ):
+                return declared_idle_state_digest(profiles, self.policy)
+            now = self._monotonic_ns()
+            if now >= deadline:
+                details = ", ".join(
+                    f"{device_id}={busy}%"
+                    for device_id, busy in last_busy
+                )
+                raise ModelCompileError(
+                    "AMD devices did not reach a stable idle baseline within "
+                    f"{self.policy.maximum_quiescence_wait_ns} ns"
+                    + (f": {details}" if details else "")
+                )
+            wait_ns = min(
+                self.policy.quiescence_poll_interval_ns,
+                deadline - now,
+            )
+            self._sleep(wait_ns / 1_000_000_000)
+
+    def _require_target_residency_baseline(
+        self,
+        observations: tuple[Json, ...],
+        baseline_by_id: dict[str, Json],
+    ) -> None:
+        failures = []
         for observation in observations:
-            baseline = baseline_by_id[str(observation["device_id"])]
+            device_id = str(observation["device_id"])
+            baseline = baseline_by_id[device_id]
             baseline_used = baseline.get("vram_used_bytes")
+            used = observation["vram_used_bytes"]
+            total = observation["vram_total_bytes"]
             if (
                 isinstance(baseline_used, bool)
                 or not isinstance(baseline_used, int)
-                or observation["vram_used_bytes"] > baseline_used
             ):
                 raise ModelCompileError(
-                    f"device {observation['device_id']!r} did not return to "
-                    "its initial VRAM residency baseline"
+                    "optimization target has an invalid initial VRAM baseline"
                 )
-        return declared_idle_state_digest(profiles, self.policy)
+            if observation["resident_processes"]:
+                owners = ", ".join(
+                    f"{item['pid']}:{item['command']}"
+                    for item in observation["resident_processes"]
+                )
+                failures.append(
+                    f"{device_id} has resident DRM consumers ({owners})"
+                )
+            if (
+                used * 1_000_000 // total
+                > self.policy.maximum_vram_fraction_ppm
+            ):
+                failures.append(
+                    f"{device_id} uses {used}/{total} VRAM bytes"
+                )
+            if used > baseline_used:
+                failures.append(
+                    f"{device_id} uses {used} VRAM bytes above its "
+                    f"{baseline_used}-byte initial baseline"
+                )
+        if failures:
+            raise ModelCompileError(
+                "AMD device did not return to its initial VRAM residency "
+                "baseline: "
+                + "; ".join(failures)
+            )
 
     def _drm_card(self, pci_address: str) -> Path:
         candidates = []

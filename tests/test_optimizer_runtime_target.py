@@ -13,6 +13,7 @@ from nerve.compiler_target import (
     synthetic_hardware_profile,
 )
 from nerve.representation_optimizer.automation.device_state import (
+    DeviceIdlePolicy,
     LinuxAmdDeviceStateProbe,
     declared_idle_state_digest,
 )
@@ -118,6 +119,103 @@ def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
 
     observation = probe.require_idle((profile,))
     assert observation[0]["resident_processes"] == []
+
+
+def test_target_idle_attestation_waits_for_stable_counter_quiescence(
+    tmp_path: Path,
+) -> None:
+    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address="0000:03:00.0",
+        used_vram=64 * 1024 * 1024,
+        busy_percent=0,
+    )
+    busy = next(
+        (sysfs / "card0" / "device").resolve().glob("gpu_busy_percent")
+    )
+    clock = [0]
+    sleeps = []
+
+    def advance(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += round(seconds * 1_000_000_000)
+        if len(sleeps) == 1:
+            busy.write_text("0\n")
+
+    policy = DeviceIdlePolicy(
+        quiescence_poll_interval_ns=10,
+        quiescence_required_observations=2,
+        maximum_quiescence_wait_ns=100,
+    )
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        policy=policy,
+        monotonic_ns=lambda: clock[0],
+        sleep=advance,
+    )
+    baseline = probe.require_idle((profile,))
+    target = SimpleNamespace(
+        hardware_profiles=(profile,),
+        matched_conditions={
+            "environment": {
+                "initial_idle_observations": list(baseline),
+            }
+        },
+    )
+    busy.write_text("73\n")
+
+    assert probe.target_idle_state_digest(target) == (
+        declared_idle_state_digest((profile,), policy)
+    )
+    assert sleeps == [1e-08, 1e-08]
+
+
+def test_target_idle_attestation_bounds_nonquiescent_counter_wait(
+    tmp_path: Path,
+) -> None:
+    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address="0000:03:00.0",
+        used_vram=64 * 1024 * 1024,
+        busy_percent=0,
+    )
+    busy = next(
+        (sysfs / "card0" / "device").resolve().glob("gpu_busy_percent")
+    )
+    clock = [0]
+
+    def advance(seconds: float) -> None:
+        clock[0] += round(seconds * 1_000_000_000)
+
+    policy = DeviceIdlePolicy(
+        quiescence_poll_interval_ns=10,
+        quiescence_required_observations=2,
+        maximum_quiescence_wait_ns=25,
+    )
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        policy=policy,
+        monotonic_ns=lambda: clock[0],
+        sleep=advance,
+    )
+    baseline = probe.require_idle((profile,))
+    target = SimpleNamespace(
+        hardware_profiles=(profile,),
+        matched_conditions={
+            "environment": {
+                "initial_idle_observations": list(baseline),
+            }
+        },
+    )
+    busy.write_text("51\n")
+
+    with pytest.raises(ModelCompileError, match="stable idle baseline"):
+        probe.target_idle_state_digest(target)
+    assert clock[0] == policy.maximum_quiescence_wait_ns
 
 
 def test_runtime_target_preparation_selects_minimum_idle_amd_group(
