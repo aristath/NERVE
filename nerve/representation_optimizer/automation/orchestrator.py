@@ -41,6 +41,9 @@ from nerve.representation_optimizer.promotion.publication import (
     publish_promoted_package,
 )
 from nerve.representation_optimizer.providers.registry import ProviderRegistry
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.providers.types import ProviderProblem
 from nerve.representation_optimizer.scope_enumeration.catalog import (
     load_optimization_scope_catalog,
@@ -75,6 +78,7 @@ def run_automated_optimizer(
     catalog = load_optimization_scope_catalog(
         source / "optimization" / "scopes.json"
     )
+    source_artifacts = PackageSourceArtifactResolver(source)
     session = OptimizationSession.from_json(stage["session"])
     run_id = stable_contract_id(
         "automated_optimizer_run",
@@ -200,6 +204,7 @@ def run_automated_optimizer(
                     source_contracts=(source_contract,),
                     evidence=analysis.evidence,
                     hardware_profile=target.synthesis_profile,
+                    source_artifacts=source_artifacts,
                 )
                 registry_report = providers.run(problem)
                 evaluations = build_provider_records(

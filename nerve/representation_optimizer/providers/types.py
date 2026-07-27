@@ -26,6 +26,9 @@ from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
 from nerve.representation_optimizer.validation.contracts import (
     ValidationRequirements,
 )
+from nerve.representation_optimizer.providers.source_artifacts import (
+    SourceArtifactResolver,
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -118,6 +121,7 @@ class ProviderContext:
     _evidence: tuple[ContractDocument, ...]
     _hardware_profile: ContractDocument
     _descriptor: ContractDocument
+    _source_artifacts: SourceArtifactResolver | None
 
     @property
     def scopes(self) -> tuple[Json, ...]:
@@ -156,6 +160,15 @@ class ProviderContext:
             str(document.to_json()["evidence_id"]) for document in self._evidence
         )
 
+    @property
+    def source_artifacts(self) -> SourceArtifactResolver:
+        if self._source_artifacts is None:
+            raise ContractValidationError(
+                "representation provider requires source artifact access, but "
+                "this optimization problem has no source artifact resolver"
+            )
+        return self._source_artifacts
+
 
 @dataclass(frozen=True)
 class ProviderProblem:
@@ -164,6 +177,7 @@ class ProviderProblem:
     _source_contracts: tuple[ContractDocument, ...]
     _evidence: tuple[ContractDocument, ...]
     _hardware_profile: ContractDocument
+    _source_artifacts: SourceArtifactResolver | None
 
     @classmethod
     def from_documents(
@@ -174,6 +188,7 @@ class ProviderProblem:
         source_contracts: Iterable[Json | ContractDocument],
         evidence: Iterable[Json | ContractDocument],
         hardware_profile: Json | ContractDocument,
+        source_artifacts: SourceArtifactResolver | None = None,
     ) -> ProviderProblem:
         if not package_id:
             raise ContractValidationError("provider problem requires package_id")
@@ -247,6 +262,7 @@ class ProviderProblem:
                 )
             ),
             _hardware_profile=parsed_profile,
+            _source_artifacts=source_artifacts,
         )
 
     def bind_descriptor(
@@ -264,6 +280,7 @@ class ProviderProblem:
             _evidence=self._evidence,
             _hardware_profile=self._hardware_profile,
             _descriptor=descriptor,
+            _source_artifacts=self._source_artifacts,
         )
 
 

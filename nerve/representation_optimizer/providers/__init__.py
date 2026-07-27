@@ -4,6 +4,12 @@ from nerve.representation_optimizer.providers.protocol import (
     RepresentationProvider,
 )
 from nerve.representation_optimizer.providers.registry import ProviderRegistry
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+    SourceArtifact,
+    SourceArtifactResolver,
+    SourceTensorArtifact,
+)
 from nerve.representation_optimizer.providers.types import (
     EvidenceAssessment,
     MatchAssessment,
@@ -21,6 +27,10 @@ __all__ = [
     "ProviderIdentity",
     "ProviderProblem",
     "ProviderRegistry",
+    "PackageSourceArtifactResolver",
+    "SourceArtifact",
+    "SourceArtifactResolver",
+    "SourceTensorArtifact",
     "ProviderRegistryReport",
     "RepresentationProvider",
     "StaticEstimate",
