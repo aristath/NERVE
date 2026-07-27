@@ -30,6 +30,20 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
+from nerve.representation_optimizer.validation.component_executor import (
+    ResidentComponentValidationBackend,
+)
+from nerve.representation_optimizer.validation.contracts import (
+    ValidationResidencyEvent,
+    ValidationRoleResult,
+)
+from nerve.representation_optimizer.validation.planning import (
+    create_validation_check,
+)
+from nerve.representation_optimizer.validation.protocols import (
+    ValidationRoleExecutionRequest,
+    ValidationRoleMountRequest,
+)
 
 
 class FixtureExecutor:
@@ -218,6 +232,115 @@ def test_resident_component_adapter_rejects_artifact_path_escape(
         )
 
 
+def test_component_validation_backend_reuses_resident_executor_per_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    candidate_id = "candidate_" + "a" * 32
+    candidate_root = tmp_path / "candidate"
+    fixtures = candidate_root / "fixtures"
+    fixtures.mkdir(exist_ok=True)
+    fixture_payload = b"opaque provider-owned component inputs\n"
+    (fixtures / "component.bin").write_bytes(fixture_payload)
+    check = create_validation_check(
+        name="fixture component decode",
+        stage="sanity",
+        kind="component_comparison",
+        coverage=("component_output_error",),
+        execution_scope="component",
+        activation_batch_width=1,
+        context_size=0,
+        context_size_basis={"kind": "not_applicable"},
+        state_size=0,
+        boundary_mode="local",
+        input_artifact={
+            "path": "fixtures/component.bin",
+            "digest": _artifact_digest(fixture_payload),
+        },
+        initial_state_artifact=None,
+        controls={
+            "phase": "decode",
+            "component_id": "block_13",
+            "physical_node_id": "head_norm",
+        },
+        seeds=(17, 19),
+        minimum_steps=8,
+        output_allowance=None,
+        output_allowance_basis={"kind": "unlimited"},
+        metrics=("bf16_bit_exact",),
+    )
+    matched_conditions = {
+        "devices": [
+            {"device_id": "vulkan:amd-fixture"},
+            {"device_id": "vulkan:amd-peer"},
+        ],
+        "placement": {"block_13": "vulkan:amd-fixture"},
+        "controls": {
+            "scheduler": "normal",
+            "maximum_quantum_wait_ns": 9_000_000,
+        },
+        "environment": {"power_profile": "matched"},
+        "idle_device_state_digest": _artifact_digest(b"idle"),
+        "exclusive_residency": True,
+    }
+    plan_id = stable_contract_id("validation_plan", str(tmp_path))
+    implementation = {
+        "implementation_id": f"staged-representation:{candidate_id}"
+    }
+    backend = ResidentComponentValidationBackend(
+        executor_client=adapter.executor_client,
+        trace_store=adapter.trace_store,
+        run_nonce="validation-fixture",
+    )
+    mount_request = ValidationRoleMountRequest(
+        plan_id=plan_id,
+        candidate_id=candidate_id,
+        stage="sanity",
+        check=check,
+        role="candidate",
+        implementation=implementation,
+        matched_conditions=matched_conditions,
+        matched_conditions_digest=contract_digest(matched_conditions),
+        seed=17,
+        block_index=0,
+    )
+    execution_request = ValidationRoleExecutionRequest(
+        plan_id=plan_id,
+        candidate_id=candidate_id,
+        check=check,
+        role="candidate",
+        implementation=implementation,
+        matched_conditions=matched_conditions,
+        matched_conditions_digest=contract_digest(matched_conditions),
+        seed=17,
+    )
+
+    session = backend.open_session(mount_request)
+    mount = ValidationResidencyEvent.from_json(session.mount_event).to_json()
+    result = ValidationRoleResult.from_json(
+        session.execute(execution_request)
+    ).to_json()
+    unmount = ValidationResidencyEvent.from_json(session.close()).to_json()
+    comparison = backend.compare_results(
+        {
+            "check": check,
+            "behavioral_contract": {"mode": "exact"},
+        },
+        result,
+        result,
+    )
+
+    assert executor.commands[0]["phase"] == "decode"
+    assert executor.commands[1]["useful_units"] == 8
+    assert result["steps"] == 8
+    assert result["output_digest"] == _artifact_digest(b"output")
+    assert result["default_statistics"]["physical_dispatch_count"] == 1
+    assert comparison["metrics"][0]["error"] == 0.0
+    assert mount["device_state_before_digest"] == _artifact_digest(b"idle")
+    assert unmount["device_state_after_digest"] == _artifact_digest(b"idle")
+
+
 def _adapter_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -309,7 +432,10 @@ def _requests(
         sustained_window_count=1,
     ).to_json()
     matched_conditions = {
-        "devices": [{"device_id": "vulkan:amd-fixture"}],
+        "devices": [
+            {"device_id": "vulkan:amd-fixture"},
+            {"device_id": "vulkan:amd-peer"},
+        ],
         "placement": {"block_13": "vulkan:amd-fixture"},
         "controls": {
             "scheduler": "normal",

@@ -68,6 +68,7 @@ def execute_validation_stage(
                     implementation = plan.implementation(role)
                     mount_request = ValidationRoleMountRequest(
                         plan_id=plan.plan_id,
+                        candidate_id=plan.candidate_id,
                         stage=stage,
                         check=check,
                         role=role,
@@ -90,6 +91,7 @@ def execute_validation_stage(
                         _validate_mount(plan, mount_request, mount)
                         execution_request = ValidationRoleExecutionRequest(
                             plan_id=plan.plan_id,
+                            candidate_id=plan.candidate_id,
                             check=check,
                             role=role,
                             implementation=implementation,

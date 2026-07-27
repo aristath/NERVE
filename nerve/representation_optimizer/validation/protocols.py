@@ -59,6 +59,7 @@ class ExactProofVerifier(Protocol):
 @dataclass(frozen=True)
 class ValidationRoleMountRequest:
     plan_id: str
+    candidate_id: str
     stage: str
     check: Json
     role: str
@@ -71,6 +72,7 @@ class ValidationRoleMountRequest:
     def to_json(self) -> Json:
         return {
             "plan_id": self.plan_id,
+            "candidate_id": self.candidate_id,
             "stage": self.stage,
             "check": deepcopy(self.check),
             "role": self.role,
@@ -85,6 +87,7 @@ class ValidationRoleMountRequest:
 @dataclass(frozen=True)
 class ValidationRoleExecutionRequest:
     plan_id: str
+    candidate_id: str
     check: Json
     role: str
     implementation: Json
@@ -96,6 +99,7 @@ class ValidationRoleExecutionRequest:
     def to_json(self) -> Json:
         return {
             "plan_id": self.plan_id,
+            "candidate_id": self.candidate_id,
             "check": deepcopy(self.check),
             "role": self.role,
             "implementation": deepcopy(self.implementation),

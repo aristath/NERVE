@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
-import time
 from collections.abc import Iterable
-from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,7 +9,11 @@ from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     ExecutorArtifactStore,
     StagedCandidateLoader,
     default_staged_candidate_loader,
-    resolve_candidate_mount,
+)
+from nerve.representation_optimizer.benchmarking.executor_client import (
+    ResidentExecutorClient,
+    ResidentExecutorMountSpec,
+    ResidentExecutorSession,
 )
 from nerve.representation_optimizer.benchmarking.contracts import (
     BENCHMARK_OBSERVATION_SCHEMA,
@@ -26,20 +27,14 @@ from nerve.representation_optimizer.benchmarking.protocols import (
     BenchmarkMountRequest,
 )
 from nerve.representation_optimizer.benchmarking.executor_protocol import (
-    EXECUTOR_COMMAND_SCHEMA,
     nonnegative_integer,
     positive_integer,
-    request_id,
     required_digest,
-    required_object,
     required_text,
-    validate_mount_payload,
-    validated_response,
     validated_windows,
 )
 from nerve.representation_optimizer.benchmarking.executor_transport import (
     ExecutorFactory,
-    ExecutorTransport,
     subprocess_executor,
 )
 from nerve.representation_optimizer.contracts import (
@@ -98,6 +93,14 @@ class ResidentComponentExecutionAdapter:
         self.staged_candidate_loader = (
             staged_candidate_loader or default_staged_candidate_loader
         )
+        self.executor_client = ResidentExecutorClient(
+            package_manifest=self.package_manifest,
+            candidate_workspace=self.candidate_workspace,
+            executor_command=self.executor_command,
+            vulkan_driver_files=self.vulkan_driver_files,
+            executor_factory=self.executor_factory,
+            staged_candidate_loader=self.staged_candidate_loader,
+        )
         self.run_nonce = uuid4().hex
 
     def iter_fixture_artifact(
@@ -140,12 +143,7 @@ class ResidentComponentExecutionAdapter:
         return self.trace_store.publish(relative_path, payload)
 
     def executor_environment(self) -> dict[str, str]:
-        environment = dict(os.environ)
-        environment["VK_DRIVER_FILES"] = os.pathsep.join(
-            str(path) for path in self.vulkan_driver_files
-        )
-        environment.pop("VK_ICD_FILENAMES", None)
-        return environment
+        return self.executor_client.environment()
 
 
 class ResidentComponentExecutionSession:
@@ -154,13 +152,13 @@ class ResidentComponentExecutionSession:
         *,
         adapter: ResidentComponentExecutionAdapter,
         request: BenchmarkMountRequest,
-        transport: ExecutorTransport,
+        executor_session: ResidentExecutorSession,
         mount_payload: Json,
         mount_duration_ns: int,
     ) -> None:
         self.adapter = adapter
         self.request = request
-        self.transport = transport
+        self.executor_session = executor_session
         self.mount_payload = mount_payload
         self.mount_duration_ns = mount_duration_ns
         self.session_nonce = uuid4().hex
@@ -196,79 +194,76 @@ class ResidentComponentExecutionSession:
                 "resident component benchmark phase must be decode or prefill"
             )
         devices = request.matched_conditions.get("devices")
-        if not isinstance(devices, list) or len(devices) != 1:
+        if not isinstance(devices, list) or not devices:
             raise ModelCompileError(
-                "resident component benchmark requires exactly one physical device"
+                "resident component benchmark requires declared physical devices"
             )
-        physical_device_id = required_text(devices[0], "device_id")
+        placement = request.matched_conditions.get("placement")
+        if not isinstance(placement, dict):
+            raise ModelCompileError(
+                "resident component benchmark requires explicit placement"
+            )
+        physical_device_id = required_text(
+            placement,
+            component_id,
+        )
+        declared_device_ids = {
+            required_text(device, "device_id")
+            for device in devices
+            if isinstance(device, dict)
+        }
+        if (
+            len(declared_device_ids) != len(devices)
+            or physical_device_id not in declared_device_ids
+        ):
+            raise ModelCompileError(
+                "resident component placement references an undeclared device"
+            )
         maximum_wait_ns = positive_integer(
             request.matched_conditions.get("controls", {}).get(
                 "maximum_quantum_wait_ns"
             ),
             "matched_conditions.controls.maximum_quantum_wait_ns",
         )
-        candidate_id, candidate_root = resolve_candidate_mount(
-            implementation_id=request.implementation["implementation_id"],
-            workspace_root=adapter.candidate_workspace,
-            package_dir=adapter.package_dir,
-            loader=adapter.staged_candidate_loader,
-        )
-        logical_device_id = (
-            "optimizer:"
-            + sha256(physical_device_id.encode("utf-8")).hexdigest()[:16]
-        )
-        command = {
-            "schema": EXECUTOR_COMMAND_SCHEMA,
-            "command": "mount",
-            "request_id": request_id("mount", request.to_json()),
-            "package_manifest": str(adapter.package_manifest),
-            "candidate_root": (
-                None if candidate_root is None else str(candidate_root)
-            ),
-            "candidate_id": candidate_id,
-            "component_id": component_id,
-            "physical_node_id": physical_node_id,
-            "phase": phase,
-            "activation_batch_width": width,
-            "logical_device_id": logical_device_id,
-            "physical_device_id": physical_device_id,
-            "dynamic_state_capacity_activations": max(width, 1),
-            "maximum_quantum_wait_ns": maximum_wait_ns,
-        }
-        transport = adapter.executor_factory(
-            adapter.executor_command,
-            adapter.executor_environment(),
-        )
-        started = time.monotonic_ns()
-        try:
-            response = validated_response(
-                transport.request(command),
-                expected_request_id=command["request_id"],
-                expected_status="mounted",
-            )
-            payload = required_object(response, "payload")
-            validate_mount_payload(
-                payload,
-                request=request,
+        executor_session = adapter.executor_client.open(
+            ResidentExecutorMountSpec(
+                implementation_id=request.implementation[
+                    "implementation_id"
+                ],
                 component_id=component_id,
                 physical_node_id=physical_node_id,
-                logical_device_id=logical_device_id,
+                phase=phase,
+                activation_batch_width=width,
                 physical_device_id=physical_device_id,
-                candidate_id=candidate_id,
+                dynamic_state_capacity_activations=max(width, 1),
+                maximum_quantum_wait_ns=maximum_wait_ns,
+                request_identity=request.to_json(),
             )
-            return cls(
-                adapter=adapter,
-                request=request,
-                transport=transport,
-                mount_payload=payload,
-                mount_duration_ns=max(
-                    1,
-                    time.monotonic_ns() - started,
-                ),
+        )
+        payload = executor_session.mount_payload
+        if (
+            request.implementation["implementation_id"].startswith(
+                "staged-representation:"
             )
-        except BaseException:
-            transport.abort()
-            raise
+            != (payload["candidate_id"] is not None)
+        ):
+            executor_session.close(
+                request_identity={
+                    "plan_id": request.plan_id,
+                    "block_index": request.block_index,
+                    "reason": "implementation_identity_mismatch",
+                }
+            )
+            raise ModelCompileError(
+                "resident executor implementation role changed at mount"
+            )
+        return cls(
+            adapter=adapter,
+            request=request,
+            executor_session=executor_session,
+            mount_payload=payload,
+            mount_duration_ns=executor_session.host_mount_ns,
+        )
 
     @property
     def mount_event(self) -> Json:
@@ -295,30 +290,16 @@ class ResidentComponentExecutionSession:
         useful_units = int(
             request.workload["useful_work"]["minimum_units"]
         )
-        command = {
-            "schema": EXECUTOR_COMMAND_SCHEMA,
-            "command": "execute",
-            "request_id": request_id("execute", request.to_json()),
-            "useful_units": useful_units,
-            "seed": request.seed,
-        }
-        started = time.monotonic_ns()
-        response = validated_response(
-            self.transport.request(command),
-            expected_request_id=command["request_id"],
-            expected_status="completed",
+        execution = self.executor_session.execute(
+            useful_units=useful_units,
+            seed=request.seed,
+            request_identity=request.to_json(),
         )
-        host_execution_ns = max(1, time.monotonic_ns() - started)
-        report = required_object(response, "payload")
         return self._observation(
             request,
-            report,
-            host_execution_ns=host_execution_ns,
-            transport_bytes=(
-                len(canonical_json_bytes(command))
-                + len(canonical_json_bytes(response))
-                + 2
-            ),
+            execution.report,
+            host_execution_ns=execution.host_execution_ns,
+            transport_bytes=execution.transport_bytes,
         )
 
     def close(self) -> Json:
@@ -327,40 +308,15 @@ class ResidentComponentExecutionSession:
                 "resident component execution session closed twice"
             )
         self.closed = True
-        command = {
-            "schema": EXECUTOR_COMMAND_SCHEMA,
-            "command": "close",
-            "request_id": request_id(
-                "close",
-                {
-                    "plan_id": self.request.plan_id,
-                    "block_index": self.request.block_index,
-                },
-            ),
-        }
-        started = time.monotonic_ns()
-        try:
-            response = validated_response(
-                self.transport.request(command),
-                expected_request_id=command["request_id"],
-                expected_status="released",
-            )
-            payload = required_object(response, "payload")
-            if (
-                payload.get("released") is not True
-                or payload.get("mounted_state_digest")
-                != self.mount_payload["mounted_state_digest"]
-            ):
-                raise ModelCompileError(
-                    "resident executor did not prove release of its mounted state"
-                )
-            self.transport.close()
-        except BaseException:
-            self.transport.abort()
-            raise
+        release = self.executor_session.close(
+            request_identity={
+                "plan_id": self.request.plan_id,
+                "block_index": self.request.block_index,
+            }
+        )
         return self._residency_event(
             action="unmount",
-            duration_ns=max(1, time.monotonic_ns() - started),
+            duration_ns=release.host_release_ns,
             before=self.mount_payload["mounted_state_digest"],
             after=self.request.matched_conditions[
                 "idle_device_state_digest"

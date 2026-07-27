@@ -577,7 +577,23 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
     )
     assert plan.static_estimate.steady_state_work["dispatch_count_change"] == 0
     assert len(plan.benchmark_workloads) == 2
-    assert len(plan.validation_requirements.to_json()["checks"]) == 7
+    validation_checks = plan.validation_requirements.to_json()["checks"]
+    assert len(validation_checks) == 9
+    component_checks = [
+        check
+        for check in validation_checks
+        if check["regime"]["execution_scope"] == "component"
+    ]
+    assert len(component_checks) == 4
+    assert {check["controls"]["phase"] for check in component_checks} == {
+        "decode",
+        "prefill",
+    }
+    assert all(
+        check["controls"]["component_id"] == "arbitrary_component"
+        and check["controls"]["physical_node_id"] == "fused_norm_rope"
+        for check in component_checks
+    )
     assert plan.mount_requirements.to_json()["component_replacements"] == [
         {
             "source_component_id": "arbitrary_component",
