@@ -59,44 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 14. Automate the analyze–synthesize–benchmark–verify loop
-
-- Walk optimization scopes deterministically.
-- Invoke compatible analyzers and representation providers.
-- Deduplicate equivalent candidates.
-- Apply declared construction, memory, execution-time, and experimental budgets
-  without weakening correctness or benchmark quality.
-- Run one GPU workload at a time and verify residency before and after it.
-- Isolate failures and continue with other valid scopes and candidates.
-- Emit structured progress, evidence, counterexamples, benchmark results,
-  validation results, and promotion decisions.
-- Make matched benchmarking convergence-driven rather than fixed-sample:
-  - warm each resident implementation until a declared stability criterion is
-    met within an explicit bound;
-  - counterbalance reference/candidate execution in repeated temporal blocks;
-  - extend paired sampling until the result is materially faster, decisively
-    not faster, or a declared evidence budget is exhausted; and
-  - retain an honest inconclusive result only after that bounded adaptive
-    process, not merely because an arbitrary initial sample count was noisy.
-- Produce a final report explaining:
-  - which scopes were analyzed;
-  - which structures were found;
-  - which candidates were generated;
-  - why candidates were rejected;
-  - which candidates were faster;
-  - which faster candidates failed validation; and
-  - which candidates were promoted.
-- Keep the report and command response proportional to their summaries:
-  canonical per-scope evidence stays in referenced evidence directories; the
-  final report indexes and aggregates it instead of duplicating hundreds of
-  megabytes of algebraic claims, and normal JSON command output identifies the
-  persisted report without replaying it in full.
-
-Completion requires a full unattended run that can safely finish without
-leaving devices, staging artifacts, or package publication in an ambiguous
-state, and whose benchmark protocol can reach a decisive result under ordinary
-hardware variance when the measured effect is decisive.
-
 ### 15. Establish the first generic representation providers
 
 - Use the analysis evidence from real components to choose the first providers;
