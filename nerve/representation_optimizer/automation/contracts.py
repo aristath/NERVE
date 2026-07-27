@@ -57,7 +57,7 @@ class OptimizationBudget:
 class CandidateResourceCost:
     permanent_bytes: int
     transient_bytes: int
-    construction_nanoseconds: int
+    construction_nanoseconds: int | None
     execution_nanoseconds: int | None
     experiment_invocations: int
 
@@ -65,7 +65,6 @@ class CandidateResourceCost:
         for field in (
             "permanent_bytes",
             "transient_bytes",
-            "construction_nanoseconds",
             "experiment_invocations",
         ):
             value = getattr(self, field)
@@ -77,6 +76,15 @@ class CandidateResourceCost:
                 raise ModelCompileError(
                     f"candidate resource cost {field} must be non-negative"
                 )
+        if self.construction_nanoseconds is not None and (
+            not isinstance(self.construction_nanoseconds, int)
+            or isinstance(self.construction_nanoseconds, bool)
+            or self.construction_nanoseconds < 0
+        ):
+            raise ModelCompileError(
+                "candidate resource cost construction_nanoseconds must be "
+                "non-negative or null"
+            )
         if self.execution_nanoseconds is not None and (
             not isinstance(self.execution_nanoseconds, int)
             or isinstance(self.execution_nanoseconds, bool)

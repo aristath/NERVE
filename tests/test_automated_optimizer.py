@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +22,7 @@ from nerve.representation_optimizer.contracts import (
     contract_digest,
     representation_candidate_id,
 )
-from nerve.representation_optimizer.providers import ProviderRegistry
+from nerve.representation_optimizer.providers import ProviderRegistry, StaticEstimate
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
@@ -87,6 +88,32 @@ class DistinctFixtureProvider(FixtureProvider):
         )
         candidate["candidate_id"] = representation_candidate_id(candidate)
         return (candidate,)
+
+
+class UncalibratedConstructionProvider(FixtureProvider):
+    def estimate_static_cost(
+        self,
+        context,
+        candidate,
+        representation_ir,
+        target_lowering,
+    ):
+        estimate = super().estimate_static_cost(
+            context,
+            candidate,
+            representation_ir,
+            target_lowering,
+        )
+        return StaticEstimate(
+            feasible=estimate.feasible,
+            permanent_bytes=estimate.permanent_bytes,
+            transient_bytes=estimate.transient_bytes,
+            construction_nanoseconds=None,
+            steady_state_work=estimate.steady_state_work,
+            reasons=(
+                "construction duration has not been calibrated for this target",
+            ),
+        )
 
 
 @dataclass
@@ -250,6 +277,40 @@ def test_budget_rejects_whole_candidate_without_running_partial_experiment(
     assert candidate["construction_status"] is None
     assert lease.acquisitions == 0
     assert not (tmp_path / "unused-output").exists()
+
+
+def test_bounded_construction_budget_rejects_uncalibrated_estimate(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, lease = _target()
+
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        output_package_dir=tmp_path / "unused-output",
+        run_root=tmp_path / "run",
+        providers=_providers(
+            UncalibratedConstructionProvider(
+                "fixture.uncalibrated-construction",
+                _descriptor_id(),
+            )
+        ),
+        targets=(target,),
+        budget=_budget(),
+    )
+
+    candidate = outcome.report["candidates"][0]
+    budget = json.loads(
+        (tmp_path / "run" / candidate["budget_decision_ref"]).read_text()
+    )
+    assert candidate["status"] == "rejected"
+    assert budget["cost"]["construction_nanoseconds"] is None
+    assert any(
+        "no calibrated construction-cost estimate" in reason
+        for reason in candidate["rejection_reasons"]
+    )
+    assert candidate["construction_status"] is None
+    assert lease.acquisitions == 0
 
 
 def test_candidate_failure_is_audited_and_releases_every_lease(

@@ -54,7 +54,8 @@ class BudgetLedger:
             # not a cumulative allocation across the run.
             transient_bytes=max(before.transient_bytes, cost.transient_bytes),
             construction_nanoseconds=(
-                before.construction_nanoseconds + cost.construction_nanoseconds
+                before.construction_nanoseconds
+                + (cost.construction_nanoseconds or 0)
             ),
             execution_nanoseconds=(
                 before.execution_nanoseconds
@@ -69,10 +70,6 @@ class BudgetLedger:
             ("maximum_permanent_bytes", proposed.permanent_bytes),
             ("maximum_transient_bytes", proposed.transient_bytes),
             (
-                "maximum_construction_nanoseconds",
-                proposed.construction_nanoseconds,
-            ),
-            (
                 "maximum_experiment_invocations",
                 proposed.experiment_invocations,
             ),
@@ -83,6 +80,18 @@ class BudgetLedger:
                 reasons.append(
                     f"whole candidate exceeds {field}: "
                     f"{proposed_value} > {maximum}"
+                )
+        construction_limit = self._budget.maximum_construction_nanoseconds
+        if construction_limit is not None:
+            if cost.construction_nanoseconds is None:
+                reasons.append(
+                    "whole candidate has no calibrated construction-cost "
+                    "estimate required by maximum_construction_nanoseconds"
+                )
+            elif proposed.construction_nanoseconds > construction_limit:
+                reasons.append(
+                    "whole candidate exceeds maximum_construction_nanoseconds: "
+                    f"{proposed.construction_nanoseconds} > {construction_limit}"
                 )
         execution_limit = self._budget.maximum_execution_nanoseconds
         if execution_limit is not None:

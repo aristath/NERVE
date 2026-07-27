@@ -79,7 +79,7 @@ class StaticEstimate:
     feasible: bool
     permanent_bytes: int
     transient_bytes: int
-    construction_nanoseconds: int
+    construction_nanoseconds: int | None
     steady_state_work: Json
     reasons: tuple[str, ...]
 
@@ -87,12 +87,20 @@ class StaticEstimate:
         for name, value in (
             ("permanent_bytes", self.permanent_bytes),
             ("transient_bytes", self.transient_bytes),
-            ("construction_nanoseconds", self.construction_nanoseconds),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ContractValidationError(
                     f"provider static estimate {name} must be non-negative"
                 )
+        if self.construction_nanoseconds is not None and (
+            not isinstance(self.construction_nanoseconds, int)
+            or isinstance(self.construction_nanoseconds, bool)
+            or self.construction_nanoseconds < 0
+        ):
+            raise ContractValidationError(
+                "provider static estimate construction_nanoseconds must be "
+                "non-negative or null"
+            )
         _json_object(
             self.steady_state_work,
             "provider static estimate steady_state_work",
