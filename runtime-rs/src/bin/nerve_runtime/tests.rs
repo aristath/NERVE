@@ -11,16 +11,16 @@ mod tests {
     use tokenizers::{AddedToken, Tokenizer};
 
     use nerve_runtime::{
+        RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
         VulkanComputeDeviceInfo, VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
-        VulkanResidentTokenTextCodecError,
+        VulkanResidentTokenTextCodecError, chat_transcript_codec,
+        model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
     };
 
     use super::{
-        Args, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
-        RuntimeSustainedDecodeReport,
+        Args, RuntimeSustainedDecodeReport,
         RuntimeSustainedDecodeSample,
-        assistant_content_token_ids, chat_transcript_codec,
-        model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
+        assistant_content_token_ids,
         parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
         parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,

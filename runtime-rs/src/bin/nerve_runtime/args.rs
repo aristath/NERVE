@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-use chrono::{DateTime, FixedOffset, Local};
 use nerve_runtime::{
     CircuitPort, ComponentEdgePlacement, ComponentPlacement, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID,
     RUNTIME_TOPOLOGY_SCHEMA, RuntimeAvailableDevice, RuntimeBoundDevice, RuntimeEdgeRouteTarget,
@@ -31,12 +29,12 @@ use nerve_runtime::{
     VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
     VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats,
+    RuntimeChatSession, RuntimePreparedChatTurn,
+    chat_stop_token_ids_from_manifest, chat_transcript_codec,
     discover_cpu_hardware_profile, reset_vulkan_resident_execution_counters,
     runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters,
 };
-use minijinja::{Environment, Error as TemplateError, ErrorKind as TemplateErrorKind};
-use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Args {

@@ -1,3 +1,5 @@
+#[cfg(all(feature = "vulkan", feature = "tokenizers"))]
+pub mod chat;
 #[cfg(feature = "vulkan")]
 pub mod editor;
 pub mod execution_schedule;
@@ -23,6 +25,8 @@ pub mod vulkan_distributed;
 #[cfg(feature = "vulkan")]
 pub mod vulkan_stream_circuit;
 
+#[cfg(all(feature = "vulkan", feature = "tokenizers"))]
+pub use chat::*;
 #[cfg(feature = "vulkan")]
 pub use editor::*;
 pub use execution_schedule::*;
