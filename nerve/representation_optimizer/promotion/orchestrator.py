@@ -321,6 +321,9 @@ def prepare_candidate_promotion(
         "artifact_bundle": {
             "root_ref": root_ref,
             "candidate_integrity_ref": f"{root_ref}/candidate/integrity.json",
+            "mount_plan_ref": (
+                f"{root_ref}/candidate/contracts/mount_plan.json"
+            ),
             "candidate_integrity_digest": artifact_integrity["digest"],
             "artifact_count": artifact_integrity["file_count"],
         },

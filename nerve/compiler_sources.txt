@@ -42,6 +42,7 @@ nerve/representation_optimizer/benchmarking/storage.py
 nerve/representation_optimizer/contracts.py
 nerve/representation_optimizer/descriptor_registry.py
 nerve/representation_optimizer/lifecycle.py
+nerve/representation_optimizer/mounting.py
 nerve/representation_optimizer/promotion/__init__.py
 nerve/representation_optimizer/promotion/contracts.py
 nerve/representation_optimizer/promotion/package_validation.py

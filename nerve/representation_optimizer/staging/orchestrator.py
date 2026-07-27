@@ -312,6 +312,7 @@ def _construct_candidate(
             ("representation_graph.json", plan.representation_ir.to_json()),
             ("target_lowering.json", plan.target_lowering),
             ("build_plan.json", build_plan.to_json()),
+            ("mount_plan.json", plan.mount_requirements.to_json()),
             ("relowering_request.json", relowering_request),
         ):
             context.write_internal_contract(name, document)

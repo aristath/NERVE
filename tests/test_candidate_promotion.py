@@ -36,9 +36,11 @@ from nerve.representation_optimizer.providers import (
 )
 from nerve.representation_optimizer.promotion.contracts import (
     ImplementationRegistry,
+    PromotionContractError,
     append_implementation_registry_entries,
     create_runtime_implementation_predicate,
     implementation_id,
+    validate_implementation_registry_entry,
 )
 from nerve.representation_optimizer.promotion.orchestrator import (
     PreparedPromotion,
@@ -519,8 +521,13 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
     predicate = prepared.runtime_predicate.to_json()
 
     assert predicate["hardware"] == {
-        "capability_classes": [
-            qualified.profile["capability_class"]
+        "capability_class_counts": [
+            {
+                "capability_class": qualified.profile[
+                    "capability_class"
+                ],
+                "count": 1,
+            }
         ],
         "device_kinds": ["gpu"],
         "apis": ["vulkan"],
@@ -545,6 +552,22 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
         "maximum_device_count": 1,
         "required_interconnects": [],
     }
+
+
+def test_registry_rejects_mount_contract_outside_implementation_bundle(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare(_qualified_candidate(tmp_path))
+    entry = deepcopy(prepared.registry_entry)
+    entry["artifact_bundle"]["mount_plan_ref"] = (
+        "optimization/unrelated/mount_plan.json"
+    )
+
+    with pytest.raises(
+        PromotionContractError,
+        match="must stay inside",
+    ):
+        validate_implementation_registry_entry(entry)
 
 
 def test_promotion_rejects_hardware_profile_not_used_by_benchmark(
@@ -704,9 +727,13 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
         "same semantic scope, decode-specialized representation",
     )
     second_predicate = create_runtime_implementation_predicate(
-        capability_classes=first["runtime_predicate"]["hardware"][
-            "capability_classes"
-        ],
+        capability_classes=(
+            count["capability_class"]
+            for count in first["runtime_predicate"]["hardware"][
+                "capability_class_counts"
+            ]
+            for _ in range(count["count"])
+        ),
         device_kinds=first["runtime_predicate"]["hardware"][
             "device_kinds"
         ],
@@ -742,6 +769,9 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
     second["artifact_bundle"]["root_ref"] = second_root
     second["artifact_bundle"]["candidate_integrity_ref"] = (
         f"{second_root}/candidate/integrity.json"
+    )
+    second["artifact_bundle"]["mount_plan_ref"] = (
+        f"{second_root}/candidate/contracts/mount_plan.json"
     )
     for name, value in tuple(second["evidence"].items()):
         if name == "analysis_run_refs":

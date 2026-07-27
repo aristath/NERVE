@@ -491,7 +491,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         "artifact_integrity": {
             "schema": "nerve.optimizer.staged_candidate_integrity.v1",
             "digest": staged_artifact_digest(b"integrity manifest"),
-            "file_count": 6,
+            "file_count": 7,
         },
         "comparison": {
             "exact_implementation_id": "exact_reference",
@@ -641,7 +641,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             "integrity": {
                 "schema": "nerve.optimizer.staged_candidate_integrity.v1",
                 "digest": staged_artifact_digest(b"integrity manifest"),
-                "file_count": 6,
+                "file_count": 7,
             },
             "resource_measurements": {
                 "construction_time_ns": 100,
@@ -740,7 +740,7 @@ def test_algebraic_evidence_identity_rejects_claim_drift() -> None:
         (
             lambda document: document["integrity"].__setitem__(
                 "file_count",
-                7,
+                8,
             ),
             "file_count",
         ),

@@ -1,0 +1,11 @@
+{
+  "schema": "nerve.optimizer.implementation_registry.v1",
+  "registry_id": "implementation_registry_4a326f2b659efe3274e08a50974a9b3c",
+  "package_id": "model_d119caf1_vulkan_resident",
+  "exact_baseline": {
+    "artifact_ref": "lowered/execution_graph.circuits.json",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:14da5baf80fde6adb806ffea252169ce40e48c61e81dfc4ae117db7775c47465",
+    "mutable": false
+  },
+  "implementations": []
+}

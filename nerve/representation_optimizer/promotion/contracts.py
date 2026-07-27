@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -13,7 +14,7 @@ from nerve.representation_optimizer.contracts import (
 
 
 RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA = (
-    "nerve.optimizer.runtime_implementation_predicate.v1"
+    "nerve.optimizer.runtime_implementation_predicate.v2"
 )
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
 IMPLEMENTATION_REGISTRY_SCHEMA = (
@@ -155,11 +156,20 @@ def create_runtime_implementation_predicate(
     maximum_device_count: int,
     required_interconnects: Iterable[str],
 ) -> RuntimeImplementationPredicate:
+    capability_class_counts = Counter(capability_classes)
     document = {
         "schema": RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
         "predicate_id": "",
         "hardware": {
-            "capability_classes": sorted(set(capability_classes)),
+            "capability_class_counts": [
+                {
+                    "capability_class": capability_class,
+                    "count": count,
+                }
+                for capability_class, count in sorted(
+                    capability_class_counts.items()
+                )
+            ],
             "device_kinds": sorted(set(device_kinds)),
             "apis": sorted(set(apis)),
             "required_processes": sorted(set(required_processes)),
@@ -252,7 +262,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
     _fields(
         hardware,
         {
-            "capability_classes",
+            "capability_class_counts",
             "device_kinds",
             "apis",
             "required_processes",
@@ -260,16 +270,33 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         },
         "hardware",
     )
-    capability_classes = _sorted_unique_strings(
-        hardware["capability_classes"],
-        "hardware.capability_classes",
-        nonempty=True,
+    capability_counts = _list(
+        hardware["capability_class_counts"],
+        "hardware.capability_class_counts",
     )
-    for index, capability_class in enumerate(capability_classes):
-        _stable_id(
-            capability_class,
-            "hardware_capability",
-            f"hardware.capability_classes[{index}]",
+    capability_classes = []
+    capability_device_count = 0
+    for index, raw_count in enumerate(capability_counts):
+        path = f"hardware.capability_class_counts[{index}]"
+        count = _object(raw_count, path)
+        _fields(count, {"capability_class", "count"}, path)
+        capability_classes.append(
+            _stable_id(
+                count["capability_class"],
+                "hardware_capability",
+                f"{path}.capability_class",
+            )
+        )
+        capability_device_count += _positive_integer(
+            count["count"],
+            f"{path}.count",
+        )
+    if (
+        not capability_classes
+        or capability_classes != sorted(set(capability_classes))
+    ):
+        raise PromotionContractError(
+            "hardware capability-class counts must be non-empty, sorted, and unique"
         )
     _sorted_unique_strings(
         hardware["device_kinds"],
@@ -348,6 +375,14 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
     if minimum_devices > maximum_devices:
         raise PromotionContractError(
             "runtime predicate device-count range is inverted"
+        )
+    if (
+        minimum_devices != capability_device_count
+        or maximum_devices != capability_device_count
+    ):
+        raise PromotionContractError(
+            "runtime predicate device count must exactly match its measured "
+            "capability-class multiplicities"
         )
     _sorted_unique_strings(
         placement["required_interconnects"],
@@ -748,6 +783,7 @@ def validate_implementation_registry_entry(document: Json) -> None:
         {
             "root_ref",
             "candidate_integrity_ref",
+            "mount_plan_ref",
             "candidate_integrity_digest",
             "artifact_count",
         },
@@ -761,9 +797,16 @@ def validate_implementation_registry_entry(document: Json) -> None:
         bundle["candidate_integrity_ref"],
         "artifact_bundle.candidate_integrity_ref",
     )
-    if not integrity_ref.startswith(f"{root_ref}/"):
+    mount_plan_ref = _safe_package_path(
+        bundle["mount_plan_ref"],
+        "artifact_bundle.mount_plan_ref",
+    )
+    if (
+        not integrity_ref.startswith(f"{root_ref}/")
+        or not mount_plan_ref.startswith(f"{root_ref}/")
+    ):
         raise PromotionContractError(
-            "candidate integrity reference must stay inside its artifact bundle"
+            "candidate artifact references must stay inside their artifact bundle"
         )
     _artifact_digest(
         bundle["candidate_integrity_digest"],

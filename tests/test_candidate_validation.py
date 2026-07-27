@@ -19,6 +19,7 @@ from nerve.representation_optimizer.contracts import (
     representation_candidate_id,
 )
 from nerve.representation_optimizer.lifecycle import CandidateState
+from nerve.representation_optimizer.mounting import RuntimeMountPlan
 from nerve.representation_optimizer.representation_ir import (
     RepresentationGraphDocument,
     representation_graph_id,
@@ -475,10 +476,18 @@ def _approximate_plan(plan):
         },
         counterexamples=source_requirements["counterexamples"],
     )
+    mount_document = plan.mount_requirements.to_json()
+    mount_document["candidate_id"] = document["candidate_id"]
+    mount_requirements = RuntimeMountPlan.from_json(
+        mount_document,
+        candidate_id=document["candidate_id"],
+        build_plan=plan.construction_requirements,
+    )
     return replace(
         plan,
         candidate=candidate,
         representation_ir=graph,
+        mount_requirements=mount_requirements,
         proof_or_error_contract=document["behavioral_contract"],
         validation_requirements=requirements,
     )

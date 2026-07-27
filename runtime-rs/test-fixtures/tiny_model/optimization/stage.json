@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.optimizer.stage.v2",
+  "schema": "nerve.optimizer.stage.v3",
   "stage": "behavioral_representation_optimization",
   "compiler_position": {
     "after": "exact_semantic_lowering",
@@ -24,6 +24,11 @@
     "exact_baseline_digest": "nerve.optimizer.canonical_json_sha256.v1:14da5baf80fde6adb806ffea252169ce40e48c61e81dfc4ae117db7775c47465",
     "candidates": []
   },
+  "implementation_registry": {
+    "artifact_ref": "optimization/implementations.json",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:c89888896e43a293f801c14f3e616392765cdac609fa80bf41cb559489955a27",
+    "implementation_count": 0
+  },
   "contract_schemas": [
     "nerve.optimizer.optimization_scope.v1",
     "nerve.optimizer.optimization_scope_catalog.v1",
@@ -32,10 +37,31 @@
     "nerve.optimizer.hardware_process_profile.v1",
     "nerve.optimizer.representation_descriptor.v1",
     "nerve.optimizer.representation_candidate.v1",
+    "nerve.optimizer.representation_graph.v1",
+    "nerve.optimizer.candidate_build_plan.v1",
     "nerve.optimizer.candidate_construction.v1",
+    "nerve.optimizer.source_package_seal.v1",
+    "nerve.optimizer.staged_candidate_integrity.v1",
+    "nerve.optimizer.benchmark_workload.v1",
+    "nerve.optimizer.benchmark_plan.v1",
+    "nerve.optimizer.benchmark_observation.v1",
+    "nerve.optimizer.benchmark_residency_event.v1",
+    "nerve.optimizer.benchmark_run.v1",
     "nerve.optimizer.benchmark_record.v1",
+    "nerve.optimizer.benchmark_evidence_integrity.v1",
+    "nerve.optimizer.behavioral_error_contract.v1",
+    "nerve.optimizer.validation_requirements.v1",
+    "nerve.optimizer.validation_plan.v1",
+    "nerve.optimizer.proof_result.v1",
+    "nerve.optimizer.validation_observation.v1",
+    "nerve.optimizer.validation_residency_event.v1",
+    "nerve.optimizer.validation_run.v1",
+    "nerve.optimizer.prebenchmark_record.v1",
+    "nerve.optimizer.validation_evidence_integrity.v1",
     "nerve.optimizer.validation_record.v1",
-    "nerve.optimizer.promotion_decision.v1",
+    "nerve.optimizer.runtime_implementation_predicate.v2",
+    "nerve.optimizer.promotion_decision.v2",
+    "nerve.optimizer.implementation_registry.v1",
     "nerve.optimizer.relowering_request.v1"
   ]
 }

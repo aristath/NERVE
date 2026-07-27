@@ -1471,10 +1471,10 @@ def _validate_candidate_construction(document: Json) -> None:
             raise ContractValidationError("construction integrity schema is unsupported")
         _require_staged_artifact_digest(integrity["digest"], "integrity.digest")
         _require_positive_integer(integrity["file_count"], "integrity.file_count")
-        if integrity["file_count"] != len(artifacts) + 5:
+        if integrity["file_count"] != len(artifacts) + 6:
             raise ContractValidationError(
                 "construction integrity file_count does not cover its "
-                "five contracts and declared artifacts"
+                "six contracts and declared artifacts"
             )
     elif artifacts or integrity is not None:
         raise ContractValidationError(

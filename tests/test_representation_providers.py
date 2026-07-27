@@ -286,13 +286,15 @@ class FixtureProvider:
                 },
                 {
                     "path": "state/compact_layout.json",
-                    "kind": "state_layout",
+                    "kind": "runtime_component_overlay",
                     "lifetime": "mount",
                     "producer_phase": "semantic_construction",
                     "resident_bytes": 32,
                     "validator_id": "json_contract",
                     "validation_contract": {
-                        "schema": "fixture.state_layout.v1",
+                        "schema": (
+                            "nerve.optimizer.vulkan_component_overlay.v1"
+                        ),
                         "object_required": True,
                     },
                 },
@@ -319,8 +321,18 @@ class FixtureProvider:
     def mount_requirements(self, context, candidate):
         self._called("mount_requirements")
         return {
-            "schema": "nerve.optimizer.fixture_mount_requirements.v1",
-            "resident_bytes": 128,
+            "schema": "nerve.optimizer.runtime_mount_plan.v1",
+            "candidate_id": candidate["candidate_id"],
+            "adapter_id": (
+                "vulkan_stream_circuit_component_overlay.v1"
+            ),
+            "component_replacements": [
+                {
+                    "source_component_id": "component",
+                    "overlay_ref": "state/compact_layout.json",
+                }
+            ],
+            "tensor_index_refs": [],
         }
 
     def proof_or_error_contract(self, context, candidate):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 from pathlib import Path
 
@@ -55,6 +56,21 @@ def validate_published_implementation_registry(
             candidate_root,
             expected_candidate_id=entry["candidate_id"],
         )
+        mount_plan_path = _package_path(
+            package,
+            bundle["mount_plan_ref"],
+            "runtime mount plan",
+        )
+        expected_mount_plan_path = (
+            candidate_root / "contracts" / "mount_plan.json"
+        ).resolve()
+        if (
+            mount_plan_path != expected_mount_plan_path
+            or not mount_plan_path.is_file()
+        ):
+            raise ModelCompileError(
+                "published runtime mount plan does not match the staged candidate"
+            )
         if (
             integrity_evidence(integrity)["digest"]
             != bundle["candidate_integrity_digest"]
@@ -242,13 +258,19 @@ def validate_published_implementation_registry(
                 profile["profile_digest"]
                 for profile in hardware_profile_provenance
             ]
-            and sorted(
+            and [
                 {
-                    profile["capability_class"]
-                    for profile in loaded_profiles
+                    "capability_class": capability_class,
+                    "count": count,
                 }
-            )
-            == hardware_predicate["capability_classes"]
+                for capability_class, count in sorted(
+                    Counter(
+                        profile["capability_class"]
+                        for profile in loaded_profiles
+                    ).items()
+                )
+            ]
+            == hardware_predicate["capability_class_counts"]
             and sorted(
                 {
                     profile["hardware_identity"]["device_kind"]

@@ -18,6 +18,7 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.benchmarking.contracts import (
     BenchmarkWorkload,
 )
+from nerve.representation_optimizer.mounting import RuntimeMountPlan
 from nerve.representation_optimizer.representation_ir.contracts import (
     RepresentationGraphDocument,
 )
@@ -274,7 +275,7 @@ class ProviderCandidatePlan:
     target_lowering: Json
     static_estimate: StaticEstimate
     construction_requirements: CandidateBuildPlan
-    mount_requirements: Json
+    mount_requirements: RuntimeMountPlan
     proof_or_error_contract: Json
     benchmark_workloads: tuple[BenchmarkWorkload, ...]
     validation_requirements: ValidationRequirements

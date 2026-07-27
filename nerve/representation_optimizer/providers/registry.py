@@ -18,6 +18,7 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.descriptor_registry import (
     RepresentationDescriptorRegistry,
 )
+from nerve.representation_optimizer.mounting import RuntimeMountPlan
 from nerve.representation_optimizer.providers.protocol import (
     RepresentationProvider,
 )
@@ -281,9 +282,10 @@ def _candidate_plan(
         raise ContractValidationError(
             "candidate build-plan outputs must match candidate artifact declarations"
         )
-    mount = _provider_document(
+    mount = RuntimeMountPlan.from_json(
         provider.mount_requirements(context, candidate.to_json()),
-        "mount requirements",
+        candidate_id=str(document["candidate_id"]),
+        build_plan=construction,
     )
     proof = _provider_document(
         provider.proof_or_error_contract(context, candidate.to_json()),

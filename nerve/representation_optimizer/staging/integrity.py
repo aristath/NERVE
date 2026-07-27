@@ -14,6 +14,10 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.representation_ir import (
     RepresentationGraphDocument,
 )
+from nerve.representation_optimizer.mounting import (
+    RuntimeMountPlan,
+    validate_runtime_mount_artifacts,
+)
 from nerve.representation_optimizer.staging.contracts import (
     CandidateBuildPlan,
     staged_artifact_digest,
@@ -146,6 +150,16 @@ def validate_staged_candidate(
     build_plan = CandidateBuildPlan.from_json(
         _read_object(root / "contracts" / "build_plan.json")
     )
+    mount_plan = RuntimeMountPlan.from_json(
+        _read_object(root / "contracts" / "mount_plan.json"),
+        candidate_id=str(candidate["candidate_id"]),
+        build_plan=build_plan,
+    )
+    if not mount_plan.to_json()["component_replacements"]:
+        raise ModelCompileError(
+            "staged candidate runtime mount plan has no executable replacement"
+        )
+    validate_runtime_mount_artifacts(root, mount_plan)
     if expected_build_plan is not None and build_plan != expected_build_plan:
         raise ModelCompileError("staged candidate build plan changed")
     declared_paths = set(build_plan.output_paths)
