@@ -39,16 +39,7 @@ impl VulkanResidentModelPackageDeviceSlice {
         let device_id = device_id.as_ref();
         let capacity = dynamic_state_capacity_activations
             .unwrap_or(runtime_model.package.max_context_activations);
-        let tensor_index_path = resolve_resident_model_package_path(
-            manifest_dir,
-            &runtime_model.package.tensor_index_path,
-        );
-        let tensor_index =
-            TensorIndex::from_package_json_file(&tensor_index_path).map_err(|error| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to load tensor index {tensor_index_path:?}: {error}"
-                ))
-            })?;
+        let tensor_index = runtime_model.load_runtime_tensor_index(manifest_dir)?;
         let plan = VulkanResidentModelPackageDeviceSlicePlan::prepare(
             device,
             manifest_dir,
