@@ -14,6 +14,9 @@ from nerve.compilation import ModelCompileCancelled, ModelCompileError
 from nerve.model_compiler import compile_model, discover_source_model
 from nerve.compiler_target import discover_compiler_target
 from nerve.hardware_calibration.orchestrator import calibrate_hardware
+from nerve.representation_optimizer.automation.command import (
+    optimize_compiled_package,
+)
 
 
 RUNTIME_PACKAGE_MANIFEST = "vulkan_resident_package.json"
@@ -38,6 +41,15 @@ def main() -> None:
         type=Path,
         metavar="PACKAGE_DIR_OR_MANIFEST",
         help="run a compiled model package with the Rust/Vulkan runtime engine",
+    )
+    parser.add_argument(
+        "--optimize-model",
+        type=Path,
+        metavar="PACKAGE_DIR_OR_MANIFEST",
+        help=(
+            "analyze, synthesize, benchmark, validate, and publish faster "
+            "representations for a compiled model package"
+        ),
     )
     parser.add_argument(
         "--calibrate-hardware",
@@ -110,6 +122,37 @@ def main() -> None:
         help="directory for the complete compiled model artifact",
     )
     parser.add_argument(
+        "--optimized-model-dir",
+        type=Path,
+        help="fresh destination for the self-contained optimized model package",
+    )
+    parser.add_argument(
+        "--optimizer-run-dir",
+        type=Path,
+        help="fresh directory for optimizer evidence and working artifacts",
+    )
+    parser.add_argument(
+        "--optimizer-executor-bin",
+        type=Path,
+        help="path to a built nerve-optimizer-executor binary",
+    )
+    parser.add_argument(
+        "--validation-executor-bin",
+        type=Path,
+        help="path to a built nerve-validation-executor binary",
+    )
+    parser.add_argument(
+        "--vulkan-driver-manifest",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="RADEON_ICD_JSON",
+        help=(
+            "explicit AMD Vulkan ICD manifest for optimization; may be "
+            "repeated"
+        ),
+    )
+    parser.add_argument(
         "--device",
         default=None,
         help="default logical device for the runtime graph",
@@ -140,7 +183,10 @@ def main() -> None:
         action="append",
         default=[],
         metavar="vulkan-uuid:UUID",
-        help="restrict runtime discovery and execution to one physical Vulkan device; may be repeated",
+        help=(
+            "restrict runtime or optimizer discovery and execution to one "
+            "physical Vulkan device; may be repeated"
+        ),
     )
     parser.add_argument(
         "--duplicate-after",
@@ -228,11 +274,13 @@ def main() -> None:
         args.compile_model is not None,
         args.discover_model is not None,
         args.run is not None,
+        args.optimize_model is not None,
         args.calibrate_hardware is not None,
     ]
     if sum(selected_actions) > 1:
         parser.error(
-            "--compile-model, --discover-model, --run, and --calibrate-hardware are mutually exclusive"
+            "--compile-model, --discover-model, --run, --optimize-model, and "
+            "--calibrate-hardware are mutually exclusive"
         )
     if not any(selected_actions):
         if len(sys.argv) == 1:
@@ -287,6 +335,52 @@ def main() -> None:
         else:
             print(f"calibrated {report.profile_count} hardware profiles")
             print(f"  output: {report.destination}")
+        return
+    if args.optimize_model is not None:
+        cancel_requested = False
+
+        def request_optimizer_cancel(_signum: int, _frame: object) -> None:
+            nonlocal cancel_requested
+            cancel_requested = True
+
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, request_optimizer_cancel)
+        signal.signal(signal.SIGTERM, request_optimizer_cancel)
+        try:
+            outcome = optimize_compiled_package(
+                args.optimize_model,
+                output_package_dir=args.optimized_model_dir,
+                run_root=args.optimizer_run_dir,
+                runtime_bin=args.runtime_bin,
+                component_executor_bin=args.optimizer_executor_bin,
+                validation_executor_bin=args.validation_executor_bin,
+                selected_device_ids=args.allow_physical_device,
+                vulkan_driver_files=args.vulkan_driver_manifest,
+                cancel_requested=lambda: cancel_requested,
+            )
+        except ModelCompileCancelled:
+            raise SystemExit(130) from None
+        except ModelCompileError as error:
+            raise SystemExit(str(error)) from None
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        if args.json:
+            print(json.dumps(outcome.to_json(), indent=2))
+        else:
+            report = outcome.optimization.report
+            print(f"optimizer status: {report['status']}")
+            print(f"  report:  {outcome.optimization.report_path}")
+            print(
+                f"  package: {outcome.optimization.output_package_dir}"
+            )
+            print(
+                "  targets: "
+                + ", ".join(
+                    target.target_id for target in outcome.targets.targets
+                )
+            )
         return
     if args.discover_model is not None:
         reporter = JsonLineCompileReporter() if args.compiler_events_jsonl else None
@@ -429,7 +523,6 @@ def validate_action_options(
         ("--place-node", bool(args.place_node)),
         ("--shard-component", bool(args.shard_component)),
         ("--bind-device", bool(args.bind_device)),
-        ("--allow-physical-device", bool(args.allow_physical_device)),
         ("--duplicate-after", bool(args.duplicate_after)),
         ("--chain", args.chain is not None),
         ("--context-size", args.context_size is not None),
@@ -452,18 +545,43 @@ def validate_action_options(
             if provided:
                 parser.error(f"{option} is only supported with --run")
     if (
+        args.allow_physical_device
+        and args.run is None
+        and args.optimize_model is None
+    ):
+        parser.error(
+            "--allow-physical-device requires --run or --optimize-model"
+        )
+    if (
         args.runtime_bin is not None
         and args.run is None
         and args.compile_model is None
+        and args.optimize_model is None
         and args.calibrate_hardware is None
     ):
         parser.error(
-            "--runtime-bin is only supported with --run, --compile-model, or --calibrate-hardware"
+            "--runtime-bin is only supported with --run, --compile-model, "
+            "--optimize-model, or --calibrate-hardware"
         )
     if args.calibration_device and args.calibrate_hardware is None:
         parser.error("--calibration-device requires --calibrate-hardware")
     if args.calibrator_bin is not None and args.calibrate_hardware is None:
         parser.error("--calibrator-bin requires --calibrate-hardware")
+
+    optimizer_options = (
+        ("--optimized-model-dir", args.optimized_model_dir is not None),
+        ("--optimizer-run-dir", args.optimizer_run_dir is not None),
+        ("--optimizer-executor-bin", args.optimizer_executor_bin is not None),
+        (
+            "--validation-executor-bin",
+            args.validation_executor_bin is not None,
+        ),
+        ("--vulkan-driver-manifest", bool(args.vulkan_driver_manifest)),
+    )
+    if args.optimize_model is None:
+        for option, provided in optimizer_options:
+            if provided:
+                parser.error(f"{option} requires --optimize-model")
 
     compiler_options = (
         ("--compiled-model-dir", args.compiled_model_dir is not None),
