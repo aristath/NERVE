@@ -27,6 +27,7 @@ class DeviceIdlePolicy:
     maximum_busy_percent: int = 0
     maximum_driver_context_vram_bytes: int = 1 * 1024 * 1024
     maximum_driver_context_gtt_bytes: int = 16 * 1024 * 1024
+    maximum_driver_retained_vram_bytes: int = 1 * 1024 * 1024
     quiescence_poll_interval_ns: int = 100_000_000
     quiescence_required_observations: int = 2
     maximum_quiescence_wait_ns: int = 5_000_000_000
@@ -43,6 +44,7 @@ class DeviceIdlePolicy:
         for field in (
             "maximum_driver_context_vram_bytes",
             "maximum_driver_context_gtt_bytes",
+            "maximum_driver_retained_vram_bytes",
         ):
             value = getattr(self, field)
             if value < 0:
@@ -74,6 +76,9 @@ class DeviceIdlePolicy:
             "maximum_driver_context_gtt_bytes": (
                 self.maximum_driver_context_gtt_bytes
             ),
+            "maximum_driver_retained_vram_bytes": (
+                self.maximum_driver_retained_vram_bytes
+            ),
             "quiescence_poll_interval_ns": self.quiescence_poll_interval_ns,
             "quiescence_required_observations": (
                 self.quiescence_required_observations
@@ -81,6 +86,10 @@ class DeviceIdlePolicy:
             "maximum_quiescence_wait_ns": self.maximum_quiescence_wait_ns,
             "resident_process_policy": (
                 "no_engine_activity_or_process_above_driver_context_envelope"
+            ),
+            "release_residency_policy": (
+                "stable_zero_activity_no_resident_process_within_"
+                "context_prepared_driver_retention_envelope"
             ),
         }
 
@@ -196,7 +205,7 @@ class LinuxAmdDeviceStateProbe:
         self,
         profiles: tuple[Json, ...],
     ) -> tuple[Json, ...]:
-        """Capture an exact idle floor after execution contexts are prepared."""
+        """Capture the idle floor after execution contexts are prepared."""
 
         if not profiles:
             raise ModelCompileError(
@@ -322,13 +331,14 @@ class LinuxAmdDeviceStateProbe:
             )
         environment = matched.get("environment")
         baselines = (
-            environment.get("initial_idle_observations")
+            environment.get("context_prepared_idle_observations")
             if isinstance(environment, dict)
             else None
         )
         if not isinstance(baselines, list):
             raise ModelCompileError(
-                "optimization target has no initial device-idle observations"
+                "optimization target has no context-prepared device-idle "
+                "observations"
             )
         baseline_by_id = {
             str(item.get("device_id", "")): item
@@ -348,6 +358,7 @@ class LinuxAmdDeviceStateProbe:
             + self.policy.maximum_quiescence_wait_ns
         )
         consecutive_idle = 0
+        previous_residency: tuple[tuple[str, int], ...] | None = None
         last_busy: tuple[tuple[str, int], ...] = ()
         while True:
             observations = tuple(
@@ -368,9 +379,21 @@ class LinuxAmdDeviceStateProbe:
                     > self.policy.maximum_busy_percent
                 )
             )
-            consecutive_idle = (
-                0 if last_busy else consecutive_idle + 1
+            residency = tuple(
+                (
+                    str(observation["device_id"]),
+                    int(observation["vram_used_bytes"]),
+                )
+                for observation in observations
             )
+            if last_busy:
+                consecutive_idle = 0
+                previous_residency = None
+            elif residency == previous_residency:
+                consecutive_idle += 1
+            else:
+                previous_residency = residency
+                consecutive_idle = 1
             if (
                 consecutive_idle
                 >= self.policy.quiescence_required_observations
@@ -410,7 +433,8 @@ class LinuxAmdDeviceStateProbe:
                 or not isinstance(baseline_used, int)
             ):
                 raise ModelCompileError(
-                    "optimization target has an invalid initial VRAM baseline"
+                    "optimization target has an invalid context-prepared VRAM "
+                    "baseline"
                 )
             if observation["resident_processes"]:
                 owners = ", ".join(
@@ -427,15 +451,20 @@ class LinuxAmdDeviceStateProbe:
                 failures.append(
                     f"{device_id} uses {used}/{total} VRAM bytes"
                 )
-            if used > baseline_used:
+            retained_limit = (
+                baseline_used
+                + self.policy.maximum_driver_retained_vram_bytes
+            )
+            if used > retained_limit:
                 failures.append(
                     f"{device_id} uses {used} VRAM bytes above its "
-                    f"{baseline_used}-byte initial baseline"
+                    f"{retained_limit}-byte context-prepared driver-retention "
+                    "envelope"
                 )
         if failures:
             raise ModelCompileError(
-                "AMD device did not return to its initial VRAM residency "
-                "baseline: "
+                "AMD device did not return to its context-prepared idle "
+                "residency envelope: "
                 + "; ".join(failures)
             )
 

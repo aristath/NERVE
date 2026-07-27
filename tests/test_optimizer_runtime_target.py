@@ -53,7 +53,7 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
         hardware_profiles=(profile,),
         matched_conditions={
             "environment": {
-                "initial_idle_observations": list(observation),
+                "context_prepared_idle_observations": list(observation),
             }
         },
     )
@@ -61,7 +61,11 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
         (sysfs / "card0" / "device").resolve().glob("mem_info_vram_used")
     )
     device.write_text(f"{64 * 1024 * 1024 + 4_096}\n")
-    with pytest.raises(ModelCompileError, match="initial VRAM"):
+    assert probe.target_idle_state_digest(target) == expected
+    device.write_text(
+        f"{64 * 1024 * 1024 + probe.policy.maximum_driver_retained_vram_bytes + 1}\n"
+    )
+    with pytest.raises(ModelCompileError, match="driver-retention envelope"):
         probe.target_idle_state_digest(target)
     device.write_text(f"{64 * 1024 * 1024}\n")
     assert probe.target_idle_state_digest(target) == expected
@@ -94,6 +98,8 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
     )
     with pytest.raises(ModelCompileError, match="resident DRM consumers"):
         probe.require_idle((profile,))
+    with pytest.raises(ModelCompileError, match="resident DRM consumers"):
+        probe.target_idle_state_digest(target)
 
 
 def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
@@ -165,11 +171,65 @@ def test_target_idle_attestation_waits_for_stable_counter_quiescence(
         hardware_profiles=(profile,),
         matched_conditions={
             "environment": {
-                "initial_idle_observations": list(baseline),
+                "context_prepared_idle_observations": list(baseline),
             }
         },
     )
     busy.write_text("73\n")
+
+    assert probe.target_idle_state_digest(target) == (
+        declared_idle_state_digest((profile,), policy)
+    )
+    assert sleeps == [1e-08, 1e-08]
+
+
+def test_target_idle_attestation_waits_for_stable_driver_retention_watermark(
+    tmp_path: Path,
+) -> None:
+    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
+    baseline_vram = 64 * 1024 * 1024
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address="0000:03:00.0",
+        used_vram=baseline_vram,
+        busy_percent=0,
+    )
+    used = next(
+        (sysfs / "card0" / "device").resolve().glob(
+            "mem_info_vram_used"
+        )
+    )
+    clock = [0]
+    sleeps = []
+
+    def retain_driver_cache(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += round(seconds * 1_000_000_000)
+        if len(sleeps) == 1:
+            used.write_text(f"{baseline_vram + 8_192}\n")
+
+    policy = DeviceIdlePolicy(
+        quiescence_poll_interval_ns=10,
+        quiescence_required_observations=2,
+        maximum_quiescence_wait_ns=100,
+    )
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        policy=policy,
+        monotonic_ns=lambda: clock[0],
+        sleep=retain_driver_cache,
+    )
+    baseline = probe.require_idle((profile,))
+    target = SimpleNamespace(
+        hardware_profiles=(profile,),
+        matched_conditions={
+            "environment": {
+                "context_prepared_idle_observations": list(baseline),
+            }
+        },
+    )
+    used.write_text(f"{baseline_vram + 4_096}\n")
 
     assert probe.target_idle_state_digest(target) == (
         declared_idle_state_digest((profile,), policy)
@@ -212,7 +272,7 @@ def test_target_idle_attestation_bounds_nonquiescent_counter_wait(
         hardware_profiles=(profile,),
         matched_conditions={
             "environment": {
-                "initial_idle_observations": list(baseline),
+                "context_prepared_idle_observations": list(baseline),
             }
         },
     )
@@ -390,7 +450,7 @@ def test_runtime_target_records_post_context_idle_floor(
     assert discovery_count == 3
     assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
     assert prepared.targets[0].matched_conditions["environment"][
-        "initial_idle_observations"
+        "context_prepared_idle_observations"
     ][0]["vram_used_bytes"] == expected_vram
 
 

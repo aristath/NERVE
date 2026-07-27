@@ -670,7 +670,7 @@ def _build_target(
         "environment": {
             "vulkan_driver_manifests": [str(path) for path in driver_files],
             "device_idle_policy": idle_probe.policy.to_json(),
-            "initial_idle_observations": [
+            "context_prepared_idle_observations": [
                 dict(item)
                 for item in sorted(
                     selected_observations,

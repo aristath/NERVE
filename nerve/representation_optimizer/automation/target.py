@@ -72,7 +72,7 @@ class NoDeviceLeaseManager:
 
 @dataclass(frozen=True)
 class VerifiedDeviceLeaseManager:
-    """Cross-process device locks plus exact idle-state probes."""
+    """Cross-process device locks plus attested idle-state probes."""
 
     lock_root: Path
     probe_idle_state_digest: Callable[["OptimizationTarget"], str]
