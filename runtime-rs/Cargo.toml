@@ -23,6 +23,11 @@ name = "nerve-calibrate"
 path = "src/bin/nerve_calibrate.rs"
 required-features = ["vulkan"]
 
+[[bin]]
+name = "nerve-optimizer-executor"
+path = "src/bin/nerve_optimizer_executor.rs"
+required-features = ["vulkan"]
+
 [features]
 default = []
 vulkan = ["dep:ash"]

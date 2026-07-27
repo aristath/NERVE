@@ -1,6 +1,6 @@
 const VULKAN_TARGETED_COMPONENT_QUANTUM_USEFUL_UNITS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum VulkanTargetedComponentExecutionPhase {
     Decode,
     Prefill { activation_batch_width: usize },
@@ -17,7 +17,7 @@ impl VulkanTargetedComponentExecutionPhase {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanTargetedComponentThroughputWindow {
     pub index: usize,
     pub start_unit: usize,
@@ -25,7 +25,7 @@ pub struct VulkanTargetedComponentThroughputWindow {
     pub duration_ns: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanTargetedComponentExecutionReport {
     pub component_id: String,
     pub node_id: String,
