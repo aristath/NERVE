@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,6 +122,7 @@ include!("vulkan_stream_circuit/token_stream.rs");
 include!("vulkan_stream_circuit/token_runtime.rs");
 include!("vulkan_stream_circuit/token_engine.rs");
 include!("vulkan_stream_circuit/resident_package_slices.rs");
+include!("vulkan_stream_circuit/targeted_component_execution.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_implementation_selection.rs");

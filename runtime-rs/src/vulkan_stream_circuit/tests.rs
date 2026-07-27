@@ -17,6 +17,7 @@ include!("tests/prompt_stream_tests.rs");
 include!("tests/prompt_engine_tests.rs");
 include!("tests/stream_remount.rs");
 include!("tests/runtime_implementation_mount.rs");
+include!("tests/targeted_component_execution.rs");
 include!("tests/resident_plan_buffers_tests.rs");
 include!("tests/kernel_abi.rs");
 include!("tests/descriptor_plan_tests.rs");
