@@ -75,7 +75,8 @@ non-finite number, or internally inconsistent contract.
 | `prebenchmark_record.v1` | Static integrity, proof, and cheap-sanity gate result |
 | `validation_record.v1` | Complete funnel, benchmark link, full runs, and counterexamples |
 | `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
-| `runtime_implementation_predicate.v1` | Hardware, execution-regime, and placement guard for one verified implementation |
+| `runtime_implementation_predicate.v2` | Exact hardware-capability multiplicities plus execution-regime and placement guards for one verified implementation |
+| `runtime_mount_plan.v1` | Runtime-adapter identity and candidate-local component-overlay and tensor-index artifacts |
 | `promotion_decision.v2` | Candidate, proof, benchmark, validation, target, artifact, and provenance decision |
 | `implementation_registry.v1` | Exact baseline plus all published physical implementations |
 | `relowering_request.v1` | Representation-aware request to repeat ordinary lowering passes |
@@ -472,6 +473,44 @@ lifecycle evidence reference resolves to a file inside that package; rejected
 and failed experiment workspaces do not leak into the deployable model.
 Relocation validation therefore needs neither the source package nor analysis,
 construction, benchmark, or validation workspaces.
+
+## Runtime implementation selection and mounting
+
+Placement remains a runtime decision. After graph edits, duplication, bypass,
+rewiring, sharding, and logical-to-physical device binding are resolved, NERVE
+builds a selection request from the effective component instances, edges,
+actual hardware-process profiles, and the complete execution envelope. The
+guard compares exact capability-class multiplicities rather than a set of
+device labels, so one GPU, two equivalent GPUs, CPU plus GPU, and two unrelated
+devices are distinct targets.
+
+Selection enumerates every connected occurrence of each promoted semantic
+scope, including duplicated source components. It rejects applications whose
+hardware, required processes and features, placement, interconnects, phase,
+activation width, context, or transient-state envelope falls outside the
+published predicate. A branch-and-bound search then chooses the compatible
+non-overlapping set with the greatest measured savings after conversion costs.
+Uncovered instances retain the immutable exact implementation only when that
+implementation is compatible; otherwise execution fails closed.
+
+Each selected package entry names a `runtime_mount_plan.v1` explicitly. The
+current Vulkan adapter replaces the physical component circuit and execution
+specification while preserving semantic identity and all externally visible
+ports. A multi-component island may retain a native representation across
+internal boundaries. Shader and tensor-index references are canonicalized,
+confined to the candidate bundle, integrity checked as package artifacts, and
+mounted atomically. Tensor fragments may add candidate-owned parameters but
+may never shadow an exact tensor. The fully mounted graph, execution specs,
+generation contract, and merged tensor index are revalidated before model
+residency begins.
+
+Normal package and placement inspection expose every verified option and the
+selection report. The TUI shows the option, provider provenance, predicate,
+benchmark, validation, and the implementation selected for the current draft
+placement. Normal chat statistics report the chosen instances and measured
+representation-boundary time, bytes, and count. They also divide observed
+inter-token time into ordered context/state windows, making sustained decode
+changes visible without a profiling-only execution path.
 
 ## Hardware-process profiles
 

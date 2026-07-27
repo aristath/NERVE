@@ -59,27 +59,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 13. Implement runtime implementation selection
-
-- Select among promoted implementations using actual runtime device bindings
-  and execution conditions.
-- Keep placement under runtime/UI control.
-- Refuse execution when no implementation satisfies its declared hardware and
-  behavioral contract; never silently run an incompatible variant.
-- Avoid repeated representation conversion when a compatible multi-component
-  representation island is available.
-- Expose the selected implementation, target predicate, representation,
-  provenance, benchmark evidence, and validation status through normal runtime
-  inspection and the TUI.
-- Report selection and representation-boundary costs in default execution
-  statistics.
-- Treat sustained decode length as an explicit selection and measurement
-  regime. Expose throughput changes as context and transient state grow so a
-  short-window average cannot hide a long-running slow path.
-
-Completion requires runtime tests across CPU, one-GPU, multi-GPU, and mixed
-logical placements without model-specific selection code.
-
 ### 14. Automate the analyze–synthesize–benchmark–verify loop
 
 - Walk optimization scopes deterministically.
@@ -138,6 +117,10 @@ Completion requires both:
   runtime.
 - Record whole-model improvements and any component-level win hidden by
   conversion or downstream costs.
+- Use default sustained-decode windows and execution counters to distinguish
+  exact-runtime effects—such as changing speculative acceptance, bounded
+  completion waits, and cross-device transfers—from representation-candidate
+  costs, and reject candidates that amplify those slow paths.
 
 Completion requires correct real conversations for the complete supported model
 set, no regression in existing explicit performance floors, clean device
