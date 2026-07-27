@@ -433,6 +433,41 @@ def test_graph_analysis_uses_semantics_and_connectivity_not_model_names():
         },
     )
     result = GraphStructureAnalyzer().analyze(_context({}, nodes=nodes))
+    operators = _claim(result.claims, "operator_structure")
+    assert operators == {
+        "kind": "operator_structure",
+        "status": "supported",
+        "exact": True,
+        "facts": {
+            "node_count": 3,
+            "operators": [
+                {
+                    "node_id": "component/dispatch",
+                    "op": "expert_dispatch",
+                    "inputs": ["component/routes"],
+                    "outputs": ["component/output"],
+                    "params": [],
+                    "attrs": {},
+                },
+                {
+                    "node_id": "component/isolated",
+                    "op": "identity",
+                    "inputs": ["component/external"],
+                    "outputs": ["component/other"],
+                    "params": [],
+                    "attrs": {},
+                },
+                {
+                    "node_id": "component/router",
+                    "op": "topk_select",
+                    "inputs": ["component/input"],
+                    "outputs": ["component/routes"],
+                    "params": [],
+                    "attrs": {},
+                },
+            ],
+        },
+    }
     assert _claim(result.claims, "graph_communities")["status"] == "supported"
     routing = _claim(result.claims, "routing_structure")
     assert routing["status"] == "supported"
@@ -440,6 +475,51 @@ def test_graph_analysis_uses_semantics_and_connectivity_not_model_names():
         "component/router",
         "component/dispatch",
     }
+
+
+def test_graph_operator_structure_preserves_exact_generic_operator_contract():
+    node = {
+        "id": "component/norm",
+        "component_id": "component",
+        "semantic_role": "normalization",
+        "op": "rms_norm_per_head",
+        "inputs": ["component/input"],
+        "outputs": ["component/output"],
+        "params": ["component/scale"],
+        "attrs": {
+            "eps": 1e-6,
+            "head_count": 24,
+            "weight_offset": 1.0,
+        },
+    }
+    result = GraphStructureAnalyzer().analyze(_context({}, nodes=(node,)))
+    structure = _claim(result.claims, "operator_structure")
+    assert structure["status"] == "supported"
+    assert structure["exact"] is True
+    assert structure["facts"]["operators"] == [
+        {
+            "node_id": "component/norm",
+            "component_id": "component",
+            "semantic_role": "normalization",
+            "op": "rms_norm_per_head",
+            "inputs": ["component/input"],
+            "outputs": ["component/output"],
+            "params": ["component/scale"],
+            "attrs": {
+                "eps": 1e-6,
+                "head_count": 24,
+                "weight_offset": 1.0,
+            },
+        }
+    ]
+
+
+def test_graph_operator_structure_rejects_empty_scope_without_inventing_nodes():
+    result = GraphStructureAnalyzer().analyze(_context({}, nodes=()))
+    structure = _claim(result.claims, "operator_structure")
+    assert structure["status"] == "rejected"
+    assert structure["exact"] is True
+    assert structure["facts"] == {"node_count": 0, "operators": []}
 
 
 def test_activation_evidence_always_records_domain_and_remains_non_exhaustive():

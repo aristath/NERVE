@@ -9,10 +9,11 @@ from nerve.representation_optimizer.contracts import contract_digest
 
 class GraphStructureAnalyzer:
     analyzer_id = "semantic_graph_structure"
-    version = "1"
+    version = "2"
 
     def analyze(self, context: ScopeAnalysisContext) -> AnalyzerResult:
         nodes = {str(node["id"]): node for node in context.nodes}
+        operators = _operator_inventory(nodes)
         producer: dict[str, str] = {}
         consumers: dict[str, list[str]] = defaultdict(list)
         for node_id, node in nodes.items():
@@ -41,6 +42,15 @@ class GraphStructureAnalyzer:
             if len(destinations) > 1
         }
         claims = (
+            claim(
+                kind="operator_structure",
+                status="supported" if operators else "rejected",
+                exact=True,
+                facts={
+                    "node_count": len(operators),
+                    "operators": operators,
+                },
+            ),
             claim(
                 kind="graph_communities",
                 status="supported" if len(communities) > 1 else "rejected",
@@ -74,6 +84,7 @@ class GraphStructureAnalyzer:
                 "nodes": sorted(nodes),
                 "edges": [list(edge) for edge in sorted(edges)],
                 "communities": communities,
+                "operators": operators,
                 "routing_nodes": routes,
                 "repeated_node_signatures": repeated_signatures,
             },
@@ -122,6 +133,26 @@ def _routing_nodes(nodes: dict[str, dict]) -> list[dict]:
                 }
             )
     return sorted(routes, key=lambda route: route["node_id"])
+
+
+def _operator_inventory(nodes: dict[str, dict]) -> list[dict]:
+    inventory = []
+    for node_id in sorted(nodes):
+        node = nodes[node_id]
+        record = {
+            "node_id": node_id,
+            "op": str(node.get("op", "")),
+            "inputs": [str(item) for item in node.get("inputs", [])],
+            "outputs": [str(item) for item in node.get("outputs", [])],
+            "params": [str(item) for item in node.get("params", [])],
+            "attrs": node.get("attrs", {}),
+        }
+        for optional in ("component_id", "semantic_role"):
+            value = node.get(optional)
+            if value is not None:
+                record[optional] = str(value)
+        inventory.append(record)
+    return inventory
 
 
 def _node_signature(node: dict) -> str:
