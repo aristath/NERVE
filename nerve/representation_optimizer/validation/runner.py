@@ -15,18 +15,21 @@ from nerve.representation_optimizer.staging.contracts import (
     STAGED_ARTIFACT_DIGEST_SCHEMA,
 )
 from nerve.representation_optimizer.validation.contracts import (
+    VALIDATION_OBSERVATION_SCHEMA,
     VALIDATION_RUN_SCHEMA,
     BehavioralErrorContract,
     ValidationObservation,
     ValidationPlan,
     ValidationResidencyEvent,
+    ValidationRoleResult,
     ValidationRun,
+    validation_observation_id,
     validation_run_id,
 )
 from nerve.representation_optimizer.validation.protocols import (
     BehavioralValidationAdapter,
-    ValidationExecutionRequest,
-    ValidationStageMountRequest,
+    ValidationRoleExecutionRequest,
+    ValidationRoleMountRequest,
 )
 
 
@@ -48,70 +51,108 @@ def execute_validation_stage(
         adapter,
         candidate_id=plan.candidate_id,
     )
-    mount_request = ValidationStageMountRequest(
-        plan_id=plan.plan_id,
-        stage=stage,
-        implementations=dict(document["implementations"]),
-        matched_conditions=dict(document["matched_conditions"]),
-        matched_conditions_digest=str(
-            document["matched_conditions_digest"]
-        ),
-    )
-    _checkpoint(cancel_requested)
-    session = adapter.open_stage(mount_request)
     observations: list[Json] = []
+    events: list[Json] = []
     elapsed: list[Json] = []
     diagnostics: list[str] = []
     trace_paths: set[str] = set()
-    mount: ValidationResidencyEvent | None = None
-    unmount: ValidationResidencyEvent | None = None
     status = "completed"
+    block_index = 0
     try:
-        try:
-            mount = ValidationResidencyEvent.from_json(session.mount_event)
-            _validate_mount(plan, stage, mount)
-        except BaseException:
-            try:
-                ValidationResidencyEvent.from_json(session.close())
-            except BaseException:
-                pass
-            raise
         for check in checks:
             for seed in check["seeds"]:
                 _checkpoint(cancel_requested)
-                request = ValidationExecutionRequest(
-                    plan_id=plan.plan_id,
-                    check=check,
-                    reference_implementation=plan.implementation(
-                        "reference"
-                    ),
-                    candidate_implementation=plan.implementation(
-                        "candidate"
-                    ),
-                    matched_conditions=dict(
-                        document["matched_conditions"]
-                    ),
-                    matched_conditions_digest=str(
-                        document["matched_conditions_digest"]
-                    ),
-                    seed=seed,
-                )
                 started = time.monotonic_ns()
-                raw = session.execute_pair(request)
-                host_elapsed = max(1, time.monotonic_ns() - started)
-                observation = ValidationObservation.from_json(raw)
-                observed_paths = _validate_observation(
-                    plan,
-                    request,
-                    observation,
-                    adapter,
-                )
-                if trace_paths & observed_paths:
-                    raise ModelCompileError(
-                        "validation observations reused a raw trace path"
+                results: dict[str, Json] = {}
+                for role in ("reference", "candidate"):
+                    implementation = plan.implementation(role)
+                    mount_request = ValidationRoleMountRequest(
+                        plan_id=plan.plan_id,
+                        stage=stage,
+                        check=check,
+                        role=role,
+                        implementation=implementation,
+                        matched_conditions=dict(
+                            document["matched_conditions"]
+                        ),
+                        matched_conditions_digest=str(
+                            document["matched_conditions_digest"]
+                        ),
+                        seed=seed,
+                        block_index=block_index,
                     )
-                trace_paths.update(observed_paths)
-                observation_document = observation.to_json()
+                    session = adapter.open_session(mount_request)
+                    mount: ValidationResidencyEvent | None = None
+                    try:
+                        mount = ValidationResidencyEvent.from_json(
+                            session.mount_event
+                        )
+                        _validate_mount(plan, mount_request, mount)
+                        execution_request = ValidationRoleExecutionRequest(
+                            plan_id=plan.plan_id,
+                            check=check,
+                            role=role,
+                            implementation=implementation,
+                            matched_conditions=dict(
+                                document["matched_conditions"]
+                            ),
+                            matched_conditions_digest=str(
+                                document[
+                                    "matched_conditions_digest"
+                                ]
+                            ),
+                            seed=seed,
+                        )
+                        result = ValidationRoleResult.from_json(
+                            session.execute(execution_request)
+                        )
+                        observed_paths = _validate_role_result(
+                            execution_request,
+                            result,
+                            adapter,
+                        )
+                        if trace_paths & observed_paths:
+                            raise ModelCompileError(
+                                "validation role results reused a raw trace path"
+                            )
+                        trace_paths.update(observed_paths)
+                        results[role] = result.to_json()
+                    finally:
+                        if mount is not None:
+                            unmount = ValidationResidencyEvent.from_json(
+                                session.close()
+                            )
+                            _validate_unmount(
+                                plan,
+                                mount_request,
+                                mount,
+                                unmount,
+                            )
+                            events.extend(
+                                (mount.to_json(), unmount.to_json())
+                            )
+                    block_index += 1
+                comparison = adapter.compare_results(
+                    {
+                        "plan_id": plan.plan_id,
+                        "check": check,
+                        "seed": seed,
+                        "behavioral_contract": plan.behavioral_contract,
+                    },
+                    results["reference"],
+                    results["candidate"],
+                )
+                observation_document = _paired_observation(
+                    plan=plan,
+                    check=check,
+                    seed=seed,
+                    results=results,
+                    comparison=comparison,
+                )
+                host_elapsed = max(1, time.monotonic_ns() - started)
+                observation = ValidationObservation.from_json(
+                    observation_document
+                )
                 observations.append(observation_document)
                 elapsed.append(
                     {
@@ -133,14 +174,6 @@ def execute_validation_stage(
     except ModelCompileCancelled as error:
         status = "cancelled"
         diagnostics.append(str(error))
-    finally:
-        if mount is not None:
-            unmount = ValidationResidencyEvent.from_json(session.close())
-            _validate_unmount(plan, stage, mount, unmount)
-    if mount is None or unmount is None:
-        raise ModelCompileError(
-            "validation stage lacks complete residency evidence"
-        )
     run_document = {
         "schema": VALIDATION_RUN_SCHEMA,
         "run_id": "",
@@ -152,7 +185,7 @@ def execute_validation_stage(
             for observation in observations
         ],
         "observations": observations,
-        "residency_events": [mount.to_json(), unmount.to_json()],
+        "residency_events": events,
         "host_elapsed_ns": elapsed,
         "diagnostics": diagnostics,
     }
@@ -221,41 +254,109 @@ def _behavioral_rejection(
     return None
 
 
-def _validate_observation(
-    plan: ValidationPlan,
-    request: ValidationExecutionRequest,
-    observation: ValidationObservation,
+def _validate_role_result(
+    request: ValidationRoleExecutionRequest,
+    result: ValidationRoleResult,
     adapter: BehavioralValidationAdapter,
 ) -> set[str]:
-    document = observation.to_json()
+    document = result.to_json()
     if (
         document["plan_id"] != request.plan_id
         or document["check_id"] != request.check["check_id"]
         or document["stage"] != request.check["stage"]
         or document["seed"] != request.seed
-        or document["reference"]["implementation_id"]
-        != request.reference_implementation["implementation_id"]
-        or document["candidate"]["implementation_id"]
-        != request.candidate_implementation["implementation_id"]
+        or document["role"] != request.role
+        or document["implementation_id"]
+        != request.implementation["implementation_id"]
     ):
         raise ModelCompileError(
-            "validation adapter returned an observation for another request"
+            "validation adapter returned a role result for another request"
         )
     paths: set[str] = set()
-    for role in ("reference", "candidate"):
-        for trace in document["traces"][role]:
-            path = str(trace["path"])
-            if path in paths:
-                raise ModelCompileError(
-                    "validation observation reused a trace path"
-                )
-            _verify_streamed_artifact(
-                path,
-                str(trace["digest"]),
-                adapter.iter_trace_artifact,
+    for trace in document["traces"]:
+        path = str(trace["path"])
+        if path in paths:
+            raise ModelCompileError(
+                "validation role result reused a trace path"
             )
-            paths.add(path)
+        _verify_streamed_artifact(
+            path,
+            str(trace["digest"]),
+            adapter.iter_trace_artifact,
+        )
+        paths.add(path)
     return paths
+
+
+def _paired_observation(
+    *,
+    plan: ValidationPlan,
+    check: Json,
+    seed: int,
+    results: dict[str, Json],
+    comparison: Json,
+) -> Json:
+    if set(comparison) != {"metrics", "diagnostics"}:
+        raise ModelCompileError(
+            "validation result comparison fields are invalid"
+        )
+    if not isinstance(comparison["metrics"], list) or not isinstance(
+        comparison["diagnostics"],
+        list,
+    ):
+        raise ModelCompileError(
+            "validation result comparison payload is invalid"
+        )
+    status = (
+        "completed"
+        if all(
+            results[role]["status"] == "completed"
+            for role in ("reference", "candidate")
+        )
+        else "failed"
+    )
+    diagnostics = [
+        *(
+            f"{role}: {diagnostic}"
+            for role in ("reference", "candidate")
+            for diagnostic in results[role]["diagnostics"]
+        ),
+        *comparison["diagnostics"],
+    ]
+    if status == "failed" and not diagnostics:
+        diagnostics.append("one validation role failed without diagnostics")
+    document = {
+        "schema": VALIDATION_OBSERVATION_SCHEMA,
+        "observation_id": "",
+        "plan_id": plan.plan_id,
+        "check_id": check["check_id"],
+        "stage": check["stage"],
+        "seed": seed,
+        "status": status,
+        "reference": _observation_role(results["reference"]),
+        "candidate": _observation_role(results["candidate"]),
+        "metrics": comparison["metrics"],
+        "traces": {
+            role: results[role]["traces"]
+            for role in ("reference", "candidate")
+        },
+        "execution_statistics": {
+            role: results[role]["default_statistics"]
+            for role in ("reference", "candidate")
+        },
+        "diagnostics": diagnostics,
+    }
+    document["observation_id"] = validation_observation_id(document)
+    return ValidationObservation.from_json(document).to_json()
+
+
+def _observation_role(result: Json) -> Json:
+    return {
+        "implementation_id": result["implementation_id"],
+        "output_digest": result["output_digest"],
+        "state_digest": result["state_digest"],
+        "steps": result["steps"],
+    }
 
 
 def _verify_fixture_artifacts(
@@ -418,15 +519,23 @@ def _verify_declared_limit(
 
 def _validate_mount(
     plan: ValidationPlan,
-    stage: str,
+    request: ValidationRoleMountRequest,
     event: ValidationResidencyEvent,
 ) -> None:
     document = event.to_json()
     if (
         document["plan_id"] != plan.plan_id
-        or document["stage"] != stage
+        or document["stage"] != request.stage
+        or document["check_id"] != request.check["check_id"]
+        or document["seed"] != request.seed
+        or document["role"] != request.role
+        or document["implementation_id"]
+        != request.implementation["implementation_id"]
+        or document["block_index"] != request.block_index
         or document["action"] != "mount"
         or document["released"]
+        or document["device_state_before_digest"]
+        != request.matched_conditions["idle_device_state_digest"]
     ):
         raise ModelCompileError(
             "validation adapter returned invalid mount evidence"
@@ -435,7 +544,7 @@ def _validate_mount(
 
 def _validate_unmount(
     plan: ValidationPlan,
-    stage: str,
+    request: ValidationRoleMountRequest,
     mount: ValidationResidencyEvent,
     unmount: ValidationResidencyEvent,
 ) -> None:
@@ -443,13 +552,19 @@ def _validate_unmount(
     released = unmount.to_json()
     if (
         released["plan_id"] != plan.plan_id
-        or released["stage"] != stage
+        or released["stage"] != request.stage
+        or released["check_id"] != request.check["check_id"]
+        or released["seed"] != request.seed
+        or released["role"] != request.role
+        or released["implementation_id"]
+        != request.implementation["implementation_id"]
+        or released["block_index"] != request.block_index
         or released["action"] != "unmount"
         or not released["released"]
         or released["device_state_before_digest"]
         != mounted["device_state_after_digest"]
         or released["device_state_after_digest"]
-        != mounted["device_state_before_digest"]
+        != request.matched_conditions["idle_device_state_digest"]
     ):
         raise ModelCompileError(
             "validation adapter did not prove complete residency release"

@@ -9,6 +9,7 @@ from nerve.representation_optimizer.validation.contracts import (
     VALIDATION_OBSERVATION_SCHEMA,
     VALIDATION_PLAN_SCHEMA,
     VALIDATION_REQUIREMENTS_SCHEMA,
+    VALIDATION_ROLE_RESULT_SCHEMA,
     VALIDATION_RESIDENCY_EVENT_SCHEMA,
     VALIDATION_RUN_SCHEMA,
     BehavioralErrorContract,
@@ -17,6 +18,7 @@ from nerve.representation_optimizer.validation.contracts import (
     ValidationObservation,
     ValidationPlan,
     ValidationRequirements,
+    ValidationRoleResult,
     ValidationResidencyEvent,
     ValidationRun,
 )
@@ -30,6 +32,7 @@ __all__ = [
     "VALIDATION_OBSERVATION_SCHEMA",
     "VALIDATION_PLAN_SCHEMA",
     "VALIDATION_REQUIREMENTS_SCHEMA",
+    "VALIDATION_ROLE_RESULT_SCHEMA",
     "VALIDATION_RESIDENCY_EVENT_SCHEMA",
     "VALIDATION_RUN_SCHEMA",
     "BehavioralErrorContract",
@@ -38,6 +41,7 @@ __all__ = [
     "ValidationObservation",
     "ValidationPlan",
     "ValidationRequirements",
+    "ValidationRoleResult",
     "ValidationResidencyEvent",
     "ValidationRun",
 ]

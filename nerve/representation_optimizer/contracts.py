@@ -29,11 +29,12 @@ BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
 VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
 VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v1"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
-VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v1"
+VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v1"
+VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v2"
 VALIDATION_RESIDENCY_EVENT_SCHEMA = (
-    "nerve.optimizer.validation_residency_event.v1"
+    "nerve.optimizer.validation_residency_event.v2"
 )
-VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v1"
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v2"
 PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 CONTRACT_DIGEST_SCHEMA = "nerve.optimizer.canonical_json_sha256.v1"
 
@@ -1603,6 +1604,14 @@ def _validate_validation_observation(document: Json) -> None:
     validate_validation_observation(document)
 
 
+def _validate_validation_role_result(document: Json) -> None:
+    from nerve.representation_optimizer.validation.contracts import (
+        validate_validation_role_result,
+    )
+
+    validate_validation_role_result(document)
+
+
 def _validate_validation_run(document: Json) -> None:
     from nerve.representation_optimizer.validation.contracts import (
         validate_validation_run,
@@ -1965,6 +1974,7 @@ _VALIDATORS: dict[str, Validator] = {
     VALIDATION_REQUIREMENTS_SCHEMA: _validate_validation_requirements,
     VALIDATION_PLAN_SCHEMA: _validate_validation_plan,
     PROOF_RESULT_SCHEMA: _validate_proof_result,
+    VALIDATION_ROLE_RESULT_SCHEMA: _validate_validation_role_result,
     VALIDATION_OBSERVATION_SCHEMA: _validate_validation_observation,
     VALIDATION_RESIDENCY_EVENT_SCHEMA: (
         _validate_validation_residency_event

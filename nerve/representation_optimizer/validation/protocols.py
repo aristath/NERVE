@@ -57,29 +57,37 @@ class ExactProofVerifier(Protocol):
 
 
 @dataclass(frozen=True)
-class ValidationStageMountRequest:
+class ValidationRoleMountRequest:
     plan_id: str
     stage: str
-    implementations: Json
+    check: Json
+    role: str
+    implementation: Json
     matched_conditions: Json
     matched_conditions_digest: str
+    seed: int
+    block_index: int
 
     def to_json(self) -> Json:
         return {
             "plan_id": self.plan_id,
             "stage": self.stage,
-            "implementations": deepcopy(self.implementations),
+            "check": deepcopy(self.check),
+            "role": self.role,
+            "implementation": deepcopy(self.implementation),
             "matched_conditions": deepcopy(self.matched_conditions),
             "matched_conditions_digest": self.matched_conditions_digest,
+            "seed": self.seed,
+            "block_index": self.block_index,
         }
 
 
 @dataclass(frozen=True)
-class ValidationExecutionRequest:
+class ValidationRoleExecutionRequest:
     plan_id: str
     check: Json
-    reference_implementation: Json
-    candidate_implementation: Json
+    role: str
+    implementation: Json
     matched_conditions: Json
     matched_conditions_digest: str
     seed: int
@@ -89,12 +97,8 @@ class ValidationExecutionRequest:
         return {
             "plan_id": self.plan_id,
             "check": deepcopy(self.check),
-            "reference_implementation": deepcopy(
-                self.reference_implementation
-            ),
-            "candidate_implementation": deepcopy(
-                self.candidate_implementation
-            ),
+            "role": self.role,
+            "implementation": deepcopy(self.implementation),
             "matched_conditions": deepcopy(self.matched_conditions),
             "matched_conditions_digest": self.matched_conditions_digest,
             "seed": self.seed,
@@ -102,15 +106,15 @@ class ValidationExecutionRequest:
         }
 
 
-class ValidationExecutionSession(Protocol):
-    """Normal runtime execution mounted for one validation stage."""
+class ValidationRoleExecutionSession(Protocol):
+    """One role mounted through the ordinary runtime execution path."""
 
     @property
     def mount_event(self) -> Json:
         """Return validation_residency_event.v1 evidence for this mount."""
 
-    def execute_pair(self, request: ValidationExecutionRequest) -> Json:
-        """Compare exact and candidate implementations via normal execution."""
+    def execute(self, request: ValidationRoleExecutionRequest) -> Json:
+        """Execute one validation role and return its raw result."""
 
     def close(self) -> Json:
         """Release all residency and return validation_residency_event.v1."""
@@ -128,11 +132,19 @@ class BehavioralValidationAdapter(Protocol):
     ) -> Iterable[bytes]:
         """Read one immutable validation fixture or counterexample."""
 
-    def open_stage(
+    def open_session(
         self,
-        request: ValidationStageMountRequest,
-    ) -> ValidationExecutionSession:
-        """Mount a stage through the same public execution path as runtime."""
+        request: ValidationRoleMountRequest,
+    ) -> ValidationRoleExecutionSession:
+        """Mount one role through the same public execution path as runtime."""
+
+    def compare_results(
+        self,
+        request: Json,
+        reference_result: Json,
+        candidate_result: Json,
+    ) -> Json:
+        """Compare two released role results without accelerator residency."""
 
     def iter_trace_artifact(
         self,

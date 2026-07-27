@@ -32,16 +32,16 @@ from nerve.representation_optimizer.staging.orchestrator import (
 )
 from nerve.representation_optimizer.validation.contracts import (
     PROOF_RESULT_SCHEMA,
-    VALIDATION_OBSERVATION_SCHEMA,
     VALIDATION_RESIDENCY_EVENT_SCHEMA,
+    VALIDATION_ROLE_RESULT_SCHEMA,
     ProofResult,
-    ValidationObservation,
     ValidationRequirements,
+    ValidationRoleResult,
     proof_result_id,
     validation_check_id,
-    validation_observation_id,
     validation_requirements_id,
     validation_residency_event_id,
+    validation_role_result_id,
 )
 from nerve.representation_optimizer.validation.orchestrator import (
     prepare_candidate_for_benchmark,
@@ -174,9 +174,9 @@ class FixtureValidationAdapter:
             ),
         }
         self.trace_artifacts: dict[str, bytes] = {}
-        self.stage_requests = []
+        self.mount_requests = []
         self.execution_requests = []
-        self.closed_stages: list[str] = []
+        self.closed_sessions: list[tuple[str, str, int]] = []
         self.fixture_candidate_ids: list[str] = []
 
     def iter_fixture_artifact(
@@ -201,21 +201,41 @@ class FixtureValidationAdapter:
         for offset in range(0, len(payload), chunk_bytes):
             yield payload[offset : offset + chunk_bytes]
 
-    def open_stage(self, request):
-        self.stage_requests.append(request)
-        return FixtureValidationSession(self, request)
+    def open_session(self, request):
+        self.mount_requests.append(request)
+        return FixtureValidationRoleSession(self, request)
+
+    def compare_results(self, request, reference_result, candidate_result):
+        invalid = self.behavior.invalid_stage == request["check"]["stage"]
+        error = self.behavior.invalid_error if invalid else 0.0
+        return {
+            "metrics": [
+                {
+                    "name": name,
+                    "reference_value": 1.0,
+                    "candidate_value": 1.0 - error,
+                    "error": error,
+                    "unit": "normalized_error",
+                }
+                for name in request["check"]["metrics"]
+            ],
+            "diagnostics": [],
+        }
 
 
-class FixtureValidationSession:
+class FixtureValidationRoleSession:
     def __init__(self, adapter, request) -> None:
         self.adapter = adapter
         self.request = request
         self.closed = False
-        self.idle = staged_artifact_digest(
-            f"idle:{request.stage}".encode()
-        )
+        self.idle = request.matched_conditions[
+            "idle_device_state_digest"
+        ]
         self.mounted = staged_artifact_digest(
-            f"mounted:{request.stage}".encode()
+            (
+                f"mounted:{request.stage}:{request.role}:"
+                f"{request.block_index}"
+            ).encode()
         )
         self._mount_event = self._residency_event(
             action="mount",
@@ -228,21 +248,23 @@ class FixtureValidationSession:
     def mount_event(self):
         return dict(self._mount_event)
 
-    def execute_pair(self, request):
+    def execute(self, request):
         if self.closed:
             raise RuntimeError("validation fixture stage is closed")
         self.adapter.execution_requests.append(request)
         behavior = self.adapter.behavior
         if behavior.fail_execution_stage == request.check["stage"]:
             raise ModelCompileError("fixture validation execution failed")
-        invalid = behavior.invalid_stage == request.check["stage"]
-        error = behavior.invalid_error if invalid else 0.0
-        reference_output = staged_artifact_digest(
+        invalid = (
+            request.role == "candidate"
+            and behavior.invalid_stage == request.check["stage"]
+        )
+        exact_output = staged_artifact_digest(
             (
                 f"output:{request.check['check_id']}:{request.seed}"
             ).encode()
         )
-        candidate_output = (
+        output = (
             staged_artifact_digest(
                 (
                     f"invalid-output:{request.check['check_id']}:"
@@ -250,14 +272,14 @@ class FixtureValidationSession:
                 ).encode()
             )
             if invalid
-            else reference_output
+            else exact_output
         )
-        reference_state = staged_artifact_digest(
+        exact_state = staged_artifact_digest(
             (
                 f"state:{request.check['check_id']}:{request.seed}"
             ).encode()
         )
-        candidate_state = (
+        state = (
             staged_artifact_digest(
                 (
                     f"invalid-state:{request.check['check_id']}:"
@@ -265,76 +287,64 @@ class FixtureValidationSession:
                 ).encode()
             )
             if invalid
-            else reference_state
+            else exact_state
         )
         steps = (
             request.check["horizon"]["minimum_steps"] - 1
             if behavior.incomplete_steps
             else request.check["horizon"]["minimum_steps"]
         )
-        traces = {"reference": [], "candidate": []}
-        for role in ("reference", "candidate"):
-            payload = (
-                f"{request.check['stage']}:{request.check['check_id']}:"
-                f"{request.seed}:{role}"
-            ).encode()
-            path = (
-                f"traces/{request.check['stage']}/"
-                f"{request.check['check_id']}/{request.seed}/{role}.bin"
-            )
-            self.adapter.trace_artifacts[path] = payload
-            traces[role].append(
-                {
-                    "path": path,
-                    "digest": staged_artifact_digest(payload),
-                }
-            )
-        metrics = [
-            {
-                "name": name,
-                "reference_value": 1.0,
-                "candidate_value": 1.0 - error,
-                "error": error,
-                "unit": "normalized_error",
-            }
-            for name in request.check["metrics"]
-        ]
+        payload = (
+            f"{request.check['stage']}:{request.check['check_id']}:"
+            f"{request.seed}:{request.role}"
+        ).encode()
+        path = (
+            f"traces/{request.check['stage']}/"
+            f"{request.check['check_id']}/{request.seed}/"
+            f"{request.role}.bin"
+        )
+        self.adapter.trace_artifacts[path] = payload
         document = {
-            "schema": VALIDATION_OBSERVATION_SCHEMA,
-            "observation_id": "",
+            "schema": VALIDATION_ROLE_RESULT_SCHEMA,
+            "result_id": "",
             "plan_id": request.plan_id,
             "check_id": request.check["check_id"],
             "stage": request.check["stage"],
             "seed": request.seed,
+            "role": request.role,
+            "implementation_id": request.implementation[
+                "implementation_id"
+            ],
             "status": "completed",
-            "reference": {
-                "implementation_id": request.reference_implementation[
-                    "implementation_id"
-                ],
-                "output_digest": reference_output,
-                "state_digest": reference_state,
-                "steps": steps,
+            "output_digest": output,
+            "state_digest": state,
+            "steps": steps,
+            "traces": [
+                {
+                    "path": path,
+                    "digest": staged_artifact_digest(payload),
+                }
+            ],
+            "default_statistics": {
+                "execution_path": "normal_fixture_runtime",
+                "role": request.role,
             },
-            "candidate": {
-                "implementation_id": request.candidate_implementation[
-                    "implementation_id"
-                ],
-                "output_digest": candidate_output,
-                "state_digest": candidate_state,
-                "steps": steps,
-            },
-            "metrics": metrics,
-            "traces": traces,
             "diagnostics": [],
         }
-        document["observation_id"] = validation_observation_id(document)
-        return ValidationObservation.from_json(document).to_json()
+        document["result_id"] = validation_role_result_id(document)
+        return ValidationRoleResult.from_json(document).to_json()
 
     def close(self):
         if self.closed:
             raise RuntimeError("validation fixture stage closed twice")
         self.closed = True
-        self.adapter.closed_stages.append(self.request.stage)
+        self.adapter.closed_sessions.append(
+            (
+                self.request.stage,
+                self.request.role,
+                self.request.block_index,
+            )
+        )
         after = (
             staged_artifact_digest(
                 f"leaked:{self.request.stage}".encode()
@@ -355,6 +365,13 @@ class FixtureValidationSession:
             "event_id": "",
             "plan_id": self.request.plan_id,
             "stage": self.request.stage,
+            "check_id": self.request.check["check_id"],
+            "seed": self.request.seed,
+            "role": self.request.role,
+            "implementation_id": self.request.implementation[
+                "implementation_id"
+            ],
+            "block_index": self.request.block_index,
             "action": action,
             "duration_ns": 100,
             "device_state_before_digest": before,
@@ -565,11 +582,44 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
         "full_local",
         "whole_model",
     ]
-    assert adapter.closed_stages == [
-        "sanity",
-        "full_local",
-        "whole_model",
-    ]
+    for run in (pre.sanity_run, *final.runs):
+        assert run is not None
+        run_document = run.to_json()
+        assert len(run_document["residency_events"]) == (
+            4 * len(run_document["observations"])
+        )
+        assert [
+            (event["role"], event["action"])
+            for event in run_document["residency_events"]
+        ] == [
+            pair
+            for _observation in run_document["observations"]
+            for pair in (
+                ("reference", "mount"),
+                ("reference", "unmount"),
+                ("candidate", "mount"),
+                ("candidate", "unmount"),
+            )
+        ]
+        assert all(
+            event["device_state_before_digest"]
+            == fixture[4].matched_conditions[
+                "idle_device_state_digest"
+            ]
+            for event in run_document["residency_events"]
+            if event["action"] == "mount"
+        )
+    assert {
+        stage for stage, _role, _block in adapter.closed_sessions
+    } == {"sanity", "full_local", "whole_model"}
+    assert len(adapter.closed_sessions) == len(adapter.mount_requests)
+    for completed_stage in ("sanity", "full_local", "whole_model"):
+        blocks = [
+            block
+            for stage, _role, block in adapter.closed_sessions
+            if stage == completed_stage
+        ]
+        assert blocks == list(range(len(blocks)))
     assert set(adapter.fixture_candidate_ids) == {fixture[2].candidate_id}
     assert len(
         {
@@ -649,7 +699,9 @@ def test_faster_but_behaviorally_invalid_approximation_is_rejected(
             ),
         }
     ]
-    assert "whole_model" not in adapter.closed_stages
+    assert "whole_model" not in {
+        stage for stage, _role, _block in adapter.closed_sessions
+    }
 
 
 def test_exact_candidate_with_behavioral_divergence_is_rejected_before_timing(
@@ -665,7 +717,10 @@ def test_exact_candidate_with_behavioral_divergence_is_rejected_before_timing(
     )
 
     assert pre.status == CandidateState.REJECTED.value
-    assert adapter.closed_stages == ["sanity"]
+    assert [
+        role for stage, role, _block in adapter.closed_sessions
+        if stage == "sanity"
+    ] == ["reference", "candidate"]
     assert pre.record.to_json()["stages"][2]["status"] == "failed"
 
 
@@ -697,7 +752,9 @@ def test_nonwinning_benchmark_skips_expensive_behavioral_validation(
 
     assert final.status == CandidateState.REJECTED.value
     assert final.runs == ()
-    assert adapter.closed_stages == ["sanity"]
+    assert {
+        stage for stage, _role, _block in adapter.closed_sessions
+    } == {"sanity"}
 
 
 def test_validation_requirements_cannot_waive_long_horizon_coverage(
@@ -771,7 +828,7 @@ def test_unproven_exact_candidate_never_reaches_timing(
 
     assert pre.status == CandidateState.REJECTED.value
     assert pre.sanity_run is None
-    assert adapter.stage_requests == []
+    assert adapter.mount_requests == []
     lifecycle = next(
         candidate
         for candidate in pre.session.candidates
@@ -818,7 +875,7 @@ def test_tampered_staged_artifact_fails_static_gate_before_execution(
 
     assert pre.status == CandidateState.FAILED.value
     assert pre.record.to_json()["stages"][0]["status"] == "failed"
-    assert adapter.stage_requests == []
+    assert adapter.mount_requests == []
 
 
 def test_validation_rejects_incomplete_declared_horizon(
@@ -852,7 +909,7 @@ def test_validation_refuses_residency_leak(
     )
 
     assert pre.status == CandidateState.FAILED.value
-    assert adapter.closed_stages == ["sanity"]
+    assert adapter.closed_sessions == [("sanity", "reference", 0)]
 
 
 def test_validation_evidence_detects_post_publication_tampering(

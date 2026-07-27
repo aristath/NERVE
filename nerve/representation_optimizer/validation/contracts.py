@@ -21,11 +21,12 @@ BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
 VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
 VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v1"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
-VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v1"
+VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v1"
+VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v2"
 VALIDATION_RESIDENCY_EVENT_SCHEMA = (
-    "nerve.optimizer.validation_residency_event.v1"
+    "nerve.optimizer.validation_residency_event.v2"
 )
-VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v1"
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v2"
 PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 VALIDATION_EVIDENCE_INTEGRITY_SCHEMA = (
     "nerve.optimizer.validation_evidence_integrity.v1"
@@ -340,6 +341,20 @@ class ValidationObservation:
 
 
 @dataclass(frozen=True)
+class ValidationRoleResult:
+    _document: Json
+
+    @classmethod
+    def from_json(cls, document: Json) -> ValidationRoleResult:
+        normalized = deepcopy(document)
+        validate_validation_role_result(normalized)
+        return cls(normalized)
+
+    def to_json(self) -> Json:
+        return deepcopy(self._document)
+
+
+@dataclass(frozen=True)
 class ValidationResidencyEvent:
     _document: Json
 
@@ -403,6 +418,14 @@ def validation_observation_id(document: Json) -> str:
     return _content_id(
         "validation_observation",
         "observation_id",
+        document,
+    )
+
+
+def validation_role_result_id(document: Json) -> str:
+    return _content_id(
+        "validation_role_result",
+        "result_id",
         document,
     )
 
@@ -1073,6 +1096,76 @@ def validate_proof_result(document: Json) -> None:
         )
 
 
+def validate_validation_role_result(document: Json) -> None:
+    canonical_json_bytes(document)
+    _fields(
+        document,
+        {
+            "schema",
+            "result_id",
+            "plan_id",
+            "check_id",
+            "stage",
+            "seed",
+            "role",
+            "implementation_id",
+            "status",
+            "output_digest",
+            "state_digest",
+            "steps",
+            "traces",
+            "default_statistics",
+            "diagnostics",
+        },
+        "validation role result",
+    )
+    _schema(
+        document,
+        VALIDATION_ROLE_RESULT_SCHEMA,
+        "validation role result",
+    )
+    _stable_id(
+        document["result_id"],
+        "validation_role_result",
+        "result_id",
+    )
+    _stable_id(document["plan_id"], "validation_plan", "plan_id")
+    _stable_id(document["check_id"], "validation_check", "check_id")
+    if document["stage"] not in VALIDATION_STAGES:
+        raise ValidationContractError(
+            "validation role-result stage is unsupported"
+        )
+    _u32(document["seed"], "seed")
+    if document["role"] not in _IMPLEMENTATION_ROLES:
+        raise ValidationContractError(
+            "validation role-result role is unsupported"
+        )
+    _text(document["implementation_id"], "implementation_id")
+    if document["status"] not in {"completed", "failed"}:
+        raise ValidationContractError(
+            "validation role-result status is unsupported"
+        )
+    for field in ("output_digest", "state_digest"):
+        if document[field] is not None:
+            _artifact_digest(document[field], field)
+    _nonnegative_integer(document["steps"], "steps")
+    _artifact_refs(document["traces"], "traces")
+    if not _object(document["default_statistics"], "default_statistics"):
+        raise ValidationContractError(
+            "validation role result requires normal runtime statistics"
+        )
+    diagnostics = _string_list(document["diagnostics"], "diagnostics")
+    if document["status"] == "failed" and not diagnostics:
+        raise ValidationContractError(
+            "failed validation role result requires diagnostics"
+        )
+    expected = validation_role_result_id(document)
+    if document["result_id"] != expected:
+        raise ValidationContractError(
+            f"validation role result id must be {expected!r}"
+        )
+
+
 def validate_validation_observation(document: Json) -> None:
     canonical_json_bytes(document)
     _fields(
@@ -1089,6 +1182,7 @@ def validate_validation_observation(document: Json) -> None:
             "candidate",
             "metrics",
             "traces",
+            "execution_statistics",
             "diagnostics",
         },
         "validation observation",
@@ -1160,6 +1254,23 @@ def validate_validation_observation(document: Json) -> None:
     _fields(traces, set(_IMPLEMENTATION_ROLES), "traces")
     for role in _IMPLEMENTATION_ROLES:
         _artifact_refs(traces[role], f"traces.{role}")
+    statistics = _object(
+        document["execution_statistics"],
+        "execution_statistics",
+    )
+    _fields(
+        statistics,
+        set(_IMPLEMENTATION_ROLES),
+        "execution_statistics",
+    )
+    for role in _IMPLEMENTATION_ROLES:
+        if not _object(
+            statistics[role],
+            f"execution_statistics.{role}",
+        ):
+            raise ValidationContractError(
+                f"execution_statistics.{role} must not be empty"
+            )
     diagnostics = _string_list(document["diagnostics"], "diagnostics")
     if document["status"] == "failed" and not diagnostics:
         raise ValidationContractError(
@@ -1181,6 +1292,11 @@ def validate_validation_residency_event(document: Json) -> None:
             "event_id",
             "plan_id",
             "stage",
+            "check_id",
+            "seed",
+            "role",
+            "implementation_id",
+            "block_index",
             "action",
             "duration_ns",
             "device_state_before_digest",
@@ -1205,6 +1321,14 @@ def validate_validation_residency_event(document: Json) -> None:
         raise ValidationContractError(
             "validation residency event stage is unsupported"
         )
+    _stable_id(document["check_id"], "validation_check", "check_id")
+    _u32(document["seed"], "seed")
+    if document["role"] not in _IMPLEMENTATION_ROLES:
+        raise ValidationContractError(
+            "validation residency role is unsupported"
+        )
+    _text(document["implementation_id"], "implementation_id")
+    _nonnegative_integer(document["block_index"], "block_index")
     if document["action"] not in {"mount", "unmount"}:
         raise ValidationContractError(
             "validation residency event action is unsupported"
@@ -1286,9 +1410,9 @@ def validate_validation_run(document: Json) -> None:
             "validation run execution order must match observations exactly"
         )
     events = _list(document["residency_events"], "residency_events")
-    if len(events) != 2:
+    if len(events) != 4 * len(observations):
         raise ValidationContractError(
-            "validation run requires one mount and one unmount event"
+            "validation run requires a mount and unmount for each role result"
         )
     parsed_events = []
     for index, raw_event in enumerate(events):
@@ -1302,18 +1426,48 @@ def validate_validation_run(document: Json) -> None:
                 "validation residency event does not match its run"
             )
         parsed_events.append(event)
-    mount, unmount = parsed_events
-    if (
-        mount["action"] != "mount"
-        or unmount["action"] != "unmount"
-        or mount["device_state_after_digest"]
-        != unmount["device_state_before_digest"]
-        or mount["device_state_before_digest"]
-        != unmount["device_state_after_digest"]
-    ):
-        raise ValidationContractError(
-            "validation residency events do not prove complete release"
-        )
+    event_index = 0
+    block_index = 0
+    idle_digest: str | None = None
+    for observation in observations:
+        for role in _IMPLEMENTATION_ROLES:
+            mount = parsed_events[event_index]
+            unmount = parsed_events[event_index + 1]
+            expected_identity = {
+                "check_id": observation["check_id"],
+                "seed": observation["seed"],
+                "role": role,
+                "implementation_id": observation[role][
+                    "implementation_id"
+                ],
+                "block_index": block_index,
+            }
+            if any(
+                mount[field] != value or unmount[field] != value
+                for field, value in expected_identity.items()
+            ):
+                raise ValidationContractError(
+                    "validation residency identity does not match execution"
+                )
+            if (
+                mount["action"] != "mount"
+                or unmount["action"] != "unmount"
+                or mount["device_state_after_digest"]
+                != unmount["device_state_before_digest"]
+                or mount["device_state_before_digest"]
+                != unmount["device_state_after_digest"]
+            ):
+                raise ValidationContractError(
+                    "validation role residency does not prove complete release"
+                )
+            if idle_digest is None:
+                idle_digest = mount["device_state_before_digest"]
+            elif mount["device_state_before_digest"] != idle_digest:
+                raise ValidationContractError(
+                    "validation role mounts do not share one idle baseline"
+                )
+            event_index += 2
+            block_index += 1
     elapsed = _list(document["host_elapsed_ns"], "host_elapsed_ns")
     if len(elapsed) != len(observations):
         raise ValidationContractError(

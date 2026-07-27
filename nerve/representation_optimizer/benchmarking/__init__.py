@@ -15,10 +15,6 @@ from nerve.representation_optimizer.benchmarking.contracts import (
     BenchmarkRun,
     BenchmarkWorkload,
 )
-from nerve.representation_optimizer.benchmarking.executor_adapter import (
-    ResidentComponentExecutionAdapter,
-)
-
 __all__ = [
     "BENCHMARK_OBSERVATION_SCHEMA",
     "BENCHMARK_EVIDENCE_INTEGRITY_SCHEMA",
@@ -33,5 +29,4 @@ __all__ = [
     "BenchmarkResidencyEvent",
     "BenchmarkRun",
     "BenchmarkWorkload",
-    "ResidentComponentExecutionAdapter",
 ]
