@@ -523,13 +523,19 @@ def synthetic_numeric_formats(features: frozenset[str]) -> list[str]:
 def discover_compiler_target(
     *,
     runtime_bin: Path | None = None,
+    allowed_physical_device_ids: Iterable[str] = (),
+    environment: dict[str, str] | None = None,
 ) -> CompilerTarget:
-    command = compiler_device_probe_command(runtime_bin=runtime_bin)
+    command = compiler_device_probe_command(
+        runtime_bin=runtime_bin,
+        allowed_physical_device_ids=allowed_physical_device_ids,
+    )
     completed = subprocess.run(
         command,
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
@@ -550,15 +556,33 @@ def discover_compiler_target(
     return CompilerTarget.from_hardware_inventory_json(payload)
 
 
-def compiler_device_probe_command(*, runtime_bin: Path | None = None) -> list[str]:
+def compiler_device_probe_command(
+    *,
+    runtime_bin: Path | None = None,
+    allowed_physical_device_ids: Iterable[str] = (),
+) -> list[str]:
+    allowed = tuple(sorted(set(allowed_physical_device_ids)))
+    if any(not value.startswith("vulkan-uuid:") for value in allowed):
+        raise ModelCompileError(
+            "compiler device discovery requires stable Vulkan device identities"
+        )
     configured = runtime_bin or runtime_bin_from_env()
     if configured is not None:
-        return [str(configured), "--inspect-devices", "--json"]
+        return [
+            str(configured),
+            "--inspect-devices",
+            "--json",
+            *[
+                value
+                for device_id in allowed
+                for value in ("--allow-physical-device", device_id)
+            ],
+        ]
 
     repo_root = Path(__file__).resolve().parents[1]
     cargo_manifest = repo_root / "runtime-rs" / "Cargo.toml"
     if cargo_manifest.is_file():
-        return [
+        command = [
             "cargo",
             "run",
             "--release",
@@ -573,10 +597,25 @@ def compiler_device_probe_command(*, runtime_bin: Path | None = None) -> list[st
             "--inspect-devices",
             "--json",
         ]
+        command.extend(
+            value
+            for device_id in allowed
+            for value in ("--allow-physical-device", device_id)
+        )
+        return command
 
     installed = shutil.which("nerve-runtime")
     if installed:
-        return [installed, "--inspect-devices", "--json"]
+        return [
+            installed,
+            "--inspect-devices",
+            "--json",
+            *[
+                value
+                for device_id in allowed
+                for value in ("--allow-physical-device", device_id)
+            ],
+        ]
     raise ModelCompileError(
         "could not find nerve-runtime for GPU compiler-capability discovery"
     )

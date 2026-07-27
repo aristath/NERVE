@@ -211,3 +211,47 @@ def test_compiler_target_discovery_fails_closed_on_probe_errors(
 
     with pytest.raises(ModelCompileError, match="device query failed"):
         discover_compiler_target(runtime_bin=Path("/tmp/nerve-runtime"))
+
+
+def test_compiler_target_discovery_forwards_stable_allowlist_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    allowed = "vulkan-uuid:00000000070000000000000000000000"
+
+    class Completed:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps(
+            hardware_inventory(
+                device_payload(
+                    index=2,
+                    device_type="discrete_gpu",
+                    features=["shader_float16"],
+                )
+            )
+        )
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return Completed()
+
+    monkeypatch.setattr("nerve.compiler_target.subprocess.run", run)
+
+    discover_compiler_target(
+        runtime_bin=Path("/tmp/nerve-runtime"),
+        allowed_physical_device_ids=(allowed,),
+        environment={"VK_DRIVER_FILES": "/tmp/radeon.json"},
+    )
+
+    assert captured["command"] == [
+        "/tmp/nerve-runtime",
+        "--inspect-devices",
+        "--json",
+        "--allow-physical-device",
+        allowed,
+    ]
+    assert captured["environment"] == {
+        "VK_DRIVER_FILES": "/tmp/radeon.json"
+    }
