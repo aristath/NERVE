@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -192,6 +193,50 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     )
     assert executor.closed is True
     assert executor.aborted is False
+
+
+def test_resident_component_schedule_trace_excludes_timing_jitter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, execution_request, _ = _requests(tmp_path)
+    original_request = executor.request
+    execution_count = 0
+
+    def variably_timed(document: Json, *, cancel_requested=None) -> Json:
+        nonlocal execution_count
+        response = original_request(
+            document,
+            cancel_requested=cancel_requested,
+        )
+        if document["command"] == "execute":
+            execution_count += 1
+            duration_ns = 400 + execution_count
+            response["payload"]["execution_ns"] = duration_ns
+            response["payload"]["throughput_windows"][0][
+                "duration_ns"
+            ] = duration_ns
+        return response
+
+    executor.request = variably_timed  # type: ignore[method-assign]
+    session = adapter.open_session(mount_request)
+    first = BenchmarkObservation.from_json(
+        session.execute(execution_request)
+    ).to_json()
+    second = BenchmarkObservation.from_json(
+        session.execute(replace(execution_request, pair_index=1))
+    ).to_json()
+    session.close()
+
+    assert first["timing"]["execution_ns"] != second["timing"]["execution_ns"]
+    assert first["traces"]["schedule"]["digest"] == second["traces"][
+        "schedule"
+    ]["digest"]
+    assert all(
+        first["traces"][name]["digest"] == second["traces"][name]["digest"]
+        for name in ("distribution", "tokens", "state", "random_draws")
+    )
 
 
 def test_resident_component_adapter_aborts_a_mismatched_mount(

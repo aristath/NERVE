@@ -534,7 +534,14 @@ class ResidentComponentExecutionSession:
                 "seed": request.seed,
             },
             "schedule": {
-                "throughput_windows": report["throughput_windows"],
+                "throughput_windows": [
+                    {
+                        "index": window["index"],
+                        "start_unit": window["start_unit"],
+                        "end_unit": window["end_unit"],
+                    }
+                    for window in report["throughput_windows"]
+                ],
                 "physical_dispatch_count": report[
                     "physical_dispatch_count"
                 ],
