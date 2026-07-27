@@ -120,7 +120,8 @@ mod tests {
                     "weight": {
                         "dtype": "BF16",
                         "shape": [4, 4],
-                        "source_file": "../outside.safetensors"
+                        "source_file": "../outside.safetensors",
+                        "data_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
                     }
                 }
             }))
@@ -132,6 +133,12 @@ mod tests {
 
         assert!(error.0.contains("must stay inside the package"));
 
+        std::fs::create_dir_all(root.join("weights")).unwrap();
+        std::fs::write(
+            root.join("weights/weight.safetensors"),
+            b"fixture",
+        )
+        .unwrap();
         std::fs::write(
             &index_path,
             serde_json::to_vec(&serde_json::json!({

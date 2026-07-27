@@ -48,6 +48,7 @@ fn canonical_runtime_execution_identity(
             },
         },
         "component_executions": component_executions,
+        "implementation_selection": runtime_model.implementation_selection,
         "state_capacity_activations": dynamic_state_capacity_activations,
         "speculative_decoders_enabled": speculative_decoders_enabled,
     });

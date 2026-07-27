@@ -52,20 +52,22 @@ impl VulkanResidentModelPackage {
             &runtime_model.component_executions,
         )?;
 
-        let tensor_index_path = resolve_resident_model_package_path(
-            manifest_dir,
-            &runtime_model.package.tensor_index_path,
-        );
         let default_device_id = runtime_model.placement.default_device_id.clone();
-        let (tensor_index, resource_plan, placed_plan) =
-            plan_resident_package_single_device_stream_circuit(
+        let tensor_index =
+            runtime_model.load_runtime_tensor_index(manifest_dir)?;
+        let (resource_plan, placement_plan, placed_plan) =
+            plan_resident_package_placed_stream_circuit_with_tensor_index(
                 &default_device_id,
                 &runtime_model.placement,
                 &runtime_model.circuit_graph,
                 manifest_dir,
-                &tensor_index_path,
+                &tensor_index,
                 runtime_model.package.activation_element_bytes,
             )?;
+        validate_single_device_resident_package_placement(
+            &default_device_id,
+            &placement_plan,
+        )?;
         let parameter_buffer_plan = VulkanPermanentParameterBufferPlan::from_placed_resident_plan(
             &placed_plan.placed_resident_plan,
         )
@@ -370,4 +372,3 @@ impl VulkanResidentTokenModelPackage for VulkanResidentModelPackage {
         VulkanResidentModelPackage::create_stream_processor(self, device, random_seed)
     }
 }
-

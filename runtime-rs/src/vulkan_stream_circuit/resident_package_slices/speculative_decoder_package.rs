@@ -49,6 +49,8 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
             placement: StreamCircuitPlacementSpec::new(device_id),
             circuit_graph,
             component_executions: decoder.component_executions.clone(),
+            tensor_index_fragments: Vec::new(),
+            implementation_selection: None,
         };
         let device_slice = Arc::new(
             VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(

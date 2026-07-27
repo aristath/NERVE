@@ -124,6 +124,7 @@ include!("vulkan_stream_circuit/token_engine.rs");
 include!("vulkan_stream_circuit/resident_package_slices.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
+include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
 include!("vulkan_stream_circuit/sparse_moe_execution.rs");
 include!("vulkan_stream_circuit/placed_model_package_loader.rs");
 include!("vulkan_stream_circuit/placed_stream_processor.rs");

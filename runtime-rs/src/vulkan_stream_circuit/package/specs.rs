@@ -31,6 +31,15 @@ pub struct VulkanResidentRuntimeModel {
     pub placement: StreamCircuitPlacementSpec,
     pub circuit_graph: VulkanResidentPackageCircuitGraph,
     pub component_executions: Vec<VulkanResidentComponentExecutionSpec>,
+    pub tensor_index_fragments: Vec<VulkanRuntimeTensorIndexFragment>,
+    pub implementation_selection:
+        Option<crate::RuntimeImplementationSelectionReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanRuntimeTensorIndexFragment {
+    pub index_path: PathBuf,
+    pub candidate_root: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

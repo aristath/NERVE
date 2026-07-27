@@ -47,6 +47,16 @@ impl VulkanResidentModelPackageManifest {
         validate_resident_package_artifact_integrity(path, &manifest)?;
         let package_root = path.parent().unwrap_or_else(|| Path::new("."));
         validate_resident_package_spirv_requirements(package_root, &manifest)?;
+        manifest
+            .implementation_catalog(package_root)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid runtime implementation catalog: {error}"
+                    ),
+                )
+            })?;
         let source_graph = manifest
             .resolved_source_graph(package_root)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
@@ -59,6 +69,17 @@ impl VulkanResidentModelPackageManifest {
         validate_generation_execution_contract(&manifest, &manifest.circuit_graph)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         Ok(manifest)
+    }
+
+    pub fn implementation_catalog(
+        &self,
+        package_root: impl AsRef<Path>,
+    ) -> io::Result<crate::RuntimeImplementationCatalog> {
+        crate::RuntimeImplementationCatalog::load(
+            package_root,
+            &self.representation_optimization_path,
+            &self.package_id,
+        )
     }
 
     pub fn write_json_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
@@ -232,6 +253,8 @@ impl VulkanResidentModelPackageManifest {
             placement,
             circuit_graph,
             component_executions,
+            tensor_index_fragments: Vec::new(),
+            implementation_selection: None,
         })
     }
 }

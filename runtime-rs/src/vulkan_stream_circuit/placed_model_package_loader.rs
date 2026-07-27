@@ -115,17 +115,15 @@ impl VulkanResidentInProcessPlacedModelPackage {
             mount_speculative_decoders,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-        let tensor_index_path = resolve_resident_model_package_path(
-            manifest_dir,
-            &runtime_model.package.tensor_index_path,
-        );
-        let (tensor_index, resource_plan, placement_plan, _boundary_placed_plan) =
-            plan_resident_package_placed_stream_circuit(
+        let tensor_index =
+            runtime_model.load_runtime_tensor_index(manifest_dir)?;
+        let (resource_plan, placement_plan, _boundary_placed_plan) =
+            plan_resident_package_placed_stream_circuit_with_tensor_index(
                 &input_device_id,
                 &runtime_model.placement,
                 &runtime_model.circuit_graph,
                 manifest_dir,
-                &tensor_index_path,
+                &tensor_index,
                 runtime_model.package.activation_element_bytes,
             )?;
         let input_device = device_for(&input_device_id)?;

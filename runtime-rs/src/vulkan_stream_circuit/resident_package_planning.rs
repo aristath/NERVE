@@ -7,6 +7,7 @@ fn resolve_resident_model_package_path(manifest_dir: &Path, path: &str) -> PathB
     }
 }
 
+#[cfg(test)]
 fn plan_resident_package_single_device_stream_circuit(
     device_id: &str,
     placement_spec: &StreamCircuitPlacementSpec,
@@ -35,6 +36,7 @@ fn plan_resident_package_single_device_stream_circuit(
     Ok((tensor_index, resource_plan, placed_plan))
 }
 
+#[cfg(test)]
 fn plan_resident_package_placed_stream_circuit(
     device_id: &str,
     placement_spec: &StreamCircuitPlacementSpec,
@@ -151,4 +153,3 @@ fn validate_single_device_resident_package_placement(
     }
     Ok(())
 }
-
