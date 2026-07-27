@@ -342,16 +342,20 @@ def _proof_artifact_readers(
     source: ProofVerifierRegistry,
 ) -> tuple[tuple[Json, object], ...]:
     artifacts = []
-    paths: set[str] = set()
+    declarations: dict[str, tuple[str, str]] = {}
     for result in proof_results:
         verifier_id = str(result["verifier_id"])
         for reference in result["artifacts"]:
             path = str(reference["path"])
-            if path in paths:
+            declaration = (str(reference["digest"]), verifier_id)
+            previous = declarations.get(path)
+            if previous is not None and previous != declaration:
                 raise ModelCompileError(
-                    "proof results reuse an artifact path"
+                    "proof results declare conflicting artifact ownership"
                 )
-            paths.add(path)
+            if previous is not None:
+                continue
+            declarations[path] = declaration
 
             def reader(
                 relative_path,

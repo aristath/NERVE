@@ -57,6 +57,7 @@ from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
 )
 from nerve.representation_optimizer.validation.storage import (
+    _proof_artifact_readers,
     load_prebenchmark_evidence,
     load_validation_evidence,
 )
@@ -147,6 +148,68 @@ class FixtureProofVerifier:
             chunk_bytes,
         ):
             yield self.artifact_payload[offset : offset + chunk_bytes]
+
+
+def test_identical_proof_artifact_can_support_multiple_obligations() -> None:
+    verifier = FixtureProofVerifier(emit_artifact=True)
+    registry = ProofVerifierRegistry.from_verifiers((verifier,))
+    reference = {
+        "path": "proofs/fixture-certificate.bin",
+        "digest": staged_artifact_digest(verifier.artifact_payload),
+    }
+
+    readers = _proof_artifact_readers(
+        [
+            {
+                "verifier_id": verifier.verifier_id,
+                "artifacts": [reference],
+            },
+            {
+                "verifier_id": verifier.verifier_id,
+                "artifacts": [reference],
+            },
+        ],
+        registry,
+    )
+
+    assert len(readers) == 1
+    assert readers[0][0] == reference
+    assert b"".join(readers[0][1](reference["path"])) == (
+        verifier.artifact_payload
+    )
+
+
+def test_conflicting_proof_artifact_ownership_is_rejected() -> None:
+    verifier = FixtureProofVerifier(emit_artifact=True)
+    registry = ProofVerifierRegistry.from_verifiers((verifier,))
+
+    with pytest.raises(
+        ModelCompileError,
+        match="conflicting artifact ownership",
+    ):
+        _proof_artifact_readers(
+            [
+                {
+                    "verifier_id": verifier.verifier_id,
+                    "artifacts": [
+                        {
+                            "path": "proofs/fixture-certificate.bin",
+                            "digest": staged_artifact_digest(b"first"),
+                        }
+                    ],
+                },
+                {
+                    "verifier_id": verifier.verifier_id,
+                    "artifacts": [
+                        {
+                            "path": "proofs/fixture-certificate.bin",
+                            "digest": staged_artifact_digest(b"second"),
+                        }
+                    ],
+                },
+            ],
+            registry,
+        )
 
 
 @dataclass(frozen=True)
