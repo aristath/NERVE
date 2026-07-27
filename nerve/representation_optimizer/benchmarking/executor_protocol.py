@@ -6,11 +6,14 @@ from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.benchmarking.protocols import (
     BenchmarkMountRequest,
 )
-from nerve.representation_optimizer.contracts import canonical_json_bytes
+from nerve.representation_optimizer.contracts import (
+    DEVICE_STATE_DIGEST_SCHEMA,
+    canonical_json_bytes,
+)
 
 
 EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v1"
-EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v1"
+EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v2"
 ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
 
 
@@ -76,7 +79,7 @@ def validate_mount_payload(
         "resident_transient_bytes",
     ):
         nonnegative_integer(payload.get(field), f"executor mount {field}")
-    required_digest(payload, "mounted_state_digest")
+    required_device_state_digest(payload, "mounted_state_digest")
     is_candidate = request.implementation["implementation_id"].startswith(
         "staged-representation:"
     )
@@ -153,6 +156,24 @@ def required_digest(document: Json, field: str) -> str:
         or any(character not in "0123456789abcdef" for character in hexadecimal)
     ):
         raise ModelCompileError(f"executor {field} is not an artifact digest")
+    return value
+
+
+def required_device_state_digest(document: Json, field: str) -> str:
+    value = required_text(document, field)
+    prefix = f"{DEVICE_STATE_DIGEST_SCHEMA}:"
+    hexadecimal = value.removeprefix(prefix)
+    if (
+        not value.startswith(prefix)
+        or len(hexadecimal) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in hexadecimal
+        )
+    ):
+        raise ModelCompileError(
+            f"executor {field} is not a device-state digest"
+        )
     return value
 
 

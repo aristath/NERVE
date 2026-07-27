@@ -11,6 +11,7 @@ from nerve.representation_optimizer.benchmarking.executor_artifacts import (
 )
 from nerve.representation_optimizer.contracts import (
     contract_digest,
+    device_state_digest,
     stable_contract_id,
 )
 from nerve.representation_optimizer.staging.contracts import (
@@ -54,7 +55,7 @@ class FixtureWholeModelExecutor:
                 "context_capacity": (
                     document["context_capacity"] or 131_072
                 ),
-                "mounted_state_digest": _digest(b"mounted"),
+                "mounted_state_digest": _device_digest(b"mounted"),
                 "mount_duration_ns": 11,
             }
             status = "mounted"
@@ -94,7 +95,7 @@ class FixtureWholeModelExecutor:
         elif document["command"] == "close":
             payload = {
                 "released": True,
-                "mounted_state_digest": _digest(b"mounted"),
+                "mounted_state_digest": _device_digest(b"mounted"),
                 "released_device_ids": [
                     "optimizer:device:0",
                     "optimizer:device:1",
@@ -213,7 +214,7 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
             "maximum_quantum_wait_ns": 9_000_000,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": _digest(b"idle"),
+        "idle_device_state_digest": _device_digest(b"idle"),
         "exclusive_residency": True,
     }
     plan_id = stable_contract_id(
@@ -302,8 +303,8 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
     assert result["steps"] == 1_024
     assert result["default_statistics"]["scheduler_steps"] == 16
     assert comparison["metrics"][0]["error"] == 0.0
-    assert mount["device_state_before_digest"] == _digest(b"idle")
-    assert unmount["device_state_after_digest"] == _digest(b"idle")
+    assert mount["device_state_before_digest"] == _device_digest(b"idle")
+    assert unmount["device_state_after_digest"] == _device_digest(b"idle")
     assert executor.closed is True
     assert executor.aborted is False
     assert captured_environment["VK_DRIVER_FILES"] == str(
@@ -314,3 +315,7 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
 
 def _digest(payload: bytes) -> str:
     return staged_artifact_digest(payload)
+
+
+def _device_digest(payload: bytes) -> str:
+    return device_state_digest({"fixture_state": payload.hex()})

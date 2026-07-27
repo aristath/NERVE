@@ -35,6 +35,7 @@ from nerve.representation_optimizer.benchmarking.storage import (
 )
 from nerve.representation_optimizer.contracts import (
     contract_digest,
+    device_state_digest,
     stable_contract_id,
 )
 from nerve.representation_optimizer.lifecycle import CandidateState
@@ -113,11 +114,13 @@ class FixtureExecutionSession:
         self.adapter = adapter
         self.request = request
         self.closed = False
-        self.mounted_state = staged_artifact_digest(
-            (
-                f"mounted:{request.role}:{request.block_index}:"
-                f"{request.seed}"
-            ).encode()
+        self.mounted_state = device_state_digest(
+            {
+                "fixture_state": "mounted",
+                "role": request.role,
+                "block_index": request.block_index,
+                "seed": request.seed,
+            }
         )
         self._mount_event = self._event(
             action="mount",
@@ -447,7 +450,9 @@ def _fixture(
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": staged_artifact_digest(b"idle"),
+            "idle_device_state_digest": device_state_digest(
+                {"fixture_state": "idle"}
+            ),
             "exclusive_residency": True,
         },
     )
@@ -861,8 +866,8 @@ def test_mismatched_unmount_evidence_fails_after_releasing_session(
 
     def mismatched_unmount(self):
         document = original(self)
-        document["device_state_after_digest"] = staged_artifact_digest(
-            b"not idle"
+        document["device_state_after_digest"] = device_state_digest(
+            {"fixture_state": "not_idle"}
         )
         document["event_id"] = benchmark_residency_event_id(document)
         return document

@@ -25,6 +25,7 @@ from nerve.representation_optimizer.benchmarking.protocols import (
 )
 from nerve.representation_optimizer.contracts import (
     contract_digest,
+    device_state_digest,
     stable_contract_id,
 )
 from nerve.representation_optimizer.staging.contracts import (
@@ -68,7 +69,7 @@ class FixtureExecutor:
                 "mount_duration_ns": 11,
                 "resident_parameter_bytes": 4_096,
                 "resident_transient_bytes": 512,
-                "mounted_state_digest": _artifact_digest(b"mounted"),
+                "mounted_state_digest": _device_digest(b"mounted"),
             }
             status = "mounted"
         elif command == "execute":
@@ -103,7 +104,7 @@ class FixtureExecutor:
             payload = {
                 "released": True,
                 "release_duration_ns": 7,
-                "mounted_state_digest": _artifact_digest(b"mounted"),
+                "mounted_state_digest": _device_digest(b"mounted"),
             }
             status = "released"
         else:
@@ -286,7 +287,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
             "maximum_quantum_wait_ns": 9_000_000,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": _artifact_digest(b"idle"),
+        "idle_device_state_digest": _device_digest(b"idle"),
         "exclusive_residency": True,
     }
     plan_id = stable_contract_id("validation_plan", str(tmp_path))
@@ -342,8 +343,8 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
     assert result["output_digest"] == _artifact_digest(b"output")
     assert result["default_statistics"]["physical_dispatch_count"] == 1
     assert comparison["metrics"][0]["error"] == 0.0
-    assert mount["device_state_before_digest"] == _artifact_digest(b"idle")
-    assert unmount["device_state_after_digest"] == _artifact_digest(b"idle")
+    assert mount["device_state_before_digest"] == _device_digest(b"idle")
+    assert unmount["device_state_after_digest"] == _device_digest(b"idle")
 
 
 def _adapter_fixture(
@@ -447,7 +448,7 @@ def _requests(
             "maximum_quantum_wait_ns": 9_000_000,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": _artifact_digest(b"idle"),
+        "idle_device_state_digest": _device_digest(b"idle"),
         "exclusive_residency": True,
     }
     plan_id = stable_contract_id("benchmark_plan", str(tmp_path))
@@ -479,3 +480,7 @@ def _requests(
 
 def _artifact_digest(payload: bytes) -> str:
     return staged_artifact_digest(payload)
+
+
+def _device_digest(payload: bytes) -> str:
+    return device_state_digest({"fixture_state": payload.hex()})

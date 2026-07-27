@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v1";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v1";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v2";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
 

@@ -24,6 +24,7 @@ from nerve.representation_optimizer.benchmarking.planning import (
 from nerve.representation_optimizer.contracts import (
     canonical_json_bytes,
     contract_digest,
+    device_state_digest,
     stable_contract_id,
 )
 from nerve.representation_optimizer.lifecycle import (
@@ -167,7 +168,9 @@ def _qualified_candidate(
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": staged_artifact_digest(b"idle"),
+            "idle_device_state_digest": device_state_digest(
+                {"fixture_state": "idle"}
+            ),
             "exclusive_residency": True,
         },
     )

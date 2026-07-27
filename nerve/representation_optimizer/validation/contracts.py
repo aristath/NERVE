@@ -7,8 +7,12 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from nerve.compilation import Json
+from nerve.representation_optimizer.benchmarking.contracts import (
+    validate_matched_conditions,
+)
 from nerve.representation_optimizer.contracts import (
     ContractValidationError,
+    DEVICE_STATE_DIGEST_SCHEMA,
     canonical_json_bytes,
     contract_digest,
     stable_contract_id,
@@ -19,14 +23,14 @@ BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
 )
 VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
-VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v1"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v2"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
 VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v1"
 VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v2"
 VALIDATION_RESIDENCY_EVENT_SCHEMA = (
-    "nerve.optimizer.validation_residency_event.v2"
+    "nerve.optimizer.validation_residency_event.v3"
 )
-VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v2"
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v3"
 PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 VALIDATION_EVIDENCE_INTEGRITY_SCHEMA = (
     "nerve.optimizer.validation_evidence_integrity.v1"
@@ -968,7 +972,11 @@ def validate_validation_plan(document: Json) -> None:
             implementations[role],
             f"implementations.{role}",
         )
-    _object(document["matched_conditions"], "matched_conditions")
+    matched_conditions = _object(
+        document["matched_conditions"],
+        "matched_conditions",
+    )
+    validate_matched_conditions(matched_conditions)
     _contract_digest(
         document["matched_conditions_digest"],
         "matched_conditions_digest",
@@ -1338,7 +1346,7 @@ def validate_validation_residency_event(document: Json) -> None:
         "device_state_before_digest",
         "device_state_after_digest",
     ):
-        _artifact_digest(document[field], field)
+        _device_state_digest(document[field], field)
     if not isinstance(document["released"], bool):
         raise ValidationContractError(
             "validation residency released must be boolean"
@@ -1904,6 +1912,21 @@ def _artifact_digest(value: object, path: str) -> str:
     ):
         raise ValidationContractError(
             f"{path} must be an artifact digest"
+        )
+    return text
+
+
+def _device_state_digest(value: object, path: str) -> str:
+    text = _text(value, path)
+    prefix = f"{DEVICE_STATE_DIGEST_SCHEMA}:"
+    suffix = text.removeprefix(prefix)
+    if (
+        not text.startswith(prefix)
+        or len(suffix) != 64
+        or any(character not in "0123456789abcdef" for character in suffix)
+    ):
+        raise ValidationContractError(
+            f"{path} must be a device-state digest"
         )
     return text
 

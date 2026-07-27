@@ -27,16 +27,17 @@ BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
 )
 VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
-VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v1"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v2"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
 VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v1"
 VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v2"
 VALIDATION_RESIDENCY_EVENT_SCHEMA = (
-    "nerve.optimizer.validation_residency_event.v2"
+    "nerve.optimizer.validation_residency_event.v3"
 )
-VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v2"
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v3"
 PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 CONTRACT_DIGEST_SCHEMA = "nerve.optimizer.canonical_json_sha256.v1"
+DEVICE_STATE_DIGEST_SCHEMA = "nerve.optimizer.device_state_sha256.v1"
 
 OPTIMIZATION_SCOPE_KINDS = frozenset(
     {
@@ -128,6 +129,33 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def contract_digest(value: Any) -> str:
     return f"{CONTRACT_DIGEST_SCHEMA}:{sha256(canonical_json_bytes(value)).hexdigest()}"
+
+
+def device_state_digest(value: Any) -> str:
+    """Return the identity of a physical residency state, not a file artifact."""
+
+    return (
+        f"{DEVICE_STATE_DIGEST_SCHEMA}:"
+        f"{sha256(canonical_json_bytes(value)).hexdigest()}"
+    )
+
+
+def require_device_state_digest(value: Any, path: str) -> str:
+    digest = _require_nonempty_string(value, path)
+    prefix = f"{DEVICE_STATE_DIGEST_SCHEMA}:"
+    hexadecimal = digest.removeprefix(prefix)
+    if (
+        not digest.startswith(prefix)
+        or len(hexadecimal) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in hexadecimal
+        )
+    ):
+        raise ContractValidationError(
+            f"{path} must use {DEVICE_STATE_DIGEST_SCHEMA}"
+        )
+    return digest
 
 
 def stable_contract_id(prefix: str, *identity_parts: Any) -> str:

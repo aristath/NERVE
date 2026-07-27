@@ -17,6 +17,7 @@ from nerve.representation_optimizer.benchmarking.executor_protocol import (
     positive_integer,
     request_id,
     required_digest,
+    required_device_state_digest,
     required_object,
     required_text,
     validated_response,
@@ -293,7 +294,7 @@ def _validate_mount_payload(
         )
     for field in ("package_id", "device_name"):
         required_text(payload, field)
-    required_digest(payload, "mounted_state_digest")
+    required_device_state_digest(payload, "mounted_state_digest")
     for field in (
         "mount_duration_ns",
         "resident_parameter_bytes",

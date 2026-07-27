@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nerve.compilation import Json, ModelCompileError
-from nerve.representation_optimizer.contracts import contract_digest
+from nerve.representation_optimizer.contracts import device_state_digest
 
 
 AMD_PCI_VENDOR_ID = "0x1002"
@@ -341,7 +341,7 @@ def declared_idle_state_digest(
         ),
         key=lambda item: item["device_id"],
     )
-    return contract_digest(
+    return device_state_digest(
         {
             "schema": "nerve.optimizer.device_idle_attestation.v1",
             "devices": devices,

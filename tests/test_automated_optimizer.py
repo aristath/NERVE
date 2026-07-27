@@ -24,6 +24,7 @@ from nerve.representation_optimizer.automation import (
 from nerve.representation_optimizer.contracts import (
     canonical_json_bytes,
     contract_digest,
+    device_state_digest,
     representation_candidate_id,
 )
 from nerve.representation_optimizer.providers import ProviderRegistry, StaticEstimate
@@ -213,7 +214,9 @@ def _target(
         "placement": {"fixture_scope": "vulkan:fixture"},
         "controls": {"scheduler": "normal"},
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": staged_artifact_digest(b"idle"),
+        "idle_device_state_digest": device_state_digest(
+            {"fixture_state": "idle"}
+        ),
         "exclusive_residency": True,
     }
     return (
@@ -760,8 +763,8 @@ def test_verified_device_lease_checks_idle_before_and_after(
     tmp_path: Path,
 ) -> None:
     probe_results = [
-        staged_artifact_digest(b"idle"),
-        staged_artifact_digest(b"idle"),
+        device_state_digest({"fixture_state": "idle"}),
+        device_state_digest({"fixture_state": "idle"}),
     ]
     target, _ = _target(
         lease=VerifiedDeviceLeaseManager(
@@ -780,8 +783,8 @@ def test_verified_device_lease_reports_post_execution_residency_leak(
     tmp_path: Path,
 ) -> None:
     probe_results = [
-        staged_artifact_digest(b"idle"),
-        staged_artifact_digest(b"resident"),
+        device_state_digest({"fixture_state": "idle"}),
+        device_state_digest({"fixture_state": "resident"}),
     ]
     target, _ = _target(
         lease=VerifiedDeviceLeaseManager(
@@ -797,8 +800,8 @@ def test_verified_device_lease_reports_post_execution_residency_leak(
     target, _ = _target(
         lease=VerifiedDeviceLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_idle_state_digest=lambda _target: staged_artifact_digest(
-                b"idle"
+            probe_idle_state_digest=lambda _target: device_state_digest(
+                {"fixture_state": "idle"}
             ),
         )
     )

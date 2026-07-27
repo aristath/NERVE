@@ -15,6 +15,7 @@ from nerve.representation_optimizer.benchmarking.protocols import (
 from nerve.representation_optimizer.contracts import (
     HARDWARE_PROCESS_PROFILE_SCHEMA,
     contract_digest,
+    require_device_state_digest,
     validate_contract,
 )
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
@@ -197,11 +198,10 @@ class OptimizationTarget:
             raise ModelCompileError(
                 "optimization target must require exclusive residency"
             )
-        idle = self.matched_conditions.get("idle_device_state_digest")
-        if not isinstance(idle, str) or not idle:
-            raise ModelCompileError(
-                "optimization target must declare an idle device-state digest"
-            )
+        require_device_state_digest(
+            self.matched_conditions.get("idle_device_state_digest"),
+            "optimization target idle_device_state_digest",
+        )
 
     @property
     def profile_ids(self) -> tuple[str, ...]:

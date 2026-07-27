@@ -4,6 +4,7 @@ from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.benchmarking.executor_protocol import (
     positive_integer,
     required_digest,
+    required_device_state_digest,
     required_object,
     required_text,
 )
@@ -13,7 +14,7 @@ VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
     "nerve.optimizer.validation_executor_command.v1"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v1"
+    "nerve.optimizer.validation_executor_response.v2"
 )
 
 
@@ -59,7 +60,7 @@ def validate_validation_mount_payload(
             "validation executor mounted different role conditions"
         )
     required_text(payload, "package_id")
-    required_digest(payload, "mounted_state_digest")
+    required_device_state_digest(payload, "mounted_state_digest")
     positive_integer(
         payload.get("context_capacity"),
         "validation executor context capacity",

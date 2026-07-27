@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v1";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v1";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v2";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
 
@@ -375,7 +375,7 @@ fn mounted_state_digest(
         serde_json::to_vec(&identity).expect("mounted state identity is serializable"),
     );
     format!(
-        "nerve.optimizer.artifact_sha256.v1:{}",
+        "nerve.optimizer.device_state_sha256.v1:{}",
         digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -470,6 +470,6 @@ mod tests {
         );
         assert_eq!(exact, repeated);
         assert_ne!(exact, candidate);
-        assert!(exact.starts_with("nerve.optimizer.artifact_sha256.v1:"));
+        assert!(exact.starts_with("nerve.optimizer.device_state_sha256.v1:"));
     }
 }

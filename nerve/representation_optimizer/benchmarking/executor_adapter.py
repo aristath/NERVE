@@ -31,6 +31,7 @@ from nerve.representation_optimizer.benchmarking.executor_protocol import (
     nonnegative_integer,
     positive_integer,
     required_digest,
+    required_device_state_digest,
     required_text,
     validated_windows,
 )
@@ -166,7 +167,7 @@ class ResidentComponentExecutionSession:
             action="mount",
             duration_ns=mount_duration_ns,
             before=request.matched_conditions["idle_device_state_digest"],
-            after=required_digest(
+            after=required_device_state_digest(
                 mount_payload,
                 "mounted_state_digest",
             ),

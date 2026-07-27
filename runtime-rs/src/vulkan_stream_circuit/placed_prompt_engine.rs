@@ -115,7 +115,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             digest.update(token_id.to_le_bytes());
         }
         Ok(format!(
-            "nerve.optimizer.artifact_sha256.v1:{:x}",
+            "nerve.optimizer.device_state_sha256.v1:{:x}",
             digest.finalize()
         ))
     }

@@ -16,6 +16,7 @@ from nerve.representation_optimizer.contracts import (
     REPRESENTATION_CANDIDATE_SCHEMA,
     ContractDocument,
     contract_digest,
+    device_state_digest,
     representation_candidate_id,
 )
 from nerve.representation_optimizer.lifecycle import CandidateState
@@ -231,11 +232,13 @@ class FixtureValidationRoleSession:
         self.idle = request.matched_conditions[
             "idle_device_state_digest"
         ]
-        self.mounted = staged_artifact_digest(
-            (
-                f"mounted:{request.stage}:{request.role}:"
-                f"{request.block_index}"
-            ).encode()
+        self.mounted = device_state_digest(
+            {
+                "fixture_state": "mounted",
+                "stage": request.stage,
+                "role": request.role,
+                "block_index": request.block_index,
+            }
         )
         self._mount_event = self._residency_event(
             action="mount",
@@ -430,7 +433,9 @@ def _staged_fixture(tmp_path: Path, *, approximate: bool = False):
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": staged_artifact_digest(b"idle"),
+            "idle_device_state_digest": device_state_digest(
+                {"fixture_state": "idle"}
+            ),
             "exclusive_residency": True,
         },
     )

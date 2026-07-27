@@ -9,6 +9,7 @@ from nerve.compilation import Json
 from nerve.representation_optimizer.contracts import (
     BENCHMARK_RECORD_SCHEMA,
     ContractValidationError,
+    DEVICE_STATE_DIGEST_SCHEMA,
     canonical_json_bytes,
     contract_digest,
     stable_contract_id,
@@ -16,12 +17,12 @@ from nerve.representation_optimizer.contracts import (
 
 
 BENCHMARK_WORKLOAD_SCHEMA = "nerve.optimizer.benchmark_workload.v1"
-BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v1"
+BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v2"
 BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v1"
 BENCHMARK_RESIDENCY_EVENT_SCHEMA = (
-    "nerve.optimizer.benchmark_residency_event.v1"
+    "nerve.optimizer.benchmark_residency_event.v2"
 )
-BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v1"
+BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v2"
 BENCHMARK_EVIDENCE_INTEGRITY_SCHEMA = (
     "nerve.optimizer.benchmark_evidence_integrity.v1"
 )
@@ -444,7 +445,7 @@ def validate_benchmark_plan(document: Json) -> None:
             "constructed candidate contracts"
         )
     conditions = _object(document["matched_conditions"], "matched_conditions")
-    _matched_conditions(conditions)
+    validate_matched_conditions(conditions)
     expected_conditions_digest = contract_digest(conditions)
     if document["matched_conditions_digest"] != expected_conditions_digest:
         raise BenchmarkContractError(
@@ -804,11 +805,11 @@ def validate_benchmark_residency_event(document: Json) -> None:
         document["matched_conditions_digest"],
         "matched_conditions_digest",
     )
-    _artifact_digest(
+    _device_state_digest(
         document["device_state_before_digest"],
         "device_state_before_digest",
     )
-    _artifact_digest(
+    _device_state_digest(
         document["device_state_after_digest"],
         "device_state_after_digest",
     )
@@ -1412,7 +1413,7 @@ def _implementation(value: Any, path: str) -> None:
         )
 
 
-def _matched_conditions(conditions: Json) -> None:
+def validate_matched_conditions(conditions: Json) -> None:
     _fields(
         conditions,
         {
@@ -1475,7 +1476,7 @@ def _matched_conditions(conditions: Json) -> None:
         raise BenchmarkContractError(
             "matched placement references an undeclared device"
         )
-    _artifact_digest(
+    _device_state_digest(
         conditions["idle_device_state_digest"],
         "matched_conditions.idle_device_state_digest",
     )
@@ -1684,6 +1685,14 @@ def _hex_digest(value: Any, prefix: str, path: str) -> str:
 
 def _artifact_digest(value: Any, path: str) -> str:
     return _hex_digest(value, _ARTIFACT_DIGEST_PREFIX, path)
+
+
+def _device_state_digest(value: Any, path: str) -> str:
+    return _hex_digest(
+        value,
+        f"{DEVICE_STATE_DIGEST_SCHEMA}:",
+        path,
+    )
 
 
 def _contract_digest(value: Any, path: str) -> str:
