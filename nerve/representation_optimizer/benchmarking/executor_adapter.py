@@ -7,6 +7,7 @@ from uuid import uuid4
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     ExecutorArtifactStore,
+    LazyExecutorArtifactStore,
     StagedCandidateLoader,
     default_staged_candidate_loader,
 )
@@ -77,15 +78,13 @@ class ResidentComponentExecutionAdapter:
                 "resident execution trace root must not be a symlink"
             )
         trace_root = trace_root.resolve()
-        trace_root.mkdir(parents=True, exist_ok=True)
         self.package_manifest = package_manifest
         self.package_dir = package_manifest.parent
         self.candidate_workspace = candidate_workspace.resolve()
         self.trace_root = trace_root
-        self.trace_store = ExecutorArtifactStore(
+        self.trace_store = LazyExecutorArtifactStore(
             trace_root,
             label="benchmark trace",
-            create=True,
         )
         self.executor_command = tuple(executor_command)
         self.vulkan_driver_files = drivers

@@ -7,6 +7,7 @@ from uuid import uuid4
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     ExecutorArtifactStore,
+    LazyExecutorArtifactStore,
     StagedCandidateLoader,
     default_staged_candidate_loader,
 )
@@ -47,10 +48,9 @@ class ResidentBehavioralValidationAdapter:
         self.package_manifest = package_manifest.resolve()
         self.package_dir = self.package_manifest.parent
         self.candidate_workspace = candidate_workspace.resolve()
-        self.trace_store = ExecutorArtifactStore(
+        self.trace_store = LazyExecutorArtifactStore(
             trace_root,
             label="validation trace",
-            create=True,
         )
         self.staged_candidate_loader = (
             staged_candidate_loader

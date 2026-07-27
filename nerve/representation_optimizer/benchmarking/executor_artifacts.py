@@ -109,6 +109,43 @@ class ExecutorArtifactStore:
         return path
 
 
+class LazyExecutorArtifactStore:
+    """Create a trace store only after its owning optimizer run exists."""
+
+    def __init__(self, root: Path, *, label: str) -> None:
+        if root.is_symlink():
+            raise ModelCompileError(f"{label} root must not be a symlink")
+        self.root = root.resolve()
+        self.label = label
+        self._store: ExecutorArtifactStore | None = None
+
+    def iter_file(
+        self,
+        relative_path: str,
+        *,
+        chunk_bytes: int = 8 * 1024 * 1024,
+    ) -> Iterable[bytes]:
+        yield from self._resolved().iter_file(
+            relative_path,
+            chunk_bytes=chunk_bytes,
+        )
+
+    def publish(self, relative_path: str, payload: bytes) -> dict[str, str]:
+        return self._resolved().publish(relative_path, payload)
+
+    def confined_path(self, relative_path: str) -> Path:
+        return self._resolved().confined_path(relative_path)
+
+    def _resolved(self) -> ExecutorArtifactStore:
+        if self._store is None:
+            self._store = ExecutorArtifactStore(
+                self.root,
+                label=self.label,
+                create=True,
+            )
+        return self._store
+
+
 def default_staged_candidate_loader(
     workspace_root: Path,
     candidate_id: str,
