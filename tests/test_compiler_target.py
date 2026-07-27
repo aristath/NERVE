@@ -193,8 +193,14 @@ def test_compiler_target_discovery_validates_runtime_report(
 
     assert target.devices[0].physical_device_index == 2
     assert compiler_device_probe_command(
-        runtime_bin=Path("/tmp/nerve-runtime")
-    ) == ["/tmp/nerve-runtime", "--inspect-devices", "--json"]
+        runtime_bin=Path("/tmp/nerve-runtime"),
+        initialize_device_contexts=True,
+    ) == [
+        "/tmp/nerve-runtime",
+        "--inspect-devices",
+        "--json",
+        "--initialize-device-contexts",
+    ]
 
 
 def test_compiler_target_discovery_fails_closed_on_probe_errors(
@@ -244,12 +250,14 @@ def test_compiler_target_discovery_forwards_stable_allowlist_and_environment(
         runtime_bin=Path("/tmp/nerve-runtime"),
         allowed_physical_device_ids=(allowed,),
         environment={"VK_DRIVER_FILES": "/tmp/radeon.json"},
+        initialize_device_contexts=True,
     )
 
     assert captured["command"] == [
         "/tmp/nerve-runtime",
         "--inspect-devices",
         "--json",
+        "--initialize-device-contexts",
         "--allow-physical-device",
         allowed,
     ]

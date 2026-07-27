@@ -218,6 +218,42 @@ def test_target_idle_attestation_bounds_nonquiescent_counter_wait(
     assert clock[0] == policy.maximum_quiescence_wait_ns
 
 
+def test_context_prepared_idle_baseline_waits_for_stable_vram_floor(
+    tmp_path: Path,
+) -> None:
+    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
+    baseline_vram = 64 * 1024 * 1024
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address="0000:03:00.0",
+        used_vram=baseline_vram,
+        busy_percent=0,
+    )
+    used = next(
+        (sysfs / "card0" / "device").resolve().glob(
+            "mem_info_vram_used"
+        )
+    )
+    sleeps = 0
+
+    def settle_driver_floor(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            used.write_text(f"{baseline_vram + 4_096}\n")
+
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        sleep=settle_driver_floor,
+    )
+
+    observations = probe.capture_stable_idle_baseline((profile,))
+
+    assert sleeps == 2
+    assert observations[0]["vram_used_bytes"] == baseline_vram + 4_096
+
+
 def test_runtime_target_preparation_selects_minimum_idle_amd_group(
     tmp_path: Path,
 ) -> None:
@@ -283,6 +319,64 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
         _device_id("0000:07:00.0"),
         _device_id("0000:0a:00.0"),
     }
+
+
+def test_runtime_target_records_post_context_idle_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pci_address = "0000:03:00.0"
+    target = _target((pci_address,))
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(100,),
+    )
+    initial_vram = 64 * 1024 * 1024
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=initial_vram,
+        busy_percent=0,
+    )
+    used = next(
+        (sysfs / "card0" / "device").resolve().glob(
+            "mem_info_vram_used"
+        )
+    )
+    probe = LinuxAmdDeviceStateProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        sleep=lambda _seconds: None,
+    )
+
+    def discover_after_context_initialization(**kwargs) -> CompilerTarget:
+        assert kwargs["initialize_device_contexts"] is True
+        used.write_text(f"{initial_vram + 12_288}\n")
+        return target
+
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.automation.runtime_target."
+        "discover_compiler_target",
+        discover_after_context_initialization,
+    )
+
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        runtime_bin=tmp_path / "nerve-runtime",
+        selected_device_ids=(_device_id(pci_address),),
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        vulkan_driver_files=(_driver(tmp_path),),
+        idle_probe=probe,
+    )
+
+    expected_vram = initial_vram + 12_288
+    assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
+    assert prepared.targets[0].matched_conditions["environment"][
+        "initial_idle_observations"
+    ][0]["vram_used_bytes"] == expected_vram
 
 
 def test_explicit_busy_optimizer_device_is_never_substituted(

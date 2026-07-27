@@ -530,12 +530,14 @@ def discover_compiler_target(
     runtime_bin: Path | None = None,
     allowed_physical_device_ids: Iterable[str] = (),
     environment: dict[str, str] | None = None,
+    initialize_device_contexts: bool = False,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> CompilerTarget:
     check_compile_cancelled(cancel_requested)
     command = compiler_device_probe_command(
         runtime_bin=runtime_bin,
         allowed_physical_device_ids=allowed_physical_device_ids,
+        initialize_device_contexts=initialize_device_contexts,
     )
     if cancel_requested is None:
         completed = subprocess.run(
@@ -594,6 +596,7 @@ def compiler_device_probe_command(
     *,
     runtime_bin: Path | None = None,
     allowed_physical_device_ids: Iterable[str] = (),
+    initialize_device_contexts: bool = False,
 ) -> list[str]:
     allowed = tuple(sorted(set(allowed_physical_device_ids)))
     if any(not value.startswith("vulkan-uuid:") for value in allowed):
@@ -606,6 +609,7 @@ def compiler_device_probe_command(
             str(configured),
             "--inspect-devices",
             "--json",
+            *(["--initialize-device-contexts"] if initialize_device_contexts else []),
             *[
                 value
                 for device_id in allowed
@@ -631,6 +635,8 @@ def compiler_device_probe_command(
             "--inspect-devices",
             "--json",
         ]
+        if initialize_device_contexts:
+            command.append("--initialize-device-contexts")
         command.extend(
             value
             for device_id in allowed
@@ -644,6 +650,7 @@ def compiler_device_probe_command(
             installed,
             "--inspect-devices",
             "--json",
+            *(["--initialize-device-contexts"] if initialize_device_contexts else []),
             *[
                 value
                 for device_id in allowed

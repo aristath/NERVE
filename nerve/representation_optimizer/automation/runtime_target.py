@@ -192,6 +192,7 @@ def prepare_runtime_optimization_targets(
             runtime_bin=runtime_bin,
             allowed_physical_device_ids=selected_ids,
             environment=environment,
+            initialize_device_contexts=True,
             cancel_requested=cancel_requested,
         )
     check_compile_cancelled(cancel_requested)
@@ -207,6 +208,11 @@ def prepare_runtime_optimization_targets(
             "live AMD discovery did not return exactly the verified idle devices"
         )
     _require_live_identity_match(by_id, live_profiles, selected_ids)
+    selected_records = list(
+        probe.capture_stable_idle_baseline(
+            tuple(live_profiles[device_id] for device_id in selected_ids)
+        )
+    )
     live_groups = tuple(
         tuple(live_profiles[_device_id(profile)] for profile in group)
         for group in selected_groups

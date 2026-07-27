@@ -102,15 +102,35 @@ mod tests {
     #[test]
     fn device_capability_inspection_is_a_package_free_mode() {
         let args = parse_args_from(
-            ["--inspect-devices", "--json"]
+            [
+                "--inspect-devices",
+                "--initialize-device-contexts",
+                "--json",
+            ]
                 .into_iter()
                 .map(str::to_string),
         )
         .unwrap();
 
         assert!(args.inspect_devices);
+        assert!(args.initialize_device_contexts);
         assert!(args.json);
         assert!(args.package_manifest.is_none());
+    }
+
+    #[test]
+    fn device_context_initialization_requires_device_inspection() {
+        let error = parse_args_from(
+            ["--initialize-device-contexts"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--initialize-device-contexts requires --inspect-devices"
+        );
     }
 
     #[test]

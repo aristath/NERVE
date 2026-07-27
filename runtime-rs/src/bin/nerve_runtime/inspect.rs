@@ -228,6 +228,15 @@ fn inspect_compute_devices(args: &Args) -> Result<Vec<VulkanComputeDeviceInfo>, 
 
 fn inspect_device_capabilities(args: &Args) -> Result<(), Box<dyn Error>> {
     let catalog = runtime_vulkan_device_catalog(args)?;
+    if args.initialize_device_contexts {
+        for device in catalog.available_compute_devices() {
+            drop(
+                catalog.open_physical_device_index(
+                    device.physical_device_index,
+                )?,
+            );
+        }
+    }
     let mut profiles = catalog.available_hardware_profiles()?;
     profiles.push(discover_cpu_hardware_profile()?);
     let inventory = HardwareProcessInventory::new(profiles)?;

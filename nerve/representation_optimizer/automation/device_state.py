@@ -181,6 +181,96 @@ class LinuxAmdDeviceStateProbe:
                 key=lambda item: item.device_id,
             )
         )
+        failures = self._idle_observation_failures(
+            observations,
+            include_busy=True,
+        )
+        if failures:
+            raise ModelCompileError(
+                "AMD device is not at an idle residency baseline: "
+                + "; ".join(failures)
+            )
+        return tuple(item.to_json() for item in observations)
+
+    def capture_stable_idle_baseline(
+        self,
+        profiles: tuple[Json, ...],
+    ) -> tuple[Json, ...]:
+        """Capture an exact idle floor after execution contexts are prepared."""
+
+        if not profiles:
+            raise ModelCompileError(
+                "stable idle-device baseline requires hardware profiles"
+            )
+        deadline = (
+            self._monotonic_ns()
+            + self.policy.maximum_quiescence_wait_ns
+        )
+        previous_residency: tuple[tuple[str, int], ...] | None = None
+        consecutive_idle = 0
+        last_busy: tuple[tuple[str, int], ...] = ()
+        while True:
+            observations = tuple(
+                sorted(
+                    (self.observe(profile) for profile in profiles),
+                    key=lambda item: item.device_id,
+                )
+            )
+            failures = self._idle_observation_failures(
+                observations,
+                include_busy=False,
+            )
+            if failures:
+                raise ModelCompileError(
+                    "AMD device is not at an idle residency baseline: "
+                    + "; ".join(failures)
+                )
+            last_busy = tuple(
+                (item.device_id, item.busy_percent)
+                for item in observations
+                if item.busy_percent > self.policy.maximum_busy_percent
+            )
+            residency = tuple(
+                (item.device_id, item.vram_used_bytes)
+                for item in observations
+            )
+            if last_busy:
+                consecutive_idle = 0
+                previous_residency = None
+            elif residency == previous_residency:
+                consecutive_idle += 1
+            else:
+                previous_residency = residency
+                consecutive_idle = 1
+            if (
+                consecutive_idle
+                >= self.policy.quiescence_required_observations
+            ):
+                return tuple(item.to_json() for item in observations)
+            now = self._monotonic_ns()
+            if now >= deadline:
+                details = ", ".join(
+                    f"{device_id}={busy}%"
+                    for device_id, busy in last_busy
+                )
+                raise ModelCompileError(
+                    "AMD devices did not establish a stable context-prepared "
+                    "idle baseline within "
+                    f"{self.policy.maximum_quiescence_wait_ns} ns"
+                    + (f": {details}" if details else "")
+                )
+            wait_ns = min(
+                self.policy.quiescence_poll_interval_ns,
+                deadline - now,
+            )
+            self._sleep(wait_ns / 1_000_000_000)
+
+    def _idle_observation_failures(
+        self,
+        observations: tuple[DeviceIdleObservation, ...],
+        *,
+        include_busy: bool,
+    ) -> list[str]:
         failures: list[str] = []
         for observation in observations:
             used_fraction_ppm = (
@@ -201,16 +291,15 @@ class LinuxAmdDeviceStateProbe:
                     f"{observation.vram_used_bytes}/{observation.vram_total_bytes} "
                     "VRAM bytes"
                 )
-            if observation.busy_percent > self.policy.maximum_busy_percent:
+            if (
+                include_busy
+                and observation.busy_percent
+                > self.policy.maximum_busy_percent
+            ):
                 failures.append(
                     f"{observation.device_id} is {observation.busy_percent}% busy"
                 )
-        if failures:
-            raise ModelCompileError(
-                "AMD device is not at an idle residency baseline: "
-                + "; ".join(failures)
-            )
-        return tuple(item.to_json() for item in observations)
+        return failures
 
     def idle_state_digest(self, profiles: tuple[Json, ...]) -> str:
         """Attest current idleness and return its stable semantic identity."""

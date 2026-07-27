@@ -35,6 +35,9 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
             "--inspect-devices" => {
                 parsed.inspect_devices = true;
             }
+            "--initialize-device-contexts" => {
+                parsed.initialize_device_contexts = true;
+            }
             "--device" => {
                 let device_id = next_value(&mut raw, &arg)?;
                 if parsed.default_device_id.replace(device_id).is_some() {
@@ -185,6 +188,12 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
     }
     if parsed.chat && inspect_mode_count > 0 {
         return Err("--chat cannot be combined with inspect modes".to_string());
+    }
+    if parsed.initialize_device_contexts && !parsed.inspect_devices {
+        return Err(
+            "--initialize-device-contexts requires --inspect-devices"
+                .to_string(),
+        );
     }
     if parsed.chat && parsed.json {
         return Err("--json is not supported with --chat yet".to_string());
