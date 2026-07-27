@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from nerve.compilation import Json
+from nerve.representation_optimizer.analysis.memo import AnalysisComputationMemo
 from nerve.representation_optimizer.analysis.tensor_repository import (
     TensorRepository,
 )
@@ -94,6 +95,9 @@ class ScopeAnalysisContext:
     nodes: tuple[Json, ...]
     budget: AnalysisBudget
     activation_trace: ActivationTrace | None = None
+    computations: AnalysisComputationMemo = field(
+        default_factory=AnalysisComputationMemo
+    )
     _observation_cache: dict[str, Any] = field(default_factory=dict)
 
     @property

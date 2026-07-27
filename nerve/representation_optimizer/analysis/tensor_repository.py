@@ -44,7 +44,11 @@ class InMemoryTensorRepository:
         *,
         metadata: dict[str, Json] | None = None,
     ) -> None:
-        self._tensors = {name: np.asarray(values) for name, values in tensors.items()}
+        self._tensors = {}
+        for name, values in tensors.items():
+            immutable = np.array(values, copy=True)
+            immutable.flags.writeable = False
+            self._tensors[name] = immutable
         self._metadata = metadata or {}
 
     def metadata(self, tensor_name: str) -> Json:
@@ -68,11 +72,13 @@ class InMemoryTensorRepository:
             exhaustive_element_limit is None or values.size <= exhaustive_element_limit
         )
         if exhaustive:
-            observed = values.astype(np.float32, copy=False)
+            observed = np.asarray(values, dtype=np.float32)
             indices: tuple[tuple[int, ...], ...] = ()
         else:
             indices = _grid_indices(values.shape, sampled_element_limit)
             observed = values[np.ix_(*indices)].astype(np.float32, copy=False)
+        observed = np.asarray(observed)
+        observed.flags.writeable = False
         return TensorObservation(
             tensor_name=tensor_name,
             values=np.asarray(observed),

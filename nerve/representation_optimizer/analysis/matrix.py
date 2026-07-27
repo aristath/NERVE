@@ -11,11 +11,15 @@ from nerve.representation_optimizer.analysis.claims import (
     tolerance_threshold,
 )
 from nerve.representation_optimizer.analysis.context import ScopeAnalysisContext
+from nerve.representation_optimizer.analysis.decomposition import (
+    ExactMatrixSvd,
+    exact_matrix_svd,
+)
 
 
 class MatrixStructureAnalyzer:
     analyzer_id = "matrix_and_tensor_structure"
-    version = "1"
+    version = "2"
 
     def analyze(self, context: ScopeAnalysisContext) -> AnalyzerResult:
         claims = []
@@ -33,14 +37,29 @@ class MatrixStructureAnalyzer:
                 relative_tolerance=context.budget.relative_tolerance,
             )
             if values.ndim == 1:
-                vector_claims, vector_details = _analyze_vector(
-                    values,
-                    base,
-                    threshold,
-                    observation.exhaustive,
+                vector_claims, vector_details = (
+                    context.computations.get_or_compute(
+                        "vector_structure_facts",
+                        (
+                            context.computations.observation_identity(observation),
+                            threshold,
+                            observation.exhaustive,
+                        ),
+                        lambda: _analyze_vector(
+                            values,
+                            {},
+                            threshold,
+                            observation.exhaustive,
+                        ),
+                    )
                 )
-                claims.extend(vector_claims)
-                details.append(vector_details)
+                claims.extend(_claims_with_base(vector_claims, base))
+                details.append(
+                    {
+                        "tensor": parameter.tensor_name,
+                        **vector_details,
+                    }
+                )
                 continue
             if values.ndim < 2:
                 continue
@@ -65,15 +84,14 @@ class MatrixStructureAnalyzer:
                 details.append(topology_details)
                 continue
 
-            matrix_claims, matrix_details = _analyze_matrix(
+            matrix_claims, matrix_details = _memoized_matrix_analysis(
+                context,
+                parameter.tensor_name,
                 matrix,
-                base=base,
-                threshold=threshold,
-                exhaustive=observation.exhaustive,
-                low_rank_ratio=context.budget.low_rank_ratio_threshold,
-                sparse_density=context.budget.sparse_density_threshold,
+                threshold,
+                observation.exhaustive,
             )
-            claims.extend(matrix_claims)
+            claims.extend(_claims_with_base(matrix_claims, base))
             topology_claims, topology_details = _analyze_tensor_topology(
                 context,
                 values,
@@ -82,8 +100,60 @@ class MatrixStructureAnalyzer:
                 observation.exhaustive,
             )
             claims.extend(topology_claims)
-            details.append({**matrix_details, **topology_details})
+            details.append(
+                {
+                    "tensor": parameter.tensor_name,
+                    **matrix_details,
+                    **topology_details,
+                }
+            )
         return AnalyzerResult(claims=tuple(claims), details={"tensors": details})
+
+
+def _memoized_matrix_analysis(
+    context: ScopeAnalysisContext,
+    tensor_name: str,
+    matrix: np.ndarray,
+    threshold: float,
+    exhaustive: bool,
+) -> tuple[list[dict], dict]:
+    observation = context.observation(tensor_name)
+    key = (
+        context.computations.observation_identity(observation),
+        threshold,
+        exhaustive,
+        context.budget.low_rank_ratio_threshold,
+        context.budget.sparse_density_threshold,
+    )
+    return context.computations.get_or_compute(
+        "matrix_structure_facts",
+        key,
+        lambda: _analyze_matrix(
+            matrix,
+            base={},
+            threshold=threshold,
+            exhaustive=exhaustive,
+            low_rank_ratio=context.budget.low_rank_ratio_threshold,
+            sparse_density=context.budget.sparse_density_threshold,
+            decomposition=exact_matrix_svd(context, tensor_name, matrix),
+        ),
+    )
+
+
+def _claims_with_base(
+    claims: list[dict],
+    base: dict,
+) -> list[dict]:
+    return [
+        {
+            **item,
+            "facts": {
+                **base,
+                **item["facts"],
+            },
+        }
+        for item in claims
+    ]
 
 
 def _analyze_vector(
@@ -125,7 +195,7 @@ def _analyze_vector(
             facts={**base, **spectral},
         )
     )
-    return claims, {"tensor": base["tensor"], "rank": 1, **spectral}
+    return claims, {"rank": 1, **spectral}
 
 
 def _analyze_matrix(
@@ -136,9 +206,10 @@ def _analyze_matrix(
     exhaustive: bool,
     low_rank_ratio: float,
     sparse_density: float,
+    decomposition: ExactMatrixSvd,
 ) -> tuple[list[dict], dict]:
     rows, columns = matrix.shape
-    singular_values = np.linalg.svd(matrix, compute_uv=False)
+    singular_values = decomposition.singular_values
     rank_threshold = max(
         threshold,
         (
@@ -328,7 +399,7 @@ def _analyze_matrix(
         )
     )
 
-    tensor_train = _tensor_train_facts(matrix, threshold)
+    tensor_train = _tensor_train_facts(singular_values, matrix.shape, threshold)
     claims.append(
         claim(
             kind="tensor_train_structure",
@@ -368,7 +439,11 @@ def _analyze_matrix(
         )
     )
 
-    basis = _structured_basis_residual(matrix, singular_values, threshold)
+    basis = _structured_basis_residual(
+        matrix,
+        decomposition,
+        threshold,
+    )
     claims.append(
         claim(
             kind="structured_basis_sparse_exception",
@@ -387,7 +462,6 @@ def _analyze_matrix(
         )
     )
     return claims, {
-        "tensor": base["tensor"],
         "matrix_shape": [rows, columns],
         "numerical_rank": numerical_rank,
         "singular_values": singular_values[: min(32, singular_values.size)],
@@ -621,12 +695,7 @@ def _kronecker_facts(
                 .transpose(0, 2, 1, 3)
                 .reshape(left_rows * left_columns, right_rows * right_columns)
             )
-            singular = np.linalg.svd(rearranged, compute_uv=False)
-            residual = float(np.linalg.norm(singular[1:])) if singular.size > 1 else 0.0
-            relative = residual / max(
-                float(np.linalg.norm(singular)),
-                np.finfo(float).eps,
-            )
+            relative = _best_rank_one_relative_residual(rearranged)
             candidate = {
                 "left_shape": [left_rows, left_columns],
                 "right_shape": [right_rows, right_columns],
@@ -639,9 +708,27 @@ def _kronecker_facts(
     return best
 
 
-def _tensor_train_facts(matrix: np.ndarray, threshold: float) -> dict:
-    singular = np.linalg.svd(matrix, compute_uv=False)
-    rank = int(np.count_nonzero(singular > threshold))
+def _best_rank_one_relative_residual(matrix: np.ndarray) -> float:
+    """Exact Frobenius residual without computing an unnecessary full SVD."""
+
+    squared_norm = float(np.sum(np.square(matrix), dtype=np.float64))
+    if squared_norm == 0:
+        return 0.0
+    gram = matrix @ matrix.T if matrix.shape[0] <= matrix.shape[1] else matrix.T @ matrix
+    largest_squared_singular = max(
+        0.0,
+        float(np.linalg.eigvalsh(gram)[-1]),
+    )
+    residual_squared = max(0.0, squared_norm - largest_squared_singular)
+    return math.sqrt(residual_squared / squared_norm)
+
+
+def _tensor_train_facts(
+    singular_values: np.ndarray,
+    shape: tuple[int, int],
+    threshold: float,
+) -> dict:
+    rank = int(np.count_nonzero(singular_values > threshold))
     return {
         "unfolding_ranks": [rank],
         "maximum_rank": rank,
@@ -677,17 +764,17 @@ def _spectral_facts(values: np.ndarray) -> dict:
 
 def _structured_basis_residual(
     matrix: np.ndarray,
-    singular_values: np.ndarray,
+    decomposition: ExactMatrixSvd,
     threshold: float,
 ) -> dict:
     maximum_rank = min(matrix.shape)
     basis_rank = max(1, min(maximum_rank - 1, math.ceil(maximum_rank * 0.25)))
     if maximum_rank <= 1:
         return {"basis_rank": maximum_rank, "residual_density": 0.0}
-    u, _singular, vh = np.linalg.svd(matrix, full_matrices=False)
-    approximation = (u[:, :basis_rank] * singular_values[:basis_rank][None, :]) @ vh[
-        :basis_rank
-    ]
+    approximation = (
+        decomposition.left_vectors[:, :basis_rank]
+        * decomposition.singular_values[:basis_rank][None, :]
+    ) @ decomposition.right_vectors[:basis_rank]
     residual = matrix - approximation
     return {
         "basis_rank": basis_rank,

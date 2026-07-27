@@ -13,7 +13,7 @@ from nerve.representation_optimizer.analysis.context import ScopeAnalysisContext
 
 class ProceduralStructureAnalyzer:
     analyzer_id = "procedural_structure"
-    version = "1"
+    version = "2"
 
     def analyze(self, context: ScopeAnalysisContext) -> AnalyzerResult:
         claims = []
@@ -27,9 +27,16 @@ class ProceduralStructureAnalyzer:
                 relative_tolerance=context.budget.relative_tolerance,
             )
             base = observation_facts(context, parameter.tensor_name)
-
-            period = _smallest_period(values, threshold)
-            exact_period = _smallest_period(values, 0.0)
+            structure = context.computations.get_or_compute(
+                "procedural_parameter_facts",
+                (
+                    context.computations.observation_identity(observation),
+                    threshold,
+                ),
+                lambda: _procedural_facts(values, threshold),
+            )
+            period = structure["period"]
+            exact_period = structure["exact_period"]
             claims.append(
                 claim(
                     kind="periodic_parameter_generator",
@@ -44,8 +51,8 @@ class ProceduralStructureAnalyzer:
                 )
             )
 
-            affine = _affine_recurrence(values, threshold)
-            exact_affine = _affine_recurrence(values, 0.0)
+            affine = structure["affine_recurrence"]
+            exact_affine = structure["exact_affine_recurrence"]
             claims.append(
                 claim(
                     kind="affine_recurrence_generator",
@@ -60,8 +67,8 @@ class ProceduralStructureAnalyzer:
                 )
             )
 
-            polynomial_degree = _polynomial_degree(values, threshold)
-            exact_polynomial_degree = _polynomial_degree(values, 0.0)
+            polynomial_degree = structure["polynomial_degree"]
+            exact_polynomial_degree = structure["exact_polynomial_degree"]
             claims.append(
                 claim(
                     kind="polynomial_parameter_generator",
@@ -120,6 +127,20 @@ class ProceduralStructureAnalyzer:
         return AnalyzerResult(claims=tuple(claims), details={"tensors": details})
 
 
+def _procedural_facts(
+    values: np.ndarray,
+    threshold: float,
+) -> dict:
+    return {
+        "period": _smallest_period(values, threshold),
+        "exact_period": _smallest_period(values, 0.0),
+        "affine_recurrence": _affine_recurrence(values, threshold),
+        "exact_affine_recurrence": _affine_recurrence(values, 0.0),
+        "polynomial_degree": _polynomial_degree(values, threshold),
+        "exact_polynomial_degree": _polynomial_degree(values, 0.0),
+    }
+
+
 def _smallest_period(values: np.ndarray, tolerance: float) -> int | None:
     if values.size < 2:
         return 1
@@ -138,15 +159,25 @@ def _affine_recurrence(
         return None
     x = values[:-1]
     y = values[1:]
-    design = np.column_stack((x, np.ones_like(x)))
-    coefficients, *_ = np.linalg.lstsq(design, y, rcond=None)
-    predicted = design @ coefficients
+    x_mean = float(np.mean(x))
+    y_mean = float(np.mean(y))
+    centered_x = x - x_mean
+    denominator = float(centered_x @ centered_x)
+    if denominator > np.finfo(np.float64).eps * max(1.0, float(x @ x)):
+        scale = float(centered_x @ (y - y_mean)) / denominator
+        offset = y_mean - scale * x_mean
+    else:
+        design = np.column_stack((x, np.ones_like(x)))
+        coefficients, *_ = np.linalg.lstsq(design, y, rcond=None)
+        scale = float(coefficients[0])
+        offset = float(coefficients[1])
+    predicted = x * scale + offset
     error = float(np.max(np.abs(predicted - y)))
     if error > tolerance:
         return None
     return {
-        "scale": float(coefficients[0]),
-        "offset": float(coefficients[1]),
+        "scale": scale,
+        "offset": offset,
         "maximum_error": error,
     }
 

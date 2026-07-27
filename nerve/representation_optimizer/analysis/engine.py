@@ -28,6 +28,7 @@ from nerve.representation_optimizer.analysis.evidence import (
 from nerve.representation_optimizer.analysis.graph import GraphStructureAnalyzer
 from nerve.representation_optimizer.analysis.joint import JointParameterAnalyzer
 from nerve.representation_optimizer.analysis.matrix import MatrixStructureAnalyzer
+from nerve.representation_optimizer.analysis.memo import AnalysisComputationMemo
 from nerve.representation_optimizer.analysis.procedural import (
     ProceduralStructureAnalyzer,
 )
@@ -97,6 +98,7 @@ class ScopeAnalysisEngine:
         nodes: dict[str, Json],
         analyzers: tuple[StructuralAnalyzer, ...],
         tensors: TensorRepository,
+        computations: AnalysisComputationMemo | None = None,
     ) -> None:
         self.package_dir = package_dir
         self.catalog = catalog
@@ -106,6 +108,7 @@ class ScopeAnalysisEngine:
         self.nodes = nodes
         self.analyzers = analyzers
         self.tensors = tensors
+        self.computations = computations or AnalysisComputationMemo()
 
     @classmethod
     def from_package(
@@ -178,6 +181,7 @@ class ScopeAnalysisEngine:
             nodes=_scope_nodes_from_index(self.nodes, scope),
             budget=budget,
             activation_trace=activation_trace,
+            computations=self.computations,
         )
         evidence = []
         details = []

@@ -12,6 +12,7 @@ from nerve.representation_optimizer.analysis.context import (
     AnalysisBudget,
     ScopeAnalysisContext,
 )
+from nerve.representation_optimizer.analysis.decomposition import exact_matrix_svd
 from nerve.representation_optimizer.analysis.elementwise import (
     ElementwiseStructureAnalyzer,
 )
@@ -23,12 +24,17 @@ from nerve.representation_optimizer.analysis.evidence import (
 )
 from nerve.representation_optimizer.analysis.graph import GraphStructureAnalyzer
 from nerve.representation_optimizer.analysis.joint import JointParameterAnalyzer
-from nerve.representation_optimizer.analysis.matrix import MatrixStructureAnalyzer
+from nerve.representation_optimizer.analysis.matrix import (
+    MatrixStructureAnalyzer,
+    _best_rank_one_relative_residual,
+)
+from nerve.representation_optimizer.analysis.memo import AnalysisComputationMemo
 from nerve.representation_optimizer.analysis.procedural import (
     ProceduralStructureAnalyzer,
 )
 from nerve.representation_optimizer.analysis.tensor_repository import (
     InMemoryTensorRepository,
+    TensorRepository,
 )
 from nerve.representation_optimizer.analysis.trace import (
     ReachableActivationAnalyzer,
@@ -46,6 +52,8 @@ def _context(
     nodes: tuple[dict, ...] = (),
     budget: AnalysisBudget | None = None,
     trace: ActivationTrace | None = None,
+    repository: TensorRepository | None = None,
+    computations: AnalysisComputationMemo | None = None,
 ) -> ScopeAnalysisContext:
     roles = roles or {}
     component_ids = ["component"]
@@ -79,7 +87,7 @@ def _context(
         package_id="fixture_package",
         scope=scope,
         source_contract={"contract_digest": digest},
-        tensors=InMemoryTensorRepository(tensors),
+        tensors=repository or InMemoryTensorRepository(tensors),
         nodes=nodes,
         budget=budget
         or AnalysisBudget(
@@ -87,6 +95,7 @@ def _context(
             decomposition_dimension_limit=128,
         ),
         activation_trace=trace,
+        computations=computations or AnalysisComputationMemo(),
     )
 
 
@@ -310,6 +319,27 @@ def test_matrix_analyzer_finds_known_structures_and_rejects_controls():
     )
 
 
+def test_rank_one_residual_matches_full_singular_spectrum():
+    generator = np.random.default_rng(29)
+    for shape in ((4, 64), (16, 16), (64, 4), (7, 11)):
+        values = generator.normal(size=shape)
+        singular = np.linalg.svd(values, compute_uv=False)
+        expected = float(np.linalg.norm(singular[1:]) / np.linalg.norm(singular))
+        assert _best_rank_one_relative_residual(values) == pytest.approx(
+            expected,
+            rel=1e-12,
+            abs=1e-12,
+        )
+    rank_one = np.outer(
+        np.arange(1, 9, dtype=np.float64),
+        np.arange(2, 13, dtype=np.float64),
+    )
+    assert _best_rank_one_relative_residual(rank_one) == pytest.approx(
+        0.0,
+        abs=1e-8,
+    )
+
+
 def test_joint_analysis_canonicalizes_permutations_and_finds_shared_structure():
     source = np.array(
         [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
@@ -357,14 +387,19 @@ def test_joint_analysis_canonicalizes_permutations_and_finds_shared_structure():
     ]
     assert generators[0]["status"] == "supported"
     assert generators[0]["facts"]["affine_generator"]["scale"] == pytest.approx(2)
-    unrelated_claim = [
+    unrelated_claims = [
         item
         for item in result.claims
         if item["kind"] == "coordinate_equivalence"
         and item["facts"]["left_tensor"] == "source"
         and item["facts"]["right_tensor"] == "unrelated"
-    ][0]
-    assert unrelated_claim["status"] == "rejected"
+    ]
+    assert unrelated_claims == []
+    coverage = _claim(result.claims, "joint_parameter_search_coverage")
+    assert coverage["exact"] is True
+    assert coverage["facts"]["searched_pair_count"] == 10
+    assert coverage["facts"]["relationship_pair_count"] == 3
+    assert coverage["facts"]["pair_without_relationship_count"] == 7
     assert (
         _claim(
             result.claims,
@@ -406,6 +441,210 @@ def test_joint_analysis_proves_direct_linear_coordinate_symmetry():
     assert symmetry["status"] == "supported"
     assert symmetry["exact"] is True
     assert symmetry["facts"]["symmetry"]["coordinate_width"] == 3
+
+
+def test_joint_analysis_reports_only_proper_shared_subspaces():
+    generator = np.random.default_rng(31)
+    shared_basis = np.array(
+        [
+            [1, 0, 2, 0, 3, 0, 4, 0],
+            [0, 5, 0, 6, 0, 7, 0, 8],
+        ],
+        dtype=np.float32,
+    )
+    first = np.arange(1, 13, dtype=np.float32).reshape(6, 2) @ shared_basis
+    second = np.arange(3, 13, dtype=np.float32).reshape(5, 2) @ shared_basis
+    full_rank_left = generator.normal(size=(8, 8))
+    full_rank_right = generator.normal(size=(8, 8))
+    result = JointParameterAnalyzer().analyze(
+        _context(
+            {
+                "first": first,
+                "second": second,
+                "full_rank_left": full_rank_left.astype(np.float32),
+                "full_rank_right": full_rank_right.astype(np.float32),
+            }
+        )
+    )
+    subspaces = [
+        item for item in result.claims if item["kind"] == "shared_subspace"
+    ]
+    assert len(subspaces) == 1
+    assert subspaces[0]["facts"]["left_tensor"] == "first"
+    assert subspaces[0]["facts"]["right_tensor"] == "second"
+    assert subspaces[0]["facts"]["subspace"]["ambient_dimension"] == 8
+    assert subspaces[0]["facts"]["subspace"]["left_rank"] == 2
+    assert subspaces[0]["facts"]["subspace"]["right_rank"] == 2
+
+
+def test_joint_analysis_compacts_large_negative_pair_search():
+    tensors = {
+        f"weight_{index}": np.random.default_rng(index).normal(size=(4, 4)).astype(
+            np.float32
+        )
+        for index in range(64)
+    }
+    result = JointParameterAnalyzer().analyze(_context(tensors))
+    coverage = _claim(result.claims, "joint_parameter_search_coverage")
+    assert coverage["facts"]["searched_pair_count"] == 2_016
+    assert coverage["facts"]["pair_without_relationship_count"] == 2_016
+    assert coverage["facts"]["relationship_pair_count"] == 0
+    assert len(result.claims) == 1
+    assert result.details["pairs"] == []
+
+
+def test_overlapping_scopes_reuse_exact_intrinsic_matrix_analysis():
+    values = np.random.default_rng(23).normal(size=(24, 16)).astype(np.float32)
+    repository = InMemoryTensorRepository({"shared": values})
+    computations = AnalysisComputationMemo()
+    first_context = _context(
+        {"shared": values},
+        roles={"shared": "input_projection"},
+        repository=repository,
+        computations=computations,
+    )
+    second_context = _context(
+        {"shared": values},
+        roles={"shared": "output_projection"},
+        repository=repository,
+        computations=computations,
+    )
+
+    first = MatrixStructureAnalyzer().analyze(first_context)
+    second = MatrixStructureAnalyzer().analyze(second_context)
+    independent = MatrixStructureAnalyzer().analyze(
+        _context(
+            {"shared": values},
+            roles={"shared": "output_projection"},
+        )
+    )
+
+    statistics = computations.statistics()
+    assert statistics["matrix_structure_facts"] == {
+        "computations": 1,
+        "hits": 1,
+    }
+    assert statistics["exact_matrix_svd"] == {
+        "computations": 1,
+        "hits": 0,
+    }
+    assert second == independent
+    assert {
+        claim["facts"]["semantic_role"]
+        for claim in first.claims
+        if claim["facts"].get("tensor") == "shared"
+    } == {"input_projection"}
+    assert {
+        claim["facts"]["semantic_role"]
+        for claim in second.claims
+        if claim["facts"].get("tensor") == "shared"
+    } == {"output_projection"}
+
+
+def test_analysis_memo_separates_thresholds_and_observed_values():
+    first_values = np.eye(8, dtype=np.float32)
+    second_values = first_values.copy()
+    second_values[0, 1] = 0.25
+    computations = AnalysisComputationMemo()
+    first_repository = InMemoryTensorRepository({"weight": first_values})
+    second_repository = InMemoryTensorRepository({"weight": second_values})
+
+    for repository, absolute_tolerance in (
+        (first_repository, 0.0),
+        (first_repository, 0.5),
+        (second_repository, 0.0),
+    ):
+        MatrixStructureAnalyzer().analyze(
+            _context(
+                {"weight": first_values},
+                repository=repository,
+                computations=computations,
+                budget=AnalysisBudget(
+                    absolute_tolerance=absolute_tolerance,
+                    relative_tolerance=0.0,
+                    decomposition_dimension_limit=128,
+                ),
+            )
+        )
+
+    statistics = computations.statistics()
+    assert statistics["matrix_structure_facts"]["computations"] == 3
+    assert statistics["matrix_structure_facts"]["hits"] == 0
+    assert statistics["exact_matrix_svd"]["computations"] == 2
+    assert statistics["exact_matrix_svd"]["hits"] == 1
+
+
+def test_analysis_memo_reuses_identical_content_across_tensor_names():
+    values = np.arange(1, 65, dtype=np.float32).reshape(8, 8)
+    computations = AnalysisComputationMemo()
+    context = _context(
+        {
+            "first": values,
+            "second": values.copy(),
+        },
+        computations=computations,
+    )
+    result = MatrixStructureAnalyzer().analyze(context)
+    statistics = computations.statistics()
+    assert statistics["matrix_structure_facts"] == {
+        "computations": 1,
+        "hits": 1,
+    }
+    assert statistics["exact_matrix_svd"] == {
+        "computations": 1,
+        "hits": 0,
+    }
+    tensor_names = {
+        item["facts"]["tensor"]
+        for item in result.claims
+        if item["kind"] == "low_rank"
+    }
+    assert tensor_names == {"first", "second"}
+
+
+def test_shared_exact_decomposition_is_read_only_and_reused_by_joint_analysis():
+    source = np.arange(1, 17, dtype=np.float32).reshape(4, 4)
+    related = source * 2
+    repository = InMemoryTensorRepository(
+        {
+            "source": source,
+            "related": related,
+        }
+    )
+    computations = AnalysisComputationMemo()
+    context = _context(
+        {
+            "source": source,
+            "related": related,
+        },
+        repository=repository,
+        computations=computations,
+    )
+
+    MatrixStructureAnalyzer().analyze(context)
+    JointParameterAnalyzer().analyze(context)
+    decompositions = [
+        exact_matrix_svd(
+            context,
+            tensor_name,
+            context.observation(tensor_name)
+            .values.astype(np.float64, copy=False)
+            .reshape(4, 4),
+        )
+        for tensor_name in ("source", "related")
+    ]
+
+    statistics = computations.statistics()
+    assert statistics["exact_matrix_svd"] == {
+        "computations": 2,
+        "hits": 4,
+    }
+    for decomposition in decompositions:
+        assert decomposition.left_vectors.flags.writeable is False
+        assert decomposition.singular_values.flags.writeable is False
+        assert decomposition.right_vectors.flags.writeable is False
+        with pytest.raises(ValueError, match="read-only"):
+            decomposition.singular_values[0] = 0
 
 
 def test_graph_analysis_uses_semantics_and_connectivity_not_model_names():
