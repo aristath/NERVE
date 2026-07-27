@@ -4,10 +4,6 @@ from nerve.representation_optimizer.automation.contracts import (
     CandidateResourceCost,
     OptimizationBudget,
 )
-from nerve.representation_optimizer.automation.command import (
-    OptimizePackageOutcome,
-    optimize_compiled_package,
-)
 from nerve.representation_optimizer.automation.orchestrator import (
     run_automated_optimizer,
 )
@@ -31,11 +27,9 @@ __all__ = [
     "CandidateToolchainResolver",
     "DeviceLeaseManager",
     "NoDeviceLeaseManager",
-    "OptimizePackageOutcome",
     "OptimizationBudget",
     "OptimizationTarget",
     "VerifiedDeviceLeaseManager",
     "run_automated_optimizer",
-    "optimize_compiled_package",
     "validate_report_directory",
 ]

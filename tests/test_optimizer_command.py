@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,3 +74,22 @@ def test_optimizer_command_requires_package_manifest_identity(
 
     with pytest.raises(ModelCompileError, match="package path is invalid"):
         resolve_package_manifest(wrong)
+
+
+def test_builtin_provider_imports_in_a_clean_interpreter() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from nerve.representation_optimizer.providers.builtin "
+                "import load_builtin_provider_registry; "
+                "load_builtin_provider_registry()"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
