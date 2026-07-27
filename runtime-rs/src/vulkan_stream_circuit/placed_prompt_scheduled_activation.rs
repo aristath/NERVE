@@ -189,10 +189,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         };
         if self.speculative_draft_tokens > 0
             && self.processor.speculative_decoder_count() > 0
-            && self.speculative_execution_policy.should_use_speculative(
-                self.processor
-                    .resident_feedback_estimated_tick_time_ns(),
-            )
+            && self.speculative_execution_policy.should_use_speculative()
         {
             return self
                 .run_runtime_scheduler_activation_with_output(activation, on_output_event)
@@ -326,7 +323,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             && completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
             && completion.executed_tick_count > 0
             && pending.generated_tokens < pending.max_tokens;
-        if can_continue {
+        if can_continue && !self.speculative_execution_policy.should_use_speculative() {
             let remaining = pending.max_tokens - pending.generated_tokens;
             if let Some(window) = self.submit_resident_feedback_window_limited(remaining)? {
                 self.active_input_event
@@ -338,7 +335,9 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 self.pending_scheduler_activation = Some(pending);
                 return Ok(None);
             }
-
+        }
+        if can_continue {
+            let remaining = pending.max_tokens - pending.generated_tokens;
             let mut trailing_output_events = Vec::new();
             completed_input_run = self.run_scheduled_feedback_window_with_output(
                 &pending.input_event_id,
@@ -578,21 +577,11 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 continue;
             }
 
-            let resident_tick_time_ns = self
-                .processor
-                .resident_feedback_estimated_tick_time_ns();
-            let resident_tick_limit = if self
-                .speculative_execution_policy
-                .requires_resident_probe(resident_tick_time_ns)
-            {
-                remaining.min(
-                    self.processor
-                        .resident_feedback_next_window_tick_count()
-                        .max(1),
-                )
-            } else {
-                remaining
-            };
+            let resident_tick_limit = remaining.min(
+                self.processor
+                    .resident_feedback_next_window_tick_count()
+                    .max(1),
+            );
             if self.run_resident_feedback_window_limited_with_output(
                 resident_tick_limit,
                 on_output_event,

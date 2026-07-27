@@ -43,12 +43,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .unwrap_or(0)
     }
 
-    fn resident_feedback_estimated_tick_time_ns(&self) -> Option<u64> {
-        self.resident_feedback_loop
-            .as_ref()
-            .and_then(|feedback_loop| feedback_loop.window_policy.estimated_tick_time_ns.get())
-    }
-
     fn mount_resident_feedback_submission_template(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,

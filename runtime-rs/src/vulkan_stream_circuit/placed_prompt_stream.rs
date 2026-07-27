@@ -278,6 +278,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let Some(input_event) = self.pending_input_events.pop_front() else {
             return Ok(false);
         };
+        self.speculative_execution_policy.begin_input_event();
         self.active_input_event = Some(VulkanResidentInProcessPlacedActivePromptEvent::new(
             input_event,
             self.session.next_stream_tick,
@@ -596,19 +597,10 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 }
                 continue;
             }
-            let resident_tick_time_ns = self
+            let resident_tick_limit = self
                 .processor
-                .resident_feedback_estimated_tick_time_ns();
-            let resident_tick_limit = if self
-                .speculative_execution_policy
-                .requires_resident_probe(resident_tick_time_ns)
-            {
-                self.processor
-                    .resident_feedback_next_window_tick_count()
-                    .max(1)
-            } else {
-                usize::MAX
-            };
+                .resident_feedback_next_window_tick_count()
+                .max(1);
             if self.run_resident_feedback_window_limited_with_output(
                 resident_tick_limit,
                 &mut on_output_event,
@@ -645,10 +637,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         if self.speculative_draft_tokens == 0 || self.processor.speculative_decoder_count() == 0 {
             return Ok(false);
         }
-        if !self.speculative_execution_policy.should_use_speculative(
-            self.processor
-                .resident_feedback_estimated_tick_time_ns(),
-        ) {
+        if !self.speculative_execution_policy.should_use_speculative() {
             return Ok(false);
         }
         let Some(active) = self.active_input_event.as_ref() else {
@@ -683,7 +672,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
             draft_token_count,
             &stop_token_ids,
         )?;
-        self.speculative_execution_policy.observe_cycle(&cycle);
+        self.speculative_execution_policy
+            .observe_speculative_cycle(&cycle);
         self.active_input_event
             .as_mut()
             .expect("speculative feedback cycle requires an active input event")
@@ -998,6 +988,14 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 elapsed_time_ns,
                 completion.stop_reason != VULKAN_FEEDBACK_STOP_REASON_NONE,
             );
+        if completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
+            && completion.executed_tick_count == planned_tick_count
+        {
+            self.speculative_execution_policy.observe_resident_window(
+                elapsed_time_ns,
+                completion.sampled_tick_count,
+            );
+        }
         Ok(completion)
     }
 

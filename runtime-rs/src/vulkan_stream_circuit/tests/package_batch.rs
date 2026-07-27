@@ -334,9 +334,9 @@ fn speculative_verification_stops_at_the_first_emitted_stop_token() {
 #[test]
 fn speculative_execution_policy_probes_both_paths_before_selecting() {
     let mut policy = VulkanSpeculativeExecutionPolicy::default();
-    assert!(policy.should_use_speculative(None));
+    assert!(policy.should_use_speculative());
 
-    policy.observe_cycle(&VulkanSpeculativeCycleRun {
+    policy.observe_speculative_cycle(&VulkanSpeculativeCycleRun {
         decoder_id: "draft".to_string(),
         initial_token_id: 1,
         start_stream_tick: 0,
@@ -353,11 +353,9 @@ fn speculative_execution_policy_probes_both_paths_before_selecting() {
         total_time_ns: 90,
     });
 
-    assert!(policy.requires_resident_probe(None));
-    assert!(!policy.should_use_speculative(None));
-    assert!(!policy.requires_resident_probe(Some(40)));
-    assert!(policy.should_use_speculative(Some(40)));
-    assert!(!policy.should_use_speculative(Some(20)));
+    assert!(!policy.should_use_speculative());
+    policy.observe_resident_window(120, 3);
+    assert!(policy.should_use_speculative());
 }
 
 #[test]
@@ -382,13 +380,94 @@ fn speculative_execution_policy_uses_rolling_useful_token_cost() {
         }
     };
     for _ in 0..8 {
-        policy.observe_cycle(&cycle(2, vec![2, 3, 4], 120));
+        policy.observe_speculative_cycle(&cycle(2, vec![2, 3, 4], 120));
     }
-    policy.observe_cycle(&cycle(0, vec![9], 120));
+    policy.observe_speculative_cycle(&cycle(0, vec![9], 120));
 
-    assert_eq!(policy.estimated_useful_token_time_ns(), Some(44));
-    assert!(policy.should_use_speculative(Some(70)));
-    assert!(!policy.should_use_speculative(Some(40)));
+    assert_eq!(
+        policy.speculative.estimated_useful_token_time_ns(),
+        Some(44)
+    );
+    policy.observe_resident_window(210, 3);
+    assert!(policy.should_use_speculative());
+}
+
+#[test]
+fn speculative_execution_policy_reprobes_a_rejected_arm() {
+    let mut policy = VulkanSpeculativeExecutionPolicy::default();
+    policy.observe_speculative_cycle(&VulkanSpeculativeCycleRun {
+        decoder_id: "draft".to_string(),
+        initial_token_id: 1,
+        start_stream_tick: 0,
+        draft_token_ids: vec![2, 3],
+        target_token_ids: vec![2, 3, 4],
+        verification: VulkanSpeculativeVerificationResult {
+            accepted_draft_count: 2,
+            committed_target_tick_count: 3,
+            emitted_token_ids: vec![2, 3, 4],
+        },
+        draft_time_ns: 10,
+        target_verification_time_ns: 60,
+        draft_catch_up_time_ns: 10,
+        total_time_ns: 90,
+    });
+    policy.observe_resident_window(150, 3);
+    assert!(policy.should_use_speculative());
+
+    for _ in 0..VULKAN_SPECULATIVE_POLICY_OBSERVATION_WINDOW {
+        policy.observe_speculative_cycle(&VulkanSpeculativeCycleRun {
+            decoder_id: "draft".to_string(),
+            initial_token_id: 1,
+            start_stream_tick: 0,
+            draft_token_ids: vec![2, 3],
+            target_token_ids: vec![2, 3, 4],
+            verification: VulkanSpeculativeVerificationResult {
+                accepted_draft_count: 2,
+                committed_target_tick_count: 3,
+                emitted_token_ids: vec![2, 3, 4],
+            },
+            draft_time_ns: 10,
+            target_verification_time_ns: 60,
+            draft_catch_up_time_ns: 10,
+            total_time_ns: 90,
+        });
+    }
+
+    assert!(!policy.should_use_speculative());
+    policy.observe_resident_window(150, 3);
+    assert!(policy.should_use_speculative());
+}
+
+#[test]
+fn speculative_execution_policy_starts_each_input_with_fresh_evidence() {
+    let mut policy = VulkanSpeculativeExecutionPolicy::default();
+    policy.observe_speculative_cycle(&VulkanSpeculativeCycleRun {
+        decoder_id: "draft".to_string(),
+        initial_token_id: 1,
+        start_stream_tick: 0,
+        draft_token_ids: vec![2, 3],
+        target_token_ids: vec![9, 3, 4],
+        verification: VulkanSpeculativeVerificationResult {
+            accepted_draft_count: 0,
+            committed_target_tick_count: 1,
+            emitted_token_ids: vec![9],
+        },
+        draft_time_ns: 20,
+        target_verification_time_ns: 60,
+        draft_catch_up_time_ns: 10,
+        total_time_ns: 90,
+    });
+    policy.observe_resident_window(30, 1);
+    assert!(!policy.should_use_speculative());
+
+    policy.begin_input_event();
+
+    assert!(policy.should_use_speculative());
+    assert_eq!(
+        policy.speculative.estimated_useful_token_time_ns(),
+        None
+    );
+    assert_eq!(policy.resident.estimated_useful_token_time_ns(), None);
 }
 
 #[test]
