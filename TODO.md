@@ -53,30 +53,14 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
   back to the source tensor format.
 - Compilation, candidate construction, setup, warmup, steady-state execution,
   validation, and teardown are separate measured phases.
-- No candidate is promoted from one lucky timing or one convenient prompt.
+- Microbenchmarks answer one bounded binary question—whether the candidate is
+  faster—using one discarded warmup and one matched measured call per role.
+  Behavioral validation, not repeated timing samples, decides correctness and
+  operating-regime coverage.
 - GPU experiments remain sequential and obey all device-residency requirements
   in `AGENTS.md`. NVIDIA is not used for NERVE workloads.
 
 ## Work plan
-
-### 15. Establish the first generic representation providers
-
-- Use the analysis evidence from real components to choose the first providers;
-  do not preselect them solely because they appear interesting.
-- Begin with exact representations where the source structure permits an
-  equivalence proof.
-- Add approximate providers only with explicit correction and validation
-  contracts.
-- Ensure that at least one provider changes the computational representation,
-  rather than merely changing matrix tiling, fusion, quantization, or scheduling.
-- Keep every provider generic across compatible structures and model families.
-
-Completion requires both:
-
-- a candidate that is correctly rejected because it is slower or inaccurate;
-  and
-- a genuinely alternative representation that is promoted after a measured
-  hardware win and complete behavioral validation.
 
 ### 16. Run end-to-end model and hardware qualification
 

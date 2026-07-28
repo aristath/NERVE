@@ -155,7 +155,7 @@ that every selected GPU returned to its idle baseline:
   --bind-device gpu1=vulkan-uuid:SECOND_AMD_DEVICE_UUID
 ```
 
-The command and compiled package fingerprint, compiler target, compiled shader
+The command and compiled package schema, compiler target, compiled shader
 variant count, per-turn statistics, responses, and transcript hashes are
 captured in the report. Physical bindings are also printed in the normal chat
 readiness line, so a benchmark transcript identifies the devices it actually
