@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import struct
 from hashlib import sha256
@@ -31,6 +32,9 @@ from nerve.representation_optimizer.providers.codebook import (
     ExactEmbeddedHeadNormParameterProgramProvider,
     ExactHeadNormCodebookProvider,
 )
+from nerve.representation_optimizer.providers.codebook.discovery import (
+    discover_head_norm_codebook,
+)
 from nerve.representation_optimizer.providers.codebook.embedded_contracts import (
     EMBEDDED_PARAMETER_PROGRAM_PROOF_VERIFIER_ID,
 )
@@ -42,6 +46,9 @@ from nerve.representation_optimizer.providers.codebook.toolchain import (
 )
 from nerve.representation_optimizer.providers.codebook.member_paths import (
     member_path,
+)
+from nerve.representation_optimizer.providers.codebook.workloads import (
+    bundled_head_norm_validation_requirements,
 )
 from nerve.representation_optimizer.staging.artifact_validation import (
     ArtifactValidatorRegistry,
@@ -653,6 +660,11 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
     assert len(plan.benchmark_workloads) == 2
     validation_checks = plan.validation_requirements.to_json()["checks"]
     assert len(validation_checks) == 12
+    sanity_checks = [
+        check for check in validation_checks if check["stage"] == "sanity"
+    ]
+    assert len(sanity_checks) == 2
+    assert all(check["seeds"] == [1] for check in sanity_checks)
     component_checks = [
         check
         for check in validation_checks
@@ -734,6 +746,52 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
             ]
         }
     ]
+
+
+def test_bundled_candidate_runs_cheap_sanity_only_on_one_representative(
+    tmp_path: Path,
+) -> None:
+    problem = _provider_problem(tmp_path)
+    provider = ExactHeadNormCodebookProvider()
+    descriptor = load_builtin_representation_descriptors().get(
+        provider.descriptor_id
+    )
+    opportunity = discover_head_norm_codebook(
+        problem.bind_descriptor(descriptor)
+    ).opportunity
+    assert opportunity is not None
+    second = replace(
+        opportunity,
+        scope_id=stable_contract_id("scope", "second"),
+        component_id="second_component",
+    )
+    candidate = _run(problem).candidates[0].candidate.to_json()
+
+    requirements = bundled_head_norm_validation_requirements(
+        candidate=candidate,
+        opportunities=(opportunity, second),
+        max_context_activations=131_072,
+        proof_verifier_id="fixture.proof",
+        representation_name="fixture",
+    )
+    sanity = [
+        check for check in requirements["checks"] if check["stage"] == "sanity"
+    ]
+    assert len(sanity) == 2
+    assert {
+        check["controls"]["component_id"] for check in sanity
+    } == {"arbitrary_component"}
+    assert all(check["seeds"] == [1] for check in sanity)
+    fully_validated_components = {
+        check["controls"]["component_id"]
+        for check in requirements["checks"]
+        if check["stage"] == "full_local"
+        and check["regime"]["execution_scope"] == "component"
+    }
+    assert fully_validated_components == {
+        "arbitrary_component",
+        "second_component",
+    }
 
 
 def test_codebook_provider_and_toolchain_are_available_from_builtin_registries(

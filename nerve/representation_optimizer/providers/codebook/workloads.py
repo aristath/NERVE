@@ -183,7 +183,7 @@ def head_norm_validation_requirements(
                     "deterministic_random",
                 ],
             },
-            seeds=(1, 2, 3),
+            seeds=(1,),
             step_unit="component_activations",
             completion_condition="minimum_steps",
             minimum_steps=4_096,
@@ -224,7 +224,7 @@ def head_norm_validation_requirements(
                     "deterministic_random",
                 ],
             },
-            seeds=(1, 2, 3),
+            seeds=(1,),
             step_unit="component_activations",
             completion_condition="minimum_steps",
             minimum_steps=4_096,
@@ -520,7 +520,9 @@ def bundled_head_norm_validation_requirements(
         for check in document["checks"]:
             stage = check["stage"]
             execution_scope = check["regime"]["execution_scope"]
-            if index == 0 or stage == "sanity" or execution_scope == "component":
+            if index == 0 or (
+                stage != "sanity" and execution_scope == "component"
+            ):
                 checks.append(check)
     checks.sort(key=lambda item: item["check_id"])
     covered = {coverage for check in checks for coverage in check["coverage"]}
