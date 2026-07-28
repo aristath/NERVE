@@ -24,7 +24,11 @@ def test_optimizer_command_wires_fresh_default_paths_and_unbounded_budget(
     manifest = package / "vulkan_resident_package.json"
     manifest.write_text("{}")
     captured: dict[str, object] = {}
-    prepared = SimpleNamespace(targets=("target",))
+    source_artifacts = object()
+    prepared = SimpleNamespace(
+        targets=("target",),
+        source_artifacts=source_artifacts,
+    )
     optimization = SimpleNamespace(report={"status": "completed"})
 
     def prepare(**kwargs):
@@ -56,6 +60,7 @@ def test_optimizer_command_wires_fresh_default_paths_and_unbounded_budget(
     assert captured["run"]["package_dir"] == package
     assert captured["run"]["output_package_dir"] == (tmp_path / "compiled-optimized")
     assert captured["run"]["targets"] == ("target",)
+    assert captured["run"]["source_artifacts"] is source_artifacts
     assert all(value is None for value in captured["run"]["budget"].to_json().values())
 
 
