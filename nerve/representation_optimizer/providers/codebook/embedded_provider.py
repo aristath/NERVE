@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 from nerve.compilation import Json, ModelCompileError
@@ -7,33 +8,33 @@ from nerve.representation_optimizer.contracts import (
     canonical_json_bytes,
     representation_candidate_id,
 )
-from nerve.representation_optimizer.providers.codebook.artifacts import (
-    BRANCH_INDEX_PATHS,
-    CODEBOOK_TENSOR_PATH,
-    COMPONENT_FIXTURE_PATH,
-    CONVERSATION_FIXTURE_PATH,
-    DECODE_SHADER_PATH,
-    MODEL_LIMITS_PATH,
-    OVERLAY_PATH,
-    PREFILL_SHADER_PATH,
-    PROOF_PATH,
-    TENSOR_FRAGMENT_PATH,
-    artifact_paths,
-    candidate_tensor_names,
-)
-from nerve.representation_optimizer.providers.codebook.contracts import (
-    TARGET_LOWERING_SCHEMA,
-)
 from nerve.representation_optimizer.providers.codebook.discovery import (
     HeadNormCodebookOpportunity,
     discover_head_norm_codebook,
     discover_head_norm_codebooks,
 )
+from nerve.representation_optimizer.providers.codebook.embedded_artifacts import (
+    COMPONENT_FIXTURE_PATH,
+    CONVERSATION_FIXTURE_PATH,
+    DECODE_SHADER_PATH,
+    MODEL_LIMITS_PATH,
+    OVERLAY_PATH,
+    PROOF_PATH,
+    embedded_artifact_paths,
+)
+from nerve.representation_optimizer.providers.codebook.embedded_contracts import (
+    EMBEDDED_PARAMETER_PROGRAM_PROOF_SCHEMA,
+    EMBEDDED_PARAMETER_PROGRAM_PROOF_VERIFIER_ID,
+    EMBEDDED_TARGET_LOWERING_SCHEMA,
+)
+from nerve.representation_optimizer.providers.codebook.embedded_representation import (
+    embedded_parameter_program_representation_graph,
+)
 from nerve.representation_optimizer.providers.codebook.member_paths import (
     member_path,
 )
-from nerve.representation_optimizer.providers.codebook.representation import (
-    codebook_representation_graph,
+from nerve.representation_optimizer.providers.codebook.provider import (
+    LOOKUP_CODEBOOK_DESCRIPTOR_ID,
 )
 from nerve.representation_optimizer.providers.codebook.representation_bundle import (
     bundle_representation_graphs,
@@ -51,15 +52,10 @@ from nerve.representation_optimizer.providers.types import (
 )
 
 
-LOOKUP_CODEBOOK_DESCRIPTOR_ID = (
-    "representation_descriptor_9e65359d9531d6f46a89497fd0927233"
-)
-
-
-class ExactHeadNormCodebookProvider:
+class ExactEmbeddedHeadNormParameterProgramProvider:
     identity = ProviderIdentity(
-        "nerve.exact_head_norm_codebook",
-        "1",
+        "nerve.exact_embedded_head_norm_parameter_program",
+        "2",
     )
     descriptor_id = LOOKUP_CODEBOOK_DESCRIPTOR_ID
 
@@ -93,7 +89,7 @@ class ExactHeadNormCodebookProvider:
             reasons=(
                 (
                     f"discovered {len(opportunities)} non-overlapping exact "
-                    "head-normalization codebook circuits"
+                    "head-normalization parameter programs"
                 )
                 if opportunities
                 else _no_match_reason(context)
@@ -125,45 +121,41 @@ class ExactHeadNormCodebookProvider:
                 accepted=False,
                 evidence_ids=evidence_ids,
                 facts={},
-                reasons=("no exact compatible codebook circuit was found",),
+                reasons=("no exact compatible parameter program was found",),
             )
-        facts = {
-            "member_count": len(opportunities),
-            "members": [
-                {
-                    "scope_id": opportunity.scope_id,
-                    "component_id": opportunity.component_id,
-                    "physical_node_id": opportunity.physical_node_id,
-                    "branch_count": len(opportunity.branches),
-                    "head_width": opportunity.head_width,
-                    "source_tensor_names": [
-                        branch.tensor_name for branch in opportunity.branches
-                    ],
-                    "source_tensor_data_sha256": [
-                        branch.tensor.metadata["data_sha256"]
-                        for branch in opportunity.branches
-                    ],
-                    "codebook_entry_count": len(opportunity.codebook_values),
-                    "codebook_payload_sha256": (
-                        opportunity.codebook_payload_sha256
-                    ),
-                }
-                for opportunity in opportunities
-            ],
-            "original_parameter_bytes": sum(
-                item.original_parameter_bytes for item in opportunities
-            ),
-            "codebook_parameter_bytes": sum(
-                item.codebook_parameter_bytes for item in opportunities
-            ),
-            "proof_domain": "all stored BF16 bit patterns",
-        }
         return EvidenceAssessment(
             accepted=True,
             evidence_ids=evidence_ids,
-            facts=facts,
+            facts={
+                "member_count": len(opportunities),
+                "members": [
+                    {
+                        "scope_id": opportunity.scope_id,
+                        "component_id": opportunity.component_id,
+                        "physical_node_id": opportunity.physical_node_id,
+                        "branch_count": len(opportunity.branches),
+                        "head_width": opportunity.head_width,
+                        "source_tensor_names": [
+                            branch.tensor_name for branch in opportunity.branches
+                        ],
+                        "source_tensor_data_sha256": [
+                            branch.tensor.metadata["data_sha256"]
+                            for branch in opportunity.branches
+                        ],
+                    }
+                    for opportunity in opportunities
+                ],
+                "embedded_address_count": sum(
+                    len(branch.indices)
+                    for opportunity in opportunities
+                    for branch in opportunity.branches
+                ),
+                "proof_domain": "all stored BF16 bit patterns",
+            },
             reasons=(
-                "all stored BF16 values reconstruct exactly through one U8 codebook",
+                "exhaustive codebook analysis proves every stored BF16 value, "
+                "allowing both exact branch tensors to be compiled directly into "
+                "the target program",
             ),
         )
 
@@ -173,6 +165,8 @@ class ExactHeadNormCodebookProvider:
         evidence: EvidenceAssessment,
     ) -> tuple[Json, ...]:
         opportunities = _opportunities(context)
+        manifest = _source_json(context, opportunities[0].manifest_ref)
+        max_context_activations = int(manifest["max_context_activations"])
         candidate = {
             "schema": "nerve.optimizer.representation_candidate.v1",
             "candidate_id": "",
@@ -184,33 +178,35 @@ class ExactHeadNormCodebookProvider:
             "descriptor_id": self.descriptor_id,
             "evidence_refs": list(evidence.evidence_ids),
             "representation": {
-                "kind": "exact_u8_addressed_bf16_codebook",
+                "kind": "exact_embedded_bf16_head_norm_parameter_program",
                 "signal_formats": [
                     {"name": "dense_bf16_component_boundary"},
                 ],
                 "parameter_format": {
-                    "kind": "shared_bf16_codebook_with_u8_addresses",
+                    "kind": "spirv_constant_bf16_parameter_program",
+                    "execution_phases": ["decode"],
+                    "source_retained_execution_phases": ["prefill"],
                     "member_count": len(opportunities),
+                    "entry_dtype": "BF16",
                     "members": [
                         {
                             "scope_id": opportunity.scope_id,
-                            "entry_count": len(opportunity.codebook_values),
                             "branch_count": len(opportunity.branches),
                             "elements_per_branch": opportunity.head_width,
                             "source_data_sha256": [
                                 branch.tensor.metadata["data_sha256"]
                                 for branch in opportunity.branches
                             ],
-                            "codebook_payload_sha256": (
-                                opportunity.codebook_payload_sha256
-                            ),
                         }
                         for opportunity in opportunities
                     ],
                 },
                 "state_format": {"kind": "source_state_unchanged"},
                 "topology": {
-                    "kind": "non_overlapping_fused_head_norm_rope_dispatch_set",
+                    "kind": (
+                        "phase_selective_non_overlapping_fused_head_norm_rope_"
+                        "dispatch_set"
+                    ),
                     "component_ids": [
                         opportunity.component_id
                         for opportunity in opportunities
@@ -225,19 +221,38 @@ class ExactHeadNormCodebookProvider:
                     "device_cache_hierarchy",
                     "shader_scalar",
                 ],
+                "execution_envelope": {
+                    "phases": ["decode", "prefill"],
+                    "alternative_phases": ["decode"],
+                    "source_retained_phases": ["prefill"],
+                    "activation_batch": {
+                        "minimum": 1,
+                        "maximum": max_context_activations,
+                    },
+                    "context_activations": {
+                        "minimum": 0,
+                        "maximum": max_context_activations,
+                    },
+                    "state_activations": {
+                        "minimum": 0,
+                        "maximum": max_context_activations,
+                    },
+                },
             },
             "behavioral_contract": {
                 "mode": "exact",
                 "proof_obligations": [
-                    "codebook_reconstructs_source_bf16_bits",
-                    "fused_operator_preserves_source_rounding",
+                    "embedded_parameter_program_preserves_source_rounding",
+                    "embedded_parameter_program_reconstructs_source_bf16_bits",
                 ],
                 "error_contract": None,
             },
             "artifact_declarations": [
-                {"path": member_path(opportunity.scope_id, path)}
+                {
+                    "path": member_path(opportunity.scope_id, path),
+                }
                 for opportunity in opportunities
-                for path in artifact_paths()
+                for path in embedded_artifact_paths()
             ],
         }
         candidate["candidate_id"] = representation_candidate_id(candidate)
@@ -253,7 +268,7 @@ class ExactHeadNormCodebookProvider:
             members=tuple(
                 (
                     opportunity.scope_id,
-                    codebook_representation_graph(
+                    embedded_parameter_program_representation_graph(
                         candidate=candidate,
                         opportunity=opportunity,
                         capability_class=str(
@@ -272,7 +287,7 @@ class ExactHeadNormCodebookProvider:
         representation_ir: Json,
     ) -> Json:
         return {
-            "schema": TARGET_LOWERING_SCHEMA,
+            "schema": EMBEDDED_TARGET_LOWERING_SCHEMA,
             "candidate_id": candidate["candidate_id"],
             "representation_graph_id": representation_ir["graph_id"],
             "capability_class": context.hardware_profile["capability_class"],
@@ -293,32 +308,29 @@ class ExactHeadNormCodebookProvider:
         return StaticEstimate(
             feasible=True,
             permanent_bytes=sum(
-                item.codebook_parameter_bytes for item in opportunities
+                item.original_parameter_bytes for item in opportunities
             ),
             transient_bytes=max(
                 item.original_parameter_bytes for item in opportunities
             ),
-            # Shader compiler latency is a host/toolchain property. Until
-            # that process is calibrated for this target, inventing a time
-            # estimate would make bounded admission unsound.
             construction_nanoseconds=None,
             steady_state_work={
-                "indexed_u8_reads_per_dispatch": (
-                    2 * max(item.head_width for item in opportunities)
-                ),
-                "codebook_bf16_reads_per_dispatch": (
-                    2 * max(item.head_width for item in opportunities)
-                ),
-                "source_parameter_bytes_avoided": (
-                    sum(item.original_parameter_bytes for item in opportunities)
-                    - sum(item.codebook_parameter_bytes for item in opportunities)
+                "decode_parameter_buffer_reads_per_dispatch": 0,
+                "prefill_parameter_buffer_reads_per_dispatch": 2,
+                "embedded_bf16_elements": sum(
+                    len(branch.raw_values)
+                    for opportunity in opportunities
+                    for branch in opportunity.branches
                 ),
                 "qualified_component_count": len(opportunities),
                 "dispatch_count_change": 0,
             },
             reasons=(
-                "candidate preserves the source fused dispatch and replaces "
-                "two BF16 parameter streams with U8 addresses into one cache-sized table",
+                "candidate embeds exact BF16 constants only in the decode "
+                "program while retaining the source parameter buffers and "
+                "source batch kernels for prefill; construction temporarily "
+                "reads the parameters to prove the embedded program and decode "
+                "dispatches perform no parameter-buffer reads",
             ),
         )
 
@@ -355,10 +367,7 @@ class ExactHeadNormCodebookProvider:
                     key=lambda item: item.component_id,
                 )
             ],
-            "tensor_index_refs": sorted(
-                member_path(opportunity.scope_id, TENSOR_FRAGMENT_PATH)
-                for opportunity in opportunities
-            ),
+            "tensor_index_refs": [],
         }
 
     def proof_or_error_contract(
@@ -380,9 +389,10 @@ class ExactHeadNormCodebookProvider:
             for opportunity in _execution_class_representatives(opportunities)
             for workload in head_norm_benchmark_workloads(
                 opportunity,
-                representation_name="U8-addressed BF16 codebook",
+                representation_name="embedded BF16 parameter program",
                 artifact_scope_id=opportunity.scope_id,
                 qualified_component_ids=qualified,
+                execution_phases=("decode",),
             )
         )
 
@@ -397,10 +407,9 @@ class ExactHeadNormCodebookProvider:
             candidate=candidate,
             opportunities=opportunities,
             max_context_activations=int(manifest["max_context_activations"]),
-            proof_verifier_id=(
-                "nerve.exact_codebook_reconstruction.v1"
-            ),
-            representation_name="U8-addressed BF16 codebook",
+            proof_verifier_id=EMBEDDED_PARAMETER_PROGRAM_PROOF_VERIFIER_ID,
+            representation_name="embedded BF16 parameter program",
+            execution_phases=("decode",),
         )
 
 
@@ -412,7 +421,7 @@ def _opportunities(
     opportunities = discover_head_norm_codebooks(context)
     if required and not opportunities:
         raise ModelCompileError(
-            "no exact U8-addressed BF16 head-normalization codebook was found"
+            "no exact embedded head-normalization parameter program was found"
         )
     return opportunities
 
@@ -420,12 +429,10 @@ def _opportunities(
 def _no_match_reason(context: ProviderContext) -> str:
     if len(context.scope_ids) == 1:
         return discover_head_norm_codebook(context).reasons[0]
-    return "no exact compatible head-normalization codebook was found"
+    return "no exact compatible head-normalization parameter program was found"
 
 
 def _source_json(context: ProviderContext, path: str) -> Json:
-    import json
-
     try:
         document = json.loads(context.source_artifacts.read_path(path))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -459,10 +466,9 @@ def _member_lowering(
     candidate: Json,
     opportunity: HeadNormCodebookOpportunity,
 ) -> Json:
-    tensor_names = candidate_tensor_names(opportunity)
     manifest = _source_json(context, opportunity.manifest_ref)
     return {
-        "schema": TARGET_LOWERING_SCHEMA,
+        "schema": EMBEDDED_TARGET_LOWERING_SCHEMA,
         "candidate_id": candidate["candidate_id"],
         "scope_id": opportunity.scope_id,
         "source": {
@@ -494,25 +500,25 @@ def _member_lowering(
                 }
                 for branch in opportunity.branches
             ],
-            "branch_index_tensor_names": list(tensor_names[:2]),
-            "codebook_tensor_name": tensor_names[2],
-            "codebook_values_u16": list(opportunity.codebook_values),
-            "codebook_payload_sha256": opportunity.codebook_payload_sha256,
+            "branch_values_u16": [
+                list(branch.raw_values) for branch in opportunity.branches
+            ],
         },
         "artifacts": {
-            "branch_index_paths": list(BRANCH_INDEX_PATHS),
-            "codebook_path": CODEBOOK_TENSOR_PATH,
-            "tensor_fragment_path": TENSOR_FRAGMENT_PATH,
             "overlay_path": OVERLAY_PATH,
             "decode_shader_path": DECODE_SHADER_PATH,
-            "prefill_shader_path": PREFILL_SHADER_PATH,
             "proof_path": PROOF_PATH,
             "component_fixture_path": COMPONENT_FIXTURE_PATH,
             "conversation_fixture_path": CONVERSATION_FIXTURE_PATH,
             "model_limits_path": MODEL_LIMITS_PATH,
         },
         "runtime": {
-            "replacement_op": "parallel_head_norm_rope_2way_codebook_u8",
+            "source_abi_op": "parallel_head_norm_rope_2way",
+            "implementation": (
+                "exact_embedded_head_norm_parameter_program_v2"
+            ),
+            "alternative_execution_phases": ["decode"],
+            "source_retained_execution_phases": ["prefill"],
             "max_context_activations": int(manifest["max_context_activations"]),
             "required_vulkan_version": "1.4",
         },
@@ -547,14 +553,6 @@ def _build_plan(
     context: ProviderContext,
     opportunities: tuple[HeadNormCodebookOpportunity, ...],
 ) -> Json:
-    binary = {
-        "validator_id": "nonempty_binary",
-        "validation_contract": {
-            "minimum_byte_count": 1,
-            "byte_multiple": 1,
-        },
-    }
-
     def json_contract(schema: str) -> Json:
         return {
             "validator_id": "json_contract",
@@ -566,37 +564,9 @@ def _build_plan(
 
     outputs = []
     for opportunity in opportunities:
-        def prefix(path: str) -> str:
-            return member_path(opportunity.scope_id, path)
-
-        outputs.extend([
-        _output(
-            prefix(BRANCH_INDEX_PATHS[0]),
-            "address_index",
-            "residency",
-            "semantic_construction",
-            len(opportunity.branches[0].index_storage_payload),
-            binary,
-        ),
-        _output(
-            prefix(BRANCH_INDEX_PATHS[1]),
-            "address_index",
-            "residency",
-            "semantic_construction",
-            len(opportunity.branches[1].index_storage_payload),
-            binary,
-        ),
-        _output(
-            prefix(CODEBOOK_TENSOR_PATH),
-            "codebook",
-            "residency",
-            "semantic_construction",
-            # Vulkan storage-buffer codebook reads are 32-bit packed. The
-            # final unused half-word is explicit when the logical table has
-            # an odd number of BF16 entries.
-            len(opportunity.codebook_storage_payload),
-            binary,
-        ),
+        prefix = lambda path: member_path(opportunity.scope_id, path)
+        outputs.extend(
+            [
         _output(
             prefix(COMPONENT_FIXTURE_PATH),
             "validation_fixture",
@@ -611,9 +581,7 @@ def _build_plan(
             "compile",
             "semantic_construction",
             0,
-            json_contract(
-                "nerve.optimizer.validation_conversation.v1"
-            ),
+            json_contract("nerve.optimizer.validation_conversation.v1"),
         ),
         _output(
             prefix(DECODE_SHADER_PATH),
@@ -643,33 +611,15 @@ def _build_plan(
             json_contract("nerve.optimizer.vulkan_component_overlay.v1"),
         ),
         _output(
-            prefix(PREFILL_SHADER_PATH),
-            "vulkan_shader",
-            "residency",
-            "physical_optimization",
-            0,
-            {
-                "validator_id": "spirv_module",
-                "validation_contract": {"minimum_version": 0x00010600},
-            },
-        ),
-        _output(
             prefix(PROOF_PATH),
             "equivalence_proof",
             "compile",
             "physical_optimization",
             0,
-            json_contract("nerve.optimizer.codebook_equivalence_proof.v1"),
+            json_contract(EMBEDDED_PARAMETER_PROGRAM_PROOF_SCHEMA),
         ),
-        _output(
-            prefix(TENSOR_FRAGMENT_PATH),
-            "tensor_index_fragment",
-            "mount",
-            "semantic_construction",
-            0,
-            json_contract("nerve.tensor_index.v1"),
-        ),
-        ])
+            ]
+        )
     outputs.sort(key=lambda item: item["path"])
     source_inputs = {
         item["path"]: item
@@ -686,9 +636,6 @@ def _build_plan(
         "source_inputs": [source_inputs[path] for path in sorted(source_inputs)],
         "outputs": outputs,
         "resource_limits": {
-            # Whole-run budgets and cancellation remain authoritative.
-            # Provider-local limits must be derived from calibration rather
-            # than arbitrary constants, and none exists yet.
             "maximum_construction_time_ns": None,
             "maximum_temporary_bytes": None,
             "maximum_staging_bytes": None,

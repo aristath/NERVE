@@ -16,7 +16,8 @@ from nerve.representation_optimizer.contracts import (
 
 CANDIDATE_BUILD_PLAN_SCHEMA = "nerve.optimizer.candidate_build_plan.v1"
 STAGED_ARTIFACT_DIGEST_SCHEMA = "nerve.optimizer.artifact_sha256.v1"
-SOURCE_PACKAGE_SEAL_SCHEMA = "nerve.optimizer.source_package_seal.v1"
+SOURCE_PACKAGE_SEAL_SCHEMA = "nerve.optimizer.source_package_seal.v2"
+SOURCE_PACKAGE_SEAL_FILE = "source_seal.json"
 CONSTRUCTION_PHASES = (
     "semantic_construction",
     "ordinary_lowering",
@@ -56,6 +57,54 @@ class CandidateBuildPlan:
 
     def to_json(self) -> Json:
         return deepcopy(self._document)
+
+
+def validate_source_package_seal(
+    document: Json,
+    build_plan: CandidateBuildPlan,
+) -> Json:
+    expected_fields = {
+        "schema",
+        "package_id",
+        "manifest_digest",
+        "optimizer_stage_digest",
+        "exact_baseline_digest",
+        "scope_catalog_digest",
+        "package_integrity_contract_digest",
+        "source_inputs",
+    }
+    if (
+        not isinstance(document, dict)
+        or set(document) != expected_fields
+        or document.get("schema") != SOURCE_PACKAGE_SEAL_SCHEMA
+    ):
+        raise ModelCompileError("candidate source package seal is invalid")
+    declarations = {
+        item["path"]: item["digest"]
+        for item in build_plan.source_inputs
+    }
+    records = document.get("source_inputs")
+    if (
+        not isinstance(records, dict)
+        or list(records) != sorted(records)
+        or set(records) != set(declarations)
+    ):
+        raise ModelCompileError(
+            "source package seal does not cover its exact source inputs"
+        )
+    for relative_path, expected_digest in declarations.items():
+        record = records.get(relative_path)
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"digest", "signature"}
+            or record["digest"] != expected_digest
+            or not _valid_file_signature(record["signature"])
+        ):
+            raise ModelCompileError(
+                f"candidate source package seal record is invalid: "
+                f"{relative_path!r}"
+            )
+    return document
 
 
 def staged_artifact_digest(payload: bytes) -> str:
@@ -238,3 +287,23 @@ def _positive_integer(value: Any, path: str) -> int:
     if result == 0:
         raise ContractValidationError(f"{path} must be positive")
     return result
+
+
+def _valid_file_signature(document: object) -> bool:
+    return (
+        isinstance(document, dict)
+        and set(document)
+        == {
+            "device",
+            "inode",
+            "byte_count",
+            "modified_ns",
+            "changed_ns",
+        }
+        and all(
+            not isinstance(value, bool)
+            and isinstance(value, int)
+            and value >= 0
+            for value in document.values()
+        )
+    )

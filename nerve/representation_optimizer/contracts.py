@@ -19,22 +19,22 @@ HARDWARE_PROCESS_PROFILE_SCHEMA = "nerve.optimizer.hardware_process_profile.v1"
 REPRESENTATION_DESCRIPTOR_SCHEMA = "nerve.optimizer.representation_descriptor.v1"
 REPRESENTATION_CANDIDATE_SCHEMA = "nerve.optimizer.representation_candidate.v1"
 CANDIDATE_CONSTRUCTION_SCHEMA = "nerve.optimizer.candidate_construction.v1"
-BENCHMARK_RECORD_SCHEMA = "nerve.optimizer.benchmark_record.v1"
+BENCHMARK_RECORD_SCHEMA = "nerve.optimizer.benchmark_record.v2"
 VALIDATION_RECORD_SCHEMA = "nerve.optimizer.validation_record.v1"
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
 RELOWERING_REQUEST_SCHEMA = "nerve.optimizer.relowering_request.v1"
 BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
 )
-VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
-VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v2"
+VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v2"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v3"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
-VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v1"
-VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v2"
+VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v2"
+VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v3"
 VALIDATION_RESIDENCY_EVENT_SCHEMA = (
     "nerve.optimizer.validation_residency_event.v3"
 )
-VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v3"
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v4"
 PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 CONTRACT_DIGEST_SCHEMA = "nerve.optimizer.canonical_json_sha256.v1"
 DEVICE_STATE_DIGEST_SCHEMA = "nerve.optimizer.device_state_sha256.v1"
@@ -1326,7 +1326,7 @@ def _validate_candidate_construction(document: Json) -> None:
             "source_inputs",
         },
     )
-    if source_seal["schema"] != "nerve.optimizer.source_package_seal.v1":
+    if source_seal["schema"] != "nerve.optimizer.source_package_seal.v2":
         raise ContractValidationError("source_seal schema is unsupported")
     _require_nonempty_string(source_seal["package_id"], "source_seal.package_id")
     _require_staged_artifact_digest(
@@ -1347,14 +1347,39 @@ def _validate_candidate_construction(document: Json) -> None:
     )
     if list(source_inputs) != sorted(source_inputs):
         raise ContractValidationError("source_seal.source_inputs must be sorted")
-    for path, digest in source_inputs.items():
+    for path, raw_record in source_inputs.items():
         _require_normalized_relative_path(
             path,
             "source_seal.source_inputs path",
         )
-        _require_staged_artifact_digest(
-            digest, f"source_seal.source_inputs.{path}"
+        record = _require_object(
+            raw_record,
+            f"source_seal.source_inputs.{path}",
         )
+        _require_fields(record, {"digest", "signature"})
+        _require_staged_artifact_digest(
+            record["digest"],
+            f"source_seal.source_inputs.{path}.digest",
+        )
+        signature = _require_object(
+            record["signature"],
+            f"source_seal.source_inputs.{path}.signature",
+        )
+        _require_fields(
+            signature,
+            {
+                "device",
+                "inode",
+                "byte_count",
+                "modified_ns",
+                "changed_ns",
+            },
+        )
+        for field, value in signature.items():
+            _require_nonnegative_integer(
+                value,
+                f"source_seal.source_inputs.{path}.signature.{field}",
+            )
     for field in (
         "representation_graph_digest",
         "target_lowering_digest",
@@ -1500,10 +1525,10 @@ def _validate_candidate_construction(document: Json) -> None:
             raise ContractValidationError("construction integrity schema is unsupported")
         _require_staged_artifact_digest(integrity["digest"], "integrity.digest")
         _require_positive_integer(integrity["file_count"], "integrity.file_count")
-        if integrity["file_count"] != len(artifacts) + 6:
+        if integrity["file_count"] != len(artifacts) + 7:
             raise ContractValidationError(
                 "construction integrity file_count does not cover its "
-                "six contracts and declared artifacts"
+                "seven contracts and declared artifacts"
             )
     elif artifacts or integrity is not None:
         raise ContractValidationError(

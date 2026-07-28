@@ -40,6 +40,21 @@ def execute_validation_stage(
     adapter: BehavioralValidationAdapter,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> ValidationRun:
+    return _execute_validation_stage(
+        plan,
+        stage=stage,
+        adapter=adapter,
+        cancel_requested=cancel_requested,
+    )
+
+
+def _execute_validation_stage(
+    plan: ValidationPlan,
+    *,
+    stage: str,
+    adapter: BehavioralValidationAdapter,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> ValidationRun:
     checks = plan.checks_for_stage(stage)
     if not checks:
         raise ModelCompileError(
@@ -58,120 +73,97 @@ def execute_validation_stage(
     trace_paths: set[str] = set()
     status = "completed"
     block_index = 0
+    pairs_by_scope = {
+        execution_scope: tuple(
+            (check, seed)
+            for check in checks
+            if check["regime"]["execution_scope"] == execution_scope
+            for seed in check["seeds"]
+        )
+        for execution_scope in ("component", "whole_model")
+    }
+    pairs = tuple(
+        pair
+        for execution_scope in ("component", "whole_model")
+        for pair in pairs_by_scope[execution_scope]
+    )
+    results: dict[tuple[str, int], dict[str, Json]] = {
+        (check["check_id"], seed): {}
+        for check, seed in pairs
+    }
+    role_elapsed_ns: dict[tuple[str, int], int] = {
+        key: 0 for key in results
+    }
     try:
-        for check in checks:
-            for seed in check["seeds"]:
-                _checkpoint(cancel_requested)
-                started = time.monotonic_ns()
-                results: dict[str, Json] = {}
-                for role in ("reference", "candidate"):
-                    implementation = plan.implementation(role)
-                    mount_request = ValidationRoleMountRequest(
-                        plan_id=plan.plan_id,
-                        candidate_id=plan.candidate_id,
-                        stage=stage,
-                        check=check,
-                        role=role,
-                        implementation=implementation,
-                        matched_conditions=dict(
-                            document["matched_conditions"]
-                        ),
-                        matched_conditions_digest=str(
-                            document["matched_conditions_digest"]
-                        ),
-                        seed=seed,
-                        block_index=block_index,
-                        cancel_requested=cancel_requested,
+        for execution_scope in ("component", "whole_model"):
+            scoped_pairs = pairs_by_scope[execution_scope]
+            if not scoped_pairs:
+                continue
+            with adapter.validation_stage(
+                stage,
+                execution_scope=execution_scope,
+                cancel_requested=cancel_requested,
+            ):
+                for check, seed in scoped_pairs:
+                    key = (check["check_id"], seed)
+                    for role in ("reference", "candidate"):
+                        _checkpoint(cancel_requested)
+                        implementation = plan.implementation(role)
+                        result, role_events, duration_ns = (
+                            _execute_validation_role(
+                                plan=plan,
+                                plan_document=document,
+                                stage=stage,
+                                check=check,
+                                seed=seed,
+                                role=role,
+                                implementation=implementation,
+                                block_index=block_index,
+                                adapter=adapter,
+                                trace_paths=trace_paths,
+                                cancel_requested=cancel_requested,
+                            )
+                        )
+                        results[key][role] = result
+                        events.extend(role_events)
+                        role_elapsed_ns[key] += duration_ns
+                        block_index += 1
+                    comparison = adapter.compare_results(
+                        {
+                            "plan_id": plan.plan_id,
+                            "check": check,
+                            "seed": seed,
+                            "behavioral_contract": plan.behavioral_contract,
+                        },
+                        results[key]["reference"],
+                        results[key]["candidate"],
                     )
-                    session = adapter.open_session(mount_request)
-                    mount: ValidationResidencyEvent | None = None
-                    try:
-                        mount = ValidationResidencyEvent.from_json(
-                            session.mount_event
-                        )
-                        _validate_mount(plan, mount_request, mount)
-                        execution_request = ValidationRoleExecutionRequest(
-                            plan_id=plan.plan_id,
-                            candidate_id=plan.candidate_id,
-                            check=check,
-                            role=role,
-                            implementation=implementation,
-                            matched_conditions=dict(
-                                document["matched_conditions"]
-                            ),
-                            matched_conditions_digest=str(
-                                document[
-                                    "matched_conditions_digest"
-                                ]
-                            ),
-                            seed=seed,
-                        )
-                        result = ValidationRoleResult.from_json(
-                            session.execute(execution_request)
-                        )
-                        observed_paths = _validate_role_result(
-                            execution_request,
-                            result,
-                            adapter,
-                        )
-                        if trace_paths & observed_paths:
-                            raise ModelCompileError(
-                                "validation role results reused a raw trace path"
-                            )
-                        trace_paths.update(observed_paths)
-                        results[role] = result.to_json()
-                    finally:
-                        if mount is not None:
-                            unmount = ValidationResidencyEvent.from_json(
-                                session.close()
-                            )
-                            _validate_unmount(
-                                plan,
-                                mount_request,
-                                mount,
-                                unmount,
-                            )
-                            events.extend(
-                                (mount.to_json(), unmount.to_json())
-                            )
-                    block_index += 1
-                comparison = adapter.compare_results(
-                    {
-                        "plan_id": plan.plan_id,
-                        "check": check,
-                        "seed": seed,
-                        "behavioral_contract": plan.behavioral_contract,
-                    },
-                    results["reference"],
-                    results["candidate"],
-                )
-                observation_document = _paired_observation(
-                    plan=plan,
-                    check=check,
-                    seed=seed,
-                    results=results,
-                    comparison=comparison,
-                )
-                host_elapsed = max(1, time.monotonic_ns() - started)
-                observation = ValidationObservation.from_json(
-                    observation_document
-                )
-                observations.append(observation_document)
-                elapsed.append(
-                    {
-                        "observation_id": observation.observation_id,
-                        "duration_ns": host_elapsed,
-                    }
-                )
-                rejection = _behavioral_rejection(
-                    plan,
-                    check,
-                    observation_document,
-                )
-                if rejection is not None:
-                    status = "failed"
-                    diagnostics.append(rejection)
-                    break
+                    observation_document = _paired_observation(
+                        plan=plan,
+                        check=check,
+                        seed=seed,
+                        results=results[key],
+                        comparison=comparison,
+                    )
+                    observation = ValidationObservation.from_json(
+                        observation_document
+                    )
+                    observations.append(observation_document)
+                    elapsed.append(
+                        {
+                            "observation_id": observation.observation_id,
+                            "duration_ns": max(1, role_elapsed_ns[key]),
+                        }
+                    )
+                    rejection = _behavioral_rejection(
+                        plan,
+                        check,
+                        observation_document,
+                    )
+                    if rejection is not None:
+                        status = "failed"
+                        diagnostics.append(rejection)
+                        break
             if status != "completed":
                 break
     except ModelCompileCancelled as error:
@@ -196,6 +188,90 @@ def execute_validation_stage(
     return ValidationRun.from_json(run_document)
 
 
+def _execute_validation_role(
+    *,
+    plan: ValidationPlan,
+    plan_document: Json,
+    stage: str,
+    check: Json,
+    seed: int,
+    role: str,
+    implementation: Json,
+    block_index: int,
+    adapter: BehavioralValidationAdapter,
+    trace_paths: set[str],
+    cancel_requested: Callable[[], bool] | None,
+) -> tuple[Json, tuple[Json, Json], int]:
+    started = time.monotonic_ns()
+    mount_request = ValidationRoleMountRequest(
+        plan_id=plan.plan_id,
+        candidate_id=plan.candidate_id,
+        stage=stage,
+        check=check,
+        role=role,
+        implementation=implementation,
+        matched_conditions=dict(
+            plan_document["matched_conditions"]
+        ),
+        matched_conditions_digest=str(
+            plan_document["matched_conditions_digest"]
+        ),
+        seed=seed,
+        block_index=block_index,
+        cancel_requested=cancel_requested,
+    )
+    session = adapter.open_session(mount_request)
+    mount: ValidationResidencyEvent | None = None
+    try:
+        mount = ValidationResidencyEvent.from_json(
+            session.mount_event
+        )
+        _validate_mount(plan, mount_request, mount)
+        execution_request = ValidationRoleExecutionRequest(
+            plan_id=plan.plan_id,
+            candidate_id=plan.candidate_id,
+            check=check,
+            role=role,
+            implementation=implementation,
+            matched_conditions=dict(
+                plan_document["matched_conditions"]
+            ),
+            matched_conditions_digest=str(
+                plan_document["matched_conditions_digest"]
+            ),
+            seed=seed,
+        )
+        result = ValidationRoleResult.from_json(
+            session.execute(execution_request)
+        )
+        observed_paths = _validate_role_result(
+            execution_request,
+            result,
+            adapter,
+        )
+        if trace_paths & observed_paths:
+            raise ModelCompileError(
+                "validation role results reused a raw trace path"
+            )
+        trace_paths.update(observed_paths)
+    finally:
+        if mount is not None:
+            unmount = ValidationResidencyEvent.from_json(
+                session.close()
+            )
+            _validate_unmount(
+                plan,
+                mount_request,
+                mount,
+                unmount,
+            )
+    return (
+        result.to_json(),
+        (mount.to_json(), unmount.to_json()),
+        max(1, time.monotonic_ns() - started),
+    )
+
+
 def _behavioral_rejection(
     plan: ValidationPlan,
     check: Json,
@@ -206,14 +282,16 @@ def _behavioral_rejection(
             f"validation check {check['check_id']} seed "
             f"{observation['seed']} failed during execution"
         )
-    minimum_steps = check["horizon"]["minimum_steps"]
+    completion_condition = check["horizon"]["completion_condition"]
     if any(
-        observation[role]["steps"] < minimum_steps
+        observation[role]["horizon_completion"]["condition"]
+        != completion_condition
+        or not observation[role]["horizon_completion"]["satisfied"]
         for role in ("reference", "candidate")
     ):
         return (
-            f"validation check {check['check_id']} did not execute its "
-            "declared minimum horizon"
+            f"validation check {check['check_id']} did not satisfy its "
+            "declared horizon completion condition"
         )
     observed_metrics = {
         metric["name"]: metric
@@ -274,6 +352,16 @@ def _validate_role_result(
     ):
         raise ModelCompileError(
             "validation adapter returned a role result for another request"
+        )
+    completion = document["horizon_completion"]
+    horizon = request.check["horizon"]
+    if completion["condition"] != horizon["completion_condition"] or (
+        completion["condition"] == "minimum_steps"
+        and completion["minimum_steps"] != horizon["minimum_steps"]
+    ):
+        raise ModelCompileError(
+            "validation adapter returned completion evidence for another "
+            "horizon contract"
         )
     paths: set[str] = set()
     for trace in document["traces"]:
@@ -359,6 +447,7 @@ def _observation_role(result: Json) -> Json:
         "output_digest": result["output_digest"],
         "state_digest": result["state_digest"],
         "steps": result["steps"],
+        "horizon_completion": result["horizon_completion"],
     }
 
 

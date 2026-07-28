@@ -322,15 +322,19 @@ class FixtureProvider:
     def mount_requirements(self, context, candidate):
         self._called("mount_requirements")
         return {
-            "schema": "nerve.optimizer.runtime_mount_plan.v1",
+            "schema": "nerve.optimizer.runtime_mount_plan.v2",
             "candidate_id": candidate["candidate_id"],
             "adapter_id": (
                 "vulkan_stream_circuit_component_overlay.v1"
             ),
-            "component_replacements": [
+            "regions": [
                 {
-                    "source_component_id": "component",
-                    "overlay_ref": "state/compact_layout.json",
+                    "component_replacements": [
+                        {
+                            "source_component_id": "component",
+                            "overlay_ref": "state/compact_layout.json",
+                        }
+                    ],
                 }
             ],
             "tensor_index_refs": [],
@@ -362,7 +366,7 @@ class FixtureProvider:
                 },
                 controls={"sampler": "greedy"},
                 randomness_algorithm="fixture-counter",
-                seeds=(1, 2),
+                seeds=(1,),
                 deterministic_replay_required=True,
                 permit_sampling_variance=False,
                 permit_numerical_nondeterminism=False,
@@ -403,7 +407,7 @@ class FixtureProvider:
                 },
                 controls={"scheduler": "multi_stream"},
                 randomness_algorithm="fixture-counter",
-                seeds=(1, 2),
+                seeds=(1,),
                 deterministic_replay_required=True,
                 permit_sampling_variance=False,
                 permit_numerical_nondeterminism=False,
@@ -447,6 +451,8 @@ class FixtureProvider:
                 },
                 controls={"execution": "ordinary"},
                 seeds=(1,),
+                step_unit="component_activations",
+                completion_condition="minimum_steps",
                 minimum_steps=1,
                 output_allowance=None,
                 output_allowance_basis={"kind": "unlimited"},
@@ -480,6 +486,8 @@ class FixtureProvider:
                 },
                 controls={"execution": "ordinary"},
                 seeds=(1, 2),
+                step_unit="component_activations",
+                completion_condition="minimum_steps",
                 minimum_steps=128,
                 output_allowance=None,
                 output_allowance_basis={"kind": "unlimited"},
@@ -516,6 +524,8 @@ class FixtureProvider:
                 },
                 controls={"execution": "ordinary"},
                 seeds=(1, 2),
+                step_unit="component_activations",
+                completion_condition="minimum_steps",
                 minimum_steps=128,
                 output_allowance=None,
                 output_allowance_basis={"kind": "unlimited"},
@@ -546,6 +556,8 @@ class FixtureProvider:
                 },
                 controls={"execution": "ordinary"},
                 seeds=(1, 2),
+                step_unit="component_activations",
+                completion_condition="minimum_steps",
                 minimum_steps=128,
                 output_allowance=None,
                 output_allowance_basis={"kind": "unlimited"},
@@ -576,6 +588,8 @@ class FixtureProvider:
                 },
                 controls={"execution": "ordinary"},
                 seeds=(1, 2),
+                step_unit="component_activations",
+                completion_condition="minimum_steps",
                 minimum_steps=128,
                 output_allowance=None,
                 output_allowance_basis={"kind": "unlimited"},
@@ -617,10 +631,15 @@ class FixtureProvider:
                 },
                 controls={
                     "execution": "ordinary",
+                    "execution_mode": "conversation",
                     "max_output_tokens": 65_536,
                 },
                 seeds=(1, 2),
-                minimum_steps=1_024,
+                step_unit="component_activations",
+                completion_condition=(
+                    "semantic_stop_or_allowance_per_turn"
+                ),
+                minimum_steps=None,
                 output_allowance=65_536,
                 output_allowance_basis={
                     "kind": "declared_model_limit",

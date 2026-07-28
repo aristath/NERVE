@@ -20,6 +20,10 @@ from nerve.representation_optimizer.providers.codebook.contracts import (
     CODEBOOK_RUNTIME_OP,
     TARGET_LOWERING_SCHEMA,
 )
+from nerve.representation_optimizer.providers.codebook.member_paths import (
+    member_path,
+    member_root,
+)
 from nerve.representation_optimizer.providers.codebook.shaders import (
     compile_spirv,
     render_codebook_shader,
@@ -50,59 +54,80 @@ _SUPPORTED_OBLIGATIONS = frozenset(
 
 @dataclass(frozen=True)
 class ExactCodebookProofVerifier:
-    package_root: Path
+    source_artifacts: PackageSourceArtifactResolver
     candidate_workspace_root: Path
     verifier_id: str = CODEBOOK_PROOF_VERIFIER_ID
 
     def verify(self, request: ProofRequest) -> Json:
         diagnostics = []
         facts: Json = {}
-        artifact = None
+        artifacts = []
         try:
             if request.obligation not in _SUPPORTED_OBLIGATIONS:
                 raise ModelCompileError(
                     f"unsupported codebook proof obligation {request.obligation!r}"
                 )
             root = self._candidate_root(request.candidate_id)
-            proof_path = _regular_file(root, PROOF_PATH)
-            artifact_digest = staged_file_digest(proof_path)
-            _require_candidate_artifact(
-                request.candidate_implementation,
-                PROOF_PATH,
-                artifact_digest,
-            )
             lowering = _json_file(_regular_file(root, "contracts/target_lowering.json"))
-            proof = _json_file(proof_path)
-            if (
-                lowering.get("schema") != TARGET_LOWERING_SCHEMA
-                or lowering.get("candidate_id") != request.candidate_id
-                or proof.get("schema") != CODEBOOK_PROOF_SCHEMA
-                or proof.get("candidate_id") != request.candidate_id
-            ):
+            if lowering.get("schema") != TARGET_LOWERING_SCHEMA or lowering.get(
+                "candidate_id"
+            ) != request.candidate_id:
                 raise ModelCompileError(
                     "codebook proof contracts belong to another candidate"
                 )
-            reconstruction = _verify_reconstruction(
-                self.package_root,
-                root,
-                lowering,
-                proof,
-            )
-            overlay = _verify_overlay(
-                self.package_root,
-                root,
-                lowering,
-                proof,
-            )
-            shaders = _verify_shaders(root, lowering, proof)
+            members = lowering.get("members", [lowering])
+            member_facts = []
+            for member in members:
+                scope_id = str(member["scope_id"])
+                relative_proof = member_path(scope_id, PROOF_PATH)
+                member_candidate_root = _regular_directory(
+                    root, member_root(scope_id)
+                )
+                proof_path = _regular_file(root, relative_proof)
+                artifact_digest = staged_file_digest(proof_path)
+                _require_candidate_artifact(
+                    request.candidate_implementation,
+                    relative_proof,
+                    artifact_digest,
+                )
+                proof = _json_file(proof_path)
+                if (
+                    proof.get("schema") != CODEBOOK_PROOF_SCHEMA
+                    or proof.get("candidate_id") != request.candidate_id
+                    or proof.get("scope_id") != scope_id
+                ):
+                    raise ModelCompileError(
+                        "codebook member proof belongs to another candidate or scope"
+                    )
+                member_facts.append(
+                    {
+                        "scope_id": scope_id,
+                        "exact_bf16_reconstruction": _verify_reconstruction(
+                            self.source_artifacts,
+                            member_candidate_root,
+                            member,
+                            proof,
+                        ),
+                        "source_overlay_difference_is_declared": _verify_overlay(
+                            self.source_artifacts.package_root,
+                            member_candidate_root,
+                            member,
+                            proof,
+                        ),
+                        "deterministic_lowering_matches": _verify_shaders(
+                            member_candidate_root, member, proof
+                        ),
+                    }
+                )
+                artifacts.append(
+                    {
+                        "path": f"{request.candidate_id}/{relative_proof}",
+                        "digest": artifact_digest,
+                    }
+                )
             facts = {
-                "exact_bf16_reconstruction": reconstruction,
-                "source_overlay_difference_is_declared": overlay,
-                "deterministic_lowering_matches": shaders,
-            }
-            artifact = {
-                "path": (f"{request.candidate_id}/{PROOF_PATH}"),
-                "digest": artifact_digest,
+                "member_count": len(member_facts),
+                "members": member_facts,
             }
         except (
             KeyError,
@@ -124,7 +149,7 @@ class ExactCodebookProofVerifier:
             "construction_record_digest": (request.construction_record_digest),
             "status": "proven" if not diagnostics else "inconclusive",
             "facts": facts,
-            "artifacts": [] if artifact is None else [artifact],
+            "artifacts": artifacts,
             "diagnostics": diagnostics,
         }
         document["proof_id"] = proof_result_id(document)
@@ -147,8 +172,9 @@ class ExactCodebookProofVerifier:
         candidate_id, separator, artifact_path = relative_path.partition("/")
         if (
             not separator
-            or artifact_path != PROOF_PATH
             or not candidate_id.startswith("candidate_")
+            or not artifact_path.startswith("members/scope_")
+            or not artifact_path.endswith(f"/{PROOF_PATH}")
         ):
             raise ModelCompileError("codebook proof artifact reference is invalid")
         path = _regular_file(
@@ -173,13 +199,25 @@ class ExactCodebookProofVerifier:
         return root
 
 
+def _regular_directory(root: Path, relative_path: str) -> Path:
+    path = (root / relative_path).resolve()
+    if (
+        not path.is_relative_to(root.resolve())
+        or path.is_symlink()
+        or not path.is_dir()
+    ):
+        raise ModelCompileError(
+            f"codebook candidate directory is unavailable: {relative_path!r}"
+        )
+    return path
+
+
 def _verify_reconstruction(
-    package_root: Path,
+    resolver: PackageSourceArtifactResolver,
     candidate_root: Path,
     lowering: Json,
     proof: Json,
 ) -> Json:
-    resolver = PackageSourceArtifactResolver(package_root)
     parameters = lowering["parameters"]
     codebook_values = tuple(int(value) for value in parameters["codebook_values_u16"])
     codebook_payload = b"".join(
@@ -333,6 +371,9 @@ def _verify_overlay(
             "kind": "shared_bf16_codebook_u8_addresses",
             "entry_count": len(lowering["parameters"]["codebook_values_u16"]),
             "source_parameter_ids": source_node["params"],
+            "descriptor_abi": "source_parameters_replaced",
+            "alternative_execution_phases": ["decode", "prefill"],
+            "source_retained_execution_phases": [],
         }
     ):
         raise ModelCompileError("candidate overlay node rewrite is invalid")
@@ -377,7 +418,8 @@ def _verify_overlay(
     )
     if (
         kernel["op"] != CODEBOOK_RUNTIME_OP
-        or kernel["shader_path"] != DECODE_SHADER_PATH
+        or kernel["shader_path"]
+        != member_path(lowering["scope_id"], DECODE_SHADER_PATH)
         or len(kernel["batch_implementations"])
         != len(source_kernel["batch_implementations"])
     ):
@@ -396,7 +438,9 @@ def _verify_overlay(
             source_batch["stages"],
             strict=True,
         ):
-            if candidate_stage["shader_path"] != PREFILL_SHADER_PATH:
+            if candidate_stage["shader_path"] != member_path(
+                lowering["scope_id"], PREFILL_SHADER_PATH
+            ):
                 raise ModelCompileError(
                     "candidate overlay batch shader is inconsistent"
                 )
@@ -412,8 +456,12 @@ def _verify_overlay(
         "replacement_op": CODEBOOK_RUNTIME_OP,
         "compiled_from": source_node["attrs"]["compiled_from"],
         "intermediate_rounding": source_node["attrs"]["intermediate_rounding"],
-        "decode_shader_path": DECODE_SHADER_PATH,
-        "prefill_shader_paths": [PREFILL_SHADER_PATH],
+        "decode_shader_path": member_path(
+            lowering["scope_id"], DECODE_SHADER_PATH
+        ),
+        "prefill_shader_paths": [
+            member_path(lowering["scope_id"], PREFILL_SHADER_PATH)
+        ],
     }
     if proof["overlay"] != expected_overlay:
         raise ModelCompileError("codebook overlay proof facts are inconsistent")

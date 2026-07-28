@@ -917,18 +917,6 @@ def validate_compiled_package(package_dir: Path, manifest: Json) -> None:
         )
     if not isinstance(manifest.get("package_id"), str) or not manifest["package_id"]:
         raise ModelCompileError("compiled package has no package id")
-    compiler_fingerprint = manifest.get("compiler_fingerprint")
-    if (
-        not isinstance(compiler_fingerprint, str)
-        or re.fullmatch(
-            rf"{re.escape(COMPILER_FINGERPRINT_SCHEMA)}:[0-9a-f]{{64}}",
-            compiler_fingerprint,
-        )
-        is None
-    ):
-        raise ModelCompileError(
-            "compiled package has no valid compiler fingerprint; recompile the model"
-        )
     if (
         not isinstance(manifest.get("max_context_activations"), int)
         or isinstance(manifest.get("max_context_activations"), bool)

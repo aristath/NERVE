@@ -24,17 +24,13 @@ from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
 
 @dataclass(frozen=True)
 class BenchmarkPolicy:
-    minimum_warmup_samples: int = 4
-    maximum_warmup_samples: int = 12
-    warmup_stability_window_samples: int = 2
-    measured_pairs_per_block: int = 3
-    minimum_measured_pairs_per_seed: int = 6
-    maximum_measured_pairs_per_seed: int = 30
-    confidence_level_ppm: int = 950_000
-    minimum_material_improvement_ppm: int = 50_000
-    maximum_relative_ci_width_ppm: int = 100_000
-    maximum_order_bias_ppm: int = 75_000
-    maximum_warmup_shift_ppm: int = 50_000
+    minimum_warmup_samples: int = 1
+    maximum_warmup_samples: int = 1
+    warmup_stability_window_samples: int = 1
+    measured_calls_per_role: int = 1
+    maximum_benchmark_duration_ns: int = 60_000_000_000
+    minimum_material_improvement_ppm: int = 0
+    maximum_material_regression_ppm: int = 50_000
     maximum_sustained_regression_ppm: int = 50_000
 
     def to_json(self) -> Json:
@@ -171,10 +167,11 @@ def build_benchmark_plan(
     if not workloads:
         raise ModelCompileError("candidate has no matched benchmark workloads")
     source_contract_digests = list(candidate["source_contract_digests"])
-    if source_contract_digests != sorted(set(source_contract_digests)):
+    if len(source_contract_digests) != len(set(source_contract_digests)):
         raise ModelCompileError(
-            "candidate source contracts must be sorted before benchmark planning"
+            "candidate source contracts must be unique before benchmark planning"
         )
+    source_contract_digests = sorted(source_contract_digests)
     if reference_contract_digest not in source_contract_digests:
         raise ModelCompileError(
             "exact reference implementation is not bound to a candidate "

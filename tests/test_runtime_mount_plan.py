@@ -67,15 +67,19 @@ def build_plan() -> CandidateBuildPlan:
 
 def mount_document() -> dict[str, object]:
     return {
-        "schema": "nerve.optimizer.runtime_mount_plan.v1",
+        "schema": "nerve.optimizer.runtime_mount_plan.v2",
         "candidate_id": "candidate_fixture",
         "adapter_id": (
             "vulkan_stream_circuit_component_overlay.v1"
         ),
-        "component_replacements": [
+        "regions": [
             {
-                "source_component_id": "component",
-                "overlay_ref": "overlays/component.json",
+                "component_replacements": [
+                    {
+                        "source_component_id": "component",
+                        "overlay_ref": "overlays/component.json",
+                    }
+                ]
             }
         ],
         "tensor_index_refs": ["tensor_fragment.json"],
@@ -90,9 +94,8 @@ def test_mount_plan_binds_executable_artifacts_to_candidate_outputs():
     )
 
     assert (
-        mount.to_json()["component_replacements"][0][
-            "source_component_id"
-        ]
+        mount.to_json()["regions"][0]["component_replacements"][0]
+        ["source_component_id"]
         == "component"
     )
 
@@ -134,7 +137,7 @@ def test_mount_plan_rejects_undeclared_or_escaping_artifacts():
         "../component.json",
     ):
         document = mount_document()
-        document["component_replacements"][0][
+        document["regions"][0]["component_replacements"][0][
             "overlay_ref"
         ] = reference
 

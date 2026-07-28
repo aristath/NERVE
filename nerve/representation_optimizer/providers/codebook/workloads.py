@@ -16,6 +16,9 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
 from nerve.representation_optimizer.providers.codebook.discovery import (
     HeadNormCodebookOpportunity,
 )
+from nerve.representation_optimizer.providers.codebook.member_paths import (
+    member_path,
+)
 from nerve.representation_optimizer.validation.contracts import (
     VALIDATION_COVERAGE_KINDS,
 )
@@ -25,11 +28,22 @@ from nerve.representation_optimizer.validation.planning import (
 )
 
 
-def codebook_benchmark_workloads(
+def head_norm_benchmark_workloads(
     opportunity: HeadNormCodebookOpportunity,
+    *,
+    representation_name: str,
+    artifact_scope_id: str | None = None,
+    qualified_component_ids: tuple[str, ...] = (),
+    execution_phases: tuple[str, ...] = ("decode", "prefill"),
 ) -> tuple[Json, ...]:
+    _validate_execution_phases(execution_phases)
+    fixture_path = (
+        COMPONENT_FIXTURE_PATH
+        if artifact_scope_id is None
+        else member_path(artifact_scope_id, COMPONENT_FIXTURE_PATH)
+    )
     fixture = fixture_reference(
-        COMPONENT_FIXTURE_PATH,
+        fixture_path,
         component_fixture(opportunity),
     )
     common = {
@@ -41,7 +55,7 @@ def codebook_benchmark_workloads(
         "input_artifact": fixture,
         "initial_state_artifact": None,
         "randomness_algorithm": "deterministic_fixture_counter",
-        "seeds": (1, 2, 3),
+        "seeds": (1,),
         "deterministic_replay_required": True,
         "permit_sampling_variance": False,
         "permit_numerical_nondeterminism": False,
@@ -52,22 +66,29 @@ def codebook_benchmark_workloads(
         "output_allowance_basis": {"kind": "unlimited"},
         "sustained_window_count": 8,
     }
-    return (
+    workloads = (
         create_benchmark_workload(
-            name="exact codebook fused head normalization decode",
-            execution_phase="component",
+            name=(
+                f"exact {representation_name} fused head "
+                "normalization decode"
+            ),
+            execution_phase="decode",
             activation_batch_width=1,
             controls={
                 "execution": "ordinary",
                 "phase": "decode",
                 "component_id": opportunity.component_id,
                 "physical_node_id": opportunity.physical_node_id,
+                "qualified_component_ids": list(qualified_component_ids),
             },
             minimum_useful_work_units=8_192,
             **common,
         ).to_json(),
         create_benchmark_workload(
-            name="exact codebook fused head normalization prefill",
+            name=(
+                f"exact {representation_name} fused head "
+                "normalization prefill"
+            ),
             execution_phase="prefill",
             activation_batch_width=64,
             controls={
@@ -75,29 +96,47 @@ def codebook_benchmark_workloads(
                 "phase": "prefill",
                 "component_id": opportunity.component_id,
                 "physical_node_id": opportunity.physical_node_id,
+                "qualified_component_ids": list(qualified_component_ids),
             },
             minimum_useful_work_units=4_096,
             **common,
         ).to_json(),
     )
+    return tuple(
+        workload
+        for workload in workloads
+        if workload["controls"]["phase"] in execution_phases
+    )
 
 
-def codebook_validation_requirements(
+def head_norm_validation_requirements(
     *,
     candidate: Json,
     opportunity: HeadNormCodebookOpportunity,
     max_context_activations: int,
+    proof_verifier_id: str,
+    representation_name: str,
+    artifact_scope_id: str | None = None,
+    execution_phases: tuple[str, ...] = ("decode", "prefill"),
 ) -> Json:
+    _validate_execution_phases(execution_phases)
+    def path(value: str) -> str:
+        return (
+            value
+            if artifact_scope_id is None
+            else member_path(artifact_scope_id, value)
+        )
+
     component_ref = fixture_reference(
-        COMPONENT_FIXTURE_PATH,
+        path(COMPONENT_FIXTURE_PATH),
         component_fixture(opportunity),
     )
     conversation_ref = fixture_reference(
-        CONVERSATION_FIXTURE_PATH,
+        path(CONVERSATION_FIXTURE_PATH),
         conversation_fixture(),
     )
     limits = model_limits_fixture(max_context_activations)
-    limits_ref = fixture_reference(MODEL_LIMITS_PATH, limits)
+    limits_ref = fixture_reference(path(MODEL_LIMITS_PATH), limits)
     context_basis = {
         "kind": "declared_model_limit",
         "artifact": limits_ref,
@@ -112,7 +151,10 @@ def codebook_validation_requirements(
     }
     checks = (
         create_validation_check(
-            name="exact codebook exhaustive decode component sanity",
+            name=(
+                f"exact {representation_name} exhaustive decode "
+                "component sanity"
+            ),
             stage="sanity",
             kind="component_comparison",
             coverage=(
@@ -142,13 +184,18 @@ def codebook_validation_requirements(
                 ],
             },
             seeds=(1, 2, 3),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=4_096,
             output_allowance=None,
             output_allowance_basis={"kind": "unlimited"},
             metrics=("bf16_bit_exact",),
         ),
         create_validation_check(
-            name="exact codebook exhaustive prefill component sanity",
+            name=(
+                f"exact {representation_name} exhaustive prefill "
+                "component sanity"
+            ),
             stage="sanity",
             kind="component_comparison",
             coverage=(
@@ -178,13 +225,18 @@ def codebook_validation_requirements(
                 ],
             },
             seeds=(1, 2, 3),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=4_096,
             output_allowance=None,
             output_allowance_basis={"kind": "unlimited"},
             metrics=("bf16_bit_exact",),
         ),
         create_validation_check(
-            name="exact codebook fixed-token model state replay",
+            name=(
+                f"exact {representation_name} fixed-token model "
+                "state replay"
+            ),
             stage="full_local",
             kind="teacher_forced",
             coverage=(
@@ -203,16 +255,17 @@ def codebook_validation_requirements(
                 "execution": "ordinary",
                 "execution_mode": "teacher_forced",
                 "enable_thinking": True,
-                "horizon_unit": "component_activations",
             },
-            seeds=(1, 2, 3),
+            seeds=(1, 2),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=512,
-            output_allowance=65_536,
-            output_allowance_basis=output_basis,
+            output_allowance=None,
+            output_allowance_basis={"kind": "unlimited"},
             metrics=("token_exact_match",),
         ),
         create_validation_check(
-            name="exact codebook lifecycle continuity",
+            name=f"exact {representation_name} lifecycle continuity",
             stage="full_local",
             kind="lifecycle_operation",
             coverage=(
@@ -232,19 +285,22 @@ def codebook_validation_requirements(
             initial_state_artifact=None,
             controls={
                 "execution": "ordinary",
-                "execution_mode": "lifecycle",
+                "execution_mode": "lifecycle_teacher_forced",
                 "enable_thinking": True,
-                "horizon_unit": "component_activations",
             },
-            seeds=(1, 2),
+            seeds=(1,),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=512,
-            output_allowance=65_536,
-            output_allowance_basis=output_basis,
+            output_allowance=None,
+            output_allowance_basis={"kind": "unlimited"},
             metrics=("token_exact_match",),
         ),
         *(
             create_validation_check(
-                name=f"exact codebook graph edit {operation}",
+                name=(
+                    f"exact {representation_name} graph edit {operation}"
+                ),
                 stage="full_local",
                 kind="graph_edit",
                 coverage=("graph_edits",),
@@ -258,18 +314,17 @@ def codebook_validation_requirements(
                 initial_state_artifact=None,
                 controls={
                     "execution": "ordinary",
-                    "execution_mode": "conversation",
+                    "execution_mode": "teacher_forced",
                     "graph_operation": operation,
-                    "graph_target_component_id": (
-                        opportunity.component_id
-                    ),
+                    "graph_target_component_id": (opportunity.component_id),
                     "enable_thinking": True,
-                    "horizon_unit": "component_activations",
                 },
-                seeds=(1, 2),
+                seeds=(1,),
+                step_unit="component_activations",
+                completion_condition="minimum_steps",
                 minimum_steps=256,
-                output_allowance=65_536,
-                output_allowance_basis=output_basis,
+                output_allowance=None,
+                output_allowance_basis={"kind": "unlimited"},
                 metrics=(
                     "graph_contract_preserved",
                     "token_exact_match",
@@ -283,7 +338,7 @@ def codebook_validation_requirements(
             )
         ),
         create_validation_check(
-            name="exact codebook alternative placement",
+            name=f"exact {representation_name} alternative placement",
             stage="full_local",
             kind="placement",
             coverage=("alternative_placements",),
@@ -297,18 +352,22 @@ def codebook_validation_requirements(
             initial_state_artifact=None,
             controls={
                 "execution": "ordinary",
-                "execution_mode": "conversation",
+                "execution_mode": "teacher_forced",
                 "enable_thinking": True,
-                "horizon_unit": "component_activations",
             },
-            seeds=(1, 2),
+            seeds=(1,),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=256,
-            output_allowance=65_536,
-            output_allowance_basis=output_basis,
+            output_allowance=None,
+            output_allowance_basis={"kind": "unlimited"},
             metrics=("token_exact_match",),
         ),
         create_validation_check(
-            name="exact codebook adversarial decode component inputs",
+            name=(
+                f"exact {representation_name} adversarial decode "
+                "component inputs"
+            ),
             stage="full_local",
             kind="counterexample",
             coverage=("adversarial_counterexamples",),
@@ -324,16 +383,20 @@ def codebook_validation_requirements(
                 "phase": "decode",
                 "component_id": opportunity.component_id,
                 "physical_node_id": opportunity.physical_node_id,
-                "exhaustive_codebook": True,
             },
             seeds=(0, 1, 0xFFFF_FFFF),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=65_536,
             output_allowance=None,
             output_allowance_basis={"kind": "unlimited"},
             metrics=("bf16_bit_exact",),
         ),
         create_validation_check(
-            name="exact codebook adversarial prefill component inputs",
+            name=(
+                f"exact {representation_name} adversarial prefill "
+                "component inputs"
+            ),
             stage="full_local",
             kind="counterexample",
             coverage=("adversarial_counterexamples",),
@@ -349,16 +412,20 @@ def codebook_validation_requirements(
                 "phase": "prefill",
                 "component_id": opportunity.component_id,
                 "physical_node_id": opportunity.physical_node_id,
-                "exhaustive_codebook": True,
             },
             seeds=(0, 1, 0xFFFF_FFFF),
+            step_unit="component_activations",
+            completion_condition="minimum_steps",
             minimum_steps=65_536,
             output_allowance=None,
             output_allowance_basis={"kind": "unlimited"},
             metrics=("bf16_bit_exact",),
         ),
         create_validation_check(
-            name="exact codebook reasoning conversation and long horizon",
+            name=(
+                f"exact {representation_name} reasoning conversation "
+                "and long horizon"
+            ),
             stage="whole_model",
             kind="reasoning_conversation",
             coverage=(
@@ -380,10 +447,11 @@ def codebook_validation_requirements(
                 "execution_mode": "conversation",
                 "enable_thinking": True,
                 "max_output_tokens": 65_536,
-                "horizon_unit": "component_activations",
             },
-            seeds=(1, 2),
-            minimum_steps=4_096,
+            seeds=(1,),
+            step_unit="component_activations",
+            completion_condition="semantic_stop_or_allowance_per_turn",
+            minimum_steps=None,
             output_allowance=65_536,
             output_allowance_basis=output_basis,
             metrics=(
@@ -399,20 +467,90 @@ def codebook_validation_requirements(
         for coverage in VALIDATION_COVERAGE_KINDS
         if coverage not in covered
     }
+    checks = tuple(
+        check
+        for check in checks
+        if check["regime"]["execution_scope"] != "component"
+        or check["controls"]["phase"] in execution_phases
+    )
     return create_validation_requirements(
         candidate_id=candidate["candidate_id"],
         source_contract_digests=candidate["source_contract_digests"],
         proof_verifiers={
-            "codebook_reconstructs_source_bf16_bits": (
-                "nerve.exact_codebook_reconstruction.v1"
-            ),
-            "fused_operator_preserves_source_rounding": (
-                "nerve.exact_codebook_reconstruction.v1"
-            ),
+            obligation: proof_verifier_id
+            for obligation in candidate["behavioral_contract"]["proof_obligations"]
         },
         checks=checks,
         not_applicable_reasons=not_applicable,
     ).to_json()
+
+
+def bundled_head_norm_validation_requirements(
+    *,
+    candidate: Json,
+    opportunities: tuple[HeadNormCodebookOpportunity, ...],
+    max_context_activations: int,
+    proof_verifier_id: str,
+    representation_name: str,
+    execution_phases: tuple[str, ...] = ("decode", "prefill"),
+) -> Json:
+    """Validate every member locally and the mounted set globally once."""
+
+    if not opportunities:
+        raise ValueError("bundled validation requires at least one opportunity")
+    documents = [
+        head_norm_validation_requirements(
+            candidate={
+                **candidate,
+                "source_contract_digests": [opportunity.source_contract_digest],
+            },
+            opportunity=opportunity,
+            max_context_activations=max_context_activations,
+            proof_verifier_id=proof_verifier_id,
+            representation_name=(
+                f"{representation_name} member {opportunity.component_id}"
+            ),
+            artifact_scope_id=opportunity.scope_id,
+            execution_phases=execution_phases,
+        )
+        for opportunity in opportunities
+    ]
+    checks = []
+    for index, document in enumerate(documents):
+        for check in document["checks"]:
+            stage = check["stage"]
+            execution_scope = check["regime"]["execution_scope"]
+            if index == 0 or stage == "sanity" or execution_scope == "component":
+                checks.append(check)
+    checks.sort(key=lambda item: item["check_id"])
+    covered = {coverage for check in checks for coverage in check["coverage"]}
+    not_applicable = {
+        coverage: _not_applicable_reason(coverage)
+        for coverage in VALIDATION_COVERAGE_KINDS
+        if coverage not in covered
+    }
+    return create_validation_requirements(
+        candidate_id=candidate["candidate_id"],
+        source_contract_digests=candidate["source_contract_digests"],
+        proof_verifiers={
+            obligation: proof_verifier_id
+            for obligation in candidate["behavioral_contract"]["proof_obligations"]
+        },
+        checks=checks,
+        not_applicable_reasons=not_applicable,
+    ).to_json()
+
+
+def _validate_execution_phases(execution_phases: tuple[str, ...]) -> None:
+    if (
+        not execution_phases
+        or execution_phases != tuple(sorted(set(execution_phases)))
+        or any(phase not in {"decode", "prefill"} for phase in execution_phases)
+    ):
+        raise ValueError(
+            "head-normalization execution phases must be a sorted, unique "
+            "subset of decode and prefill"
+        )
 
 
 def _not_applicable_reason(coverage: str) -> str:

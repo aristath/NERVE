@@ -20,13 +20,73 @@ from nerve.representation_optimizer.automation.device_state import (
 from nerve.representation_optimizer.automation.runtime_target import (
     balanced_component_placement,
     prepare_runtime_optimization_targets,
+    runtime_executor_command,
+    runtime_implementation_fingerprint,
 )
 from nerve.representation_optimizer.contracts import ContractDocument
 
 
-PACKAGE_COMPILER_FINGERPRINT = (
-    "nerve.package_compiler_sha256.v2:" + "a" * 64
+RUNTIME_IMPLEMENTATION_FINGERPRINT = runtime_implementation_fingerprint(
+    Path(__file__).resolve().parents[1] / "runtime-rs"
 )
+
+
+def test_runtime_executor_command_asks_cargo_to_verify_source_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    runtime = repository / "runtime-rs"
+    manifest = runtime / "Cargo.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[package]\nname = \"fixture\"\n")
+    binary = runtime / "target" / "release" / "fixture-executor"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(binary.stat().st_mode | 0o111)
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> object:
+        calls.append(command)
+        assert kwargs["stdin"] is not None
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.delenv("FIXTURE_EXECUTOR_BIN", raising=False)
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.automation.runtime_target.shutil.which",
+        lambda executable: (
+            "/usr/bin/cargo" if executable == "cargo" else None
+        ),
+    )
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.automation.runtime_target.subprocess.run",
+        run,
+    )
+
+    command = runtime_executor_command(
+        "fixture-executor",
+        explicit=None,
+        features=("vulkan", "tokenizers"),
+        repo_root=repository,
+    )
+
+    assert command == (str(binary.resolve()),)
+    assert calls == [
+        [
+            "/usr/bin/cargo",
+            "build",
+            "--release",
+            "--manifest-path",
+            str(manifest),
+            "--features",
+            "vulkan,tokenizers",
+            "--bin",
+            "fixture-executor",
+        ]
+    ]
 
 
 def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
@@ -57,9 +117,7 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
             }
         },
     )
-    device = next(
-        (sysfs / "card0" / "device").resolve().glob("mem_info_vram_used")
-    )
+    device = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
     device.write_text(f"{64 * 1024 * 1024 + 4_096}\n")
     assert probe.target_idle_state_digest(target) == expected
     device.write_text(
@@ -74,9 +132,7 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
     (small_context / "fdinfo").mkdir(parents=True)
     (small_context / "comm").write_text("vulkan-inspector\n")
     (small_context / "fdinfo" / "5").write_text(
-        "drm-pdev:\t0000:03:00.0\n"
-        "drm-memory-vram:\t12 KiB\n"
-        "drm-memory-gtt:\t2048 KiB\n"
+        "drm-pdev:\t0000:03:00.0\ndrm-memory-vram:\t12 KiB\ndrm-memory-gtt:\t2048 KiB\n"
     )
     assert probe.require_idle((profile,))[0]["resident_processes"] == []
     (small_context / "fdinfo" / "5").write_text(
@@ -85,16 +141,30 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
         "drm-memory-gtt:\t2048 KiB\n"
         "drm-engine-compute:\t1 ns\n"
     )
-    with pytest.raises(ModelCompileError, match="resident DRM consumers"):
-        probe.require_idle((profile,))
+    # Engine counters are lifetime totals, not evidence of current activity.
+    assert probe.require_idle((profile,))[0]["resident_processes"] == []
+    duplicate_fds = small_context / "fd"
+    duplicate_fds.mkdir()
+    drm_client = small_context / "drm-client"
+    drm_client.write_text("")
+    (duplicate_fds / "5").symlink_to(drm_client)
+    (duplicate_fds / "6").symlink_to(drm_client)
+    duplicated_client = (
+        "drm-pdev:\t0000:03:00.0\n"
+        "drm-memory-vram:\t40 MiB\n"
+        "drm-memory-gtt:\t4 MiB\n"
+    )
+    (small_context / "fdinfo" / "5").write_text(duplicated_client)
+    (small_context / "fdinfo" / "6").write_text(duplicated_client)
+    assert probe.require_idle((profile,))[0]["resident_processes"] == []
+    (small_context / "fdinfo" / "6").unlink()
     (small_context / "fdinfo" / "5").unlink()
 
     process = proc / "42"
     (process / "fdinfo").mkdir(parents=True)
     (process / "comm").write_text("resident-model\n")
     (process / "fdinfo" / "7").write_text(
-        "drm-pdev:\t0000:03:00.0\n"
-        "drm-memory-vram:\t4096 KiB\n"
+        "drm-pdev:\t0000:03:00.0\ndrm-memory-vram:\t96 MiB\n"
     )
     with pytest.raises(ModelCompileError, match="resident DRM consumers"):
         probe.require_idle((profile,))
@@ -142,9 +212,7 @@ def test_target_idle_attestation_waits_for_stable_counter_quiescence(
         used_vram=64 * 1024 * 1024,
         busy_percent=0,
     )
-    busy = next(
-        (sysfs / "card0" / "device").resolve().glob("gpu_busy_percent")
-    )
+    busy = next((sysfs / "card0" / "device").resolve().glob("gpu_busy_percent"))
     clock = [0]
     sleeps = []
 
@@ -194,11 +262,7 @@ def test_target_idle_attestation_waits_for_stable_driver_retention_watermark(
         used_vram=baseline_vram,
         busy_percent=0,
     )
-    used = next(
-        (sysfs / "card0" / "device").resolve().glob(
-            "mem_info_vram_used"
-        )
-    )
+    used = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
     clock = [0]
     sleeps = []
 
@@ -247,9 +311,7 @@ def test_target_idle_attestation_bounds_nonquiescent_counter_wait(
         used_vram=64 * 1024 * 1024,
         busy_percent=0,
     )
-    busy = next(
-        (sysfs / "card0" / "device").resolve().glob("gpu_busy_percent")
-    )
+    busy = next((sysfs / "card0" / "device").resolve().glob("gpu_busy_percent"))
     clock = [0]
 
     def advance(seconds: float) -> None:
@@ -294,11 +356,7 @@ def test_context_prepared_idle_baseline_waits_for_stable_vram_floor(
         used_vram=baseline_vram,
         busy_percent=0,
     )
-    used = next(
-        (sysfs / "card0" / "device").resolve().glob(
-            "mem_info_vram_used"
-        )
-    )
+    used = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
     sleeps = 0
 
     def settle_driver_floor(_seconds: float) -> None:
@@ -366,15 +424,11 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
 
     assert not run_root.exists()
     assert prepared.parameter_bytes == 1_200
-    assert [
-        item["device_id"] for item in prepared.selected_devices
-    ] == [
+    assert [item["device_id"] for item in prepared.selected_devices] == [
         _device_id("0000:07:00.0"),
         _device_id("0000:0a:00.0"),
     ]
-    assert prepared.excluded_devices[0]["device_id"] == _device_id(
-        "0000:03:00.0"
-    )
+    assert prepared.excluded_devices[0]["device_id"] == _device_id("0000:03:00.0")
     assert len(prepared.targets) == 1
     optimization_target = prepared.targets[0]
     assert len(optimization_target.hardware_profiles) == 2
@@ -404,11 +458,7 @@ def test_runtime_target_records_post_context_idle_floor(
         used_vram=initial_vram,
         busy_percent=0,
     )
-    used = next(
-        (sysfs / "card0" / "device").resolve().glob(
-            "mem_info_vram_used"
-        )
-    )
+    used = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
     probe = LinuxAmdDeviceStateProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
@@ -449,12 +499,15 @@ def test_runtime_target_records_post_context_idle_floor(
     expected_vram = initial_vram + 12_288
     assert discovery_count == 3
     assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
-    assert prepared.targets[0].matched_conditions["environment"][
-        "context_prepared_idle_observations"
-    ][0]["vram_used_bytes"] == expected_vram
+    assert (
+        prepared.targets[0].matched_conditions["environment"][
+            "context_prepared_idle_observations"
+        ][0]["vram_used_bytes"]
+        == expected_vram
+    )
 
 
-def test_runtime_target_rejects_executor_fingerprint_before_device_work(
+def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
     tmp_path: Path,
 ) -> None:
     pci_address = "0000:03:00.0"
@@ -474,22 +527,22 @@ def test_runtime_target_rejects_executor_fingerprint_before_device_work(
         sysfs_drm_root=sysfs,
         proc_root=proc,
     )
-    mismatched = (
-        "nerve.package_compiler_sha256.v2:" + "b" * 64
-    )
+    stale = "nerve.runtime_implementation_sha256.v1:" + "b" * 64
 
     with pytest.raises(
         ModelCompileError,
-        match="executables do not match package fingerprint",
+        match="executables are stale relative to runtime source",
     ):
         prepare_runtime_optimization_targets(
             package_manifest=package,
             run_root=tmp_path / "run",
             component_executor_bin=_executable(
                 tmp_path / "component",
-                fingerprint=mismatched,
+                runtime_fingerprint=stale,
             ),
-            validation_executor_bin=_executable(tmp_path / "validation"),
+            validation_executor_bin=_executable(
+                tmp_path / "validation"
+            ),
             vulkan_driver_files=(_driver(tmp_path),),
             idle_probe=probe,
             live_target=target,
@@ -551,6 +604,35 @@ def test_balanced_placement_preserves_component_order_and_all_members(
 
     assigned = [placement[f"component_{index}"] for index in range(4)]
     assert assigned == [first, first, second, second]
+
+
+def test_balanced_placement_excludes_processor_boundary_components(
+    tmp_path: Path,
+) -> None:
+    target = _target(("0000:03:00.0", "0000:07:00.0"))
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(10, 100, 100, 10),
+    )
+    manifest = json.loads(package.read_bytes())
+    manifest["circuit_graph"]["components"][0]["runtime_role"] = "input_transducer"
+    manifest["circuit_graph"]["components"][3]["runtime_role"] = "sampler"
+    first, second = (
+        _device_id("0000:03:00.0"),
+        _device_id("0000:07:00.0"),
+    )
+
+    placement = balanced_component_placement(
+        package.parent,
+        manifest,
+        (first, second),
+    )
+
+    assert placement == {
+        "component_1": first,
+        "component_2": second,
+    }
 
 
 def _target(
@@ -661,6 +743,7 @@ def _package(
     components = [
         {
             "component_id": f"component_{index}",
+            "runtime_role": "signal_processor",
             "params": {
                 "refs": {
                     "weight": {"tensor": f"tensor_{index}"},
@@ -672,7 +755,6 @@ def _package(
     manifest = {
         "schema": "nerve.vulkan_resident_model_package.v4",
         "package_id": "fixture-package",
-        "compiler_fingerprint": PACKAGE_COMPILER_FINGERPRINT,
         "tensor_index_path": "tensors.json",
         "compiler_target": target.to_json(),
         "circuit_graph": {"components": components},
@@ -730,12 +812,12 @@ def _driver(tmp_path: Path) -> Path:
 def _executable(
     path: Path,
     *,
-    fingerprint: str = PACKAGE_COMPILER_FINGERPRINT,
+    runtime_fingerprint: str = RUNTIME_IMPLEMENTATION_FINGERPRINT,
 ) -> Path:
     path.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"--package-compiler-fingerprint\" ]; then\n"
-        f"  printf '%s\\n' '{fingerprint}'\n"
+        'if [ "$1" = "--runtime-implementation-fingerprint" ]; then\n'
+        f"  printf '%s\\n' '{runtime_fingerprint}'\n"
         "  exit 0\n"
         "fi\n"
         "exit 0\n"

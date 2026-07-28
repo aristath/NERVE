@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from nerve.compilation import Json
+from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     ExecutorArtifactStore,
+)
+from nerve.representation_optimizer.benchmarking.executor_transport import (
+    EXECUTOR_PROGRESS_SCHEMA,
 )
 from nerve.representation_optimizer.contracts import (
     contract_digest,
@@ -23,6 +27,7 @@ from nerve.representation_optimizer.validation.contracts import (
 )
 from nerve.representation_optimizer.validation.executor_protocol import (
     VALIDATION_EXECUTOR_RESPONSE_SCHEMA,
+    validate_validation_execution_payload,
 )
 from nerve.representation_optimizer.validation.planning import (
     create_validation_check,
@@ -42,10 +47,17 @@ class FixtureWholeModelExecutor:
         self.closed = False
         self.aborted = False
 
-    def request(self, document: Json, *, cancel_requested=None) -> Json:
+    def request(
+        self,
+        document: Json,
+        *,
+        cancel_requested=None,
+        progress_received=None,
+    ) -> Json:
         assert cancel_requested is None or not cancel_requested()
         self.commands.append(document)
         if document["command"] == "mount":
+            capacity = document["context_capacity"]
             payload = {
                 "package_id": "package-fixture",
                 "candidate_id": document["candidate_id"],
@@ -53,13 +65,31 @@ class FixtureWholeModelExecutor:
                     "physical_device_ids"
                 ],
                 "context_capacity": (
-                    document["context_capacity"] or 131_072
+                    capacity["activations"]
+                    if capacity["kind"] == "declared"
+                    else 77
                 ),
                 "mounted_state_digest": _device_digest(b"mounted"),
                 "mount_duration_ns": 11,
             }
             status = "mounted"
         elif document["command"] == "execute":
+            assert progress_received is not None
+            progress_received(
+                {
+                    "schema": EXECUTOR_PROGRESS_SCHEMA,
+                    "request_id": document["request_id"],
+                    "sequence": 0,
+                    "payload": {
+                        "phase": "teacher_forced_turn_completed",
+                        "turn_index": 0,
+                        "generated_tokens": 0,
+                        "elapsed_ns": 101,
+                        "component_activations": 512,
+                        "scheduler_steps": 8,
+                    },
+                }
+            )
             turns = [
                 {
                     "turn_index": index,
@@ -71,6 +101,10 @@ class FixtureWholeModelExecutor:
                         2,
                         3,
                     ],
+                    "stop_reason": "fixture_completed",
+                    "state_digest": _digest(
+                        f"turn-state-{index}".encode()
+                    ),
                     "component_activations": 512,
                     "scheduler_steps": 8,
                     "elapsed_ns": 101,
@@ -84,6 +118,7 @@ class FixtureWholeModelExecutor:
                 "output_digest": _digest(b"output"),
                 "state_digest": _digest(b"state"),
                 "steps": 1_024,
+                "step_unit": document["step_unit"],
                 "scheduler_steps": 16,
                 "elapsed_ns": 202,
                 "turns": turns,
@@ -101,6 +136,8 @@ class FixtureWholeModelExecutor:
                     "optimizer:device:1",
                 ],
                 "release_duration_ns": 7,
+                "reset_duration_ns": 2,
+                "state_proof_duration_ns": 3,
             }
             status = "released"
         else:
@@ -122,7 +159,40 @@ class FixtureWholeModelExecutor:
         self.aborted = True
 
 
-def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
+def test_validation_execution_requires_every_requested_turn() -> None:
+    payload = {
+        "output_digest": _digest(b"output"),
+        "state_digest": _digest(b"state"),
+        "steps": 1,
+        "step_unit": "component_activations",
+        "scheduler_steps": 1,
+        "elapsed_ns": 1,
+        "turns": [
+            {
+                "turn_index": 0,
+                "user": "first",
+                "assistant": "answer",
+                "generated_token_ids": [1],
+                "canonical_committed_token_ids": [1],
+                "stop_reason": "eos",
+                "state_digest": _digest(b"turn-state"),
+            }
+        ],
+        "execution_counters": {"dispatches": 1},
+    }
+
+    with pytest.raises(
+        ModelCompileError,
+        match="complete every requested turn",
+    ):
+        validate_validation_execution_payload(
+            payload,
+            expected_step_unit="component_activations",
+            expected_turns=("first", "second"),
+        )
+
+
+def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates_placement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -143,6 +213,7 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
     driver.write_text("{}\n", encoding="utf-8")
     executor = FixtureWholeModelExecutor()
     captured_environment: dict[str, str] = {}
+    factory_calls = 0
     candidate_id = "candidate_" + "a" * 32
 
     def loader(
@@ -159,6 +230,8 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
         command: tuple[str, ...],
         environment: dict[str, str],
     ) -> FixtureWholeModelExecutor:
+        nonlocal factory_calls
+        factory_calls += 1
         assert command == ("fixture-validation-executor",)
         captured_environment.update(environment)
         return executor
@@ -181,20 +254,15 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
         initial_state_artifact=None,
         controls={
             "execution": "ordinary",
+            "execution_mode": "teacher_forced",
             "enable_thinking": True,
         },
         seeds=(17,),
+        step_unit="component_activations",
+        completion_condition="minimum_steps",
         minimum_steps=512,
-        output_allowance=65_536,
-        output_allowance_basis={
-            "kind": "declared_model_limit",
-            "artifact": {
-                "path": "fixtures/model_limits.json",
-                "digest": _digest(b"limits"),
-            },
-            "json_pointer": "/max_output_tokens",
-            "declared_limit": 65_536,
-        },
+        output_allowance=None,
+        output_allowance_basis={"kind": "unlimited"},
         metrics=("token_exact_match",),
     )
     devices = (
@@ -267,16 +335,22 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
         run_nonce="fixture",
     )
 
-    session = backend.open_session(mount_request)
-    mount = ValidationResidencyEvent.from_json(
-        session.mount_event
-    ).to_json()
-    result = ValidationRoleResult.from_json(
-        session.execute(execution_request)
-    ).to_json()
-    unmount = ValidationResidencyEvent.from_json(
-        session.close()
-    ).to_json()
+    with backend.validation_stage("full_local"):
+        session = backend.open_session(mount_request)
+        mount = ValidationResidencyEvent.from_json(
+            session.mount_event
+        ).to_json()
+        result = ValidationRoleResult.from_json(
+            session.execute(execution_request)
+        ).to_json()
+        unmount = ValidationResidencyEvent.from_json(
+            session.close()
+        ).to_json()
+        assert executor.closed is False
+        second_session = backend.open_session(mount_request)
+        second_session.execute(execution_request)
+        second_session.close()
+        assert executor.closed is False
     comparison = backend.compare_results(
         {
             "check": check,
@@ -294,19 +368,62 @@ def test_whole_model_validation_runs_normal_conversation_and_rotates_placement(
     assert mount_command["enable_thinking"] is True
     assert mount_command["graph_operation"] == "none"
     assert mount_command["graph_target_component_id"] is None
-    assert mount_command["context_capacity"] is None
-    assert executor.commands[1]["max_output_tokens"] == 65_536
-    assert executor.commands[1]["execution_mode"] == "conversation"
+    assert mount_command["context_capacity"] == {
+        "kind": "fixture_exact",
+    }
+    assert mount_command["validation_turns"] == [
+        "Who are you?",
+        "What is the capital of Greece?",
+    ]
+    assert mount_command["teacher_forced_assistant_turns"] == [
+        "A model.",
+        "Athens.",
+    ]
+    assert mount_command["execution_mode"] == "teacher_forced"
+    assert executor.commands[1]["max_output_tokens"] is None
+    assert executor.commands[1]["execution_mode"] == "teacher_forced"
+    assert executor.commands[1]["step_unit"] == "component_activations"
     assert executor.commands[1][
         "teacher_forced_assistant_turns"
     ] == ["A model.", "Athens."]
+    assert [
+        command["command"] for command in executor.commands
+    ] == ["mount", "execute", "close"] * 2
     assert result["steps"] == 1_024
+    assert result["horizon_completion"] == {
+        "condition": "minimum_steps",
+        "satisfied": True,
+        "observed_steps": 1_024,
+        "minimum_steps": 512,
+        "expected_turns": None,
+        "completed_turns": None,
+        "stop_reasons": [],
+    }
     assert result["default_statistics"]["scheduler_steps"] == 16
+    progress_ref = next(
+        trace
+        for trace in result["traces"]
+        if trace["path"].endswith("/progress.jsonl")
+    )
+    progress_lines = [
+        json.loads(line)
+        for line in (
+            tmp_path / "traces" / progress_ref["path"]
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert progress_lines[0]["payload"]["phase"] == (
+        "teacher_forced_turn_completed"
+    )
+    assert progress_lines[-1] == {
+        "schema": "nerve.optimizer.validation_progress_terminal.v1",
+        "status": "completed",
+    }
     assert comparison["metrics"][0]["error"] == 0.0
     assert mount["device_state_before_digest"] == _device_digest(b"idle")
     assert unmount["device_state_after_digest"] == _device_digest(b"idle")
     assert executor.closed is True
     assert executor.aborted is False
+    assert factory_calls == 1
     assert captured_environment["VK_DRIVER_FILES"] == str(
         driver.resolve()
     )

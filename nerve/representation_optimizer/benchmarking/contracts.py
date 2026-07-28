@@ -17,10 +17,10 @@ from nerve.representation_optimizer.contracts import (
 
 
 BENCHMARK_WORKLOAD_SCHEMA = "nerve.optimizer.benchmark_workload.v1"
-BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v3"
+BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v4"
 BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v2"
 BENCHMARK_RESIDENCY_EVENT_SCHEMA = "nerve.optimizer.benchmark_residency_event.v2"
-BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v3"
+BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v4"
 BENCHMARK_EVIDENCE_INTEGRITY_SCHEMA = "nerve.optimizer.benchmark_evidence_integrity.v1"
 
 _ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
@@ -243,7 +243,7 @@ def validate_benchmark_workload(document: Json) -> None:
     _text(randomness["algorithm"], "randomness.algorithm")
     seeds = _list(randomness["seeds"], "randomness.seeds")
     if (
-        len(seeds) < 2
+        len(seeds) != 1
         or seeds != sorted(set(seeds))
         or any(
             isinstance(seed, bool)
@@ -254,7 +254,7 @@ def validate_benchmark_workload(document: Json) -> None:
         )
     ):
         raise BenchmarkContractError(
-            "randomness.seeds must contain at least two sorted unique U32 seeds"
+            "randomness.seeds must contain exactly one U32 seed"
         )
     for field in (
         "deterministic_replay_required",
@@ -882,7 +882,7 @@ def validate_benchmark_run(document: Json) -> None:
             {
                 "workload_id",
                 "warmup_groups",
-                "measured_pairs_per_seed",
+                "measured_calls_per_role",
                 "decision",
                 "reasons",
                 "termination",
@@ -908,6 +908,7 @@ def validate_benchmark_run(document: Json) -> None:
                     "seed",
                     "cycle_index",
                     "order_block_index",
+                    "attempt_index",
                     "sample_count",
                     "maximum_shift_ppm",
                     "converged",
@@ -918,6 +919,10 @@ def validate_benchmark_run(document: Json) -> None:
             if group["role"] not in _ROLES:
                 raise BenchmarkContractError(f"{group_path}.role is unsupported")
             seed = _u32(group["seed"], f"{group_path}.seed")
+            attempt_index = _nonnegative(
+                group["attempt_index"],
+                f"{group_path}.attempt_index",
+            )
             cycle_index = group["cycle_index"]
             order_block_index = group["order_block_index"]
             if cycle_index is not None:
@@ -959,6 +964,7 @@ def validate_benchmark_run(document: Json) -> None:
                     -1 if cycle_index is None else cycle_index,
                     -1 if order_block_index is None else order_block_index,
                     _ROLES.index(group["role"]),
+                    attempt_index,
                 )
             )
         if not groups or group_keys != sorted(set(group_keys)):
@@ -966,17 +972,14 @@ def validate_benchmark_run(document: Json) -> None:
                 f"{path}.warmup_groups must be non-empty, sorted, and unique"
             )
         _positive(
-            outcome["measured_pairs_per_seed"],
-            f"{path}.measured_pairs_per_seed",
+            outcome["measured_calls_per_role"],
+            f"{path}.measured_calls_per_role",
         )
         _decision(outcome["decision"], f"{path}.decision")
         _string_list(outcome["reasons"], f"{path}.reasons")
         if outcome["termination"] not in {
-            "decisive_material_win",
-            "decisive_non_win",
+            "fixed_sample_complete",
             "invalid",
-            "warmup_exhausted",
-            "evidence_budget_exhausted",
         }:
             raise BenchmarkContractError(f"{path}.termination is unsupported")
     if (document["status"] == "completed" and not outcome_ids) or outcome_ids != sorted(
@@ -1110,31 +1113,20 @@ def validate_benchmark_record(document: Json) -> None:
         _fields(
             paired,
             {
-                "geometric_speedup_ppm",
-                "confidence_interval_low_ppm",
-                "confidence_interval_high_ppm",
-                "relative_ci_width_ppm",
-                "order_bias_ppm",
+                "speedup_ppm",
+                "candidate_is_faster",
             },
             f"{path}.paired",
         )
-        for field, value in paired.items():
-            _integer(value, f"{path}.paired.{field}")
-        if (
-            paired["confidence_interval_low_ppm"]
-            > paired["confidence_interval_high_ppm"]
-        ):
+        _integer(paired["speedup_ppm"], f"{path}.paired.speedup_ppm")
+        _boolean(
+            paired["candidate_is_faster"],
+            f"{path}.paired.candidate_is_faster",
+        )
+        if paired["candidate_is_faster"] != (paired["speedup_ppm"] > 0):
             raise BenchmarkContractError(
-                f"{path}.paired confidence interval is inverted"
+                f"{path}.paired binary decision disagrees with measured speedup"
             )
-        _nonnegative(
-            paired["relative_ci_width_ppm"],
-            f"{path}.paired.relative_ci_width_ppm",
-        )
-        _nonnegative(
-            paired["order_bias_ppm"],
-            f"{path}.paired.order_bias_ppm",
-        )
         sustained = _object(summary["sustained"], f"{path}.sustained")
         _fields(
             sustained,
@@ -1446,6 +1438,8 @@ def _decision(value: Any, path: str) -> str:
     decision = _text(value, path)
     if decision not in {
         "materially_faster",
+        "performance_equivalent",
+        "materially_slower",
         "not_materially_faster",
         "inconclusive",
         "invalid",
@@ -1563,14 +1557,10 @@ def _benchmark_policy(policy: Json) -> None:
             "minimum_warmup_samples",
             "maximum_warmup_samples",
             "warmup_stability_window_samples",
-            "measured_pairs_per_block",
-            "minimum_measured_pairs_per_seed",
-            "maximum_measured_pairs_per_seed",
-            "confidence_level_ppm",
+            "measured_calls_per_role",
+            "maximum_benchmark_duration_ns",
             "minimum_material_improvement_ppm",
-            "maximum_relative_ci_width_ppm",
-            "maximum_order_bias_ppm",
-            "maximum_warmup_shift_ppm",
+            "maximum_material_regression_ppm",
             "maximum_sustained_regression_ppm",
         },
         "policy",
@@ -1587,42 +1577,37 @@ def _benchmark_policy(policy: Json) -> None:
         policy["warmup_stability_window_samples"],
         "policy.warmup_stability_window_samples",
     )
-    if maximum_warmup < minimum_warmup or maximum_warmup < 2 * stability_window:
+    if maximum_warmup < minimum_warmup:
         raise BenchmarkContractError(
-            "policy warmup bound must cover the minimum and two stability windows"
+            "policy warmup bound must cover the minimum"
         )
-    pairs_per_block = _positive(
-        policy["measured_pairs_per_block"],
-        "policy.measured_pairs_per_block",
-    )
-    minimum_pairs = _positive(
-        policy["minimum_measured_pairs_per_seed"],
-        "policy.minimum_measured_pairs_per_seed",
-    )
-    maximum_pairs = _positive(
-        policy["maximum_measured_pairs_per_seed"],
-        "policy.maximum_measured_pairs_per_seed",
-    )
-    counterbalanced_cycle_pairs = 2 * pairs_per_block
     if (
-        minimum_pairs < 6
-        or maximum_pairs < minimum_pairs
-        or minimum_pairs % counterbalanced_cycle_pairs != 0
-        or maximum_pairs % counterbalanced_cycle_pairs != 0
+        minimum_warmup != 1
+        or maximum_warmup != 1
+        or stability_window != 1
     ):
         raise BenchmarkContractError(
-            "policy measured-pair bounds must cover at least six pairs and "
-            "contain whole counterbalanced cycles"
+            "microbenchmark policy requires one fixed warmup per role"
         )
-    if policy["confidence_level_ppm"] != 950_000:
+    measured_calls = _positive(
+        policy["measured_calls_per_role"],
+        "policy.measured_calls_per_role",
+    )
+    if measured_calls != 1:
         raise BenchmarkContractError(
-            "benchmark engine currently requires a 95% confidence interval"
+            "microbenchmark policy requires exactly one measured call per role"
+        )
+    maximum_duration = _positive(
+        policy["maximum_benchmark_duration_ns"],
+        "policy.maximum_benchmark_duration_ns",
+    )
+    if maximum_duration > 60_000_000_000:
+        raise BenchmarkContractError(
+            "microbenchmark duration must not exceed one minute"
         )
     for field in (
         "minimum_material_improvement_ppm",
-        "maximum_relative_ci_width_ppm",
-        "maximum_order_bias_ppm",
-        "maximum_warmup_shift_ppm",
+        "maximum_material_regression_ppm",
         "maximum_sustained_regression_ppm",
     ):
         value = _nonnegative(policy[field], f"policy.{field}")
@@ -1639,8 +1624,6 @@ def _artifact_ref(value: Any, path: str) -> None:
 
 def _fixture_ref(value: Any, path: str) -> None:
     _artifact_ref(value, path)
-    if not value["path"].startswith("fixtures/"):
-        raise BenchmarkContractError(f"{path}.path must live below fixtures/")
 
 
 def _relative_path(value: Any, path: str) -> str:

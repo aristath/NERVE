@@ -260,8 +260,8 @@ def validate_benchmarked_candidate(
     try:
         if benchmark["decision"] != "materially_faster":
             failure_reason = (
-                "candidate did not achieve a statistically material matched "
-                "performance improvement"
+                "candidate did not run faster than the matched exact "
+                "implementation"
             )
         else:
             local = execute_validation_stage(

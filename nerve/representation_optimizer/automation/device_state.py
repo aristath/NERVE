@@ -25,8 +25,8 @@ class DeviceIdlePolicy:
 
     maximum_vram_fraction_ppm: int = 10_000
     maximum_busy_percent: int = 0
-    maximum_driver_context_vram_bytes: int = 1 * 1024 * 1024
-    maximum_driver_context_gtt_bytes: int = 16 * 1024 * 1024
+    maximum_background_context_vram_bytes: int = 64 * 1024 * 1024
+    maximum_background_context_gtt_bytes: int = 64 * 1024 * 1024
     maximum_driver_retained_vram_bytes: int = 1 * 1024 * 1024
     quiescence_poll_interval_ns: int = 100_000_000
     quiescence_required_observations: int = 2
@@ -42,8 +42,8 @@ class DeviceIdlePolicy:
                 "idle-device busy percentage must be between 0 and 100"
             )
         for field in (
-            "maximum_driver_context_vram_bytes",
-            "maximum_driver_context_gtt_bytes",
+            "maximum_background_context_vram_bytes",
+            "maximum_background_context_gtt_bytes",
             "maximum_driver_retained_vram_bytes",
         ):
             value = getattr(self, field)
@@ -70,11 +70,11 @@ class DeviceIdlePolicy:
         return {
             "maximum_vram_fraction_ppm": self.maximum_vram_fraction_ppm,
             "maximum_busy_percent": self.maximum_busy_percent,
-            "maximum_driver_context_vram_bytes": (
-                self.maximum_driver_context_vram_bytes
+            "maximum_background_context_vram_bytes": (
+                self.maximum_background_context_vram_bytes
             ),
-            "maximum_driver_context_gtt_bytes": (
-                self.maximum_driver_context_gtt_bytes
+            "maximum_background_context_gtt_bytes": (
+                self.maximum_background_context_gtt_bytes
             ),
             "maximum_driver_retained_vram_bytes": (
                 self.maximum_driver_retained_vram_bytes
@@ -85,7 +85,7 @@ class DeviceIdlePolicy:
             ),
             "maximum_quiescence_wait_ns": self.maximum_quiescence_wait_ns,
             "resident_process_policy": (
-                "no_engine_activity_or_process_above_driver_context_envelope"
+                "no_process_above_background_context_envelope"
             ),
             "release_residency_policy": (
                 "stable_zero_activity_no_resident_process_within_"
@@ -170,7 +170,7 @@ class LinuxAmdDeviceStateProbe:
             raise ModelCompileError(
                 f"AMD device {device_id!r} returned invalid residency counters"
             )
-        processes = self._resident_processes(pci_address)
+        processes = self._material_resident_processes(pci_address)
         return DeviceIdleObservation(
             device_id=device_id,
             pci_address=pci_address,
@@ -489,7 +489,19 @@ class LinuxAmdDeviceStateProbe:
             )
         return candidates[0]
 
-    def _resident_processes(self, pci_address: str) -> tuple[Json, ...]:
+    def _material_resident_processes(
+        self,
+        pci_address: str,
+    ) -> tuple[Json, ...]:
+        """Return DRM clients too large to be display/driver background state.
+
+        DRM engine counters are cumulative over a client's lifetime and cannot
+        establish current activity. Global ``gpu_busy_percent`` provides the
+        live activity gate; this method establishes material residency. File
+        descriptors duplicated from one DRM client share an inode and must be
+        counted once rather than multiplying the client's reported memory.
+        """
+
         residents: dict[int, Json] = {}
         for process in sorted(self.proc_root.glob("[0-9]*")):
             try:
@@ -509,7 +521,21 @@ class LinuxAmdDeviceStateProbe:
             vram_bytes = 0
             gtt_bytes = 0
             engine_time_ns = 0
+            seen_clients: set[tuple[int, int] | tuple[str, str]] = set()
             for fdinfo in fdinfo_files:
+                try:
+                    fd_stat = (process / "fd" / fdinfo.name).stat()
+                    client_identity: tuple[int, int] | tuple[str, str] = (
+                        fd_stat.st_dev,
+                        fd_stat.st_ino,
+                    )
+                except (OSError, PermissionError):
+                    # Synthetic procfs fixtures and kernels which hide an fd
+                    # still get a deterministic, conservative identity.
+                    client_identity = ("fdinfo", fdinfo.name)
+                if client_identity in seen_clients:
+                    continue
+                seen_clients.add(client_identity)
                 try:
                     fields = _fdinfo_fields(fdinfo.read_text(errors="replace"))
                 except (OSError, PermissionError):
@@ -535,11 +561,10 @@ class LinuxAmdDeviceStateProbe:
                     if key.startswith("drm-engine-")
                 )
             if (
-                engine_time_ns == 0
-                and vram_bytes
-                <= self.policy.maximum_driver_context_vram_bytes
+                vram_bytes
+                <= self.policy.maximum_background_context_vram_bytes
                 and gtt_bytes
-                <= self.policy.maximum_driver_context_gtt_bytes
+                <= self.policy.maximum_background_context_gtt_bytes
             ):
                 continue
             try:

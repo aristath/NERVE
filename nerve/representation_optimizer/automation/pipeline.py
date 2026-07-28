@@ -32,6 +32,9 @@ from nerve.representation_optimizer.promotion.orchestrator import (
     prepare_candidate_promotion,
 )
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.staging.contracts import staged_file_digest
 from nerve.representation_optimizer.staging.orchestrator import stage_candidate
 from nerve.representation_optimizer.validation.orchestrator import (
@@ -46,6 +49,7 @@ from nerve.representation_optimizer.validation.planning import (
 def execute_candidate(
     *,
     source: Path,
+    source_artifacts: PackageSourceArtifactResolver,
     run_root: Path,
     plan: ProviderCandidatePlan,
     source_contract: Json,
@@ -71,6 +75,7 @@ def execute_candidate(
     toolchain = target.toolchains.resolve(plan)
     construction = stage_candidate(
         package_dir=source,
+        source_artifacts=source_artifacts,
         workspace_root=candidate_workspace,
         plan=plan,
         session=session,

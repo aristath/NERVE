@@ -63,7 +63,7 @@ non-finite number, or internally inconsistent contract.
 | `benchmark_observation.v1` | One normal-runtime timing, work, resource, and trace observation |
 | `benchmark_residency_event.v1` | Mount/unmount cost and device-state evidence |
 | `benchmark_run.v1` | Ordered raw observations and residency lifecycle |
-| `benchmark_record.v1` | Statistical summary and material-speed decision |
+| `benchmark_record.v2` | Binary matched-speed result and measured evidence |
 | `benchmark_evidence_integrity.v1` | Complete byte coverage of benchmark evidence |
 | `behavioral_error_contract.v1` | Approximation validity predicates, metric limits, and correction policy |
 | `validation_requirements.v1` | Proof verifiers, behavioral checks, applicability map, and counterexamples |
@@ -75,7 +75,7 @@ non-finite number, or internally inconsistent contract.
 | `prebenchmark_record.v1` | Static integrity, proof, and cheap-sanity gate result |
 | `validation_record.v1` | Complete funnel, benchmark link, full runs, and counterexamples |
 | `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
-| `runtime_implementation_predicate.v2` | Exact hardware-capability multiplicities plus execution-regime and placement guards for one verified implementation |
+| `runtime_implementation_predicate.v3` | Exact hardware-capability multiplicities, explicit alternative/source-retained phase ownership, and execution-regime and placement guards for one verified implementation |
 | `runtime_mount_plan.v1` | Runtime-adapter identity and candidate-local component-overlay and tensor-index artifacts |
 | `promotion_decision.v2` | Candidate, proof, benchmark, validation, target, artifact, and provenance decision |
 | `implementation_registry.v1` | Exact baseline plus all published physical implementations |
@@ -120,9 +120,11 @@ coarse-to-fine evaluation, verified correction, and heterogeneous
 representation islands. These are composable examples from `EXPERIMENTS.md`,
 not an exhaustive list.
 
-Descriptor JSON is included in the package compiler fingerprint. Changing the
-available representation vocabulary therefore cannot silently reuse a compiled
-package fingerprint from different optimizer semantics.
+Descriptor identity and contents are recorded in every analysis and candidate
+contract. Published implementations are accepted only when those content
+digests, their generated artifacts, and the package's exact source seal all
+match. The package schema is the compiler/runtime ABI boundary; tool source
+changes that leave that ABI intact do not invalidate compiled models.
 
 ## Semantic optimization scopes
 
@@ -342,9 +344,11 @@ metadata artifact and JSON pointer, or a candidate validity predicate; an
 arbitrary convenience cap cannot form a valid workload.
 
 Before mounting anything, the runner streams and verifies every workload
-fixture. It then executes reference/candidate samples in alternating AB/BA
-order, with at least four warmups and five measured pairs for each of at least
-two fixed seeds. Candidate and reference must complete identical useful work.
+fixture. It then makes exactly one discarded warmup call and one measured call
+for the reference and candidate under each representative workload. Candidate
+and reference must complete identical useful work. The microbenchmark has a
+hard one-minute wall-clock ceiling; crossing it is a failed experiment, not a
+reason to collect more samples.
 The normal runtime supplies its default statistics plus separate counters for
 useful, speculative, cancelled, discarded, and corrective work; setup,
 execution, teardown, queueing, synchronization, transport, conversion,
@@ -358,11 +362,10 @@ again into the published evidence tree and covered by its integrity manifest,
 so a digest label without its auditable evidence is insufficient.
 
 Inputs, initial states, and limit evidence are preserved beside those traces.
-The summary uses paired log-throughput ratios, a 95 percent Student-t
-confidence interval, a declared material-improvement floor, warmup convergence,
-counterbalanced order-bias detection, and sustained-window throughput slope.
-Timeouts, divergent fixed-seed behavior, excessive noise, order sensitivity,
-or sustained degradation prevent a winning result. Publication is an atomic
+The summary answers one binary question from that measured pair: whether the
+candidate is faster. Sustained-window throughput within each call remains a
+guard against degradation, while complete correctness and behavioral
+qualification happen only after the fast screen. Publication is an atomic
 rename of the deterministic plan, ordered raw run, summary, traces, and exact
 integrity manifest. Failed mount validation closes the already-open session,
 and every successful mount must prove that unmount returned the device to the

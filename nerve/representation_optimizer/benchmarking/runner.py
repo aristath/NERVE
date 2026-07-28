@@ -43,6 +43,8 @@ def execute_benchmark_plan(
     trace_paths: set[str] = set()
     run_status = "completed"
     block_index = 0
+    benchmark_started_ns = time.monotonic_ns()
+    maximum_duration_ns = policy["maximum_benchmark_duration_ns"]
 
     _verify_fixture_artifacts(plan, adapter)
 
@@ -102,6 +104,12 @@ def execute_benchmark_plan(
                 f"{observation_document['stop_reason']}"
             )
             return None
+        if time.monotonic_ns() - benchmark_started_ns > maximum_duration_ns:
+            run_status = "timeout"
+            diagnostics.append(
+                "microbenchmark exceeded its one-minute wall-clock contract"
+            )
+            return None
         return observation_document
 
     def open_session(
@@ -139,10 +147,7 @@ def execute_benchmark_plan(
         workload: Json,
         role: str,
         seed: int,
-        cycle_index: int,
-        order_block_index: int,
         order_index: int,
-        pair_start: int,
     ) -> Json:
         session, mount, current_block = open_session(
             workload=workload,
@@ -170,30 +175,26 @@ def execute_benchmark_plan(
                     policy,
                 )["converged"]:
                     break
-            if run_status == "completed":
-                for offset in range(policy["measured_pairs_per_block"]):
-                    if (
-                        execute(
-                            session,
-                            role=role,
-                            workload=workload,
-                            phase="measured",
-                            seed=seed,
-                            block_index=current_block,
-                            pair_index=pair_start + offset,
-                            order_index=order_index,
-                        )
-                        is None
-                    ):
-                        break
+            summary = warmup_group_summary(warmup_observations, policy)
+            if run_status == "completed" and summary["converged"]:
+                execute(
+                    session,
+                    role=role,
+                    workload=workload,
+                    phase="measured",
+                    seed=seed,
+                    block_index=current_block,
+                    pair_index=0,
+                    order_index=order_index,
+                )
         finally:
             close_session(session, mount)
-        summary = warmup_group_summary(warmup_observations, policy)
         return {
             "role": role,
             "seed": seed,
-            "cycle_index": cycle_index,
-            "order_block_index": order_block_index,
+            "cycle_index": None,
+            "order_block_index": None,
+            "attempt_index": 0,
             **summary,
             "observation_ids": [
                 observation["observation_id"] for observation in warmup_observations
@@ -267,6 +268,7 @@ def execute_benchmark_plan(
                                 "seed": seed,
                                 "cycle_index": None,
                                 "order_block_index": None,
+                                "attempt_index": 0,
                                 **summary,
                                 "observation_ids": [
                                     observation["observation_id"]
@@ -276,89 +278,56 @@ def execute_benchmark_plan(
                         )
                     if run_status != "completed":
                         break
+                if any(not group["converged"] for group in warmup_groups):
+                    run_status = "failed"
+                    diagnostics.append(
+                        f"{workload['workload_id']} cold warmup did not converge "
+                        "within the declared bound"
+                    )
             if run_status != "completed":
                 break
 
-            pairs_per_cycle = 2 * policy["measured_pairs_per_block"]
-            maximum_cycles = (
-                policy["maximum_measured_pairs_per_seed"] // pairs_per_cycle
-            )
-            summary: Json | None = None
-            for cycle_index in range(maximum_cycles):
-                for seed_index, seed in enumerate(seeds):
-                    for order_block_index in (0, 1):
-                        roles = _role_order(
-                            workload_index + seed_index + order_block_index
+            for seed_index, seed in enumerate(seeds):
+                roles = _role_order(workload_index + seed_index)
+                for order_index, role in enumerate(roles):
+                    if workload["regime"]["mount_mode"] == "resident_reuse":
+                        group = resident_block(
+                            workload=workload,
+                            role=role,
+                            seed=seed,
+                            order_index=order_index,
                         )
-                        pair_start = (
-                            cycle_index * pairs_per_cycle
-                            + order_block_index * policy["measured_pairs_per_block"]
+                        warmup_groups.append(group)
+                        if run_status == "completed" and not group["converged"]:
+                            run_status = "failed"
+                            diagnostics.append(
+                                f"{role} {workload['workload_id']} fixed warmup failed"
+                            )
+                    else:
+                        cold_observation(
+                            workload=workload,
+                            role=role,
+                            phase="measured",
+                            seed=seed,
+                            pair_index=0,
+                            order_index=order_index,
                         )
-                        for order_index, role in enumerate(roles):
-                            if workload["regime"]["mount_mode"] == "resident_reuse":
-                                warmup_groups.append(
-                                    resident_block(
-                                        workload=workload,
-                                        role=role,
-                                        seed=seed,
-                                        cycle_index=cycle_index,
-                                        order_block_index=order_block_index,
-                                        order_index=order_index,
-                                        pair_start=pair_start,
-                                    )
-                                )
-                            else:
-                                for offset in range(policy["measured_pairs_per_block"]):
-                                    if (
-                                        cold_observation(
-                                            workload=workload,
-                                            role=role,
-                                            phase="measured",
-                                            seed=seed,
-                                            pair_index=pair_start + offset,
-                                            order_index=order_index,
-                                        )
-                                        is None
-                                    ):
-                                        break
-                            if run_status != "completed":
-                                break
-                        if run_status != "completed":
-                            break
                     if run_status != "completed":
                         break
                 if run_status != "completed":
                     break
-                summary, _ = summarize_workload_samples(
-                    workload,
-                    observations,
-                    policy,
-                    warmup_groups,
-                )
-                measured_pairs = (cycle_index + 1) * pairs_per_cycle
-                if measured_pairs < policy["minimum_measured_pairs_per_seed"]:
-                    continue
-                if any(not group["converged"] for group in warmup_groups):
-                    termination = "warmup_exhausted"
-                    break
-                if summary["decision"] == "invalid":
-                    termination = "invalid"
-                    break
-                if summary["decision"] == "materially_faster":
-                    termination = "decisive_material_win"
-                    break
-                if summary["decision"] == "not_materially_faster":
-                    termination = "decisive_non_win"
-                    break
-                if measured_pairs == policy["maximum_measured_pairs_per_seed"]:
-                    termination = "evidence_budget_exhausted"
-                    break
             if run_status != "completed":
                 break
-            if summary is None:
-                raise ModelCompileError(
-                    "adaptive benchmark collected no measured cycle"
-                )
+            summary, _ = summarize_workload_samples(
+                workload,
+                observations,
+                policy,
+                warmup_groups,
+            )
+            termination = (
+                "invalid" if summary["decision"] == "invalid"
+                else "fixed_sample_complete"
+            )
             sampling_outcomes.append(
                 {
                     "workload_id": workload["workload_id"],
@@ -373,9 +342,10 @@ def execute_benchmark_plan(
                             if group["order_block_index"] is None
                             else group["order_block_index"],
                             ("reference", "candidate").index(group["role"]),
+                            group["attempt_index"],
                         ),
                     ),
-                    "measured_pairs_per_seed": measured_pairs,
+                    "measured_calls_per_role": policy["measured_calls_per_role"],
                     "decision": summary["decision"],
                     "reasons": summary["reasons"],
                     "termination": termination,
@@ -386,6 +356,15 @@ def execute_benchmark_plan(
             raise
         run_status = "cancelled"
         diagnostics.append(str(error))
+
+    if (
+        run_status == "completed"
+        and time.monotonic_ns() - benchmark_started_ns > maximum_duration_ns
+    ):
+        run_status = "timeout"
+        diagnostics.append(
+            "microbenchmark exceeded its one-minute wall-clock contract"
+        )
 
     run_document = {
         "schema": BENCHMARK_RUN_SCHEMA,
@@ -528,48 +507,40 @@ def validate_complete_run_against_plan(
             )
 
     warmup_ids: list[str] = []
-    pairs_per_cycle = 2 * policy["measured_pairs_per_block"]
     for workload_id, (workload_index, workload) in workloads.items():
         outcome = outcomes[workload_id]
-        measured_pairs = outcome["measured_pairs_per_seed"]
         if (
-            measured_pairs < policy["minimum_measured_pairs_per_seed"]
-            or measured_pairs > policy["maximum_measured_pairs_per_seed"]
-            or measured_pairs % pairs_per_cycle
+            outcome["measured_calls_per_role"]
+            != policy["measured_calls_per_role"]
+            or outcome["measured_calls_per_role"] != 1
         ):
             raise ModelCompileError(
-                "adaptive benchmark measured-pair count violates its plan"
+                "microbenchmark did not use exactly one measured call per role"
             )
-        expected_group_keys: set[tuple[int, int | None, int | None, str]] = set()
-        if workload["regime"]["mount_mode"] == "cold":
-            expected_group_keys = {
-                (seed, None, None, role)
-                for seed in workload["randomness"]["seeds"]
-                for role in ("reference", "candidate")
-            }
-        else:
-            cycle_count = measured_pairs // pairs_per_cycle
-            expected_group_keys = {
-                (seed, cycle_index, order_block_index, role)
-                for seed in workload["randomness"]["seeds"]
-                for cycle_index in range(cycle_count)
-                for order_block_index in (0, 1)
-                for role in ("reference", "candidate")
-            }
+        expected_group_keys = {
+            (seed, role)
+            for seed in workload["randomness"]["seeds"]
+            for role in ("reference", "candidate")
+        }
         observed_group_keys = {
-            (
-                group["seed"],
-                group["cycle_index"],
-                group["order_block_index"],
-                group["role"],
-            )
+            (group["seed"], group["role"])
             for group in outcome["warmup_groups"]
         }
         if observed_group_keys != expected_group_keys:
             raise ModelCompileError(
-                "adaptive warmup groups do not cover the declared sampling blocks"
+                "fixed warmups do not cover every benchmark role"
             )
         for group in outcome["warmup_groups"]:
+            if (
+                group["cycle_index"] is not None
+                or group["order_block_index"] is not None
+                or group["attempt_index"] != 0
+                or not group["converged"]
+                or group["sample_count"] != 1
+            ):
+                raise ModelCompileError(
+                    "microbenchmark warmup is not exactly one discarded call"
+                )
             selected = []
             for observation_id in group["observation_ids"]:
                 observation = observation_by_id.get(observation_id)
@@ -581,90 +552,33 @@ def validate_complete_run_against_plan(
                     or observation["seed"] != group["seed"]
                 ):
                     raise ModelCompileError(
-                        "adaptive warmup group cites a mismatched observation"
+                        "fixed warmup group cites a mismatched observation"
                     )
                 selected.append(observation)
                 warmup_ids.append(observation_id)
-            if [observation["observation_id"] for observation in selected] != [
-                observation["observation_id"]
-                for observation in observations
-                if observation["observation_id"] in set(group["observation_ids"])
-            ]:
-                raise ModelCompileError(
-                    "adaptive warmup group changed raw observation order"
-                )
             computed = warmup_group_summary(selected, policy)
             if any(
                 group[field] != computed[field]
-                for field in (
-                    "sample_count",
-                    "maximum_shift_ppm",
-                    "converged",
-                )
+                for field in ("sample_count", "maximum_shift_ppm", "converged")
             ):
                 raise ModelCompileError(
-                    "adaptive warmup outcome disagrees with raw observations"
+                    "fixed warmup outcome disagrees with raw observations"
                 )
-            if not (
-                policy["minimum_warmup_samples"]
-                <= group["sample_count"]
-                <= policy["maximum_warmup_samples"]
-            ):
-                raise ModelCompileError(
-                    "adaptive warmup sample count violates its plan"
-                )
-            blocks = {observation["block_index"] for observation in selected}
             if workload["regime"]["mount_mode"] == "resident_reuse":
-                if (
-                    group["cycle_index"] is None
-                    or group["order_block_index"] is None
-                    or len(blocks) != 1
-                ):
-                    raise ModelCompileError(
-                        "resident warmup group is not bound to one measured block"
-                    )
-                block = next(iter(blocks))
+                block = selected[0]["block_index"]
                 measured_in_block = [
                     observation
                     for observation in by_block[block]
                     if observation["phase"] == "measured"
                 ]
-                pair_start = (
-                    group["cycle_index"] * pairs_per_cycle
-                    + group["order_block_index"] * policy["measured_pairs_per_block"]
-                )
-                seed_index = workload["randomness"]["seeds"].index(group["seed"])
-                expected_roles = _role_order(
-                    workload_index + seed_index + group["order_block_index"]
-                )
                 if (
-                    len(measured_in_block) != policy["measured_pairs_per_block"]
-                    or {observation["pair_index"] for observation in measured_in_block}
-                    != set(
-                        range(
-                            pair_start,
-                            pair_start + policy["measured_pairs_per_block"],
-                        )
-                    )
-                    or any(
-                        observation["role"] != group["role"]
-                        or observation["order_index"]
-                        != expected_roles.index(group["role"])
-                        for observation in measured_in_block
-                    )
+                    len(measured_in_block) != 1
+                    or measured_in_block[0]["role"] != group["role"]
+                    or measured_in_block[0]["pair_index"] != 0
                 ):
                     raise ModelCompileError(
-                        "resident sampling block disagrees with its "
-                        "counterbalanced cycle"
+                        "resident benchmark did not measure immediately after warmup"
                     )
-            elif (
-                group["cycle_index"] is not None
-                or group["order_block_index"] is not None
-                or len(blocks) != len(selected)
-            ):
-                raise ModelCompileError(
-                    "cold warmup group is not composed of independent mounts"
-                )
         selected_workload = [
             observation
             for observation in observations
@@ -676,38 +590,34 @@ def validate_complete_run_against_plan(
                 for observation in selected_workload
                 if observation["phase"] == "measured" and observation["seed"] == seed
             ]
-            by_pair: dict[int, dict[str, Json]] = {}
-            for observation in measured:
-                roles = by_pair.setdefault(observation["pair_index"], {})
-                if observation["role"] in roles:
-                    raise ModelCompileError(
-                        "adaptive benchmark duplicated a role in one pair"
-                    )
-                roles[observation["role"]] = observation
-            if set(by_pair) != set(range(measured_pairs)) or any(
-                set(roles) != {"reference", "candidate"} for roles in by_pair.values()
+            if (
+                len(measured) != 2
+                or {observation["role"] for observation in measured}
+                != {"reference", "candidate"}
+                or {observation["pair_index"] for observation in measured} != {0}
             ):
                 raise ModelCompileError(
-                    "adaptive benchmark did not exactly cover matched pairs"
+                    "microbenchmark did not collect one matched measured call"
                 )
-            for pair_index, roles in by_pair.items():
-                order_block = (pair_index // policy["measured_pairs_per_block"]) % 2
-                expected_roles = _role_order(workload_index + seed_index + order_block)
-                for role, observation in roles.items():
-                    if observation["order_index"] != expected_roles.index(role):
-                        raise ModelCompileError(
-                            "adaptive benchmark pair is not counterbalanced"
-                        )
-                reference = roles["reference"]
-                candidate = roles["candidate"]
-                if (
-                    reference["work"]["unit"] != candidate["work"]["unit"]
-                    or reference["work"]["useful_units"]
-                    != candidate["work"]["useful_units"]
-                ):
-                    raise ModelCompileError(
-                        "matched benchmark pair performed different useful work"
-                    )
+            expected_roles = _role_order(workload_index + seed_index)
+            by_role = {observation["role"]: observation for observation in measured}
+            if any(
+                by_role[role]["order_index"] != expected_roles.index(role)
+                for role in expected_roles
+            ):
+                raise ModelCompileError(
+                    "microbenchmark measured calls changed their declared order"
+                )
+            reference = by_role["reference"]
+            candidate = by_role["candidate"]
+            if (
+                reference["work"]["unit"] != candidate["work"]["unit"]
+                or reference["work"]["useful_units"]
+                != candidate["work"]["useful_units"]
+            ):
+                raise ModelCompileError(
+                    "matched benchmark pair performed different useful work"
+                )
         summary, _ = summarize_workload_samples(
             workload,
             observations,
@@ -719,27 +629,16 @@ def validate_complete_run_against_plan(
             or outcome["reasons"] != summary["reasons"]
         ):
             raise ModelCompileError(
-                "adaptive benchmark termination disagrees with its evidence"
+                "microbenchmark termination disagrees with its evidence"
             )
-        warmup_failed = any(
-            not group["converged"] for group in outcome["warmup_groups"]
-        )
         expected_termination = (
-            "warmup_exhausted"
-            if warmup_failed
-            else {
-                "invalid": "invalid",
-                "materially_faster": "decisive_material_win",
-                "not_materially_faster": "decisive_non_win",
-                "inconclusive": "evidence_budget_exhausted",
-            }[summary["decision"]]
+            "invalid"
+            if summary["decision"] == "invalid"
+            else "fixed_sample_complete"
         )
-        if outcome["termination"] != expected_termination or (
-            expected_termination == "evidence_budget_exhausted"
-            and measured_pairs != policy["maximum_measured_pairs_per_seed"]
-        ):
+        if outcome["termination"] != expected_termination:
             raise ModelCompileError(
-                "adaptive benchmark stopped before satisfying its termination rule"
+                "microbenchmark stopped before its binary decision"
             )
     observed_warmup_ids = [
         observation["observation_id"]
@@ -750,7 +649,7 @@ def validate_complete_run_against_plan(
         observed_warmup_ids
     ):
         raise ModelCompileError(
-            "adaptive warmup groups do not exactly partition warmup evidence"
+            "fixed warmup groups do not exactly partition warmup evidence"
         )
 
 

@@ -88,6 +88,7 @@ def optimize_compiled_package(
     check_compile_cancelled(cancel_requested)
     outcome = run_automated_optimizer(
         package_dir=package_dir,
+        source_artifacts=prepared.source_artifacts,
         output_package_dir=output,
         run_root=workspace,
         providers=load_builtin_provider_registry(),

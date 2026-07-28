@@ -114,7 +114,10 @@ def main() -> None:
     parser.add_argument(
         "--runtime-bin",
         type=Path,
-        help="path to a built nerve-runtime binary; defaults to cargo run --release from a source checkout",
+        help=(
+            "path to a built nerve-runtime binary; defaults to a "
+            "source-fresh release build from a source checkout"
+        ),
     )
     parser.add_argument(
         "--compiled-model-dir",
@@ -481,7 +484,10 @@ def main() -> None:
             shader_source_dir=args.shader_source_dir,
             event_sink=reporter,
             cancel_requested=lambda: cancel_requested,
-            target=discover_compiler_target(runtime_bin=args.runtime_bin),
+            target=discover_compiler_target(
+                runtime_bin=args.runtime_bin,
+                allowed_physical_device_ids=args.allow_physical_device,
+            ),
         )
     except ModelCompileCancelled:
         raise SystemExit(130) from None
@@ -547,10 +553,12 @@ def validate_action_options(
     if (
         args.allow_physical_device
         and args.run is None
+        and args.compile_model is None
         and args.optimize_model is None
     ):
         parser.error(
-            "--allow-physical-device requires --run or --optimize-model"
+            "--allow-physical-device requires --run, --compile-model, "
+            "or --optimize-model"
         )
     if (
         args.runtime_bin is not None

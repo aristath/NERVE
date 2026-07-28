@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Protocol
+from typing import Callable, ContextManager, Iterable, Protocol
 
 from nerve.compilation import Json
 
@@ -131,6 +131,15 @@ class ValidationRoleExecutionSession(Protocol):
 
 class BehavioralValidationAdapter(Protocol):
     """Backend-neutral access to ordinary runtime validation execution."""
+
+    def validation_stage(
+        self,
+        stage: str,
+        *,
+        execution_scope: str,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> ContextManager[None]:
+        """Own one scope's exclusive execution infrastructure for a stage."""
 
     def iter_fixture_artifact(
         self,

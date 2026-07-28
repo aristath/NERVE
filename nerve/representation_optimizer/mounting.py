@@ -14,7 +14,7 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
 
 
-RUNTIME_MOUNT_PLAN_SCHEMA = "nerve.optimizer.runtime_mount_plan.v1"
+RUNTIME_MOUNT_PLAN_SCHEMA = "nerve.optimizer.runtime_mount_plan.v2"
 VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER = (
     "vulkan_stream_circuit_component_overlay.v1"
 )
@@ -60,7 +60,7 @@ def validate_runtime_mount_plan(
             "schema",
             "candidate_id",
             "adapter_id",
-            "component_replacements",
+            "regions",
             "tensor_index_refs",
         },
         "runtime mount plan",
@@ -86,44 +86,68 @@ def validate_runtime_mount_plan(
         output["path"]: output
         for output in build_plan.outputs
     }
-    replacements = _list(
-        document["component_replacements"],
-        "runtime mount plan component_replacements",
-    )
+    regions = _list(document["regions"], "runtime mount plan regions")
+    if not regions:
+        raise ContractValidationError(
+            "runtime mount plan must declare at least one semantic region"
+        )
     source_component_ids: list[str] = []
     referenced_outputs: list[str] = []
-    for index, raw in enumerate(replacements):
-        label = f"runtime mount plan component_replacements[{index}]"
-        replacement = _object(raw, label)
-        _fields(
-            replacement,
-            {
-                "source_component_id",
-                "overlay_ref",
-            },
-            label,
+    source_regions: list[list[str]] = []
+    for region_index, raw_region in enumerate(regions):
+        region_label = f"runtime mount plan regions[{region_index}]"
+        region = _object(raw_region, region_label)
+        _fields(region, {"component_replacements"}, region_label)
+        replacements = _list(
+            region["component_replacements"],
+            f"{region_label}.component_replacements",
         )
-        source_component_ids.append(
-            _text(
+        region_sources: list[str] = []
+        for replacement_index, raw_replacement in enumerate(replacements):
+            label = (
+                f"{region_label}.component_replacements"
+                f"[{replacement_index}]"
+            )
+            replacement = _object(raw_replacement, label)
+            _fields(
+                replacement,
+                {
+                    "source_component_id",
+                    "overlay_ref",
+                },
+                label,
+            )
+            source_component_id = _text(
                 replacement["source_component_id"],
                 f"{label}.source_component_id",
             )
-        )
-        referenced_outputs.append(
-            _declared_mount_artifact(
-                replacement["overlay_ref"],
-                f"{label}.overlay_ref",
-                declared_outputs,
-                expected_kind="runtime_component_overlay",
+            region_sources.append(source_component_id)
+            source_component_ids.append(source_component_id)
+            referenced_outputs.append(
+                _declared_mount_artifact(
+                    replacement["overlay_ref"],
+                    f"{label}.overlay_ref",
+                    declared_outputs,
+                    expected_kind="runtime_component_overlay",
+                )
             )
-        )
-    if (
-        not source_component_ids
-        or source_component_ids != sorted(set(source_component_ids))
-    ):
+        if (
+            not region_sources
+            or region_sources != sorted(set(region_sources))
+        ):
+            raise ContractValidationError(
+                f"{region_label} replacements must be non-empty, sorted, "
+                "and unique by source component"
+            )
+        source_regions.append(region_sources)
+    if source_regions != sorted(source_regions):
         raise ContractValidationError(
-            "runtime mount-plan component replacements must be non-empty, "
-            "sorted, and unique by source component"
+            "runtime mount-plan regions must be sorted by source components"
+        )
+    if len(source_component_ids) != len(set(source_component_ids)):
+        raise ContractValidationError(
+            "runtime mount-plan source components must occur in exactly one "
+            "semantic region"
         )
 
     tensor_index_refs = [
@@ -156,32 +180,39 @@ def validate_runtime_mount_artifacts(
     mount_plan: RuntimeMountPlan,
 ) -> None:
     document = mount_plan.to_json()
-    for replacement in document["component_replacements"]:
-        overlay = _read_object(root / replacement["overlay_ref"])
-        _fields(
-            overlay,
-            {
-                "schema",
-                "source_component_id",
-                "component",
-                "execution",
-            },
-            "Vulkan component overlay",
-        )
-        if overlay["schema"] != VULKAN_COMPONENT_OVERLAY_SCHEMA:
-            raise ContractValidationError(
-                "Vulkan component overlay schema is unsupported"
+    for region in document["regions"]:
+        for replacement in region["component_replacements"]:
+            overlay = _read_object(root / replacement["overlay_ref"])
+            _fields(
+                overlay,
+                {
+                    "schema",
+                    "source_component_id",
+                    "component",
+                    "execution",
+                },
+                "Vulkan component overlay",
             )
-        if (
-            overlay["source_component_id"]
-            != replacement["source_component_id"]
-        ):
-            raise ContractValidationError(
-                "Vulkan component overlay source component disagrees "
-                "with its mount plan"
+            if overlay["schema"] != VULKAN_COMPONENT_OVERLAY_SCHEMA:
+                raise ContractValidationError(
+                    "Vulkan component overlay schema is unsupported"
+                )
+            if (
+                overlay["source_component_id"]
+                != replacement["source_component_id"]
+            ):
+                raise ContractValidationError(
+                    "Vulkan component overlay source component disagrees "
+                    "with its mount plan"
+                )
+            _object(
+                overlay["component"],
+                "Vulkan component overlay component",
             )
-        _object(overlay["component"], "Vulkan component overlay component")
-        _object(overlay["execution"], "Vulkan component overlay execution")
+            _object(
+                overlay["execution"],
+                "Vulkan component overlay execution",
+            )
     for reference in document["tensor_index_refs"]:
         fragment = _read_object(root / reference)
         if fragment.get("schema") != "nerve.tensor_index.v1":

@@ -7,11 +7,11 @@ import shutil
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Iterable
 
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
-from nerve.compiler_fingerprint import COMPILER_FINGERPRINT_SCHEMA
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
     LinuxAmdDeviceStateProbe,
@@ -33,12 +33,20 @@ from nerve.representation_optimizer.providers.builtin import (
 )
 from nerve.representation_optimizer.providers.codebook import (
     ExactCodebookProofVerifier,
+    ExactEmbeddedParameterProgramProofVerifier,
+)
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
 )
 from nerve.representation_optimizer.validation.executor_adapter import (
     ResidentBehavioralValidationAdapter,
 )
 from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
+)
+
+RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA = (
+    "nerve.runtime_implementation_sha256.v1"
 )
 
 
@@ -55,9 +63,7 @@ class RuntimeOptimizationPolicy:
                 "model residency fraction must be in (0, 1000000] ppm"
             )
         if self.component_quantum_wait_ns <= 0:
-            raise ModelCompileError(
-                "component execution quantum wait must be positive"
-            )
+            raise ModelCompileError("component execution quantum wait must be positive")
         if self.context_lifecycle_required_observations < 2:
             raise ModelCompileError(
                 "context lifecycle requires at least two matching endpoints"
@@ -74,6 +80,7 @@ class RuntimeOptimizationPolicy:
 @dataclass(frozen=True)
 class PreparedOptimizationTargets:
     targets: tuple[OptimizationTarget, ...]
+    source_artifacts: PackageSourceArtifactResolver
     selected_devices: tuple[Json, ...]
     excluded_devices: tuple[Json, ...]
     parameter_bytes: int
@@ -85,9 +92,7 @@ class PreparedOptimizationTargets:
             "selected_devices": [dict(item) for item in self.selected_devices],
             "excluded_devices": [dict(item) for item in self.excluded_devices],
             "parameter_bytes": self.parameter_bytes,
-            "vulkan_driver_files": [
-                str(path) for path in self.vulkan_driver_files
-            ],
+            "vulkan_driver_files": [str(path) for path in self.vulkan_driver_files],
         }
 
 
@@ -108,6 +113,9 @@ def prepare_runtime_optimization_targets(
 ) -> PreparedOptimizationTargets:
     check_compile_cancelled(cancel_requested)
     package_manifest = package_manifest.resolve()
+    source_artifacts = PackageSourceArtifactResolver(
+        package_manifest.parent
+    )
     manifest = _read_json(package_manifest, "compiled package manifest")
     component_command = runtime_executor_command(
         "nerve-optimizer-executor",
@@ -128,21 +136,25 @@ def prepare_runtime_optimization_targets(
         if live_target is None
         else None
     )
-    _require_matching_package_compiler_fingerprints(
-        manifest=manifest,
-        commands=tuple(
-            (
-                label,
-                command,
-            )
-            for label, command in (
-                ("runtime", runtime_command),
-                ("component executor", component_command),
-                ("validation executor", validation_command),
-            )
-            if command is not None
-        ),
-        cancel_requested=cancel_requested,
+    executor_commands = tuple(
+        (
+            label,
+            command,
+        )
+        for label, command in (
+            ("runtime", runtime_command),
+            ("component executor", component_command),
+            ("validation executor", validation_command),
+        )
+        if command is not None
+    )
+    runtime_fingerprint = (
+        _require_current_runtime_implementation_fingerprints(
+            commands=executor_commands,
+            runtime_root=Path(__file__).resolve().parents[3]
+            / "runtime-rs",
+            cancel_requested=cancel_requested,
+        )
     )
     package_target = CompilerTarget.from_json(
         _required_object(manifest, "compiler_target")
@@ -172,8 +184,10 @@ def prepare_runtime_optimization_targets(
         )
 
     probe = idle_probe or LinuxAmdDeviceStateProbe()
-    eligible = tuple(by_id[device_id] for device_id in requested) if requested else (
-        package_profiles
+    eligible = (
+        tuple(by_id[device_id] for device_id in requested)
+        if requested
+        else (package_profiles)
     )
     idle_profiles: list[Json] = []
     selected_records: list[Json] = []
@@ -217,9 +231,7 @@ def prepare_runtime_optimization_targets(
         )
     )
     selected_records = [
-        record
-        for record in selected_records
-        if record["device_id"] in selected_ids
+        record for record in selected_records if record["device_id"] in selected_ids
     ]
     for profile in idle_profiles:
         device_id = str(profile["hardware_identity"]["stable_device_id"])
@@ -241,8 +253,7 @@ def prepare_runtime_optimization_targets(
         live_target, selected_records = _discover_stable_context_lifecycle(
             runtime_bin=(
                 Path(runtime_command[0])
-                if runtime_command is not None
-                and len(runtime_command) == 1
+                if runtime_command is not None and len(runtime_command) == 1
                 else runtime_bin
             ),
             selected_ids=selected_ids,
@@ -263,8 +274,7 @@ def prepare_runtime_optimization_targets(
         selected_records = list(
             probe.capture_stable_idle_baseline(
                 tuple(
-                    live_profiles_for_baseline[device_id]
-                    for device_id in selected_ids
+                    live_profiles_for_baseline[device_id] for device_id in selected_ids
                 )
             )
         )
@@ -295,20 +305,22 @@ def prepare_runtime_optimization_targets(
             selected_observations=tuple(
                 record
                 for record in selected_records
-                if record["device_id"]
-                in {_device_id(profile) for profile in profiles}
+                if record["device_id"] in {_device_id(profile) for profile in profiles}
             ),
             driver_files=drivers,
             component_command=component_command,
             validation_command=validation_command,
+            runtime_implementation_fingerprint=runtime_fingerprint,
             policy=policy,
             lease_root=lease_root or default_device_lease_root(),
+            source_artifacts=source_artifacts,
         )
         for profiles in live_groups
     )
     check_compile_cancelled(cancel_requested)
     return PreparedOptimizationTargets(
         targets=targets,
+        source_artifacts=source_artifacts,
         selected_devices=tuple(
             sorted(selected_records, key=lambda item: item["device_id"])
         ),
@@ -340,9 +352,7 @@ def discover_amd_vulkan_driver_files(
             "aarch64": "aarch64",
             "arm64": "aarch64",
         }.get(architecture, architecture)
-        preferred = Path(
-            f"/usr/share/vulkan/icd.d/radeon_icd.{suffix}.json"
-        )
+        preferred = Path(f"/usr/share/vulkan/icd.d/radeon_icd.{suffix}.json")
         if preferred.is_file():
             paths = (preferred.resolve(),)
     if not paths:
@@ -366,31 +376,62 @@ def discover_amd_vulkan_driver_files(
 
 def amd_vulkan_environment(driver_files: tuple[Path, ...]) -> dict[str, str]:
     environment = dict(os.environ)
-    environment["VK_DRIVER_FILES"] = os.pathsep.join(
-        str(path) for path in driver_files
-    )
+    environment["VK_DRIVER_FILES"] = os.pathsep.join(str(path) for path in driver_files)
     environment.pop("VK_ICD_FILENAMES", None)
     return environment
 
 
-def _require_matching_package_compiler_fingerprints(
-    *,
-    manifest: Json,
-    commands: tuple[tuple[str, tuple[str, ...]], ...],
-    cancel_requested: Callable[[], bool] | None,
-) -> None:
-    expected = manifest.get("compiler_fingerprint")
-    if (
-        not isinstance(expected, str)
-        or not expected.startswith(f"{COMPILER_FINGERPRINT_SCHEMA}:")
-    ):
+def runtime_implementation_fingerprint(runtime_root: Path) -> str:
+    runtime_root = runtime_root.resolve()
+    inputs = [
+        *(
+            (relative, runtime_root / relative)
+            for relative in ("Cargo.lock", "Cargo.toml", "build.rs")
+        ),
+        *(
+            (
+                path.relative_to(runtime_root).as_posix(),
+                path,
+            )
+            for path in (runtime_root / "src").rglob("*.rs")
+            if path.is_file()
+        ),
+    ]
+    missing = [
+        relative
+        for relative, path in inputs
+        if not path.is_file()
+    ]
+    if missing:
         raise ModelCompileError(
-            "compiled package has no valid compiler fingerprint"
+            "runtime implementation fingerprint inputs are missing: "
+            f"{sorted(missing)}"
         )
+    digest = sha256()
+    for relative, path in sorted(inputs):
+        relative_bytes = relative.encode("utf-8")
+        source = path.read_bytes()
+        digest.update(len(relative_bytes).to_bytes(8, "little"))
+        digest.update(relative_bytes)
+        digest.update(len(source).to_bytes(8, "little"))
+        digest.update(source)
+    return (
+        f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:"
+        f"{digest.hexdigest()}"
+    )
+
+
+def _require_current_runtime_implementation_fingerprints(
+    *,
+    commands: tuple[tuple[str, tuple[str, ...]], ...],
+    runtime_root: Path,
+    cancel_requested: Callable[[], bool] | None,
+) -> str:
+    expected = runtime_implementation_fingerprint(runtime_root)
     mismatches = []
     for label, command in commands:
         check_compile_cancelled(cancel_requested)
-        observed = _query_package_compiler_fingerprint(
+        observed = _query_runtime_implementation_fingerprint(
             command,
             cancel_requested=cancel_requested,
         )
@@ -398,20 +439,23 @@ def _require_matching_package_compiler_fingerprints(
             mismatches.append(f"{label} reports {observed}")
     if mismatches:
         raise ModelCompileError(
-            f"optimizer executables do not match package fingerprint "
+            "optimizer executables are stale relative to runtime source "
             f"{expected}: "
             + "; ".join(mismatches)
-            + "; rebuild the executables or recompile the package before "
-            "starting optimization"
+            + "; rebuild every executable before starting optimization"
         )
+    return expected
 
 
-def _query_package_compiler_fingerprint(
+def _query_runtime_implementation_fingerprint(
     command: tuple[str, ...],
     *,
     cancel_requested: Callable[[], bool] | None,
 ) -> str:
-    invocation = [*command, "--package-compiler-fingerprint"]
+    invocation = [
+        *command,
+        "--runtime-implementation-fingerprint",
+    ]
     try:
         process = subprocess.Popen(
             invocation,
@@ -440,17 +484,19 @@ def _query_package_compiler_fingerprint(
         diagnostic = stderr.strip() or stdout.strip()
         raise ModelCompileError(
             f"optimizer executable {command[0]!r} could not report its "
-            "package compiler fingerprint"
+            "runtime implementation fingerprint"
             + (f": {diagnostic}" if diagnostic else "")
         )
     fingerprint = stdout.strip()
     if (
-        not fingerprint.startswith(f"{COMPILER_FINGERPRINT_SCHEMA}:")
+        not fingerprint.startswith(
+            f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:"
+        )
         or "\n" in fingerprint
     ):
         raise ModelCompileError(
             f"optimizer executable {command[0]!r} returned an invalid "
-            f"package compiler fingerprint {fingerprint!r}"
+            f"runtime implementation fingerprint {fingerprint!r}"
         )
     return fingerprint
 
@@ -488,8 +534,7 @@ def _discover_stable_context_lifecycle(
         }
         if set(profiles) != set(selected_ids):
             raise ModelCompileError(
-                "live AMD discovery did not return exactly the verified idle "
-                "devices"
+                "live AMD discovery did not return exactly the verified idle devices"
             )
         _require_live_identity_match(
             package_profiles,
@@ -513,10 +558,7 @@ def _discover_stable_context_lifecycle(
             consecutive_endpoints = 1
         last_target = target
         last_records = records
-        if (
-            consecutive_endpoints
-            >= policy.context_lifecycle_required_observations
-        ):
+        if consecutive_endpoints >= policy.context_lifecycle_required_observations:
             return last_target, last_records
     raise ModelCompileError(
         "independent Vulkan context lifecycles did not converge on a "
@@ -531,13 +573,12 @@ def runtime_executor_command(
     *,
     explicit: Path | None,
     features: tuple[str, ...],
+    repo_root: Path | None = None,
 ) -> tuple[str, ...]:
     if explicit is not None:
         path = explicit.expanduser().resolve()
         if not path.is_file() or not os.access(path, os.X_OK):
-            raise ModelCompileError(
-                f"{binary_name} executable is unavailable: {path}"
-            )
+            raise ModelCompileError(f"{binary_name} executable is unavailable: {path}")
         return (str(path),)
     environment_name = binary_name.upper().replace("-", "_") + "_BIN"
     configured = os.environ.get(environment_name)
@@ -546,32 +587,74 @@ def runtime_executor_command(
             binary_name,
             explicit=Path(configured),
             features=features,
+            repo_root=repo_root,
         )
-    repo_root = Path(__file__).resolve().parents[3]
-    built = repo_root / "runtime-rs" / "target" / "release" / binary_name
-    if built.is_file() and os.access(built, os.X_OK):
-        return (str(built),)
+    repo_root = (
+        Path(__file__).resolve().parents[3]
+        if repo_root is None
+        else repo_root.resolve()
+    )
+    manifest = repo_root / "runtime-rs" / "Cargo.toml"
+    if manifest.is_file():
+        return _build_current_repo_executor(
+            binary_name=binary_name,
+            manifest=manifest,
+            features=features,
+        )
     installed = shutil.which(binary_name)
     if installed:
         return (installed,)
-    manifest = repo_root / "runtime-rs" / "Cargo.toml"
-    if manifest.is_file():
-        return (
-            "cargo",
-            "run",
-            "--release",
-            "--quiet",
-            "--manifest-path",
-            str(manifest),
-            "--features",
-            " ".join(features),
-            "--bin",
-            binary_name,
-            "--",
-        )
     raise ModelCompileError(
         f"could not find or build required executor {binary_name!r}"
     )
+
+
+def _build_current_repo_executor(
+    *,
+    binary_name: str,
+    manifest: Path,
+    features: tuple[str, ...],
+) -> tuple[str, ...]:
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise ModelCompileError(
+            f"cannot build current {binary_name!r}: cargo is unavailable"
+        )
+    command = [
+        cargo,
+        "build",
+        "--release",
+        "--manifest-path",
+        str(manifest),
+        "--features",
+        ",".join(features),
+        "--bin",
+        binary_name,
+    ]
+    completed = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout).strip()
+        raise ModelCompileError(
+            f"could not build current optimizer executable {binary_name!r}"
+            + (f": {diagnostic}" if diagnostic else "")
+        )
+    binary = (
+        manifest.parent
+        / "target"
+        / "release"
+        / binary_name
+    ).resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ModelCompileError(
+            f"cargo did not produce optimizer executable {binary}"
+        )
+    return (str(binary),)
 
 
 def balanced_component_placement(
@@ -594,9 +677,19 @@ def balanced_component_placement(
         if not isinstance(component, dict):
             raise ModelCompileError("compiled component graph is malformed")
         component_id = str(component.get("component_id", ""))
+        runtime_role = component.get("runtime_role")
         refs = component.get("params", {}).get("refs", {})
-        if not component_id or not isinstance(refs, dict):
-            raise ModelCompileError("compiled component parameter map is malformed")
+        if (
+            not component_id
+            or not isinstance(runtime_role, str)
+            or not runtime_role
+            or not isinstance(refs, dict)
+        ):
+            raise ModelCompileError(
+                "compiled component placement contract is malformed"
+            )
+        if runtime_role != "signal_processor":
+            continue
         names = {
             value.get("tensor")
             for value in refs.values()
@@ -607,8 +700,10 @@ def balanced_component_placement(
             raise ModelCompileError(
                 f"component {component_id!r} references unknown tensors: {missing}"
             )
-        weighted.append(
-            (component_id, sum(tensor_sizes[name] for name in names))
+        weighted.append((component_id, sum(tensor_sizes[name] for name in names)))
+    if not weighted:
+        raise ModelCompileError(
+            "compiled package has no independently placeable signal processors"
         )
     if len(device_ids) == 1:
         return {component_id: device_ids[0] for component_id, _ in weighted}
@@ -625,15 +720,13 @@ def _build_target(
     driver_files: tuple[Path, ...],
     component_command: tuple[str, ...],
     validation_command: tuple[str, ...],
+    runtime_implementation_fingerprint: str,
     policy: RuntimeOptimizationPolicy,
     lease_root: Path,
+    source_artifacts: PackageSourceArtifactResolver,
 ) -> OptimizationTarget:
-    profiles = tuple(
-        sorted(profiles, key=lambda item: _device_id(item))
-    )
-    capability_classes = {
-        str(profile["capability_class"]) for profile in profiles
-    }
+    profiles = tuple(sorted(profiles, key=lambda item: _device_id(item)))
+    capability_classes = {str(profile["capability_class"]) for profile in profiles}
     if len(capability_classes) != 1:
         raise ModelCompileError(
             "one optimization execution target must have one capability class"
@@ -668,6 +761,9 @@ def _build_target(
             "maximum_quantum_wait_ns": policy.component_quantum_wait_ns,
         },
         "environment": {
+            "runtime_implementation_fingerprint": (
+                runtime_implementation_fingerprint
+            ),
             "vulkan_driver_manifests": [str(path) for path in driver_files],
             "device_idle_policy": idle_probe.policy.to_json(),
             "context_prepared_idle_observations": [
@@ -716,7 +812,11 @@ def _build_target(
         proof_verifiers=ProofVerifierRegistry.from_verifiers(
             (
                 ExactCodebookProofVerifier(
-                    package_root=package_manifest.parent,
+                    source_artifacts=source_artifacts,
+                    candidate_workspace_root=candidate_workspace,
+                ),
+                ExactEmbeddedParameterProgramProofVerifier(
+                    source_artifacts=source_artifacts,
                     candidate_workspace_root=candidate_workspace,
                 ),
             )
@@ -787,10 +887,7 @@ def _safe_device_capacity(
     *,
     policy: RuntimeOptimizationPolicy,
 ) -> int:
-    return sum(
-        _safe_profile_capacity(profile, policy=policy)
-        for profile in profiles
-    )
+    return sum(_safe_profile_capacity(profile, policy=policy) for profile in profiles)
 
 
 def _safe_profile_capacity(
@@ -812,11 +909,7 @@ def _safe_profile_capacity(
         raise ModelCompileError(
             f"AMD profile {_device_id(profile)!r} has no device-local memory heap"
         )
-    return (
-        sum(heaps.values())
-        * policy.model_residency_fraction_ppm
-        // 1_000_000
-    )
+    return sum(heaps.values()) * policy.model_residency_fraction_ppm // 1_000_000
 
 
 def _package_parameter_bytes(package_root: Path, manifest: Json) -> int:
@@ -838,9 +931,8 @@ def _tensor_index(package_root: Path, manifest: Json) -> Json:
     if relative.is_absolute() or ".." in relative.parts:
         raise ModelCompileError("compiled tensor index path is unsafe")
     document = _read_json(package_root / relative, "compiled tensor index")
-    if (
-        document.get("schema") != "nerve.tensor_index.v1"
-        or not isinstance(document.get("tensors"), dict)
+    if document.get("schema") != "nerve.tensor_index.v1" or not isinstance(
+        document.get("tensors"), dict
     ):
         raise ModelCompileError("compiled tensor index is malformed")
     return document
@@ -866,17 +958,9 @@ def _contiguous_weighted_partition(
             if components_after < devices_after:
                 break
             component_id, weight = components[cursor]
-            if (
-                current_weight > 0
-                and abs(
-                    remaining_weight
-                    - current_weight * remaining_devices
-                )
-                <= abs(
-                    remaining_weight
-                    - (current_weight + weight) * remaining_devices
-                )
-            ):
+            if current_weight > 0 and abs(
+                remaining_weight - current_weight * remaining_devices
+            ) <= abs(remaining_weight - (current_weight + weight) * remaining_devices):
                 break
             placement[component_id] = device_id
             current_weight += weight
@@ -906,10 +990,9 @@ def _require_live_identity_match(
             "architecture",
             "physical_location",
         ):
-            if (
-                packaged["hardware_identity"].get(field)
-                != live["hardware_identity"].get(field)
-            ):
+            if packaged["hardware_identity"].get(field) != live[
+                "hardware_identity"
+            ].get(field):
                 raise ModelCompileError(
                     f"live device {device_id!r} no longer matches package "
                     f"hardware identity field {field!r}"

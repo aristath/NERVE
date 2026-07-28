@@ -8,14 +8,103 @@ from nerve.representation_optimizer.benchmarking.executor_protocol import (
     required_object,
     required_text,
 )
+from nerve.representation_optimizer.benchmarking.executor_transport import (
+    EXECUTOR_PROGRESS_SCHEMA,
+)
 
 
 VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v1"
+    "nerve.optimizer.validation_executor_command.v3"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v2"
+    "nerve.optimizer.validation_executor_response.v3"
 )
+
+_PROGRESS_FIELDS = {
+    "generation": {
+        "phase",
+        "turn_index",
+        "generated_tokens",
+        "elapsed_ns",
+    },
+    "turn_completed": {
+        "phase",
+        "turn_index",
+        "generated_tokens",
+        "elapsed_ns",
+        "component_activations",
+        "scheduler_steps",
+    },
+    "teacher_forced_turn_completed": {
+        "phase",
+        "turn_index",
+        "generated_tokens",
+        "elapsed_ns",
+        "component_activations",
+        "scheduler_steps",
+    },
+    "lifecycle_completed": {
+        "phase",
+        "elapsed_ns",
+        "component_activations",
+        "scheduler_steps",
+    },
+}
+
+
+def validate_validation_progress(
+    event: Json,
+    *,
+    expected_request_id: str,
+    turn_count: int,
+) -> None:
+    if (
+        event.get("schema") != EXECUTOR_PROGRESS_SCHEMA
+        or event.get("request_id") != expected_request_id
+        or isinstance(event.get("sequence"), bool)
+        or not isinstance(event.get("sequence"), int)
+        or event["sequence"] < 0
+        or not isinstance(event.get("payload"), dict)
+    ):
+        raise ModelCompileError(
+            "validation executor progress does not match its request"
+        )
+    payload = event["payload"]
+    phase = payload.get("phase")
+    expected_fields = _PROGRESS_FIELDS.get(phase)
+    if expected_fields is None or set(payload) != expected_fields:
+        raise ModelCompileError(
+            "validation executor progress payload is invalid"
+        )
+    for field in (
+        "elapsed_ns",
+        "component_activations",
+        "scheduler_steps",
+    ):
+        if field in payload:
+            positive_integer(
+                payload[field],
+                f"validation progress {field}",
+            )
+    generated_tokens = payload.get("generated_tokens")
+    if generated_tokens is not None and (
+        isinstance(generated_tokens, bool)
+        or not isinstance(generated_tokens, int)
+        or generated_tokens < 0
+    ):
+        raise ModelCompileError(
+            "validation progress generated token count is invalid"
+        )
+    turn_index = payload.get("turn_index")
+    if turn_index is not None and (
+        isinstance(turn_index, bool)
+        or not isinstance(turn_index, int)
+        or turn_index < 0
+        or turn_index >= turn_count
+    ):
+        raise ModelCompileError(
+            "validation progress turn index is invalid"
+        )
 
 
 def validated_validation_response(
@@ -71,11 +160,17 @@ def validate_validation_mount_payload(
     )
 
 
-def validate_validation_execution_payload(payload: Json) -> None:
+def validate_validation_execution_payload(
+    payload: Json,
+    *,
+    expected_step_unit: str,
+    expected_turns: tuple[str, ...],
+) -> None:
     expected = {
         "output_digest",
         "state_digest",
         "steps",
+        "step_unit",
         "scheduler_steps",
         "elapsed_ns",
         "turns",
@@ -87,6 +182,10 @@ def validate_validation_execution_payload(payload: Json) -> None:
         )
     required_digest(payload, "output_digest")
     required_digest(payload, "state_digest")
+    if payload.get("step_unit") != expected_step_unit:
+        raise ModelCompileError(
+            "validation executor reported a different step unit"
+        )
     positive_integer(
         payload.get("steps"),
         "validation executor component activations",
@@ -100,26 +199,33 @@ def validate_validation_execution_payload(payload: Json) -> None:
         "validation executor elapsed time",
     )
     turns = payload.get("turns")
-    if not isinstance(turns, list) or not turns:
+    if (
+        not isinstance(turns, list)
+        or len(turns) != len(expected_turns)
+    ):
         raise ModelCompileError(
-            "validation executor omitted conversation turns"
+            "validation executor did not complete every requested turn"
         )
-    for index, turn in enumerate(turns):
+    for index, (turn, expected_user) in enumerate(
+        zip(turns, expected_turns, strict=True)
+    ):
         if (
             not isinstance(turn, dict)
             or turn.get("turn_index") != index
-            or not isinstance(turn.get("user"), str)
-            or not turn["user"]
+            or turn.get("user") != expected_user
             or not isinstance(turn.get("assistant"), str)
             or not isinstance(turn.get("generated_token_ids"), list)
             or not isinstance(
                 turn.get("canonical_committed_token_ids"),
                 list,
             )
+            or turn.get("stop_reason")
+            not in {"eos", "output_allowance", "fixture_completed"}
         ):
             raise ModelCompileError(
                 "validation executor returned malformed conversation trace"
             )
+        required_digest(turn, "state_digest")
     required_object(payload, "execution_counters")
 
 
@@ -142,6 +248,14 @@ def validate_validation_release_payload(
         raise ModelCompileError(
             "validation executor did not prove complete role release"
         )
+    positive_integer(
+        payload.get("reset_duration_ns"),
+        "validation executor state reset duration",
+    )
+    positive_integer(
+        payload.get("state_proof_duration_ns"),
+        "validation executor state proof duration",
+    )
     positive_integer(
         payload.get("release_duration_ns"),
         "validation executor release duration",

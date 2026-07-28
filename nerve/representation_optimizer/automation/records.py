@@ -17,12 +17,17 @@ from nerve.representation_optimizer.lifecycle import (
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
 
 
-def build_provider_records(*, scope_id: str, target_id: str, report) -> list[Json]:
+def build_provider_records(
+    *,
+    scope_ids: tuple[str, ...],
+    target_id: str,
+    report,
+) -> list[Json]:
     records = []
     for evaluation in report.evaluations:
         records.append(
             {
-                "scope_id": scope_id,
+                "scope_ids": list(scope_ids),
                 "target_id": target_id,
                 "provider": evaluation.provider.to_json(),
                 "descriptor_id": evaluation.descriptor_id,
@@ -53,13 +58,13 @@ def build_provider_records(*, scope_id: str, target_id: str, report) -> list[Jso
 def new_candidate_record(
     plan: ProviderCandidatePlan,
     *,
-    scope_id: str,
+    scope_ids: tuple[str, ...],
     target_id: str,
 ) -> Json:
     candidate = plan.candidate.to_json()
     return {
         "candidate_id": plan.candidate_id,
-        "scope_id": scope_id,
+        "scope_ids": list(scope_ids),
         "target_id": target_id,
         "provider": plan.provider.to_json(),
         "descriptor_id": candidate["descriptor_id"],
@@ -111,7 +116,7 @@ def record_candidate_failure(
     session: OptimizationSession,
     error: Exception,
     journal: EventJournal,
-    scope_id: str,
+    scope_id: str | None,
     target_id: str,
 ) -> OptimizationSession:
     lifecycle = candidate_lifecycle(session, plan.candidate_id)
@@ -151,7 +156,7 @@ def record_candidate_cancellation(
     session: OptimizationSession,
     error: Exception,
     journal: EventJournal,
-    scope_id: str,
+    scope_id: str | None,
     target_id: str,
 ) -> OptimizationSession:
     lifecycle = candidate_lifecycle(session, plan.candidate_id)

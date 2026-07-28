@@ -75,7 +75,9 @@ def create_validation_check(
     initial_state_artifact: Json | None,
     controls: Json,
     seeds: Iterable[int],
-    minimum_steps: int,
+    step_unit: str,
+    completion_condition: str,
+    minimum_steps: int | None,
     output_allowance: int | None,
     output_allowance_basis: Json,
     metrics: Iterable[str],
@@ -103,6 +105,8 @@ def create_validation_check(
         "controls": dict(controls),
         "seeds": sorted(set(seeds)),
         "horizon": {
+            "unit": step_unit,
+            "completion_condition": completion_condition,
             "minimum_steps": minimum_steps,
             "output_allowance": output_allowance,
             "output_allowance_basis": dict(output_allowance_basis),
@@ -210,7 +214,7 @@ def build_validation_plan(
     if (
         requirements.candidate_id != candidate_plan.candidate_id
         or requirements.to_json()["source_contract_digests"]
-        != candidate["source_contract_digests"]
+        != sorted(candidate["source_contract_digests"])
     ):
         raise ModelCompileError(
             "validation requirements do not match their representation candidate"
@@ -220,7 +224,7 @@ def build_validation_plan(
         "schema": VALIDATION_PLAN_SCHEMA,
         "plan_id": "",
         "candidate_id": candidate_plan.candidate_id,
-        "source_contract_digests": list(
+        "source_contract_digests": sorted(
             candidate["source_contract_digests"]
         ),
         "construction_record_digest": construction_record.digest,

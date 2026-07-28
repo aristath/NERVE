@@ -358,6 +358,39 @@ def discover_head_norm_codebook(context: ProviderContext) -> DiscoveryResult:
     )
 
 
+def discover_head_norm_codebooks(
+    context: ProviderContext,
+) -> tuple[HeadNormCodebookOpportunity, ...]:
+    """Discover each non-overlapping compatible component in a problem."""
+
+    key = "head_norm_codebooks.v1:" + ",".join(context.scope_ids)
+    return context.memoized(
+        key,
+        lambda: _discover_head_norm_codebooks_uncached(context),
+    )  # type: ignore[return-value]
+
+
+def _discover_head_norm_codebooks_uncached(
+    context: ProviderContext,
+) -> tuple[HeadNormCodebookOpportunity, ...]:
+    by_component: dict[str, HeadNormCodebookOpportunity] = {}
+    for scoped_context in context.single_scope_contexts():
+        context.checkpoint()
+        result = discover_head_norm_codebook(scoped_context)
+        opportunity = result.opportunity
+        if opportunity is None:
+            continue
+        previous = by_component.get(opportunity.component_id)
+        if previous is None or opportunity.scope_id < previous.scope_id:
+            by_component[opportunity.component_id] = opportunity
+    return tuple(
+        sorted(
+            by_component.values(),
+            key=lambda item: (item.scope_id, item.component_id),
+        )
+    )
+
+
 def _supported_claim(evidence: tuple[Json, ...], kind: str) -> Json | None:
     matches = []
     for document in evidence:

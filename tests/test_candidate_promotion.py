@@ -35,6 +35,9 @@ from nerve.representation_optimizer.providers import (
     ProviderProblem,
     ProviderRegistry,
 )
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.promotion.contracts import (
     ImplementationRegistry,
     PromotionContractError,
@@ -45,6 +48,8 @@ from nerve.representation_optimizer.promotion.contracts import (
 )
 from nerve.representation_optimizer.promotion.orchestrator import (
     PreparedPromotion,
+    _derive_runtime_predicate,
+    _validated_execution_envelope,
     prepare_candidate_promotion,
 )
 from nerve.representation_optimizer.promotion.publication import (
@@ -106,6 +111,53 @@ class QualifiedCandidate:
     profile: dict[str, object]
 
 
+def test_phase_selective_execution_envelope_uses_full_runtime_range() -> None:
+    assert _validated_execution_envelope(
+        {
+            "phases": ["decode", "prefill"],
+            "alternative_phases": ["decode"],
+            "source_retained_phases": ["prefill"],
+            "activation_batch": {"minimum": 1, "maximum": 131_072},
+            "context_activations": {"minimum": 0, "maximum": 131_072},
+            "state_activations": {"minimum": 0, "maximum": 131_072},
+        },
+        [
+            {
+                "execution_phase": "decode",
+                "activation_batch_width": 1,
+                "context_size": 4_096,
+                "state_size": 4_096,
+            }
+        ],
+    ) == (
+        ["decode", "prefill"],
+        1,
+        131_072,
+        0,
+        131_072,
+        0,
+        131_072,
+    )
+
+
+def test_phase_selective_execution_envelope_requires_every_changed_phase() -> None:
+    with pytest.raises(
+        ModelCompileError,
+        match="every alternative execution phase",
+    ):
+        _validated_execution_envelope(
+            {
+                "phases": ["decode", "prefill"],
+                "alternative_phases": ["decode"],
+                "source_retained_phases": ["prefill"],
+                "activation_batch": {"minimum": 1, "maximum": 131_072},
+                "context_activations": {"minimum": 0, "maximum": 131_072},
+                "state_activations": {"minimum": 0, "maximum": 131_072},
+            },
+            [],
+        )
+
+
 def _qualified_candidate(
     tmp_path: Path,
     *,
@@ -128,6 +180,7 @@ def _qualified_candidate(
     candidate_workspace = tmp_path / "candidate-workspace"
     construction = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=candidate_workspace,
         plan=candidate_plan,
         session=session,
@@ -436,11 +489,11 @@ def test_promoted_package_is_relocatable_and_has_no_workspace_dependency(
     "behavior",
     (
         AdapterBehavior(candidate_duration_ns=1_100_000),
-        AdapterBehavior(noisy_candidate=True),
+        AdapterBehavior(candidate_duration_ns=1_000_000),
     ),
-    ids=("slower", "noisy"),
+    ids=("slower", "equal"),
 )
-def test_slower_or_noisy_candidate_cannot_be_prepared_for_publication(
+def test_candidate_that_is_not_faster_cannot_be_prepared_for_publication(
     tmp_path: Path,
     behavior: AdapterBehavior,
 ) -> None:
@@ -567,6 +620,8 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
     }
     assert predicate["execution"] == {
         "phases": ["decode", "prefill"],
+        "alternative_phases": ["decode", "prefill"],
+        "source_retained_phases": [],
         "activation_batch": {"minimum": 1, "maximum": 8},
         "context_activations": {
             "minimum": 4096,
@@ -583,6 +638,26 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
         "maximum_device_count": 1,
         "required_interconnects": [],
     }
+
+
+def test_promotion_rejects_unmountable_hardware_process_names(
+    tmp_path: Path,
+) -> None:
+    qualified = _qualified_candidate(tmp_path)
+    candidate = qualified.candidate_plan.candidate.to_json()
+    candidate["target_predicate"]["required_processes"] = [
+        "abstract_process_not_exposed_by_the_runtime"
+    ]
+
+    with pytest.raises(
+        ModelCompileError,
+        match="not mountable.*missing processes",
+    ):
+        _derive_runtime_predicate(
+            benchmark_plan=qualified.benchmark.plan,
+            hardware_profiles=(qualified.profile,),
+            candidate=candidate,
+        )
 
 
 def test_registry_rejects_mount_contract_outside_implementation_bundle(
@@ -776,6 +851,8 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
             "required_features"
         ],
         execution_phases=("decode",),
+        alternative_execution_phases=("decode",),
+        source_retained_execution_phases=(),
         activation_batch_minimum=1,
         activation_batch_maximum=1,
         context_activations_minimum=1,

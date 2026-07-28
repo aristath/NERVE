@@ -28,6 +28,9 @@ from nerve.representation_optimizer.contracts import (
     representation_candidate_id,
 )
 from nerve.representation_optimizer.providers import ProviderRegistry, StaticEstimate
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
 )
@@ -240,7 +243,7 @@ def _budget(*, maximum_candidates: int = 1) -> OptimizationBudget:
         maximum_transient_bytes=1_000_000,
         maximum_construction_nanoseconds=1_000_000_000,
         maximum_execution_nanoseconds=1_000_000_000,
-        maximum_experiment_invocations=maximum_candidates * 1_000,
+        maximum_experiment_invocations=maximum_candidates * 4_000,
     )
 
 
@@ -260,6 +263,7 @@ def test_unattended_loop_publishes_only_faster_fully_valid_candidate(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "optimized",
         run_root=tmp_path / "run",
         providers=_providers(
@@ -317,6 +321,7 @@ def test_budget_rejects_whole_candidate_without_running_partial_experiment(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -342,6 +347,7 @@ def test_bounded_construction_budget_rejects_uncalibrated_estimate(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(
@@ -375,11 +381,12 @@ def test_experiment_budget_counts_every_planned_role_execution(
     target, lease = _target()
     budget = replace(
         _budget(),
-        maximum_experiment_invocations=789,
+        maximum_experiment_invocations=29,
     )
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -391,10 +398,10 @@ def test_experiment_budget_counts_every_planned_role_execution(
     decision = json.loads(
         (tmp_path / "run" / candidate["budget_decision_ref"]).read_text()
     )
-    assert decision["cost"]["experiment_invocations"] == 790
+    assert decision["cost"]["experiment_invocations"] == 30
     assert candidate["status"] == "rejected"
     assert any(
-        "maximum_experiment_invocations: 790 > 789" in reason
+        "maximum_experiment_invocations: 30 > 29" in reason
         for reason in candidate["rejection_reasons"]
     )
     assert lease.acquisitions == 0
@@ -408,6 +415,7 @@ def test_candidate_failure_is_audited_and_releases_every_lease(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -434,6 +442,7 @@ def test_failed_candidate_does_not_prevent_independent_candidate_promotion(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "optimized",
         run_root=tmp_path / "run",
         providers=_providers(
@@ -483,6 +492,7 @@ def test_device_target_cannot_use_noop_lease_manager(tmp_path: Path) -> None:
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -507,6 +517,7 @@ def test_materially_faster_but_inaccurate_candidate_is_not_published(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -535,6 +546,7 @@ def test_slower_candidate_is_rejected_without_full_behavioral_execution(
 
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -555,6 +567,7 @@ def test_report_detects_truncated_event_journal(tmp_path: Path) -> None:
     target, _ = _target()
     run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -574,6 +587,7 @@ def test_report_detects_missing_event_evidence(tmp_path: Path) -> None:
     target, _ = _target()
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -594,6 +608,7 @@ def test_report_structure_index_is_checked_against_canonical_evidence(
     target, _ = _target()
     outcome = run_automated_optimizer(
         package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
         output_package_dir=tmp_path / "unused-output",
         run_root=tmp_path / "run",
         providers=_providers(),
@@ -642,6 +657,7 @@ def test_publication_failure_leaves_source_and_destination_unambiguous(
     with pytest.raises(ModelCompileError, match="failed safely"):
         run_automated_optimizer(
             package_dir=package,
+            source_artifacts=PackageSourceArtifactResolver(package),
             output_package_dir=tmp_path / "optimized",
             run_root=tmp_path / "run",
             providers=_providers(),
@@ -670,6 +686,7 @@ def test_cancellation_before_analysis_publishes_terminal_report(
     with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
         run_automated_optimizer(
             package_dir=package,
+            source_artifacts=PackageSourceArtifactResolver(package),
             output_package_dir=tmp_path / "optimized",
             run_root=tmp_path / "run",
             providers=_providers(),
@@ -700,6 +717,7 @@ def test_cancellation_during_construction_stops_the_whole_run(
     with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
         run_automated_optimizer(
             package_dir=package,
+            source_artifacts=PackageSourceArtifactResolver(package),
             output_package_dir=tmp_path / "optimized",
             run_root=tmp_path / "run",
             providers=_providers(),
@@ -729,6 +747,7 @@ def test_cancellation_during_benchmark_releases_lease_and_stops_run(
     with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
         run_automated_optimizer(
             package_dir=package,
+            source_artifacts=PackageSourceArtifactResolver(package),
             output_package_dir=tmp_path / "optimized",
             run_root=tmp_path / "run",
             providers=_providers(),
@@ -772,6 +791,7 @@ def test_cancellation_before_publication_never_commits_output(
     with pytest.raises(ModelCompileCancelled, match="cancelled safely"):
         run_automated_optimizer(
             package_dir=package,
+            source_artifacts=PackageSourceArtifactResolver(package),
             output_package_dir=tmp_path / "optimized",
             run_root=tmp_path / "run",
             providers=_providers(),

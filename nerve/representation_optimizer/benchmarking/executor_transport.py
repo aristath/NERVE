@@ -14,6 +14,9 @@ from nerve.compilation import (
     check_compile_cancelled,
 )
 
+EXECUTOR_PROGRESS_SCHEMA = "nerve.optimizer.executor_progress.v1"
+ExecutorProgressCallback = Callable[[Json], None]
+
 
 class ExecutorTransport(Protocol):
     def request(
@@ -21,6 +24,7 @@ class ExecutorTransport(Protocol):
         document: Json,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        progress_received: ExecutorProgressCallback | None = None,
     ) -> Json:
         """Send one command and return its complete response."""
 
@@ -78,6 +82,7 @@ class SubprocessExecutorTransport:
         document: Json,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        progress_received: ExecutorProgressCallback | None = None,
     ) -> Json:
         if self.process.poll() is not None:
             raise self._failure("executor exited before command")
@@ -94,21 +99,62 @@ class SubprocessExecutorTransport:
             )
             self.process.stdin.write(payload)
             self.process.stdin.flush()
-            line = self._readline(cancel_requested)
+            response = self._read_response(
+                expected_request_id=str(document.get("request_id", "")),
+                cancel_requested=cancel_requested,
+                progress_received=progress_received,
+            )
         except ModelCompileCancelled:
             self.abort()
             raise
         except (BrokenPipeError, OSError) as error:
             raise self._failure("executor command exchange failed") from error
-        if not line:
-            raise self._failure("executor returned no response")
-        try:
-            response = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise self._failure("executor returned malformed JSON") from error
-        if not isinstance(response, dict):
-            raise self._failure("executor response is not an object")
         return response
+
+    def _read_response(
+        self,
+        *,
+        expected_request_id: str,
+        cancel_requested: Callable[[], bool] | None,
+        progress_received: ExecutorProgressCallback | None,
+    ) -> Json:
+        expected_sequence = 0
+        while True:
+            line = self._readline(cancel_requested)
+            if not line:
+                raise self._failure("executor returned no response")
+            try:
+                response = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise self._failure(
+                    "executor returned malformed JSON"
+                ) from error
+            if not isinstance(response, dict):
+                raise self._failure(
+                    "executor response is not an object"
+                )
+            if response.get("schema") != EXECUTOR_PROGRESS_SCHEMA:
+                return response
+            if set(response) != {
+                "schema",
+                "request_id",
+                "sequence",
+                "payload",
+            }:
+                raise self._failure(
+                    "executor progress fields are invalid"
+                )
+            if (
+                response["request_id"] != expected_request_id
+                or response["sequence"] != expected_sequence
+                or not isinstance(response["payload"], dict)
+                or progress_received is None
+            ):
+                raise self._failure(
+                    "executor progress does not match its request"
+                )
+            progress_received(response)
+            expected_sequence += 1
 
     def close(
         self,

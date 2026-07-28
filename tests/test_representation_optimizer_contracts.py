@@ -362,11 +362,8 @@ def contract_fixtures() -> list[dict[str, object]]:
                 "reference": deepcopy(role_summary),
                 "candidate": deepcopy(role_summary),
                 "paired": {
-                    "geometric_speedup_ppm": 100_000,
-                    "confidence_interval_low_ppm": 75_000,
-                    "confidence_interval_high_ppm": 125_000,
-                    "relative_ci_width_ppm": 45_455,
-                    "order_bias_ppm": 1_000,
+                    "speedup_ppm": 100_000,
+                    "candidate_is_faster": True,
                 },
                 "sustained": {
                     "reference_slope_ppm_per_window": 0,
@@ -460,6 +457,8 @@ def contract_fixtures() -> list[dict[str, object]]:
         required_processes=("texture_sampling",),
         required_features=("shader_float16",),
         execution_phases=("decode",),
+        alternative_execution_phases=("decode",),
+        source_retained_execution_phases=(),
         activation_batch_minimum=1,
         activation_batch_maximum=1,
         context_activations_minimum=4096,
@@ -491,7 +490,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         "artifact_integrity": {
             "schema": "nerve.optimizer.staged_candidate_integrity.v1",
             "digest": staged_artifact_digest(b"integrity manifest"),
-            "file_count": 7,
+            "file_count": 8,
         },
         "comparison": {
             "exact_implementation_id": "exact_reference",
@@ -578,7 +577,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             "status": "completed",
             "staging_identity": "stage_fixture",
             "source_seal": {
-                "schema": "nerve.optimizer.source_package_seal.v1",
+                "schema": "nerve.optimizer.source_package_seal.v2",
                 "package_id": "fixture_package",
                 "manifest_digest": staged_artifact_digest(b"manifest"),
                 "optimizer_stage_digest": staged_artifact_digest(b"stage"),
@@ -641,7 +640,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             "integrity": {
                 "schema": "nerve.optimizer.staged_candidate_integrity.v1",
                 "digest": staged_artifact_digest(b"integrity manifest"),
-                "file_count": 7,
+                "file_count": 8,
             },
             "resource_measurements": {
                 "construction_time_ns": 100,
@@ -738,10 +737,10 @@ def test_algebraic_evidence_identity_rejects_claim_drift() -> None:
             "phase staging bytes",
         ),
         (
-            lambda document: document["integrity"].__setitem__(
-                "file_count",
-                8,
-            ),
+                lambda document: document["integrity"].__setitem__(
+                    "file_count",
+                    9,
+                ),
             "file_count",
         ),
         (

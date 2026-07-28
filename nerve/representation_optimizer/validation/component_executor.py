@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from uuid import uuid4
 
 from nerve.compilation import Json, ModelCompileError
@@ -10,6 +12,9 @@ from nerve.representation_optimizer.benchmarking.executor_client import (
     ResidentExecutorClient,
     ResidentExecutorMountSpec,
     ResidentExecutorSession,
+)
+from nerve.representation_optimizer.benchmarking.executor_transport import (
+    ExecutorTransport,
 )
 from nerve.representation_optimizer.contracts import canonical_json_bytes
 from nerve.representation_optimizer.validation.contracts import (
@@ -42,6 +47,42 @@ class ResidentComponentValidationBackend:
         self.executor_client = executor_client
         self.trace_store = trace_store
         self.run_nonce = run_nonce
+        self._stage_active = False
+        self._stage_transport: ExecutorTransport | None = None
+        self._stage_cancel_requested: Callable[[], bool] | None = None
+
+    @contextmanager
+    def validation_stage(
+        self,
+        stage: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> Iterator[None]:
+        if self._stage_active:
+            raise ModelCompileError(
+                "component validation stage cannot be nested"
+            )
+        if not isinstance(stage, str) or not stage:
+            raise ModelCompileError(
+                "component validation stage must not be empty"
+            )
+        self._stage_active = True
+        self._stage_cancel_requested = cancel_requested
+        try:
+            yield
+        except BaseException:
+            if self._stage_transport is not None:
+                self._stage_transport.abort()
+            raise
+        else:
+            if self._stage_transport is not None:
+                self._stage_transport.close(
+                    cancel_requested=cancel_requested,
+                )
+        finally:
+            self._stage_transport = None
+            self._stage_cancel_requested = None
+            self._stage_active = False
 
     def open_session(
         self,
@@ -79,26 +120,37 @@ class ResidentComponentValidationBackend:
             check["regime"]["activation_batch_width"],
             "validation activation batch width",
         )
-        executor_session = self.executor_client.open(
-            ResidentExecutorMountSpec(
-                implementation_id=request.implementation[
-                    "implementation_id"
-                ],
-                component_id=component_id,
-                physical_node_id=physical_node_id,
-                phase=phase,
-                activation_batch_width=width,
-                physical_device_id=physical_device_id,
-                dynamic_state_capacity_activations=max(
-                    width,
-                    int(check["regime"]["state_size"]),
-                    1,
-                ),
-                maximum_quantum_wait_ns=maximum_wait_ns,
-                request_identity=request.to_json(),
-                cancel_requested=request.cancel_requested,
-            )
+        mount_spec = ResidentExecutorMountSpec(
+            implementation_id=request.implementation[
+                "implementation_id"
+            ],
+            component_id=component_id,
+            physical_node_id=physical_node_id,
+            phase=phase,
+            activation_batch_width=width,
+            physical_device_id=physical_device_id,
+            dynamic_state_capacity_activations=max(
+                width,
+                int(check["regime"]["state_size"]),
+                1,
+            ),
+            maximum_quantum_wait_ns=maximum_wait_ns,
+            request_identity=request.to_json(),
+            cancel_requested=request.cancel_requested,
         )
+        if self._stage_active:
+            if request.cancel_requested is not self._stage_cancel_requested:
+                raise ModelCompileError(
+                    "component validation request changed stage cancellation authority"
+                )
+            if self._stage_transport is None:
+                self._stage_transport = self.executor_client.start_transport()
+            executor_session = self.executor_client.open_on_transport(
+                mount_spec,
+                self._stage_transport,
+            )
+        else:
+            executor_session = self.executor_client.open(mount_spec)
         return ResidentComponentValidationSession(
             backend=self,
             request=request,
@@ -173,10 +225,21 @@ class ResidentComponentValidationSession:
             raise ModelCompileError(
                 "component validation changed its mounted role request"
             )
+        horizon = request.check["horizon"]
+        if horizon["completion_condition"] != "minimum_steps":
+            raise ModelCompileError(
+                "component validation requires a minimum-steps completion "
+                "condition"
+            )
         useful_units = _positive_integer(
-            request.check["horizon"]["minimum_steps"],
+            horizon["minimum_steps"],
             "component validation minimum steps",
         )
+        if horizon["unit"] != "component_activations":
+            raise ModelCompileError(
+                "component validation requires a component_activations "
+                "horizon"
+            )
         execution = self.executor_session.execute(
             useful_units=useful_units,
             seed=request.seed,
@@ -226,6 +289,15 @@ class ResidentComponentValidationSession:
             "output_digest": report["output_digest"],
             "state_digest": report["state_digest"],
             "steps": useful_units,
+            "horizon_completion": {
+                "condition": "minimum_steps",
+                "satisfied": True,
+                "observed_steps": useful_units,
+                "minimum_steps": useful_units,
+                "expected_turns": None,
+                "completed_turns": None,
+                "stop_reasons": [],
+            },
             "traces": traces,
             "default_statistics": {
                 "execution_path": "resident_targeted_component",
@@ -315,6 +387,18 @@ class ResidentComponentValidationSession:
                 ],
                 "resident_transient_bytes": self.mount_payload[
                     "resident_transient_bytes"
+                ],
+                "resident_asset_pool_bytes": self.mount_payload[
+                    "resident_asset_pool_bytes"
+                ],
+                "resident_asset_pool_buffers": self.mount_payload[
+                    "resident_asset_pool_buffers"
+                ],
+                "resident_asset_pool_hits": self.mount_payload[
+                    "resident_asset_pool_hits"
+                ],
+                "resident_asset_pool_misses": self.mount_payload[
+                    "resident_asset_pool_misses"
                 ],
             },
         }

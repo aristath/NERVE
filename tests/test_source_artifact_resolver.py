@@ -117,6 +117,36 @@ def test_package_source_artifacts_read_exact_storage_and_copy_out_metadata(
     assert resolver.read_tensor_storage(tensor_name) == payload
 
 
+def test_sealed_random_access_does_not_rehash_unchanged_source(
+    tmp_path: Path,
+):
+    package, _tensor_name, _payload = _package(tmp_path / "package")
+    relative = "weights/norm.safetensors"
+    path = package / relative
+    hashed: list[str] = []
+
+    def digest(source: Path) -> str:
+        hashed.append(source.relative_to(package).as_posix())
+        return staged_artifact_digest(source.read_bytes())
+
+    resolver = PackageSourceArtifactResolver(
+        package,
+        file_digester=digest,
+    )
+    seal = resolver.source_seal_record(relative)
+    regions = resolver.read_path_regions(
+        relative,
+        ((0, 8), (path.stat().st_size - 4, 4)),
+    )
+
+    assert hashed == [relative]
+    assert seal["signature"]["byte_count"] == path.stat().st_size
+    assert regions == (
+        path.read_bytes()[:8],
+        path.read_bytes()[-4:],
+    )
+
+
 def test_package_source_artifacts_rehash_drift_and_reject_corrupt_tensor(
     tmp_path: Path,
 ):

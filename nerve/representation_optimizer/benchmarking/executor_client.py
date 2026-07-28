@@ -90,19 +90,28 @@ class ResidentExecutorClient:
         self,
         spec: ResidentExecutorMountSpec,
     ) -> ResidentExecutorSession:
-        if spec.phase not in {"decode", "prefill"}:
-            raise ModelCompileError(
-                "resident executor phase must be decode or prefill"
-            )
-        for value, label in (
-            (spec.activation_batch_width, "activation batch width"),
-            (
-                spec.dynamic_state_capacity_activations,
-                "dynamic-state capacity",
-            ),
-            (spec.maximum_quantum_wait_ns, "maximum quantum wait"),
-        ):
-            positive_integer(value, f"resident executor {label}")
+        _validate_mount_spec(spec)
+        transport = self.start_transport()
+        return self.open_on_transport(
+            spec,
+            transport,
+            close_transport_on_release=True,
+        )
+
+    def start_transport(self) -> ExecutorTransport:
+        return self.executor_factory(
+            self.executor_command,
+            self.environment(),
+        )
+
+    def open_on_transport(
+        self,
+        spec: ResidentExecutorMountSpec,
+        transport: ExecutorTransport,
+        *,
+        close_transport_on_release: bool = False,
+    ) -> ResidentExecutorSession:
+        _validate_mount_spec(spec)
         candidate_id, candidate_root = resolve_candidate_mount(
             implementation_id=spec.implementation_id,
             workspace_root=self.candidate_workspace,
@@ -133,10 +142,6 @@ class ResidentExecutorClient:
             ),
             "maximum_quantum_wait_ns": spec.maximum_quantum_wait_ns,
         }
-        transport = self.executor_factory(
-            self.executor_command,
-            self.environment(),
-        )
         started = time.monotonic_ns()
         try:
             response = validated_response(
@@ -161,10 +166,27 @@ class ResidentExecutorClient:
                 logical_device_id=logical_device_id,
                 mount_payload=payload,
                 host_mount_ns=max(1, time.monotonic_ns() - started),
+                close_transport_on_release=close_transport_on_release,
             )
         except BaseException:
             transport.abort()
             raise
+
+
+def _validate_mount_spec(spec: ResidentExecutorMountSpec) -> None:
+    if spec.phase not in {"decode", "prefill"}:
+        raise ModelCompileError(
+            "resident executor phase must be decode or prefill"
+        )
+    for value, label in (
+        (spec.activation_batch_width, "activation batch width"),
+        (
+            spec.dynamic_state_capacity_activations,
+            "dynamic-state capacity",
+        ),
+        (spec.maximum_quantum_wait_ns, "maximum quantum wait"),
+    ):
+        positive_integer(value, f"resident executor {label}")
 
 
 class ResidentExecutorSession:
@@ -177,6 +199,7 @@ class ResidentExecutorSession:
         logical_device_id: str,
         mount_payload: Json,
         host_mount_ns: int,
+        close_transport_on_release: bool,
     ) -> None:
         self.transport = transport
         self.spec = spec
@@ -184,6 +207,7 @@ class ResidentExecutorSession:
         self.logical_device_id = logical_device_id
         self.mount_payload = mount_payload
         self.host_mount_ns = host_mount_ns
+        self.close_transport_on_release = close_transport_on_release
         self.closed = False
 
     def execute(
@@ -262,9 +286,10 @@ class ResidentExecutorSession:
                 raise ModelCompileError(
                     "resident executor did not prove release of its mounted state"
                 )
-            self.transport.close(
-                cancel_requested=self.spec.cancel_requested,
-            )
+            if self.close_transport_on_release:
+                self.transport.close(
+                    cancel_requested=self.spec.cancel_requested,
+                )
         except BaseException:
             self.transport.abort()
             raise
@@ -299,6 +324,10 @@ def _validate_mount_payload(
         "mount_duration_ns",
         "resident_parameter_bytes",
         "resident_transient_bytes",
+        "resident_asset_pool_bytes",
+        "resident_asset_pool_buffers",
+        "resident_asset_pool_hits",
+        "resident_asset_pool_misses",
     ):
         value = payload.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:

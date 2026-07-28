@@ -130,6 +130,7 @@ class ProviderContext:
     _hardware_profile: ContractDocument
     _descriptor: ContractDocument
     _source_artifacts: SourceArtifactResolver | None
+    _shared_cache: dict[str, object]
     _cancel_requested: Callable[[], bool] | None = None
 
     @property
@@ -184,6 +185,71 @@ class ProviderContext:
 
         check_compile_cancelled(self._cancel_requested)
 
+    def restrict_to_scope(self, scope_id: str) -> ProviderContext:
+        """Return this provider problem restricted to one semantic scope."""
+
+        matches = [
+            context
+            for context in self.single_scope_contexts()
+            if context.scope_ids == (scope_id,)
+        ]
+        if len(matches) != 1:
+            raise ContractValidationError(
+                f"provider context has no unique scope {scope_id!r}"
+            )
+        return matches[0]
+
+    def single_scope_contexts(self) -> tuple[ProviderContext, ...]:
+        """Partition the problem in one linear pass over its evidence."""
+
+        cache_key = (
+            "provider_context.single_scope_contexts:"
+            f"{self._descriptor.digest}"
+        )
+        cached = self._shared_cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        evidence_by_scope: dict[str, list[ContractDocument]] = {
+            scope_id: [] for scope_id in self.scope_ids
+        }
+        for evidence in self._evidence:
+            scope_id = str(evidence.to_json()["scope_id"])
+            evidence_by_scope[scope_id].append(evidence)
+        contexts = tuple(
+            ProviderContext(
+                package_id=self.package_id,
+                _scopes=(scope,),
+                _source_contracts=(contract,),
+                _evidence=tuple(evidence_by_scope[scope_id]),
+                _hardware_profile=self._hardware_profile,
+                _descriptor=self._descriptor,
+                _source_artifacts=self._source_artifacts,
+                _shared_cache=self._shared_cache,
+                _cancel_requested=self._cancel_requested,
+            )
+            for scope, contract, scope_id in (
+                (
+                    scope,
+                    contract,
+                    str(scope.to_json()["scope_id"]),
+                )
+                for scope, contract in zip(
+                    self._scopes,
+                    self._source_contracts,
+                    strict=True,
+                )
+            )
+        )
+        self._shared_cache[cache_key] = contexts
+        return contexts
+
+    def memoized(self, key: str, factory: Callable[[], object]) -> object:
+        cached = self._shared_cache.get(key)
+        if cached is None:
+            cached = factory()
+            self._shared_cache[key] = cached
+        return cached
+
 
 @dataclass(frozen=True)
 class ProviderProblem:
@@ -193,6 +259,7 @@ class ProviderProblem:
     _evidence: tuple[ContractDocument, ...]
     _hardware_profile: ContractDocument
     _source_artifacts: SourceArtifactResolver | None
+    _shared_cache: dict[str, object]
 
     @classmethod
     def from_documents(
@@ -278,6 +345,7 @@ class ProviderProblem:
             ),
             _hardware_profile=parsed_profile,
             _source_artifacts=source_artifacts,
+            _shared_cache={},
         )
 
     def bind_descriptor(
@@ -298,6 +366,7 @@ class ProviderProblem:
             _hardware_profile=self._hardware_profile,
             _descriptor=descriptor,
             _source_artifacts=self._source_artifacts,
+            _shared_cache=self._shared_cache,
             _cancel_requested=cancel_requested,
         )
 

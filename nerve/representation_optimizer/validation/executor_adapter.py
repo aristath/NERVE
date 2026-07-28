@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -98,6 +99,28 @@ class ResidentBehavioralValidationAdapter:
             label="validation fixture",
             create=False,
         ).iter_file(relative_path, chunk_bytes=chunk_bytes)
+
+    @contextmanager
+    def validation_stage(
+        self,
+        stage: str,
+        *,
+        execution_scope: str,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> Iterator[None]:
+        if execution_scope == "component":
+            backend = self.component
+        elif execution_scope == "whole_model":
+            backend = self.whole_model
+        else:
+            raise ModelCompileError(
+                f"unsupported validation execution scope {execution_scope!r}"
+            )
+        with backend.validation_stage(
+            stage,
+            cancel_requested=cancel_requested,
+        ):
+            yield
 
     def open_session(
         self,

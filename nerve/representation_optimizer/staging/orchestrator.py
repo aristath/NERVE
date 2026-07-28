@@ -25,12 +25,16 @@ from nerve.representation_optimizer.lifecycle import (
     OptimizationSession,
 )
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.staging.artifact_validation import (
     ArtifactValidatorRegistry,
 )
 from nerve.representation_optimizer.staging.contracts import (
     CONSTRUCTION_PHASES,
     CandidateBuildPlan,
+    SOURCE_PACKAGE_SEAL_FILE,
 )
 from nerve.representation_optimizer.staging.integrity import (
     integrity_evidence,
@@ -97,6 +101,7 @@ def _candidate_lock(
 def stage_candidate(
     *,
     package_dir: Path,
+    source_artifacts: PackageSourceArtifactResolver,
     workspace_root: Path,
     plan: ProviderCandidatePlan,
     session: OptimizationSession,
@@ -116,7 +121,11 @@ def stage_candidate(
     _validate_session(session, candidate, package_dir)
     started_ns = time.monotonic_ns()
     initial_rss = _resident_bytes()
-    source_seal = seal_source_package(package_dir, build_plan)
+    source_seal = seal_source_package(
+        package_dir,
+        build_plan,
+        source_artifacts,
+    )
 
     with _candidate_lock(workspace_root, candidate_id):
         recovered = _recover_published_candidate(
@@ -135,6 +144,7 @@ def stage_candidate(
             session=session,
             candidate=candidate,
             build_plan=build_plan,
+            source_artifacts=source_artifacts,
             source_seal=source_seal,
             started_ns=started_ns,
             initial_rss=initial_rss,
@@ -263,6 +273,7 @@ def _construct_candidate(
     session: OptimizationSession,
     candidate: Json,
     build_plan: CandidateBuildPlan,
+    source_artifacts: PackageSourceArtifactResolver,
     source_seal: Json,
     started_ns: int,
     initial_rss: int,
@@ -293,6 +304,7 @@ def _construct_candidate(
         representation_graph=plan.representation_ir.to_json(),
         target_lowering=plan.target_lowering,
         build_plan=build_plan,
+        source_artifacts=source_artifacts,
         started_ns=started_ns,
         cancel_requested=cancel_requested,
     )
@@ -312,6 +324,7 @@ def _construct_candidate(
             ("representation_graph.json", plan.representation_ir.to_json()),
             ("target_lowering.json", plan.target_lowering),
             ("build_plan.json", build_plan.to_json()),
+            (SOURCE_PACKAGE_SEAL_FILE, source_seal),
             ("mount_plan.json", plan.mount_requirements.to_json()),
             ("relowering_request.json", relowering_request),
         ):

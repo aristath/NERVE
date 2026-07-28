@@ -131,17 +131,12 @@ def planned_experiment_invocations(
     benchmark = 0
     for workload in plan.benchmark_workloads:
         document = workload.to_json()
-        warmup_blocks = (
-            policy.maximum_measured_pairs_per_seed // policy.measured_pairs_per_block
-            if document["regime"]["mount_mode"] == "resident_reuse"
-            else 1
-        )
         benchmark += (
             len(document["randomness"]["seeds"])
             * 2
             * (
-                warmup_blocks * policy.maximum_warmup_samples
-                + policy.maximum_measured_pairs_per_seed
+                policy.maximum_warmup_samples
+                + policy.measured_calls_per_role
             )
         )
     validation = sum(

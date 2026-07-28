@@ -26,6 +26,9 @@ from nerve.representation_optimizer.providers.codebook.contracts import (
     CODEBOOK_RUNTIME_OP,
     TARGET_LOWERING_SCHEMA,
 )
+from nerve.representation_optimizer.providers.codebook.member_context import (
+    MemberConstructionContext,
+)
 from nerve.representation_optimizer.providers.codebook.shaders import (
     compile_spirv,
     render_codebook_shader,
@@ -59,6 +62,12 @@ class CodebookSemanticConstructor:
         context: CandidateConstructionContext,
     ) -> None:
         lowering = _lowering(context)
+        if "members" in lowering:
+            for member in lowering["members"]:
+                self.construct_semantic_artifacts(
+                    MemberConstructionContext(context, member)
+                )
+            return
         parameters = lowering["parameters"]
         sources = parameters["source_tensors"]
         source_payload_bytes = sum(
@@ -161,8 +170,15 @@ class CodebookSemanticConstructor:
             _tensor_fragment(
                 branch_names=branch_names,
                 index_payloads=[_word_aligned(payload) for payload in index_payloads],
+                branch_paths=[
+                    context.artifact_reference(path)
+                    for path in BRANCH_INDEX_PATHS
+                ],
                 codebook_name=codebook_name,
                 codebook_payload=codebook_storage_payload,
+                codebook_path=context.artifact_reference(
+                    CODEBOOK_TENSOR_PATH
+                ),
             ),
         )
         branch_head_counts = tuple(
@@ -198,6 +214,12 @@ class CodebookOrdinaryRelowerer:
         context: CandidateConstructionContext,
     ) -> None:
         lowering = _lowering(context)
+        if "members" in lowering:
+            for member in lowering["members"]:
+                self.run_ordinary_lowering(
+                    MemberConstructionContext(context, member)
+                )
+            return
         source = lowering["source"]
         source_payloads = {
             path: context.read_source_artifact(path) for path in source["artifact_refs"]
@@ -318,6 +340,9 @@ class CodebookOrdinaryRelowerer:
                 "kind": "shared_bf16_codebook_u8_addresses",
                 "entry_count": len(lowering["parameters"]["codebook_values_u16"]),
                 "source_parameter_ids": list(original_params),
+                "descriptor_abi": "source_parameters_replaced",
+                "alternative_execution_phases": ["decode", "prefill"],
+                "source_retained_execution_phases": [],
             },
         }
         implementation = "exact_codebook_head_norm_rope_v1"
@@ -335,10 +360,14 @@ class CodebookOrdinaryRelowerer:
                 "codebook source execution no longer matches its physical node"
             )
         kernel["op"] = CODEBOOK_RUNTIME_OP
-        kernel["shader_path"] = DECODE_SHADER_PATH
+        kernel["shader_path"] = context.artifact_reference(
+            DECODE_SHADER_PATH
+        )
         for batch in kernel["batch_implementations"]:
             for stage in batch["stages"]:
-                stage["shader_path"] = PREFILL_SHADER_PATH
+                stage["shader_path"] = context.artifact_reference(
+                    PREFILL_SHADER_PATH
+                )
                 control = stage.get("control", {})
                 if control.get("kind") == "storage_buffer":
                     control["binding"] = 7
@@ -360,6 +389,12 @@ class CodebookPhysicalOptimizer:
         context: CandidateConstructionContext,
     ) -> None:
         lowering = _lowering(context)
+        if "members" in lowering:
+            for member in lowering["members"]:
+                self.optimize_physical_artifacts(
+                    MemberConstructionContext(context, member)
+                )
+            return
         attrs = lowering["geometry"]["physical_attrs"]
         decode_source = render_codebook_shader(
             attrs,
@@ -447,13 +482,15 @@ def _tensor_fragment(
     *,
     branch_names: list[str],
     index_payloads: list[bytes],
+    branch_paths: list[str],
     codebook_name: str,
     codebook_payload: bytes,
+    codebook_path: str,
 ) -> Json:
     tensors = {}
     for name, path, payload in zip(
         branch_names,
-        BRANCH_INDEX_PATHS,
+        branch_paths,
         index_payloads,
         strict=True,
     ):
@@ -461,7 +498,7 @@ def _tensor_fragment(
     tensors[codebook_name] = _tensor_metadata(
         "BF16",
         len(codebook_payload) // 2,
-        CODEBOOK_TENSOR_PATH,
+        codebook_path,
         codebook_payload,
     )
     return {
@@ -547,7 +584,7 @@ def _write_equivalence_proof(
         {
             "schema": CODEBOOK_PROOF_SCHEMA,
             "candidate_id": lowering["candidate_id"],
-            "scope_id": context.candidate["scope_ids"][0],
+            "scope_id": lowering["scope_id"],
             "source_tensors": source_proofs,
             "codebook": {
                 "entry_count": len(codebook_values),
@@ -566,8 +603,12 @@ def _write_equivalence_proof(
                 "intermediate_rounding": lowering["geometry"]["physical_attrs"][
                     "intermediate_rounding"
                 ],
-                "decode_shader_path": DECODE_SHADER_PATH,
-                "prefill_shader_paths": [PREFILL_SHADER_PATH],
+                "decode_shader_path": context.artifact_reference(
+                    DECODE_SHADER_PATH
+                ),
+                "prefill_shader_paths": [
+                    context.artifact_reference(PREFILL_SHADER_PATH)
+                ],
             },
             "lowering": {
                 "source_template_sha256": {

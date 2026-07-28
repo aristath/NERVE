@@ -61,6 +61,7 @@ from nerve.representation_optimizer.stage import load_optimizer_stage
 def run_automated_optimizer(
     *,
     package_dir: Path,
+    source_artifacts: PackageSourceArtifactResolver,
     output_package_dir: Path,
     run_root: Path,
     providers: ProviderRegistry,
@@ -83,7 +84,10 @@ def run_automated_optimizer(
         package_dir=source,
     )
     catalog = load_optimization_scope_catalog(source / "optimization" / "scopes.json")
-    source_artifacts = PackageSourceArtifactResolver(source)
+    if source_artifacts.package_root != source:
+        raise ModelCompileError(
+            "automated optimizer source-artifact pool belongs to another package"
+        )
     session = OptimizationSession.from_json(stage["session"])
     run_id = stable_contract_id(
         "automated_optimizer_run",
@@ -114,6 +118,8 @@ def run_automated_optimizer(
     promotion_records: list[Json] = []
     seen_equivalence: dict[str, str] = {}
     analysis_directories: dict[str, Path] = {}
+    analyzed_scopes: list[Json] = []
+    analyzed_evidence: list[Json] = []
     publication: Json = {"status": "not_attempted", "reason": "no candidates promoted"}
     fatal_error: Exception | None = None
     cancellation_error: ModelCompileCancelled | None = None
@@ -225,207 +231,202 @@ def run_automated_optimizer(
                 evidence_refs=(analysis_ref,),
                 details={"structure_record_count": len(structures)},
             )
-            source_contract = contracts[scope_id]
-            for target in targets:
-                check_compile_cancelled(cancel_requested)
-                problem = ProviderProblem.from_documents(
-                    package_id=str(catalog["package_id"]),
-                    scopes=(scope,),
-                    source_contracts=(source_contract,),
-                    evidence=analysis.evidence,
-                    hardware_profile=target.synthesis_profile,
-                    source_artifacts=source_artifacts,
-                )
-                registry_report = providers.run(
-                    problem,
-                    cancel_requested=cancel_requested,
-                )
-                check_compile_cancelled(cancel_requested)
-                evaluations = build_provider_records(
-                    scope_id=scope_id,
+            analyzed_scopes.append(scope)
+            analyzed_evidence.extend(analysis.evidence)
+
+        for target in targets:
+            check_compile_cancelled(cancel_requested)
+            problem = ProviderProblem.from_documents(
+                package_id=str(catalog["package_id"]),
+                scopes=analyzed_scopes,
+                source_contracts=(
+                    contracts[str(scope["scope_id"])]
+                    for scope in analyzed_scopes
+                ),
+                evidence=analyzed_evidence,
+                hardware_profile=target.synthesis_profile,
+                source_artifacts=source_artifacts,
+            )
+            registry_report = providers.run(
+                problem,
+                cancel_requested=cancel_requested,
+            )
+            evaluations = build_provider_records(
+                scope_ids=tuple(
+                    str(scope["scope_id"]) for scope in analyzed_scopes
+                ),
+                target_id=target.target_id,
+                report=registry_report,
+            )
+            provider_records.extend(evaluations)
+            for evaluation in evaluations:
+                journal.record(
+                    phase="provider_evaluation",
+                    status=str(evaluation["status"]),
                     target_id=target.target_id,
-                    report=registry_report,
+                    details={
+                        "provider": evaluation["provider"],
+                        "candidate_ids": evaluation["candidate_ids"],
+                        "scope_count": len(evaluation["scope_ids"]),
+                        "error": evaluation["error"],
+                    },
                 )
-                provider_records.extend(evaluations)
-                for evaluation in evaluations:
-                    journal.record(
-                        phase="provider_evaluation",
-                        status=str(evaluation["status"]),
-                        scope_id=scope_id,
-                        target_id=target.target_id,
-                        details={
-                            "provider": evaluation["provider"],
-                            "candidate_ids": evaluation["candidate_ids"],
-                            "error": evaluation["error"],
-                        },
+            for duplicate in registry_report.duplicate_candidates:
+                record = {
+                    "scope_ids": [],
+                    "target_id": target.target_id,
+                    **deepcopy(duplicate),
+                }
+                duplicate_records.append(record)
+                journal.record(
+                    phase="synthesis",
+                    status="deduplicated",
+                    target_id=target.target_id,
+                    candidate_id=str(record["discarded_candidate_id"]),
+                    details={
+                        "kept_candidate_id": record["kept_candidate_id"],
+                        "equivalence_key": record["equivalence_key"],
+                    },
+                )
+            for plan in registry_report.candidates:
+                check_compile_cancelled(cancel_requested)
+                candidate = plan.candidate.to_json()
+                scope_ids = tuple(candidate["scope_ids"])
+                equivalence = representation_candidate_equivalence_key(candidate)
+                kept = seen_equivalence.get(equivalence)
+                if kept is not None:
+                    duplicate_records.append(
+                        {
+                            "scope_ids": list(scope_ids),
+                            "target_id": target.target_id,
+                            "equivalence_key": equivalence,
+                            "kept_candidate_id": kept,
+                            "discarded_candidate_id": plan.candidate_id,
+                            "reason": "duplicate across optimization problems",
+                        }
                     )
-                for duplicate in registry_report.duplicate_candidates:
-                    record = {
-                        "scope_id": scope_id,
-                        "target_id": target.target_id,
-                        **deepcopy(duplicate),
-                    }
-                    duplicate_records.append(record)
-                    journal.record(
-                        phase="synthesis",
-                        status="deduplicated",
-                        scope_id=scope_id,
-                        target_id=target.target_id,
-                        candidate_id=str(record["discarded_candidate_id"]),
-                        details={
-                            "kept_candidate_id": record["kept_candidate_id"],
-                            "equivalence_key": record["equivalence_key"],
-                        },
+                    continue
+                seen_equivalence[equivalence] = plan.candidate_id
+                session = session.register_candidate(
+                    plan.candidate_id,
+                    tuple(candidate["source_contract_digests"]),
+                )
+                candidate_records[plan.candidate_id] = new_candidate_record(
+                    plan,
+                    scope_ids=scope_ids,
+                    target_id=target.target_id,
+                )
+                try:
+                    execution_cost = target.estimate_execution_nanoseconds(
+                        plan, target.benchmark_policy
                     )
-                for plan in registry_report.candidates:
-                    check_compile_cancelled(cancel_requested)
-                    equivalence = representation_candidate_equivalence_key(
-                        plan.candidate.to_json()
+                    admission = ledger.admit_candidate(
+                        plan,
+                        execution_nanoseconds=execution_cost,
+                        benchmark_policy=target.benchmark_policy,
                     )
-                    kept = seen_equivalence.get(equivalence)
-                    if kept is not None:
-                        duplicate_records.append(
-                            {
-                                "scope_id": scope_id,
-                                "target_id": target.target_id,
-                                "equivalence_key": equivalence,
-                                "kept_candidate_id": kept,
-                                "discarded_candidate_id": plan.candidate_id,
-                                "reason": "duplicate across optimization problems",
-                            }
-                        )
-                        journal.record(
-                            phase="synthesis",
-                            status="deduplicated",
-                            scope_id=scope_id,
-                            target_id=target.target_id,
-                            candidate_id=plan.candidate_id,
-                            details={"kept_candidate_id": kept},
-                        )
-                        continue
-                    seen_equivalence[equivalence] = plan.candidate_id
-                    session = session.register_candidate(
-                        plan.candidate_id,
-                        tuple(plan.candidate.to_json()["source_contract_digests"]),
+                    budget_path = write_new_json(
+                        run_root / "decisions" / plan.candidate_id / "budget.json",
+                        admission.to_json(candidate_id=plan.candidate_id),
                     )
-                    candidate_records[plan.candidate_id] = new_candidate_record(
-                        plan, scope_id=scope_id, target_id=target.target_id
+                    budget_ref = relative_ref(run_root, budget_path)
+                    candidate_records[plan.candidate_id]["budget_decision_ref"] = (
+                        budget_ref
                     )
-                    try:
-                        execution_cost = target.estimate_execution_nanoseconds(
-                            plan, target.benchmark_policy
+                    if not admission.admitted:
+                        session = session.transition_candidate(
+                            plan.candidate_id,
+                            CandidateState.REJECTED,
+                            evidence_refs=(budget_ref,),
+                            reason="; ".join(admission.reasons),
                         )
-                        admission = ledger.admit_candidate(
-                            plan,
-                            execution_nanoseconds=execution_cost,
-                            benchmark_policy=target.benchmark_policy,
-                        )
-                        budget_path = write_new_json(
-                            run_root / "decisions" / plan.candidate_id / "budget.json",
-                            admission.to_json(candidate_id=plan.candidate_id),
-                        )
-                        budget_ref = relative_ref(run_root, budget_path)
-                        candidate_records[plan.candidate_id]["budget_decision_ref"] = (
-                            budget_ref
-                        )
-                        if not admission.admitted:
-                            session = session.transition_candidate(
-                                plan.candidate_id,
-                                CandidateState.REJECTED,
-                                evidence_refs=(budget_ref,),
-                                reason="; ".join(admission.reasons),
-                            )
-                            finish_candidate(
-                                candidate_records[plan.candidate_id],
-                                session,
-                                plan.candidate_id,
-                                rejection_reasons=list(admission.reasons),
-                            )
-                            journal.record(
-                                phase="budget",
-                                status="rejected",
-                                scope_id=scope_id,
-                                target_id=target.target_id,
-                                candidate_id=plan.candidate_id,
-                                evidence_refs=(budget_ref,),
-                                details={"reasons": list(admission.reasons)},
-                            )
-                            continue
-                        (
-                            session,
-                            promotion,
-                            candidate_updates,
-                        ) = execute_candidate(
-                            source=source,
-                            run_root=run_root,
-                            plan=plan,
-                            source_contract=source_contract,
-                            target=target,
-                            session=session,
-                            analysis_directories=analysis_directories,
-                            journal=journal,
-                            cancel_requested=cancel_requested,
-                        )
-                        candidate_records[plan.candidate_id].update(candidate_updates)
                         finish_candidate(
                             candidate_records[plan.candidate_id],
                             session,
                             plan.candidate_id,
+                            rejection_reasons=list(admission.reasons),
                         )
-                        if (
-                            candidate_records[plan.candidate_id]["status"]
-                            == CandidateState.CANCELLED.value
-                        ):
-                            raise ModelCompileCancelled(
-                                "candidate execution was cancelled"
-                            )
-                        if promotion is not None:
-                            promotions.append(promotion)
-                            promotion_records.append(
-                                {
-                                    "candidate_id": plan.candidate_id,
-                                    "implementation_id": promotion.implementation_id,
-                                    "promotion_id": promotion.decision.to_json()[
-                                        "promotion_id"
-                                    ],
-                                    "reason": promotion.decision.to_json()["reason"],
-                                }
-                            )
-                    except ModelCompileCancelled as error:
-                        session = record_candidate_cancellation(
-                            plan=plan,
-                            session=session,
-                            error=error,
-                            journal=journal,
-                            scope_id=scope_id,
+                        journal.record(
+                            phase="budget",
+                            status="rejected",
                             target_id=target.target_id,
+                            candidate_id=plan.candidate_id,
+                            evidence_refs=(budget_ref,),
+                            details={"reasons": list(admission.reasons)},
                         )
-                        record = candidate_records[plan.candidate_id]
-                        finish_candidate(
-                            record,
-                            session,
-                            plan.candidate_id,
-                            rejection_reasons=[str(error)],
+                        continue
+                    reference_scope_id = scope_ids[0]
+                    session, promotion, candidate_updates = execute_candidate(
+                        source=source,
+                        source_artifacts=source_artifacts,
+                        run_root=run_root,
+                        plan=plan,
+                        source_contract=contracts[reference_scope_id],
+                        target=target,
+                        session=session,
+                        analysis_directories=analysis_directories,
+                        journal=journal,
+                        cancel_requested=cancel_requested,
+                    )
+                    candidate_records[plan.candidate_id].update(candidate_updates)
+                    finish_candidate(
+                        candidate_records[plan.candidate_id],
+                        session,
+                        plan.candidate_id,
+                    )
+                    if (
+                        candidate_records[plan.candidate_id]["status"]
+                        == CandidateState.CANCELLED.value
+                    ):
+                        raise ModelCompileCancelled(
+                            "candidate execution was cancelled"
                         )
-                        raise
-                    except Exception as error:
-                        session = record_candidate_failure(
-                            run_root=run_root,
-                            plan=plan,
-                            session=session,
-                            error=error,
-                            journal=journal,
-                            scope_id=scope_id,
-                            target_id=target.target_id,
+                    if promotion is not None:
+                        promotions.append(promotion)
+                        promotion_records.append(
+                            {
+                                "candidate_id": plan.candidate_id,
+                                "implementation_id": promotion.implementation_id,
+                                "promotion_id": promotion.decision.to_json()[
+                                    "promotion_id"
+                                ],
+                                "reason": promotion.decision.to_json()["reason"],
+                            }
                         )
-                        record = candidate_records[plan.candidate_id]
-                        record["failure"] = error_document(error)
-                        finish_candidate(
-                            record,
-                            session,
-                            plan.candidate_id,
-                            rejection_reasons=[str(error)],
-                        )
+                except ModelCompileCancelled as error:
+                    session = record_candidate_cancellation(
+                        plan=plan,
+                        session=session,
+                        error=error,
+                        journal=journal,
+                        scope_id=None,
+                        target_id=target.target_id,
+                    )
+                    finish_candidate(
+                        candidate_records[plan.candidate_id],
+                        session,
+                        plan.candidate_id,
+                        rejection_reasons=[str(error)],
+                    )
+                    raise
+                except Exception as error:
+                    session = record_candidate_failure(
+                        run_root=run_root,
+                        plan=plan,
+                        session=session,
+                        error=error,
+                        journal=journal,
+                        scope_id=None,
+                        target_id=target.target_id,
+                    )
+                    record = candidate_records[plan.candidate_id]
+                    record["failure"] = error_document(error)
+                    finish_candidate(
+                        record,
+                        session,
+                        plan.candidate_id,
+                        rejection_reasons=[str(error)],
+                    )
         if promotions:
             check_compile_cancelled(cancel_requested)
             ordered = tuple(sorted(promotions, key=lambda item: item.implementation_id))

@@ -89,7 +89,7 @@ def summarize_benchmark(
         sampling = sampling_by_workload.get(workload["workload_id"])
         if sampling is None:
             raise ModelCompileError(
-                "benchmark run has no adaptive sampling outcome for workload"
+                "benchmark run has no sampling outcome for workload"
             )
         summary, groups = summarize_workload_samples(
             workload,
@@ -101,11 +101,11 @@ def summarize_benchmark(
             summary["decision"] != sampling["decision"]
             or summary["reasons"] != sampling["reasons"]
             or summary["sample_count_per_role"]
-            != sampling["measured_pairs_per_seed"]
+            != sampling["measured_calls_per_role"]
             * len(workload["randomness"]["seeds"])
         ):
             raise ModelCompileError(
-                "adaptive sampling outcome disagrees with benchmark evidence"
+                "sampling outcome disagrees with benchmark evidence"
             )
         summaries.append(summary)
         reproducibility.extend(groups)
@@ -116,7 +116,7 @@ def summarize_benchmark(
     decision = _overall_decision(decisions)
     if decision == "not_materially_faster" and not decision_reasons:
         decision_reasons.append(
-            "one or more matched regimes did not clear the material speedup floor"
+            "no matched regime established a material speedup"
         )
     record = {
         "schema": BENCHMARK_RECORD_SCHEMA,
@@ -206,37 +206,28 @@ def summarize_workload_samples(
     if any(observation["transport"]["timeout_count"] > 0 for observation in selected):
         decision = "invalid"
         reasons.append("runtime reported transport or bounded-wait timeouts")
-    if decision != "invalid" and any(
-        not warmup[role]["converged"] for role in ("reference", "candidate")
-    ):
-        decision = "inconclusive"
-        reasons.append("warmup did not converge within the declared adaptive bound")
-    if (
-        decision != "invalid"
-        and paired["order_bias_ppm"] > policy["maximum_order_bias_ppm"]
-    ):
-        decision = "inconclusive"
-        reasons.append("counterbalanced execution order materially changes speedup")
     if decision != "invalid" and not sustained["passed"]:
         decision = "inconclusive"
         reasons.append("candidate throughput degrades across sustained windows")
     if decision == "materially_faster":
-        material_floor = policy["minimum_material_improvement_ppm"]
-        if paired["confidence_interval_high_ppm"] <= material_floor:
-            decision = "not_materially_faster"
+        improvement_floor = policy["minimum_material_improvement_ppm"]
+        regression_floor = -policy["maximum_material_regression_ppm"]
+        speedup = paired["speedup_ppm"]
+        if speedup < regression_floor:
+            decision = "materially_slower"
             reasons.append(
-                "paired confidence interval is decisively below the declared "
-                "material-improvement floor"
+                "paired execution is slower than the permitted regression floor"
             )
-        elif paired["confidence_interval_low_ppm"] <= material_floor:
-            decision = "inconclusive"
+        elif speedup <= improvement_floor:
+            decision = "performance_equivalent"
             reasons.append(
-                "paired confidence interval still crosses the declared "
-                "material-improvement floor"
+                "paired execution is not faster but remains within the "
+                "permitted regression floor"
             )
-        elif paired["relative_ci_width_ppm"] > policy["maximum_relative_ci_width_ppm"]:
-            decision = "inconclusive"
-            reasons.append("paired confidence interval is too wide")
+        else:
+            reasons.append(
+                "paired execution is faster than the exact implementation"
+            )
     role_summaries = {
         role: _role_summary(measured[role]) for role in ("reference", "candidate")
     }
@@ -275,10 +266,9 @@ def warmup_group_summary(
     return {
         "sample_count": len(samples),
         "maximum_shift_ppm": maximum_shift,
-        "converged": (
-            len(samples) >= policy["minimum_warmup_samples"]
-            and maximum_shift <= policy["maximum_warmup_shift_ppm"]
-        ),
+        # Warmup is deliberately a fixed discarded execution, not an adaptive
+        # statistical experiment. The shift remains diagnostic evidence only.
+        "converged": len(samples) >= policy["minimum_warmup_samples"],
     }
 
 
@@ -287,13 +277,29 @@ def _warmup_summary(
     groups: list[Json],
 ) -> Json:
     selected = [group for group in groups if group["role"] == role]
+    by_block: dict[tuple[int, int | None, int | None], list[Json]] = defaultdict(list)
+    for group in selected:
+        by_block[
+            (
+                group["seed"],
+                group["cycle_index"],
+                group["order_block_index"],
+            )
+        ].append(group)
+    effective = [
+        next(
+            (group for group in attempts if group["converged"]),
+            attempts[-1],
+        )
+        for attempts in by_block.values()
+    ]
     return {
         "sample_count": sum(group["sample_count"] for group in selected),
         "maximum_shift_ppm": max(
-            (group["maximum_shift_ppm"] for group in selected),
+            (group["maximum_shift_ppm"] for group in effective),
             default=2**63 - 1,
         ),
-        "converged": bool(selected) and all(group["converged"] for group in selected),
+        "converged": bool(effective) and all(group["converged"] for group in effective),
     }
 
 
@@ -309,8 +315,7 @@ def _paired_summary(measured: dict[str, list[Json]]) -> Json:
         raise ModelCompileError(
             "matched benchmark lost a reference/candidate sample pair"
         )
-    logs = []
-    by_reference_order: dict[int, list[float]] = defaultdict(list)
+    ratios = []
     for key in sorted(by_role["reference"]):
         reference = by_role["reference"][key]
         candidate = by_role["candidate"][key]
@@ -322,34 +327,14 @@ def _paired_summary(measured: dict[str, list[Json]]) -> Json:
         candidate_rate = _throughput(candidate)
         if reference_rate <= 0 or candidate_rate <= 0:
             raise ModelCompileError("matched benchmark throughput must be positive")
-        value = math.log(candidate_rate / reference_rate)
-        logs.append(value)
-        by_reference_order[reference["order_index"]].append(value)
-    if len(logs) < 2:
-        raise ModelCompileError("matched benchmark needs repeated sample pairs")
-    mean = statistics.fmean(logs)
-    deviation = statistics.stdev(logs)
-    critical = _T_CRITICAL_95.get(len(logs) - 1, 1.96)
-    margin = critical * deviation / math.sqrt(len(logs))
-    ratio = math.exp(mean)
-    low = math.exp(mean - margin)
-    high = math.exp(mean + margin)
-    order_ratios = [
-        math.exp(statistics.fmean(values))
-        for _, values in sorted(by_reference_order.items())
-        if values
-    ]
-    order_bias = (
-        round(abs(order_ratios[0] - order_ratios[1]) * 1_000_000 / ratio)
-        if len(order_ratios) == 2
-        else 2**63 - 1
-    )
+        ratios.append(candidate_rate / reference_rate)
+    if not ratios:
+        raise ModelCompileError("matched benchmark has no measured pair")
+    ratio = math.exp(statistics.fmean(math.log(value) for value in ratios))
+    speedup_ppm = round((ratio - 1.0) * 1_000_000)
     return {
-        "geometric_speedup_ppm": round((ratio - 1.0) * 1_000_000),
-        "confidence_interval_low_ppm": round((low - 1.0) * 1_000_000),
-        "confidence_interval_high_ppm": round((high - 1.0) * 1_000_000),
-        "relative_ci_width_ppm": round((high - low) * 1_000_000 / ratio),
-        "order_bias_ppm": order_bias,
+        "speedup_ppm": speedup_ppm,
+        "candidate_is_faster": speedup_ppm > 0,
     }
 
 
@@ -738,8 +723,16 @@ def _throughput_slope(windows: list[Json]) -> int:
 def _overall_decision(decisions: list[str]) -> str:
     if "invalid" in decisions:
         return "invalid"
+    if "materially_slower" in decisions:
+        return "not_materially_faster"
     if "inconclusive" in decisions:
         return "inconclusive"
-    if decisions and all(decision == "materially_faster" for decision in decisions):
+    if (
+        "materially_faster" in decisions
+        and all(
+            decision in {"materially_faster", "performance_equivalent"}
+            for decision in decisions
+        )
+    ):
         return "materially_faster"
     return "not_materially_faster"

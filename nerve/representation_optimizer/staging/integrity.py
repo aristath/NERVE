@@ -20,7 +20,9 @@ from nerve.representation_optimizer.mounting import (
 )
 from nerve.representation_optimizer.staging.contracts import (
     CandidateBuildPlan,
+    SOURCE_PACKAGE_SEAL_FILE,
     staged_artifact_digest,
+    validate_source_package_seal,
 )
 
 
@@ -150,12 +152,16 @@ def validate_staged_candidate(
     build_plan = CandidateBuildPlan.from_json(
         _read_object(root / "contracts" / "build_plan.json")
     )
+    validate_source_package_seal(
+        _read_object(root / "contracts" / SOURCE_PACKAGE_SEAL_FILE),
+        build_plan,
+    )
     mount_plan = RuntimeMountPlan.from_json(
         _read_object(root / "contracts" / "mount_plan.json"),
         candidate_id=str(candidate["candidate_id"]),
         build_plan=build_plan,
     )
-    if not mount_plan.to_json()["component_replacements"]:
+    if not mount_plan.to_json()["regions"]:
         raise ModelCompileError(
             "staged candidate runtime mount plan has no executable replacement"
         )

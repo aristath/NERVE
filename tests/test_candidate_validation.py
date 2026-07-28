@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -25,6 +27,9 @@ from nerve.representation_optimizer.representation_ir import (
     RepresentationGraphDocument,
     representation_graph_id,
 )
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
@@ -33,13 +38,16 @@ from nerve.representation_optimizer.staging.orchestrator import (
 )
 from nerve.representation_optimizer.validation.contracts import (
     PROOF_RESULT_SCHEMA,
+    VALIDATION_REQUIREMENTS_SCHEMA,
     VALIDATION_RESIDENCY_EVENT_SCHEMA,
     VALIDATION_ROLE_RESULT_SCHEMA,
     ProofResult,
+    ValidationPlan,
     ValidationRequirements,
     ValidationRoleResult,
     proof_result_id,
     validation_check_id,
+    validation_plan_id,
     validation_requirements_id,
     validation_residency_event_id,
     validation_role_result_id,
@@ -55,6 +63,9 @@ from nerve.representation_optimizer.validation.planning import (
 )
 from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
+)
+from nerve.representation_optimizer.validation.runner import (
+    execute_validation_stage,
 )
 from nerve.representation_optimizer.validation.storage import (
     _proof_artifact_readers,
@@ -242,6 +253,19 @@ class FixtureValidationAdapter:
         self.execution_requests = []
         self.closed_sessions: list[tuple[str, str, int]] = []
         self.fixture_candidate_ids: list[str] = []
+        self.validation_stages: list[tuple[str, str]] = []
+
+    @contextmanager
+    def validation_stage(
+        self,
+        stage,
+        *,
+        execution_scope,
+        cancel_requested=None,
+    ):
+        assert cancel_requested is None or not cancel_requested()
+        self.validation_stages.append((stage, execution_scope))
+        yield
 
     def iter_fixture_artifact(
         self,
@@ -355,11 +379,40 @@ class FixtureValidationRoleSession:
             if invalid
             else exact_state
         )
-        steps = (
-            request.check["horizon"]["minimum_steps"] - 1
-            if behavior.incomplete_steps
-            else request.check["horizon"]["minimum_steps"]
-        )
+        horizon = request.check["horizon"]
+        if horizon["completion_condition"] == "minimum_steps":
+            minimum_steps = horizon["minimum_steps"]
+            steps = (
+                minimum_steps - 1
+                if behavior.incomplete_steps
+                else minimum_steps
+            )
+            horizon_completion = {
+                "condition": "minimum_steps",
+                "satisfied": not behavior.incomplete_steps,
+                "observed_steps": steps,
+                "minimum_steps": minimum_steps,
+                "expected_turns": None,
+                "completed_turns": None,
+                "stop_reasons": [],
+            }
+        else:
+            steps = 1
+            horizon_completion = {
+                "condition": (
+                    "semantic_stop_or_allowance_per_turn"
+                ),
+                "satisfied": not behavior.incomplete_steps,
+                "observed_steps": steps,
+                "minimum_steps": None,
+                "expected_turns": 1,
+                "completed_turns": (
+                    0 if behavior.incomplete_steps else 1
+                ),
+                "stop_reasons": (
+                    [] if behavior.incomplete_steps else ["eos"]
+                ),
+            }
         payload = (
             f"{request.check['stage']}:{request.check['check_id']}:"
             f"{request.seed}:{request.role}"
@@ -385,6 +438,7 @@ class FixtureValidationRoleSession:
             "output_digest": output,
             "state_digest": state,
             "steps": steps,
+            "horizon_completion": horizon_completion,
             "traces": [
                 {
                     "path": path,
@@ -460,6 +514,7 @@ def _staged_fixture(tmp_path: Path, *, approximate: bool = False):
     candidate_workspace = tmp_path / "candidate-workspace"
     construction = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=candidate_workspace,
         plan=candidate_plan,
         session=session,
@@ -612,6 +667,51 @@ def _prevalidate(
     return outcome, adapter, verifier
 
 
+def test_mixed_validation_stage_releases_component_scope_before_whole_model(
+    tmp_path: Path,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    document = fixture[5].to_json()
+    component_check = deepcopy(next(
+        check
+        for check in document["checks"]
+        if check["regime"]["execution_scope"] == "component"
+    ))
+    component_check["stage"] = "full_local"
+    component_check["check_id"] = validation_check_id(component_check)
+    document["checks"].append(component_check)
+    document["checks"].sort(key=lambda check: check["check_id"])
+    requirements = {
+        "schema": VALIDATION_REQUIREMENTS_SCHEMA,
+        "requirements_id": "",
+        "candidate_id": document["candidate_id"],
+        "source_contract_digests": document["source_contract_digests"],
+        "proofs": document["proofs"],
+        "checks": document["checks"],
+        "coverage": document["coverage"],
+        "counterexamples": document["counterexamples"],
+    }
+    requirements["requirements_id"] = validation_requirements_id(
+        requirements
+    )
+    document["requirements_digest"] = contract_digest(requirements)
+    document["plan_id"] = validation_plan_id(document)
+    plan = ValidationPlan.from_json(document)
+    adapter = FixtureValidationAdapter()
+
+    run = execute_validation_stage(
+        plan,
+        stage="full_local",
+        adapter=adapter,
+    )
+
+    assert run.status == "completed"
+    assert adapter.validation_stages == [
+        ("full_local", "component"),
+        ("full_local", "whole_model"),
+    ]
+
+
 def test_proven_exact_candidate_passes_complete_validation_funnel(
     tmp_path: Path,
 ) -> None:
@@ -650,6 +750,21 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
         "full_local",
         "whole_model",
     ]
+    whole_model_run = final.runs[-1].to_json()
+    assert all(
+        observation[role]["steps"] == 1
+        and observation[role]["horizon_completion"] == {
+            "condition": "semantic_stop_or_allowance_per_turn",
+            "satisfied": True,
+            "observed_steps": 1,
+            "minimum_steps": None,
+            "expected_turns": 1,
+            "completed_turns": 1,
+            "stop_reasons": ["eos"],
+        }
+        for observation in whole_model_run["observations"]
+        for role in ("reference", "candidate")
+    )
     for run in (pre.sanity_run, *final.runs):
         assert run is not None
         run_document = run.to_json()
@@ -662,12 +777,8 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
         ] == [
             pair
             for _observation in run_document["observations"]
-            for pair in (
-                ("reference", "mount"),
-                ("reference", "unmount"),
-                ("candidate", "mount"),
-                ("candidate", "unmount"),
-            )
+            for role in ("reference", "candidate")
+            for pair in ((role, "mount"), (role, "unmount"))
         ]
         assert all(
             event["device_state_before_digest"]
@@ -682,12 +793,19 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
     } == {"sanity", "full_local", "whole_model"}
     assert len(adapter.closed_sessions) == len(adapter.mount_requests)
     for completed_stage in ("sanity", "full_local", "whole_model"):
-        blocks = [
-            block
-            for stage, _role, block in adapter.closed_sessions
+        stage_sessions = [
+            (role, block)
+            for stage, role, block in adapter.closed_sessions
             if stage == completed_stage
         ]
+        blocks = [block for _role, block in stage_sessions]
         assert blocks == list(range(len(blocks)))
+        roles = [role for role, _block in stage_sessions]
+        assert roles == [
+            role
+            for _observation in range(len(roles) // 2)
+            for role in ("reference", "candidate")
+        ]
     assert set(adapter.fixture_candidate_ids) == {fixture[2].candidate_id}
     assert len(
         {

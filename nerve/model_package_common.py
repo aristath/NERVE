@@ -30,10 +30,6 @@ from nerve.compilation import (
     relative_json_path,
     write_json,
 )
-from nerve.compiler_fingerprint import (
-    COMPILER_FINGERPRINT_SCHEMA,
-    package_compiler_fingerprint,
-)
 from nerve.model_transpiler import read_safetensors_header, transpile_model
 
 

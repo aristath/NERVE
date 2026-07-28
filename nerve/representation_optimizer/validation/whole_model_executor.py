@@ -3,10 +3,17 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
+from nerve.compilation import (
+    Json,
+    ModelCompileCancelled,
+    ModelCompileError,
+    check_compile_cancelled,
+)
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     ExecutorArtifactStore,
     StagedCandidateLoader,
@@ -35,6 +42,7 @@ from nerve.representation_optimizer.validation.executor_protocol import (
     VALIDATION_EXECUTOR_COMMAND_SCHEMA,
     validate_validation_execution_payload,
     validate_validation_mount_payload,
+    validate_validation_progress,
     validate_validation_release_payload,
     validated_validation_response,
 )
@@ -42,6 +50,62 @@ from nerve.representation_optimizer.validation.protocols import (
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
 )
+
+
+class _ProgressJournal:
+    """Live JSONL progress with atomic immutable final publication."""
+
+    def __init__(
+        self,
+        store: ExecutorArtifactStore,
+        relative_path: str,
+    ) -> None:
+        self.store = store
+        self.relative_path = relative_path
+        self._payload = bytearray()
+        self._reference: Json | None = None
+        self._partial = store.confined_path(
+            f"{relative_path}.partial-{uuid4().hex}"
+        )
+        self._partial.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(self._partial, flags, 0o644)
+        self._stream = os.fdopen(descriptor, "wb")
+
+    @property
+    def byte_count(self) -> int:
+        return len(self._payload)
+
+    def append(self, event: Json) -> None:
+        if self._reference is not None or self._stream.closed:
+            raise ModelCompileError(
+                "validation progress journal is already finalized"
+            )
+        line = canonical_json_bytes(event) + b"\n"
+        self._stream.write(line)
+        self._stream.flush()
+        self._payload.extend(line)
+
+    def finalize(self, *, status: str) -> Json:
+        if self._reference is not None:
+            return dict(self._reference)
+        self.append(
+            {
+                "schema": "nerve.optimizer.validation_progress_terminal.v1",
+                "status": status,
+            }
+        )
+        os.fsync(self._stream.fileno())
+        self._stream.close()
+        reference = self.store.publish(
+            self.relative_path,
+            bytes(self._payload),
+        )
+        self._partial.unlink()
+        self._reference = reference
+        return dict(reference)
 
 
 class ResidentWholeModelValidationBackend:
@@ -70,11 +134,44 @@ class ResidentWholeModelValidationBackend:
         self.executor_factory = executor_factory
         self.staged_candidate_loader = staged_candidate_loader
         self.run_nonce = run_nonce
+        self._active_stage: str | None = None
+        self._transport: ExecutorTransport | None = None
+        self._role_is_mounted = False
+        self.partial_progress_refs: list[Json] = []
+
+    @contextmanager
+    def validation_stage(
+        self,
+        stage: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> Iterator[None]:
+        if self._active_stage is not None:
+            raise ModelCompileError(
+                "whole-model validation stage ownership is not reentrant"
+            )
+        self._active_stage = stage
+        try:
+            yield
+        finally:
+            try:
+                self._release_stage_executor(cancel_requested)
+            finally:
+                self._active_stage = None
 
     def open_session(
         self,
         request: ValidationRoleMountRequest,
     ) -> ResidentWholeModelValidationSession:
+        if self._active_stage != request.stage:
+            raise ModelCompileError(
+                "whole-model validation role requires an active matching "
+                "validation stage"
+            )
+        if self._role_is_mounted:
+            raise ModelCompileError(
+                "whole-model validation cannot mount overlapping roles"
+            )
         check = request.check
         if check["regime"]["execution_scope"] != "whole_model":
             raise ModelCompileError(
@@ -103,6 +200,10 @@ class ResidentWholeModelValidationBackend:
             loader=self.staged_candidate_loader,
         )
         context_size = check["regime"]["context_size"]
+        execution_mode = check["controls"].get(
+            "execution_mode",
+            "conversation",
+        )
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
             "command": "mount",
@@ -115,8 +216,18 @@ class ResidentWholeModelValidationBackend:
             "physical_device_ids": list(physical_device_ids),
             "component_placement": placement,
             "context_capacity": (
-                context_size if context_size > 0 else None
+                {
+                    "kind": "declared",
+                    "activations": context_size,
+                }
+                if context_size > 0
+                else {"kind": "fixture_exact"}
             ),
+            "validation_turns": list(turns),
+            "teacher_forced_assistant_turns": list(
+                teacher_forced_assistant_turns
+            ),
+            "execution_mode": execution_mode,
             "random_seed": request.seed,
             "enable_thinking": (
                 check["controls"].get("enable_thinking") is True
@@ -129,10 +240,8 @@ class ResidentWholeModelValidationBackend:
                 "graph_target_component_id"
             ),
         }
-        transport = self.executor_factory(
-            self.executor_command,
-            self._environment(),
-        )
+        transport = self._stage_executor()
+        self._role_is_mounted = True
         started = time.monotonic_ns()
         try:
             response = validated_validation_response(
@@ -150,7 +259,7 @@ class ResidentWholeModelValidationBackend:
                 physical_device_ids=physical_device_ids,
             )
         except BaseException:
-            transport.abort()
+            self._abort_stage_executor()
             raise
         return ResidentWholeModelValidationSession(
             backend=self,
@@ -167,6 +276,58 @@ class ResidentWholeModelValidationBackend:
             ),
             physical_device_ids=physical_device_ids,
         )
+
+    def role_released(self, transport: ExecutorTransport) -> None:
+        if transport is not self._transport or not self._role_is_mounted:
+            self._abort_stage_executor()
+            raise ModelCompileError(
+                "whole-model validation released an unowned role"
+            )
+        self._role_is_mounted = False
+
+    def role_failed(self, transport: ExecutorTransport) -> None:
+        if transport is self._transport:
+            self._abort_stage_executor()
+
+    def _stage_executor(self) -> ExecutorTransport:
+        if self._active_stage is None:
+            raise ModelCompileError(
+                "whole-model validation executor has no active stage"
+            )
+        if self._transport is None:
+            self._transport = self.executor_factory(
+                self.executor_command,
+                self._environment(),
+            )
+        return self._transport
+
+    def _release_stage_executor(
+        self,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> None:
+        transport = self._transport
+        if transport is None:
+            return
+        if self._role_is_mounted:
+            self._abort_stage_executor()
+            raise ModelCompileError(
+                "whole-model validation stage ended with a mounted role"
+            )
+        self._transport = None
+        try:
+            transport.close(cancel_requested=cancel_requested)
+        except ModelCompileCancelled:
+            transport.abort()
+        except BaseException:
+            transport.abort()
+            raise
+
+    def _abort_stage_executor(self) -> None:
+        transport = self._transport
+        self._transport = None
+        self._role_is_mounted = False
+        if transport is not None:
+            transport.abort()
 
     def compare_results(
         self,
@@ -308,14 +469,29 @@ class ResidentWholeModelValidationSession:
         max_output_tokens = request.check["horizon"][
             "output_allowance"
         ]
-        if (
+        execution_mode = request.check["controls"].get(
+            "execution_mode",
+            "conversation",
+        )
+        if execution_mode == "conversation" and (
             isinstance(max_output_tokens, bool)
             or not isinstance(max_output_tokens, int)
             or max_output_tokens <= 0
         ):
             raise ModelCompileError(
-                "whole-model validation requires a positive declared "
-                "output allowance"
+                "free-running whole-model validation requires a positive "
+                "declared output allowance"
+            )
+        if execution_mode != "conversation" and (
+            max_output_tokens is not None
+            and (
+                isinstance(max_output_tokens, bool)
+                or not isinstance(max_output_tokens, int)
+                or max_output_tokens <= 0
+            )
+        ):
+            raise ModelCompileError(
+                "whole-model validation output allowance is invalid"
             )
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
@@ -328,23 +504,93 @@ class ResidentWholeModelValidationSession:
             "teacher_forced_assistant_turns": list(
                 self.teacher_forced_assistant_turns
             ),
-            "execution_mode": request.check["controls"].get(
-                "execution_mode",
-                "conversation",
-            ),
+            "execution_mode": execution_mode,
+            "step_unit": request.check["horizon"]["unit"],
             "max_output_tokens": max_output_tokens,
         }
         started = time.monotonic_ns()
-        response = validated_validation_response(
-            self.transport.request(
-                command,
-                cancel_requested=self.request.cancel_requested,
-            ),
-            expected_request_id=command["request_id"],
-            expected_status="completed",
+        prefix = (
+            f"traces/validation/{self.backend.run_nonce}/"
+            f"{self.session_nonce}/{request.check['check_id']}/"
+            f"{request.seed}/{request.role}"
         )
+        progress = _ProgressJournal(
+            self.backend.trace_store,
+            f"{prefix}/progress.jsonl",
+        )
+
+        def progress_received(event: Json) -> None:
+            validate_validation_progress(
+                event,
+                expected_request_id=command["request_id"],
+                turn_count=len(self.turns),
+            )
+            progress.append(event)
+
+        try:
+            response = validated_validation_response(
+                self.transport.request(
+                    command,
+                    cancel_requested=self.request.cancel_requested,
+                    progress_received=progress_received,
+                ),
+                expected_request_id=command["request_id"],
+                expected_status="completed",
+            )
+        except BaseException:
+            self.backend.partial_progress_refs.append(
+                progress.finalize(status="failed")
+            )
+            self.backend.role_failed(self.transport)
+            raise
+        progress_ref = progress.finalize(status="completed")
         report = response["payload"]
-        validate_validation_execution_payload(report)
+        validate_validation_execution_payload(
+            report,
+            expected_step_unit=request.check["horizon"]["unit"],
+            expected_turns=self.turns,
+        )
+        horizon = request.check["horizon"]
+        completion_condition = horizon["completion_condition"]
+        stop_reasons = [
+            str(turn["stop_reason"])
+            for turn in report["turns"]
+        ]
+        if completion_condition == "minimum_steps":
+            horizon_completion = {
+                "condition": completion_condition,
+                "satisfied": report["steps"] >= horizon["minimum_steps"],
+                "observed_steps": report["steps"],
+                "minimum_steps": horizon["minimum_steps"],
+                "expected_turns": None,
+                "completed_turns": None,
+                "stop_reasons": [],
+            }
+        elif (
+            completion_condition
+            == "semantic_stop_or_allowance_per_turn"
+        ):
+            if any(
+                reason not in {"eos", "output_allowance"}
+                for reason in stop_reasons
+            ):
+                raise ModelCompileError(
+                    "free-running validation did not reach an ordinary "
+                    "semantic stop or its declared output allowance"
+                )
+            horizon_completion = {
+                "condition": completion_condition,
+                "satisfied": len(report["turns"]) == len(self.turns),
+                "observed_steps": report["steps"],
+                "minimum_steps": None,
+                "expected_turns": len(self.turns),
+                "completed_turns": len(report["turns"]),
+                "stop_reasons": stop_reasons,
+            }
+        else:
+            raise ModelCompileError(
+                "whole-model validation completion condition is unsupported"
+            )
         host_execution_ns = max(
             1,
             time.monotonic_ns() - started,
@@ -354,24 +600,28 @@ class ResidentWholeModelValidationSession:
             "state": {"state_digest": report["state_digest"]},
             "schedule": {
                 "steps": report["steps"],
+                "step_unit": report["step_unit"],
                 "scheduler_steps": report["scheduler_steps"],
                 "execution_counters": report[
                     "execution_counters"
                 ],
             },
         }
-        prefix = (
-            f"traces/validation/{self.backend.run_nonce}/"
-            f"{self.session_nonce}/{request.check['check_id']}/"
-            f"{request.seed}/{request.role}"
+        traces = sorted(
+            [
+                *(
+                    self.backend.trace_store.publish(
+                        f"{prefix}/{name}.json",
+                        canonical_json_bytes(payload) + b"\n",
+                    )
+                    for name, payload in sorted(
+                        trace_payloads.items()
+                    )
+                ),
+                progress_ref,
+            ],
+            key=lambda reference: reference["path"],
         )
-        traces = [
-            self.backend.trace_store.publish(
-                f"{prefix}/{name}.json",
-                canonical_json_bytes(payload) + b"\n",
-            )
-            for name, payload in sorted(trace_payloads.items())
-        ]
         document = {
             "schema": VALIDATION_ROLE_RESULT_SCHEMA,
             "result_id": "",
@@ -387,6 +637,7 @@ class ResidentWholeModelValidationSession:
             "output_digest": report["output_digest"],
             "state_digest": report["state_digest"],
             "steps": report["steps"],
+            "horizon_completion": horizon_completion,
             "traces": traces,
             "default_statistics": {
                 "execution_path": "resident_whole_model_chat",
@@ -395,6 +646,7 @@ class ResidentWholeModelValidationSession:
                 "transport_bytes": (
                     len(canonical_json_bytes(command))
                     + len(canonical_json_bytes(response))
+                    + progress.byte_count
                     + 2
                 ),
                 "scheduler_steps": report["scheduler_steps"],
@@ -416,7 +668,7 @@ class ResidentWholeModelValidationSession:
         try:
             check_compile_cancelled(self.request.cancel_requested)
         except BaseException:
-            self.transport.abort()
+            self.backend.role_failed(self.transport)
             raise
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
@@ -450,11 +702,9 @@ class ResidentWholeModelValidationSession:
                 ],
                 physical_device_ids=self.physical_device_ids,
             )
-            self.transport.close(
-                cancel_requested=self.request.cancel_requested,
-            )
+            self.backend.role_released(self.transport)
         except BaseException:
-            self.transport.abort()
+            self.backend.role_failed(self.transport)
             raise
         return self._event(
             action="unmount",

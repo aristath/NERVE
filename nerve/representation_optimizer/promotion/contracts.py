@@ -14,7 +14,7 @@ from nerve.representation_optimizer.contracts import (
 
 
 RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA = (
-    "nerve.optimizer.runtime_implementation_predicate.v2"
+    "nerve.optimizer.runtime_implementation_predicate.v3"
 )
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
 IMPLEMENTATION_REGISTRY_SCHEMA = (
@@ -145,6 +145,8 @@ def create_runtime_implementation_predicate(
     required_processes: Iterable[str],
     required_features: Iterable[str],
     execution_phases: Iterable[str],
+    alternative_execution_phases: Iterable[str],
+    source_retained_execution_phases: Iterable[str],
     activation_batch_minimum: int,
     activation_batch_maximum: int,
     context_activations_minimum: int,
@@ -177,6 +179,12 @@ def create_runtime_implementation_predicate(
         },
         "execution": {
             "phases": sorted(set(execution_phases)),
+            "alternative_phases": sorted(
+                set(alternative_execution_phases)
+            ),
+            "source_retained_phases": sorted(
+                set(source_retained_execution_phases)
+            ),
             "activation_batch": {
                 "minimum": activation_batch_minimum,
                 "maximum": activation_batch_maximum,
@@ -322,6 +330,8 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         execution,
         {
             "phases",
+            "alternative_phases",
+            "source_retained_phases",
             "activation_batch",
             "context_activations",
             "state_activations",
@@ -336,6 +346,24 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
     if any(phase not in _EXECUTION_PHASES for phase in phases):
         raise PromotionContractError(
             "runtime predicate contains an unsupported execution phase"
+        )
+    alternative_phases = _sorted_unique_strings(
+        execution["alternative_phases"],
+        "execution.alternative_phases",
+        nonempty=True,
+    )
+    source_retained_phases = _sorted_unique_strings(
+        execution["source_retained_phases"],
+        "execution.source_retained_phases",
+    )
+    if (
+        set(alternative_phases) & set(source_retained_phases)
+        or set(alternative_phases) | set(source_retained_phases)
+        != set(phases)
+    ):
+        raise PromotionContractError(
+            "runtime predicate must partition every execution phase into "
+            "alternative or source-retained execution"
         )
     _inclusive_range(execution["activation_batch"], "execution.activation_batch", positive=True)
     _inclusive_range(

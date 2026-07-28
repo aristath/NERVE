@@ -12,6 +12,7 @@ from nerve.representation_optimizer.contracts import (
 )
 from nerve.representation_optimizer.staging.contracts import (
     CandidateBuildPlan,
+    SOURCE_PACKAGE_SEAL_FILE,
     staged_file_digest,
 )
 from nerve.representation_optimizer.staging.integrity import (
@@ -118,6 +119,13 @@ def load_staged_candidate(
     if any(document[field] != digest for field, digest in contract_digests.items()):
         raise ModelCompileError(
             "candidate construction record contract digest does not match"
+        )
+    if (
+        _read_object(root / "contracts" / SOURCE_PACKAGE_SEAL_FILE)
+        != document["source_seal"]
+    ):
+        raise ModelCompileError(
+            "candidate source package seal does not match construction evidence"
         )
     if package_dir is not None:
         verify_source_package_seal(

@@ -205,6 +205,9 @@ def test_cli_compile_forwards_one_compiled_model_destination(
     write_discoverable_source(source)
     compiled_model_dir = tmp_path / "compiled_model"
     captured: dict[str, object] = {}
+    physical_device_id = (
+        "vulkan-uuid:00000000030000000000000000000000"
+    )
 
     def fake_compile_model(model_dir: Path, **kwargs: object) -> CompiledModelReport:
         captured["model_dir"] = model_dir
@@ -222,11 +225,13 @@ def test_cli_compile_forwards_one_compiled_model_destination(
         )
 
     monkeypatch.setattr("nerve.cli.compile_model", fake_compile_model)
+    def fake_discover_compiler_target(**kwargs: object) -> CompilerTarget:
+        captured["target_kwargs"] = kwargs
+        return CompilerTarget.for_features({"shader_bfloat16_type"})
+
     monkeypatch.setattr(
         "nerve.cli.discover_compiler_target",
-        lambda **_kwargs: CompilerTarget.for_features(
-            {"shader_bfloat16_type"}
-        ),
+        fake_discover_compiler_target,
     )
     monkeypatch.setattr(
         sys,
@@ -237,6 +242,8 @@ def test_cli_compile_forwards_one_compiled_model_destination(
             str(source),
             "--compiled-model-dir",
             str(compiled_model_dir),
+            "--allow-physical-device",
+            physical_device_id,
             "--json",
         ],
     )
@@ -250,6 +257,10 @@ def test_cli_compile_forwards_one_compiled_model_destination(
     assert "transpiled_dir" not in kwargs
     assert "lowered_dir" not in kwargs
     assert "package_dir" not in kwargs
+    assert captured["target_kwargs"] == {
+        "runtime_bin": None,
+        "allowed_physical_device_ids": [physical_device_id],
+    }
     report = json.loads(capsys.readouterr().out)
     assert report["compiled_model_dir"] == str(compiled_model_dir)
     assert report["package_dir"] == str(compiled_model_dir)

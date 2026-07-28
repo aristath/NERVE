@@ -14,6 +14,9 @@ from nerve.representation_optimizer.lifecycle import (
     OptimizationSession,
 )
 from nerve.representation_optimizer.providers import ProviderRegistry
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.staging.contracts import (
     CandidateBuildPlan,
     staged_artifact_digest,
@@ -219,6 +222,7 @@ def test_candidate_is_constructed_relowered_optimized_and_atomically_staged(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -314,6 +318,7 @@ def test_declared_source_input_is_digest_checked_and_sealed(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "workspace",
         plan=plan,
         session=session,
@@ -328,11 +333,15 @@ def test_declared_source_input_is_digest_checked_and_sealed(
     )
 
     assert outcome.status == "completed"
-    assert outcome.record.to_json()["source_seal"]["source_inputs"] == {
-        "weights/source.bin": staged_artifact_digest(
-            b"immutable source parameter"
-        )
-    }
+    sealed_source = outcome.record.to_json()["source_seal"][
+        "source_inputs"
+    ]["weights/source.bin"]
+    assert sealed_source["digest"] == staged_artifact_digest(
+        b"immutable source parameter"
+    )
+    assert sealed_source["signature"]["byte_count"] == len(
+        b"immutable source parameter"
+    )
     assert source_path.read_bytes() == b"immutable source parameter"
 
 
@@ -359,6 +368,7 @@ def test_declared_source_regions_are_streamed_and_whole_file_digest_checked(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "workspace",
         plan=plan,
         session=session,
@@ -374,6 +384,54 @@ def test_declared_source_regions_are_streamed_and_whole_file_digest_checked(
     assert outcome.status == "completed"
 
 
+def test_source_signature_drift_is_rejected_without_rehashing(
+    tmp_path: Path,
+) -> None:
+    package_dir, session = _package(tmp_path)
+    source_path = package_dir / "weights" / "source.bin"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"immutable source parameter")
+    plan = _plan()
+    build = plan.construction_requirements.to_json()
+    build["source_inputs"] = [
+        {
+            "path": "weights/source.bin",
+            "digest": staged_artifact_digest(source_path.read_bytes()),
+        }
+    ]
+    plan = replace(
+        plan,
+        construction_requirements=CandidateBuildPlan.from_json(build),
+    )
+    session = _session_with_candidate(session, plan)
+    complete = CompleteSemanticConstructor(
+        [],
+        source_path="weights/source.bin",
+        stream_source=True,
+    )
+
+    class MutatingConstructor:
+        def construct_semantic_artifacts(self, context) -> None:
+            complete.construct_semantic_artifacts(context)
+            source_path.write_bytes(b"changed source parameter!!")
+
+    outcome = stage_candidate(
+        package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
+        workspace_root=tmp_path / "workspace",
+        plan=plan,
+        session=session,
+        semantic_constructor=MutatingConstructor(),
+        ordinary_relowerer=CompleteRelowerer([]),
+        physical_optimizer=CompletePhysicalOptimizer([]),
+    )
+
+    assert outcome.status == "failed"
+    assert "source package changed" in " ".join(
+        outcome.record.to_json()["diagnostics"]
+    )
+
+
 def test_failed_phase_is_isolated_and_leaves_no_candidate_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -386,6 +444,7 @@ def test_failed_phase_is_isolated_and_leaves_no_candidate_artifacts(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -423,6 +482,7 @@ def test_cancellation_removes_incomplete_workspace_and_records_no_artifacts(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -464,6 +524,7 @@ def test_pre_phase_resource_failure_is_recorded_and_cleaned(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -499,6 +560,7 @@ def test_cancellation_during_streamed_artifact_removes_partial_file(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -525,6 +587,7 @@ def test_missing_declared_output_fails_before_atomic_stage_publication(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -558,6 +621,7 @@ def test_atomic_ready_rename_failure_leaves_only_failure_evidence(
     monkeypatch.setattr(Path, "replace", fail_ready_replace)
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -585,6 +649,7 @@ def test_staged_corruption_is_detected_by_complete_integrity_manifest(
     session = _session_with_candidate(session, plan)
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "workspace",
         plan=plan,
         session=session,
@@ -609,6 +674,7 @@ def test_loader_rejects_construction_record_tampering(
     workspace = tmp_path / "workspace"
     stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -633,6 +699,7 @@ def test_complete_publication_is_recovered_without_reconstructing(
     first_calls: list[str] = []
     first = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -644,6 +711,7 @@ def test_complete_publication_is_recovered_without_reconstructing(
 
     recovered = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -678,6 +746,7 @@ def test_orphaned_atomic_publication_is_removed_before_clean_retry(
     workspace = tmp_path / "workspace"
     first = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -691,6 +760,7 @@ def test_orphaned_atomic_publication_is_removed_before_clean_retry(
 
     retried = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -738,6 +808,7 @@ def test_abandoned_private_workspace_is_removed_before_construction(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -762,10 +833,10 @@ def test_construction_measurement_includes_source_sealing(
     original = staging_orchestrator.seal_source_package
     measured: dict[str, int] = {}
 
-    def measured_seal(package, build_plan):
+    def measured_seal(package, build_plan, source_artifacts):
         started = time.monotonic_ns()
         time.sleep(0.01)
-        result = original(package, build_plan)
+        result = original(package, build_plan, source_artifacts)
         measured["duration_ns"] = time.monotonic_ns() - started
         return result
 
@@ -776,6 +847,7 @@ def test_construction_measurement_includes_source_sealing(
     )
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "workspace",
         plan=plan,
         session=session,
@@ -800,6 +872,7 @@ def test_integrity_manifest_bytes_are_subject_to_staging_limit(
     session = _session_with_candidate(session, plan)
     first = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "measure-workspace",
         plan=plan,
         session=session,
@@ -830,6 +903,9 @@ def test_integrity_manifest_bytes_are_subject_to_staging_limit(
 
     outcome = stage_candidate(
         package_dir=limited_package,
+        source_artifacts=PackageSourceArtifactResolver(
+            limited_package
+        ),
         workspace_root=tmp_path / "limited-workspace",
         plan=limited_plan,
         session=limited_session,
@@ -857,6 +933,7 @@ def test_loader_reports_missing_construction_record_as_contract_error(
     workspace = tmp_path / "workspace"
     stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -883,6 +960,7 @@ def test_invalid_target_artifact_fails_kind_validation_before_atomic_stage(
 
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=workspace,
         plan=plan,
         session=session,
@@ -931,6 +1009,7 @@ def test_provider_added_artifact_validator_is_used_without_core_dispatch(
     registry.register("fixture_spirv", validate_fixture_spirv)
     outcome = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "workspace",
         plan=plan,
         session=session,
@@ -979,6 +1058,7 @@ def test_source_digest_drift_is_rejected_before_workspace_creation(
     with pytest.raises(ModelCompileError, match="source input digest mismatch"):
         stage_candidate(
             package_dir=package_dir,
+            source_artifacts=PackageSourceArtifactResolver(package_dir),
             workspace_root=workspace,
             plan=plan,
             session=session,
@@ -1023,6 +1103,7 @@ def test_build_plan_cannot_be_rebound_to_undeclared_candidate_artifact(
     with pytest.raises(ModelCompileError, match="artifact declarations"):
         stage_candidate(
             package_dir=package_dir,
+            source_artifacts=PackageSourceArtifactResolver(package_dir),
             workspace_root=tmp_path / "workspace",
             plan=plan,
             session=session,
@@ -1047,6 +1128,7 @@ def test_workspace_cannot_be_inside_or_contain_immutable_package(
     with pytest.raises(ModelCompileError, match="outside"):
         stage_candidate(
             package_dir=package_dir,
+            source_artifacts=PackageSourceArtifactResolver(package_dir),
             workspace_root=package_dir / "optimization" / "working",
             plan=plan,
             session=session,
@@ -1055,6 +1137,7 @@ def test_workspace_cannot_be_inside_or_contain_immutable_package(
     with pytest.raises(ModelCompileError, match="must not contain"):
         stage_candidate(
             package_dir=package_dir,
+            source_artifacts=PackageSourceArtifactResolver(package_dir),
             workspace_root=tmp_path,
             plan=plan,
             session=session,

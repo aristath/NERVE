@@ -22,15 +22,15 @@ from nerve.representation_optimizer.contracts import (
 BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
 )
-VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v1"
-VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v2"
+VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v2"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v3"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
-VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v1"
-VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v2"
+VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v2"
+VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v3"
 VALIDATION_RESIDENCY_EVENT_SCHEMA = (
     "nerve.optimizer.validation_residency_event.v3"
 )
-VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v3"
+VALIDATION_RUN_SCHEMA = "nerve.optimizer.validation_run.v4"
 PREBENCHMARK_RECORD_SCHEMA = "nerve.optimizer.prebenchmark_record.v1"
 VALIDATION_EVIDENCE_INTEGRITY_SCHEMA = (
     "nerve.optimizer.validation_evidence_integrity.v1"
@@ -89,6 +89,11 @@ _IMPLEMENTATION_ROLES = ("reference", "candidate")
 _PROOF_STATUSES = ("proven", "disproven", "inconclusive")
 _RUN_STATUSES = ("completed", "failed", "cancelled")
 _STAGE_STATUSES = ("passed", "failed", "not_applicable", "not_run")
+_HORIZON_COMPLETION_CONDITIONS = (
+    "minimum_steps",
+    "semantic_stop_or_allowance_per_turn",
+)
+_SEMANTIC_STOP_REASONS = ("eos", "output_allowance")
 _COVERAGE_CHECK_CONSTRAINTS = {
     "component_output_error": (
         {"sanity", "full_local"},
@@ -628,13 +633,6 @@ def validate_validation_requirements(document: Json) -> None:
             raise ValidationContractError(
                 f"validation requirements need at least one {stage!r} check"
             )
-        if stage != "sanity" and any(
-            len(check["seeds"]) < 2 for check in stage_checks
-        ):
-            raise ValidationContractError(
-                f"{stage} checks require at least two fixed seeds"
-            )
-
     coverage = _list(document["coverage"], "coverage")
     coverage_names: list[str] = []
     coverage_by_kind: dict[str, Json] = {}
@@ -718,6 +716,13 @@ def validate_validation_requirements(document: Json) -> None:
                 ):
                     raise ValidationContractError(
                         f"{path} requires a declared output allowance"
+                    )
+                if (
+                    kind == "multiple_fixed_seeds"
+                    and len(check["seeds"]) < 2
+                ):
+                    raise ValidationContractError(
+                        f"{path} requires at least two fixed seeds"
                     )
         else:
             if check_ids or not isinstance(entry["reason"], str) or not entry["reason"]:
@@ -868,16 +873,39 @@ def validate_validation_check(document: Json) -> None:
     _fields(
         horizon,
         {
+            "unit",
+            "completion_condition",
             "minimum_steps",
             "output_allowance",
             "output_allowance_basis",
         },
         "horizon",
     )
-    minimum_steps = _positive_integer(
-        horizon["minimum_steps"],
-        "horizon.minimum_steps",
-    )
+    _text(horizon["unit"], "horizon.unit")
+    completion_condition = horizon["completion_condition"]
+    if completion_condition not in _HORIZON_COMPLETION_CONDITIONS:
+        raise ValidationContractError(
+            "horizon completion condition is unsupported"
+        )
+    minimum_steps = horizon["minimum_steps"]
+    if completion_condition == "minimum_steps":
+        minimum_steps = _positive_integer(
+            minimum_steps,
+            "horizon.minimum_steps",
+        )
+    elif minimum_steps is not None:
+        raise ValidationContractError(
+            "semantic horizon completion cannot declare minimum steps"
+        )
+    if completion_condition == "semantic_stop_or_allowance_per_turn" and (
+        document["kind"] not in {"free_running", "reasoning_conversation"}
+        or regime["execution_scope"] != "whole_model"
+        or document["controls"].get("execution_mode") != "conversation"
+    ):
+        raise ValidationContractError(
+            "semantic horizon completion is incompatible with anything "
+            "except free-running whole-model conversation execution"
+        )
     allowance = horizon["output_allowance"]
     if allowance is None:
         basis = _object(
@@ -898,7 +926,7 @@ def validate_validation_check(document: Json) -> None:
             allowance,
             "horizon.output_allowance",
         )
-        if allowance < minimum_steps:
+        if minimum_steps is not None and allowance < minimum_steps:
             raise ValidationContractError(
                 "validation output allowance is below its minimum horizon"
             )
@@ -907,6 +935,14 @@ def validate_validation_check(document: Json) -> None:
             allowance,
             "horizon.output_allowance_basis",
             zero_kind=None,
+        )
+    if (
+        completion_condition == "semantic_stop_or_allowance_per_turn"
+        and allowance is None
+    ):
+        raise ValidationContractError(
+            "semantic horizon completion requires a declared output "
+            "allowance"
         )
     _sorted_unique_strings(document["metrics"], "metrics", nonempty=True)
     expected = validation_check_id(document)
@@ -1104,6 +1140,93 @@ def validate_proof_result(document: Json) -> None:
         )
 
 
+def _horizon_completion(
+    value: object,
+    *,
+    observed_steps: object,
+    path: str,
+) -> None:
+    completion = _object(value, path)
+    _fields(
+        completion,
+        {
+            "condition",
+            "satisfied",
+            "observed_steps",
+            "minimum_steps",
+            "expected_turns",
+            "completed_turns",
+            "stop_reasons",
+        },
+        path,
+    )
+    condition = completion["condition"]
+    if condition not in _HORIZON_COMPLETION_CONDITIONS:
+        raise ValidationContractError(
+            f"{path}.condition is unsupported"
+        )
+    if not isinstance(completion["satisfied"], bool):
+        raise ValidationContractError(
+            f"{path}.satisfied must be a boolean"
+        )
+    completed_steps = _nonnegative_integer(
+        completion["observed_steps"],
+        f"{path}.observed_steps",
+    )
+    if completed_steps != observed_steps:
+        raise ValidationContractError(
+            f"{path}.observed_steps does not match role-result steps"
+        )
+    stop_reasons = _string_list(
+        completion["stop_reasons"],
+        f"{path}.stop_reasons",
+    )
+    if condition == "minimum_steps":
+        minimum_steps = _positive_integer(
+            completion["minimum_steps"],
+            f"{path}.minimum_steps",
+        )
+        if (
+            completion["expected_turns"] is not None
+            or completion["completed_turns"] is not None
+            or stop_reasons
+        ):
+            raise ValidationContractError(
+                f"{path} minimum-step evidence contains conversation fields"
+            )
+        satisfied = completed_steps >= minimum_steps
+    else:
+        if completion["minimum_steps"] is not None:
+            raise ValidationContractError(
+                f"{path} semantic evidence contains a minimum step count"
+            )
+        expected_turns = _positive_integer(
+            completion["expected_turns"],
+            f"{path}.expected_turns",
+        )
+        completed_turns = _nonnegative_integer(
+            completion["completed_turns"],
+            f"{path}.completed_turns",
+        )
+        if completed_turns > expected_turns:
+            raise ValidationContractError(
+                f"{path}.completed_turns exceeds expected turns"
+            )
+        if len(stop_reasons) != completed_turns or any(
+            reason not in _SEMANTIC_STOP_REASONS
+            for reason in stop_reasons
+        ):
+            raise ValidationContractError(
+                f"{path}.stop_reasons do not prove completed conversation "
+                "turns"
+            )
+        satisfied = completed_turns == expected_turns
+    if completion["satisfied"] is not satisfied:
+        raise ValidationContractError(
+            f"{path}.satisfied contradicts its completion evidence"
+        )
+
+
 def validate_validation_role_result(document: Json) -> None:
     canonical_json_bytes(document)
     _fields(
@@ -1121,6 +1244,7 @@ def validate_validation_role_result(document: Json) -> None:
             "output_digest",
             "state_digest",
             "steps",
+            "horizon_completion",
             "traces",
             "default_statistics",
             "diagnostics",
@@ -1157,6 +1281,11 @@ def validate_validation_role_result(document: Json) -> None:
         if document[field] is not None:
             _artifact_digest(document[field], field)
     _nonnegative_integer(document["steps"], "steps")
+    _horizon_completion(
+        document["horizon_completion"],
+        observed_steps=document["steps"],
+        path="horizon_completion",
+    )
     _artifact_refs(document["traces"], "traces")
     if not _object(document["default_statistics"], "default_statistics"):
         raise ValidationContractError(
@@ -1225,6 +1354,7 @@ def validate_validation_observation(document: Json) -> None:
                 "output_digest",
                 "state_digest",
                 "steps",
+                "horizon_completion",
             },
             role,
         )
@@ -1233,6 +1363,11 @@ def validate_validation_observation(document: Json) -> None:
             if result[field] is not None:
                 _artifact_digest(result[field], f"{role}.{field}")
         _nonnegative_integer(result["steps"], f"{role}.steps")
+        _horizon_completion(
+            result["horizon_completion"],
+            observed_steps=result["steps"],
+            path=f"{role}.horizon_completion",
+        )
     metrics = _list(document["metrics"], "metrics")
     names: list[str] = []
     for index, raw_metric in enumerate(metrics):
@@ -1434,48 +1569,69 @@ def validate_validation_run(document: Json) -> None:
                 "validation residency event does not match its run"
             )
         parsed_events.append(event)
-    event_index = 0
-    block_index = 0
+    expected_residencies = {
+        (
+            observation["check_id"],
+            observation["seed"],
+            role,
+            observation[role]["implementation_id"],
+        )
+        for observation in observations
+        for role in _IMPLEMENTATION_ROLES
+    }
+    observed_residencies: set[tuple[str, int, str, str]] = set()
     idle_digest: str | None = None
-    for observation in observations:
-        for role in _IMPLEMENTATION_ROLES:
-            mount = parsed_events[event_index]
-            unmount = parsed_events[event_index + 1]
-            expected_identity = {
-                "check_id": observation["check_id"],
-                "seed": observation["seed"],
-                "role": role,
-                "implementation_id": observation[role][
-                    "implementation_id"
-                ],
-                "block_index": block_index,
-            }
-            if any(
-                mount[field] != value or unmount[field] != value
-                for field, value in expected_identity.items()
-            ):
-                raise ValidationContractError(
-                    "validation residency identity does not match execution"
+    for block_index, event_index in enumerate(
+        range(0, len(parsed_events), 2)
+    ):
+        mount = parsed_events[event_index]
+        unmount = parsed_events[event_index + 1]
+        identity = (
+            mount["check_id"],
+            mount["seed"],
+            mount["role"],
+            mount["implementation_id"],
+        )
+        if (
+            identity not in expected_residencies
+            or identity in observed_residencies
+            or any(
+                unmount[field] != mount[field]
+                for field in (
+                    "check_id",
+                    "seed",
+                    "role",
+                    "implementation_id",
                 )
-            if (
-                mount["action"] != "mount"
-                or unmount["action"] != "unmount"
-                or mount["device_state_after_digest"]
-                != unmount["device_state_before_digest"]
-                or mount["device_state_before_digest"]
-                != unmount["device_state_after_digest"]
-            ):
-                raise ValidationContractError(
-                    "validation role residency does not prove complete release"
-                )
-            if idle_digest is None:
-                idle_digest = mount["device_state_before_digest"]
-            elif mount["device_state_before_digest"] != idle_digest:
-                raise ValidationContractError(
-                    "validation role mounts do not share one idle baseline"
-                )
-            event_index += 2
-            block_index += 1
+            )
+            or mount["block_index"] != block_index
+            or unmount["block_index"] != block_index
+        ):
+            raise ValidationContractError(
+                "validation residency identity does not match execution"
+            )
+        observed_residencies.add(identity)
+        if (
+            mount["action"] != "mount"
+            or unmount["action"] != "unmount"
+            or mount["device_state_after_digest"]
+            != unmount["device_state_before_digest"]
+            or mount["device_state_before_digest"]
+            != unmount["device_state_after_digest"]
+        ):
+            raise ValidationContractError(
+                "validation role residency does not prove complete release"
+            )
+        if idle_digest is None:
+            idle_digest = mount["device_state_before_digest"]
+        elif mount["device_state_before_digest"] != idle_digest:
+            raise ValidationContractError(
+                "validation role mounts do not share one idle baseline"
+            )
+    if observed_residencies != expected_residencies:
+        raise ValidationContractError(
+            "validation run is missing required role residency evidence"
+        )
     elapsed = _list(document["host_elapsed_ns"], "host_elapsed_ns")
     if len(elapsed) != len(observations):
         raise ValidationContractError(

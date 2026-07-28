@@ -526,9 +526,52 @@ def _derive_runtime_predicate(
         workload.to_json() for workload in benchmark_plan.workloads
     ]
     regimes = [workload["regime"] for workload in workloads]
-    phases = sorted(
-        {str(regime["execution_phase"]) for regime in regimes}
-    )
+    target = candidate["target_predicate"]
+    envelope = target.get("execution_envelope")
+    if envelope is None:
+        phases = sorted(
+            {str(regime["execution_phase"]) for regime in regimes}
+        )
+        alternative_phases = list(phases)
+        source_retained_phases: list[str] = []
+        activation_batch_minimum = min(
+            int(regime["activation_batch_width"])
+            for regime in regimes
+        )
+        activation_batch_maximum = max(
+            int(regime["activation_batch_width"])
+            for regime in regimes
+        )
+        context_activations_minimum = min(
+            int(regime["context_size"]) for regime in regimes
+        )
+        context_activations_maximum = max(
+            int(regime["context_size"]) for regime in regimes
+        )
+        state_activations_minimum = min(
+            int(regime["state_size"]) for regime in regimes
+        )
+        state_activations_maximum = max(
+            int(regime["state_size"]) for regime in regimes
+        )
+    else:
+        (
+            phases,
+            activation_batch_minimum,
+            activation_batch_maximum,
+            context_activations_minimum,
+            context_activations_maximum,
+            state_activations_minimum,
+            state_activations_maximum,
+        ) = _validated_execution_envelope(envelope, regimes)
+        alternative_phases = _strict_phase_list(
+            envelope,
+            "alternative_phases",
+        )
+        source_retained_phases = _strict_phase_list(
+            envelope,
+            "source_retained_phases",
+        )
     boundaries = {
         str(regime["boundary_mode"]) for regime in regimes
     }
@@ -539,7 +582,6 @@ def _derive_runtime_predicate(
         placement_mode = "distributed"
     else:
         placement_mode = "either"
-    target = candidate["target_predicate"]
     required_processes = _optional_string_list(
         target,
         "required_processes",
@@ -551,6 +593,12 @@ def _derive_runtime_predicate(
     required_interconnects = _optional_string_list(
         target,
         "required_interconnects",
+    )
+    _require_runtime_hardware_capabilities(
+        hardware_profiles=hardware_profiles,
+        required_processes=required_processes,
+        required_features=required_features,
+        required_interconnects=required_interconnects,
     )
     return create_runtime_implementation_predicate(
         capability_classes=(
@@ -567,31 +615,220 @@ def _derive_runtime_predicate(
         required_processes=required_processes,
         required_features=required_features,
         execution_phases=phases,
-        activation_batch_minimum=min(
-            int(regime["activation_batch_width"])
-            for regime in regimes
-        ),
-        activation_batch_maximum=max(
-            int(regime["activation_batch_width"])
-            for regime in regimes
-        ),
-        context_activations_minimum=min(
-            int(regime["context_size"]) for regime in regimes
-        ),
-        context_activations_maximum=max(
-            int(regime["context_size"]) for regime in regimes
-        ),
-        state_activations_minimum=min(
-            int(regime["state_size"]) for regime in regimes
-        ),
-        state_activations_maximum=max(
-            int(regime["state_size"]) for regime in regimes
-        ),
+        alternative_execution_phases=alternative_phases,
+        source_retained_execution_phases=source_retained_phases,
+        activation_batch_minimum=activation_batch_minimum,
+        activation_batch_maximum=activation_batch_maximum,
+        context_activations_minimum=context_activations_minimum,
+        context_activations_maximum=context_activations_maximum,
+        state_activations_minimum=state_activations_minimum,
+        state_activations_maximum=state_activations_maximum,
         placement_mode=placement_mode,
         minimum_device_count=device_count,
         maximum_device_count=device_count,
         required_interconnects=required_interconnects,
     )
+
+
+def _require_runtime_hardware_capabilities(
+    *,
+    hardware_profiles: tuple[Json, ...],
+    required_processes: tuple[str, ...],
+    required_features: tuple[str, ...],
+    required_interconnects: tuple[str, ...],
+) -> None:
+    available_processes: set[str] = set()
+    available_features: set[str] = set()
+    available_interconnects: set[str] = set()
+    for profile in hardware_profiles:
+        for process in profile["processes"]:
+            if (
+                process["availability"] != "available"
+                or process["programmability"] == "none"
+            ):
+                continue
+            available_processes.add(str(process["name"]))
+            for field in (
+                "operations",
+                "numeric_formats",
+                "required_extensions",
+                "required_features",
+            ):
+                available_features.update(
+                    str(value) for value in process[field]
+                )
+        available_features.update(
+            str(value) for value in profile["capability_extensions"]
+        )
+        for interconnect in profile["interconnects"]:
+            if interconnect["availability"] != "available":
+                continue
+            available_interconnects.update(
+                (
+                    str(interconnect["name"]),
+                    str(interconnect["kind"]),
+                    str(interconnect["api"]),
+                )
+            )
+            available_interconnects.update(
+                str(value) for value in interconnect["operations"]
+            )
+    missing_processes = sorted(
+        set(required_processes) - available_processes
+    )
+    missing_features = sorted(
+        set(required_features) - available_features
+    )
+    missing_interconnects = sorted(
+        set(required_interconnects) - available_interconnects
+    )
+    if missing_processes or missing_features or missing_interconnects:
+        raise ModelCompileError(
+            "promotion target predicate is not mountable on its benchmarked "
+            "hardware profiles: "
+            f"missing processes={missing_processes}, "
+            f"features={missing_features}, "
+            f"interconnects={missing_interconnects}"
+        )
+
+
+def _validated_execution_envelope(
+    envelope: object,
+    benchmark_regimes: list[Json],
+) -> tuple[list[str], int, int, int, int, int, int]:
+    if not isinstance(envelope, dict) or set(envelope) != {
+        "phases",
+        "alternative_phases",
+        "source_retained_phases",
+        "activation_batch",
+        "context_activations",
+        "state_activations",
+    }:
+        raise ModelCompileError(
+            "candidate execution envelope has an invalid structure"
+        )
+    phases = _strict_phase_list(envelope, "phases")
+    alternative_phases = _strict_phase_list(
+        envelope,
+        "alternative_phases",
+    )
+    source_retained_phases = _strict_phase_list(
+        envelope,
+        "source_retained_phases",
+    )
+    if (
+        not alternative_phases
+        or set(alternative_phases) & set(source_retained_phases)
+        or set(alternative_phases) | set(source_retained_phases)
+        != set(phases)
+    ):
+        raise ModelCompileError(
+            "candidate execution envelope must partition every phase into "
+            "alternative or source-retained execution"
+        )
+    observed_phases = {
+        str(regime["execution_phase"]) for regime in benchmark_regimes
+    }
+    if observed_phases != set(alternative_phases):
+        raise ModelCompileError(
+            "promotion requires one or more benchmark workloads for every "
+            "alternative execution phase and none for source-retained phases"
+        )
+    activation_minimum, activation_maximum = _execution_range(
+        envelope,
+        "activation_batch",
+    )
+    context_minimum, context_maximum = _execution_range(
+        envelope,
+        "context_activations",
+    )
+    state_minimum, state_maximum = _execution_range(
+        envelope,
+        "state_activations",
+    )
+    for regime in benchmark_regimes:
+        _require_in_execution_range(
+            int(regime["activation_batch_width"]),
+            activation_minimum,
+            activation_maximum,
+            "activation batch",
+        )
+        _require_in_execution_range(
+            int(regime["context_size"]),
+            context_minimum,
+            context_maximum,
+            "context activations",
+        )
+        _require_in_execution_range(
+            int(regime["state_size"]),
+            state_minimum,
+            state_maximum,
+            "state activations",
+        )
+    return (
+        phases,
+        activation_minimum,
+        activation_maximum,
+        context_minimum,
+        context_maximum,
+        state_minimum,
+        state_maximum,
+    )
+
+
+def _strict_phase_list(document: Json, name: str) -> list[str]:
+    phases = document.get(name)
+    supported = {
+        "component",
+        "decode",
+        "mixed",
+        "prefill",
+        "state_transition",
+    }
+    if (
+        not isinstance(phases, list)
+        or any(
+            not isinstance(phase, str) or phase not in supported
+            for phase in phases
+        )
+        or phases != sorted(set(phases))
+    ):
+        raise ModelCompileError(
+            f"candidate execution envelope {name!r} must be a sorted unique "
+            "list of supported phases"
+        )
+    return phases
+
+
+def _execution_range(document: Json, name: str) -> tuple[int, int]:
+    value = document.get(name)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"minimum", "maximum"}
+        or isinstance(value["minimum"], bool)
+        or not isinstance(value["minimum"], int)
+        or isinstance(value["maximum"], bool)
+        or not isinstance(value["maximum"], int)
+        or value["minimum"] < 0
+        or value["maximum"] < value["minimum"]
+    ):
+        raise ModelCompileError(
+            f"candidate execution envelope {name!r} has an invalid range"
+        )
+    return int(value["minimum"]), int(value["maximum"])
+
+
+def _require_in_execution_range(
+    value: int,
+    minimum: int,
+    maximum: int,
+    name: str,
+) -> None:
+    if value < minimum or value > maximum:
+        raise ModelCompileError(
+            f"benchmark {name} {value} is outside the candidate execution "
+            f"envelope [{minimum}, {maximum}]"
+        )
 
 
 def _optional_string_list(document: Json, name: str) -> tuple[str, ...]:

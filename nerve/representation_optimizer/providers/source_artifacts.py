@@ -94,12 +94,13 @@ class PackageSourceArtifactResolver:
         self._root = root
         self._file_digester = file_digester
         self._digest_cache: dict[str, tuple[tuple[int, ...], SourceArtifact]] = {}
-        self._tensor_index = read_json(root / "tensors.json")
-        raw_tensors = self._tensor_index.get("tensors")
-        if not isinstance(raw_tensors, dict):
-            raise ModelCompileError("compiled tensor index has no tensor map")
-        self._tensors: dict[str, Json] = raw_tensors
+        self._tensor_index: Json | None = None
+        self._tensors: dict[str, Json] | None = None
         self._header_bytes: dict[str, int] | None = None
+
+    @property
+    def package_root(self) -> Path:
+        return self._root
 
     def resolve_path(self, package_relative_path: str) -> SourceArtifact:
         normalized, path = self._package_file(package_relative_path)
@@ -115,7 +116,18 @@ class PackageSourceArtifactResolver:
         self._digest_cache[normalized] = (signature, artifact)
         return artifact
 
+    def source_seal_record(self, package_relative_path: str) -> Json:
+        artifact = self.resolve_path(package_relative_path)
+        signature = self._digest_cache[artifact.path][0]
+        return {
+            "digest": artifact.digest,
+            "signature": _signature_json(signature),
+        }
+
     def resolve_tensor(self, tensor_name: str) -> SourceTensorArtifact:
+        self._load_tensor_index()
+        assert self._tensors is not None
+        assert self._tensor_index is not None
         try:
             metadata = deepcopy(self._tensors[tensor_name])
         except KeyError as error:
@@ -171,6 +183,16 @@ class PackageSourceArtifactResolver:
             payload_byte_count=payload_bytes,
         )
 
+    def _load_tensor_index(self) -> None:
+        if self._tensor_index is not None:
+            return
+        tensor_index = read_json(self._root / "tensors.json")
+        raw_tensors = tensor_index.get("tensors")
+        if not isinstance(raw_tensors, dict):
+            raise ModelCompileError("compiled tensor index has no tensor map")
+        self._tensor_index = tensor_index
+        self._tensors = raw_tensors
+
     def read_path(self, package_relative_path: str) -> bytes:
         artifact = self.resolve_path(package_relative_path)
         _, path = self._package_file(artifact.path)
@@ -203,6 +225,52 @@ class PackageSourceArtifactResolver:
                 f"compiled tensor {tensor_name!r} data digest disagrees"
             )
         return payload
+
+    def read_path_regions(
+        self,
+        package_relative_path: str,
+        ranges: tuple[tuple[int, int], ...],
+    ) -> tuple[bytes, ...]:
+        artifact = self.resolve_path(package_relative_path)
+        if not ranges:
+            raise ModelCompileError(
+                "provider source region read requires at least one region"
+            )
+        for offset, byte_count in ranges:
+            if (
+                isinstance(offset, bool)
+                or not isinstance(offset, int)
+                or isinstance(byte_count, bool)
+                or not isinstance(byte_count, int)
+                or offset < 0
+                or byte_count < 0
+                or offset + byte_count > artifact.byte_count
+            ):
+                raise ModelCompileError(
+                    "provider source region exceeds its sealed artifact"
+                )
+        _, path = self._package_file(artifact.path)
+        before = self._digest_cache[artifact.path]
+        payloads = tuple(
+            _read_regular_file_region(path, offset, byte_count)
+            for offset, byte_count in ranges
+        )
+        after = self.resolve_path(artifact.path)
+        if (
+            self._digest_cache[artifact.path] != before
+            or after != artifact
+            or any(
+                len(payload) != byte_count
+                for payload, (_offset, byte_count) in zip(
+                    payloads, ranges, strict=True
+                )
+            )
+        ):
+            raise ModelCompileError(
+                f"provider source artifact changed during region reads: "
+                f"{artifact.path!r}"
+            )
+        return payloads
 
     def _package_file(self, value: str) -> tuple[str, Path]:
         if not isinstance(value, str) or not value:
@@ -279,6 +347,16 @@ def _file_signature(path: Path) -> tuple[int, ...]:
         stat.st_mtime_ns,
         stat.st_ctime_ns,
     )
+
+
+def _signature_json(signature: tuple[int, ...]) -> Json:
+    return {
+        "device": signature[0],
+        "inode": signature[1],
+        "byte_count": signature[2],
+        "modified_ns": signature[3],
+        "changed_ns": signature[4],
+    }
 
 
 def _sha256_hex(value: object) -> bool:

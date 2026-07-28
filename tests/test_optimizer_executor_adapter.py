@@ -53,9 +53,17 @@ class FixtureExecutor:
         self.commands: list[Json] = []
         self.closed = False
         self.aborted = False
+        self.factory_calls = 0
 
-    def request(self, document: Json, *, cancel_requested=None) -> Json:
+    def request(
+        self,
+        document: Json,
+        *,
+        cancel_requested=None,
+        progress_received=None,
+    ) -> Json:
         assert cancel_requested is None or not cancel_requested()
+        assert progress_received is None
         self.commands.append(document)
         command = document["command"]
         if command == "mount":
@@ -70,6 +78,10 @@ class FixtureExecutor:
                 "mount_duration_ns": 11,
                 "resident_parameter_bytes": 4_096,
                 "resident_transient_bytes": 512,
+                "resident_asset_pool_bytes": 4_096,
+                "resident_asset_pool_buffers": 1,
+                "resident_asset_pool_hits": 0,
+                "resident_asset_pool_misses": 1,
                 "mounted_state_digest": _device_digest(b"mounted"),
             }
             status = "mounted"
@@ -105,6 +117,8 @@ class FixtureExecutor:
             payload = {
                 "released": True,
                 "release_duration_ns": 7,
+                "reset_duration_ns": 2,
+                "state_proof_duration_ns": 3,
                 "mounted_state_digest": _device_digest(b"mounted"),
             }
             status = "released"
@@ -220,7 +234,10 @@ def test_resident_component_schedule_trace_excludes_timing_jitter(
     ).to_json()
     session.close()
 
-    assert first["timing"]["execution_ns"] != second["timing"]["execution_ns"]
+    assert (
+        first["default_statistics"]["device_execution_ns"]
+        != second["default_statistics"]["device_execution_ns"]
+    )
     assert (
         first["traces"]["schedule"]["digest"] == second["traces"]["schedule"]["digest"]
     )
@@ -307,6 +324,8 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
             "physical_node_id": "head_norm",
         },
         seeds=(17, 19),
+        step_unit="component_activations",
+        completion_condition="minimum_steps",
         minimum_steps=8,
         output_allowance=None,
         output_allowance_basis={"kind": "unlimited"},
@@ -356,12 +375,25 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         seed=17,
     )
 
-    session = backend.open_session(mount_request)
-    mount = ValidationResidencyEvent.from_json(session.mount_event).to_json()
-    result = ValidationRoleResult.from_json(
-        session.execute(execution_request)
-    ).to_json()
-    unmount = ValidationResidencyEvent.from_json(session.close()).to_json()
+    with backend.validation_stage("sanity"):
+        session = backend.open_session(mount_request)
+        mount = ValidationResidencyEvent.from_json(session.mount_event).to_json()
+        result = ValidationRoleResult.from_json(
+            session.execute(execution_request)
+        ).to_json()
+        unmount = ValidationResidencyEvent.from_json(session.close()).to_json()
+        second_mount = replace(
+            mount_request,
+            seed=19,
+            block_index=1,
+        )
+        second_execution = replace(execution_request, seed=19)
+        second_session = backend.open_session(second_mount)
+        second_session.execute(second_execution)
+        second_session.close()
+        assert executor.closed is False
+        assert executor.factory_calls == 1
+    assert executor.closed is True
     comparison = backend.compare_results(
         {
             "check": check,
@@ -418,6 +450,7 @@ def _adapter_fixture(
     ) -> FixtureExecutor:
         assert command == ("fixture-executor",)
         captured_environment.update(environment)
+        executor.factory_calls += 1
         return executor
 
     monkeypatch.setenv("VK_ICD_FILENAMES", "/forbidden/nvidia.json")
@@ -459,7 +492,7 @@ def _requests(
             "physical_node_id": "head_norm",
         },
         randomness_algorithm="deterministic_fixture_counter",
-        seeds=(17, 19),
+        seeds=(17,),
         deterministic_replay_required=True,
         permit_sampling_variance=False,
         permit_numerical_nondeterminism=False,

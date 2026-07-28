@@ -406,7 +406,7 @@ def _package_metadata(command: Sequence[str]) -> dict[str, Any]:
     return {
         "manifest": str(path),
         "package_id": manifest.get("package_id"),
-        "compiler_fingerprint": manifest.get("compiler_fingerprint"),
+        "package_schema": manifest.get("schema"),
         "compiler_target": manifest.get("compiler_target"),
         "compiled_shader_variant_count": len(shader_paths),
     }

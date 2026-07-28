@@ -39,6 +39,9 @@ from nerve.representation_optimizer.contracts import (
     stable_contract_id,
 )
 from nerve.representation_optimizer.lifecycle import CandidateState
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.staging.contracts import (
     staged_artifact_digest,
 )
@@ -59,11 +62,13 @@ from tests.test_representation_optimizer_contracts import (
 @dataclass
 class AdapterBehavior:
     candidate_duration_ns: int = 800_000
+    candidate_duration_ns_by_execution_phase: dict[str, int] | None = None
+    candidate_measured_durations_ns: tuple[int, ...] | None = None
     reference_duration_ns: int = 1_000_000
-    noisy_candidate: bool = False
     order_biased_candidate: bool = False
     candidate_sustained_regression: bool = False
     candidate_warmup_drift: bool = False
+    candidate_resident_warmup_failures: int = 0
     candidate_initial_warmup_penalty_samples: int = 0
     candidate_initial_noisy_measured_pairs: int = 0
     timeout_count: int = 0
@@ -116,6 +121,14 @@ class FixtureExecutionSession:
         self.adapter = adapter
         self.request = request
         self.closed = False
+        behavior = adapter.behavior
+        self.fail_resident_warmup = (
+            request.role == "candidate"
+            and request.workload["regime"]["mount_mode"] == "resident_reuse"
+            and behavior.candidate_resident_warmup_failures > 0
+        )
+        if self.fail_resident_warmup:
+            behavior.candidate_resident_warmup_failures -= 1
         self.mounted_state = device_state_digest(
             {
                 "fixture_state": "mounted",
@@ -312,20 +325,25 @@ class FixtureExecutionSession:
     def _duration(self, request) -> int:
         behavior = self.adapter.behavior
         duration = (
-            behavior.candidate_duration_ns
+            (
+                behavior.candidate_duration_ns_by_execution_phase or {}
+            ).get(
+                request.workload["regime"]["execution_phase"],
+                behavior.candidate_duration_ns,
+            )
             if request.role == "candidate"
             else behavior.reference_duration_ns
         )
+        if (
+            request.role == "candidate"
+            and request.phase == "measured"
+            and behavior.candidate_measured_durations_ns
+        ):
+            duration = behavior.candidate_measured_durations_ns[
+                request.pair_index % len(behavior.candidate_measured_durations_ns)
+            ]
         jitter = (-2, -1, 0, 1, 2)[request.pair_index % 5]
         duration += jitter * 1_000
-        if (
-            behavior.noisy_candidate
-            and request.role == "candidate"
-            and request.phase == "measured"
-        ):
-            duration = (500_000, 1_500_000, 600_000, 1_400_000, 800_000)[
-                request.pair_index % 5
-            ]
         if behavior.order_biased_candidate and request.role == "candidate":
             duration = (
                 round(duration * 0.60)
@@ -333,7 +351,7 @@ class FixtureExecutionSession:
                 else round(duration * 1.40)
             )
         if (
-            behavior.candidate_warmup_drift
+            (behavior.candidate_warmup_drift or self.fail_resident_warmup)
             and request.role == "candidate"
             and request.phase == "warmup"
         ):
@@ -402,6 +420,7 @@ def _fixture(
     source_session = _session_with_candidate(source_session, candidate_plan)
     construction = stage_candidate(
         package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
         workspace_root=tmp_path / "candidate-workspace",
         plan=candidate_plan,
         session=source_session,
@@ -461,7 +480,7 @@ def _fixture(
     )
 
 
-def test_matched_benchmark_promotes_only_statistical_material_speedup(
+def test_matched_benchmark_promotes_only_measured_material_speedup(
     tmp_path: Path,
 ) -> None:
     _, construction, session, plan, adapter = _fixture(tmp_path)
@@ -477,7 +496,8 @@ def test_matched_benchmark_promotes_only_statistical_material_speedup(
     record = outcome.record.to_json()
     assert record["decision"] == "materially_faster"
     assert all(
-        workload["paired"]["confidence_interval_low_ppm"] > 50_000
+        workload["paired"]["candidate_is_faster"]
+        and workload["paired"]["speedup_ppm"] > 50_000
         for workload in record["workloads"]
     )
     assert record["resource_measurements"]["roles"]["candidate"]["discarded_units"] > 0
@@ -555,17 +575,21 @@ def test_slower_candidate_is_not_materially_faster(tmp_path: Path) -> None:
     ).to_json()
 
     assert record["decision"] == "not_materially_faster"
-    assert record["workloads"][0]["paired"]["geometric_speedup_ppm"] < 0
+    assert all(
+        workload["decision"] == "materially_slower"
+        and workload["paired"]["speedup_ppm"] < 0
+        for workload in record["workloads"]
+    )
     assert {
         outcome["termination"] for outcome in run.to_json()["sampling_outcomes"]
-    } == {"decisive_non_win"}
+    } == {"fixed_sample_complete"}
     assert {
-        outcome["measured_pairs_per_seed"]
+        outcome["measured_calls_per_role"]
         for outcome in run.to_json()["sampling_outcomes"]
-    } == {plan.policy["minimum_measured_pairs_per_seed"]}
+    } == {plan.policy["measured_calls_per_role"]}
 
 
-def test_small_speedup_below_declared_material_floor_does_not_win(
+def test_small_measured_speedup_answers_binary_faster_question(
     tmp_path: Path,
 ) -> None:
     _, construction, _, plan, adapter = _fixture(
@@ -579,44 +603,105 @@ def test_small_speedup_below_declared_material_floor_does_not_win(
         construction_record=construction.record,
     ).to_json()
 
-    assert record["decision"] == "not_materially_faster"
+    assert record["decision"] == "materially_faster"
     assert all(
-        "material-improvement floor" in reason
+        workload["decision"] == "materially_faster"
+        and any(
+            "execution is faster" in reason
+            for reason in workload["reasons"]
+        )
         for workload in record["workloads"]
-        for reason in workload["reasons"]
+    )
+    assert {
+        outcome["termination"] for outcome in run.to_json()["sampling_outcomes"]
+    } == {"fixed_sample_complete"}
+
+
+def test_one_material_win_and_one_equivalent_regime_is_a_pareto_win(
+    tmp_path: Path,
+) -> None:
+    _, construction, _, plan, adapter = _fixture(
+        tmp_path,
+        AdapterBehavior(
+            candidate_duration_ns_by_execution_phase={
+                "decode": 800_000,
+                "prefill": 1_000_000,
+            }
+        ),
+    )
+    run = execute_benchmark_plan(plan, adapter)
+    record = summarize_benchmark(
+        plan=plan,
+        run=run,
+        construction_record=construction.record,
+    ).to_json()
+
+    assert record["decision"] == "materially_faster"
+    assert {
+        workload["decision"] for workload in record["workloads"]
+    } == {"materially_faster", "performance_equivalent"}
+    assert {
+        outcome["termination"] for outcome in run.to_json()["sampling_outcomes"]
+    } == {"fixed_sample_complete"}
+    assert all(
+        outcome["measured_calls_per_role"]
+        == plan.policy["measured_calls_per_role"]
+        for outcome in run.to_json()["sampling_outcomes"]
     )
 
 
-def test_nonstationary_warmup_is_inconclusive(tmp_path: Path) -> None:
+def test_binary_decision_uses_one_measured_call_per_role(
+    tmp_path: Path,
+) -> None:
     _, construction, _, plan, adapter = _fixture(
+        tmp_path,
+        AdapterBehavior(
+            candidate_measured_durations_ns=(300_000,),
+        ),
+    )
+    run = execute_benchmark_plan(plan, adapter)
+    record = summarize_benchmark(
+        plan=plan,
+        run=run,
+        construction_record=construction.record,
+    ).to_json()
+
+    assert record["decision"] == "materially_faster"
+    assert all(
+        workload["decision"] == "materially_faster"
+        and workload["paired"]["speedup_ppm"] > 0
+        and workload["paired"]["candidate_is_faster"]
+        and workload["sample_count_per_role"] == 1
+        for workload in record["workloads"]
+    )
+
+
+def test_fixed_warmup_is_discarded_without_adaptive_sampling(tmp_path: Path) -> None:
+    _, _, _, plan, adapter = _fixture(
         tmp_path,
         AdapterBehavior(candidate_warmup_drift=True),
     )
-    run = execute_benchmark_plan(plan, adapter)
-    record = summarize_benchmark(
-        plan=plan,
-        run=run,
-        construction_record=construction.record,
-    ).to_json()
+    run = execute_benchmark_plan(plan, adapter).to_json()
 
-    assert record["decision"] == "inconclusive"
-    assert any(
-        "warmup did not converge" in reason for reason in record["decision_reasons"]
-    )
-    outcomes = run.to_json()["sampling_outcomes"]
-    assert {outcome["termination"] for outcome in outcomes} == {"warmup_exhausted"}
+    assert run["status"] == "completed"
+    assert run["sampling_outcomes"]
+    assert {
+        observation["phase"] for observation in run["observations"]
+    } == {"warmup", "measured"}
     assert all(
-        group["sample_count"] == plan.policy["maximum_warmup_samples"]
-        for outcome in outcomes
+        group["sample_count"] == 1
+        for outcome in run["sampling_outcomes"]
         for group in outcome["warmup_groups"]
-        if group["role"] == "candidate"
     )
+    assert adapter.closed_sessions == len(adapter.mount_requests)
 
 
-def test_noisy_candidate_is_inconclusive(tmp_path: Path) -> None:
+def test_microbenchmark_never_retries_a_resident_block(
+    tmp_path: Path,
+) -> None:
     _, construction, _, plan, adapter = _fixture(
         tmp_path,
-        AdapterBehavior(noisy_candidate=True),
+        AdapterBehavior(candidate_resident_warmup_failures=1),
     )
     run = execute_benchmark_plan(plan, adapter)
     record = summarize_benchmark(
@@ -625,18 +710,43 @@ def test_noisy_candidate_is_inconclusive(tmp_path: Path) -> None:
         construction_record=construction.record,
     ).to_json()
 
-    assert record["decision"] == "inconclusive"
-    assert any("confidence interval" in reason for reason in record["decision_reasons"])
-    assert {
-        outcome["measured_pairs_per_seed"]
+    assert run.to_json()["status"] == "completed"
+    assert record["decision"] == "materially_faster"
+    groups = [
+        group
         for outcome in run.to_json()["sampling_outcomes"]
-    } == {plan.policy["maximum_measured_pairs_per_seed"]}
+        for group in outcome["warmup_groups"]
+    ]
+    assert groups
+    assert {group["attempt_index"] for group in groups} == {0}
+    assert {group["sample_count"] for group in groups} == {1}
+    # One resident and one cold workload: warmup plus measurement for both roles.
+    assert len(adapter.execution_requests) == 8
+
+
+def test_binary_screen_rejects_candidate_that_is_not_faster(tmp_path: Path) -> None:
+    _, construction, _, plan, adapter = _fixture(
+        tmp_path,
+        AdapterBehavior(candidate_measured_durations_ns=(1_050_000,)),
+    )
+    run = execute_benchmark_plan(plan, adapter)
+    record = summarize_benchmark(
+        plan=plan,
+        run=run,
+        construction_record=construction.record,
+    ).to_json()
+
+    assert record["decision"] == "not_materially_faster"
+    assert {
+        outcome["measured_calls_per_role"]
+        for outcome in run.to_json()["sampling_outcomes"]
+    } == {plan.policy["measured_calls_per_role"]}
     assert {
         outcome["termination"] for outcome in run.to_json()["sampling_outcomes"]
-    } == {"evidence_budget_exhausted"}
+    } == {"fixed_sample_complete"}
 
 
-def test_adaptive_warmup_discards_initial_cold_sample(
+def test_one_fixed_cold_warmup_is_discarded(
     tmp_path: Path,
 ) -> None:
     _, construction, _, plan, adapter = _fixture(
@@ -658,14 +768,11 @@ def test_adaptive_warmup_discards_initial_cold_sample(
     ]
     assert candidate_groups
     assert all(group["converged"] for group in candidate_groups)
-    assert all(
-        group["sample_count"] > plan.policy["minimum_warmup_samples"]
-        for group in candidate_groups
-    )
+    assert {group["sample_count"] for group in candidate_groups} == {1}
     assert record["decision"] == "materially_faster"
 
 
-def test_adaptive_sampling_extends_past_noisy_initial_cycle(
+def test_microbenchmark_always_stops_after_one_measured_call(
     tmp_path: Path,
 ) -> None:
     _, construction, _, plan, adapter = _fixture(
@@ -683,21 +790,18 @@ def test_adaptive_sampling_extends_past_noisy_initial_cycle(
     ).to_json()
 
     measured_counts = {
-        outcome["measured_pairs_per_seed"]
+        outcome["measured_calls_per_role"]
         for outcome in run.to_json()["sampling_outcomes"]
     }
-    assert min(measured_counts) > plan.policy["minimum_measured_pairs_per_seed"]
-    assert max(measured_counts) <= plan.policy["maximum_measured_pairs_per_seed"]
+    assert measured_counts == {plan.policy["measured_calls_per_role"]}
     assert record["decision"] == "materially_faster"
 
 
-def test_measured_pairs_are_temporally_counterbalanced(
+def test_measured_calls_use_one_declared_order(
     tmp_path: Path,
 ) -> None:
     _, _, _, plan, adapter = _fixture(tmp_path)
     run = execute_benchmark_plan(plan, adapter).to_json()
-    block_width = plan.policy["measured_pairs_per_block"]
-
     for workload_index, workload in enumerate(plan.to_json()["workloads"]):
         outcome = next(
             item
@@ -716,15 +820,14 @@ def test_measured_pairs_are_temporally_counterbalanced(
                 ),
                 key=lambda observation: observation["pair_index"],
             )
-            assert len(references) == outcome["measured_pairs_per_seed"]
+            assert len(references) == outcome["measured_calls_per_role"]
             for observation in references:
-                order_block = (observation["pair_index"] // block_width) % 2
                 expected = (
                     (
                         "reference",
                         "candidate",
                     )
-                    if (workload_index + seed_index + order_block) % 2 == 0
+                    if (workload_index + seed_index) % 2 == 0
                     else (
                         "candidate",
                         "reference",
@@ -733,7 +836,9 @@ def test_measured_pairs_are_temporally_counterbalanced(
                 assert observation["order_index"] == expected.index("reference")
 
 
-def test_counterbalanced_order_bias_is_inconclusive(tmp_path: Path) -> None:
+def test_binary_microbenchmark_does_not_multiply_requests_for_order_statistics(
+    tmp_path: Path,
+) -> None:
     _, construction, _, plan, adapter = _fixture(
         tmp_path,
         AdapterBehavior(order_biased_candidate=True),
@@ -745,8 +850,15 @@ def test_counterbalanced_order_bias_is_inconclusive(tmp_path: Path) -> None:
         construction_record=construction.record,
     ).to_json()
 
-    assert record["decision"] == "inconclusive"
-    assert record["workloads"][0]["paired"]["order_bias_ppm"] > 75_000
+    assert record["decision"] in {
+        "materially_faster",
+        "not_materially_faster",
+    }
+    assert all(
+        workload["sample_count_per_role"] == 1
+        for workload in record["workloads"]
+    )
+    assert len(adapter.execution_requests) == 8
 
 
 def test_sustained_throughput_regression_is_inconclusive(
@@ -785,7 +897,7 @@ def test_default_runtime_timeout_counter_invalidates_benchmark(
     assert record["resource_measurements"]["roles"]["candidate"]["timeout_count"] > 0
 
 
-def test_fixed_seed_trace_divergence_is_a_correctness_defect(
+def test_microbenchmark_defers_trace_correctness_to_behavioral_validation(
     tmp_path: Path,
 ) -> None:
     _, construction, _, plan, adapter = _fixture(
@@ -799,38 +911,31 @@ def test_fixed_seed_trace_divergence_is_a_correctness_defect(
         construction_record=construction.record,
     ).to_json()
 
-    assert record["decision"] == "invalid"
-    assert any(
-        item["role"] == "candidate" and item["classification"] == "correctness_defect"
-        for item in record["reproducibility"]
-    )
+    assert record["decision"] == "materially_faster"
+    assert record["reproducibility"] == []
 
 
 @pytest.mark.parametrize(
-    ("behavior", "randomness_flag", "expected"),
+    ("behavior", "randomness_flag"),
     (
         (
             AdapterBehavior(speculative_schedule_variance=True),
             "permit_speculative_schedule_variance",
-            "speculative_scheduling",
         ),
         (
             AdapterBehavior(sampling_variance=True),
             "permit_sampling_variance",
-            "permitted_sampling_variance",
         ),
         (
             AdapterBehavior(numerical_variance=True),
             "permit_numerical_nondeterminism",
-            "numerical_nondeterminism",
         ),
     ),
 )
-def test_permitted_fixed_seed_variance_is_classified_from_raw_traces(
+def test_microbenchmark_retains_raw_traces_without_extra_repetitions(
     tmp_path: Path,
     behavior: AdapterBehavior,
     randomness_flag: str,
-    expected: str,
 ) -> None:
     _, construction, _, plan, adapter = _fixture(
         tmp_path,
@@ -844,12 +949,29 @@ def test_permitted_fixed_seed_variance_is_classified_from_raw_traces(
         construction_record=construction.record,
     ).to_json()
 
-    candidate_groups = [
-        group for group in record["reproducibility"] if group["role"] == "candidate"
-    ]
-    assert candidate_groups
-    assert {group["classification"] for group in candidate_groups} == {expected}
+    assert record["reproducibility"] == []
+    assert record["raw_evidence"]["trace_artifact_count"] > 0
     assert record["decision"] == "materially_faster"
+
+
+def test_microbenchmark_fails_when_one_minute_contract_is_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, _, plan, adapter = _fixture(tmp_path)
+    clock = iter((0, 1, 2, 60_000_000_001))
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.benchmarking.runner.time.monotonic_ns",
+        lambda: next(clock),
+    )
+
+    run = execute_benchmark_plan(plan, adapter).to_json()
+
+    assert run["status"] == "timeout"
+    assert run["diagnostics"] == [
+        "microbenchmark exceeded its one-minute wall-clock contract"
+    ]
+    assert adapter.closed_sessions == len(adapter.mount_requests) == 1
 
 
 def test_fixture_bytes_are_verified_before_any_implementation_mount(

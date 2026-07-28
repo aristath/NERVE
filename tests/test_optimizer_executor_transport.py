@@ -7,6 +7,7 @@ import pytest
 
 from nerve.compilation import ModelCompileCancelled
 from nerve.representation_optimizer.benchmarking.executor_transport import (
+    EXECUTOR_PROGRESS_SCHEMA,
     SubprocessExecutorTransport,
 )
 
@@ -64,3 +65,43 @@ def test_subprocess_transport_preserves_line_framing() -> None:
     }
     transport.close()
     assert transport.process.returncode == 0
+
+
+def test_subprocess_transport_delivers_ordered_progress_before_final_response() -> None:
+    transport = SubprocessExecutorTransport(
+        (
+            sys.executable,
+            "-u",
+            "-c",
+            (
+                "import json, sys; "
+                "request = json.loads(sys.stdin.buffer.readline()); "
+                f"schema = {EXECUTOR_PROGRESS_SCHEMA!r}; "
+                "events = ["
+                "{'schema': schema, 'request_id': request['request_id'], "
+                "'sequence': 0, 'payload': {'tokens': 32}},"
+                "{'schema': schema, 'request_id': request['request_id'], "
+                "'sequence': 1, 'payload': {'tokens': 64}},"
+                "{'schema': 'final', 'request_id': request['request_id']}]; "
+                "[print(json.dumps(event), flush=True) for event in events]; "
+                "sys.stdin.buffer.read()"
+            ),
+        ),
+        {},
+    )
+    progress = []
+
+    response = transport.request(
+        {"request_id": "progress-request"},
+        progress_received=progress.append,
+    )
+
+    assert [event["payload"]["tokens"] for event in progress] == [
+        32,
+        64,
+    ]
+    assert response == {
+        "schema": "final",
+        "request_id": "progress-request",
+    }
+    transport.close()

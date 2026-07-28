@@ -570,6 +570,18 @@ class ResidentComponentExecutionSession:
                 "action": action,
                 "physical_device_id": self.mount_payload["physical_device_id"],
                 "logical_device_id": self.mount_payload["logical_device_id"],
+                "resident_asset_pool_bytes": self.mount_payload[
+                    "resident_asset_pool_bytes"
+                ],
+                "resident_asset_pool_buffers": self.mount_payload[
+                    "resident_asset_pool_buffers"
+                ],
+                "resident_asset_pool_hits": self.mount_payload[
+                    "resident_asset_pool_hits"
+                ],
+                "resident_asset_pool_misses": self.mount_payload[
+                    "resident_asset_pool_misses"
+                ],
             },
         }
         document["event_id"] = benchmark_residency_event_id(document)

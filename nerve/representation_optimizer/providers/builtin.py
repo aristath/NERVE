@@ -7,6 +7,8 @@ from nerve.representation_optimizer.descriptor_registry import (
 )
 from nerve.representation_optimizer.providers.codebook import (
     CodebookToolchainResolver,
+    EmbeddedParameterProgramToolchainResolver,
+    ExactEmbeddedHeadNormParameterProgramProvider,
     ExactHeadNormCodebookProvider,
 )
 from nerve.representation_optimizer.providers.registry import ProviderRegistry
@@ -18,7 +20,10 @@ def load_builtin_provider_registry(
 ) -> ProviderRegistry:
     return ProviderRegistry.from_providers(
         descriptors=descriptors or load_builtin_representation_descriptors(),
-        providers=(ExactHeadNormCodebookProvider(),),
+        providers=(
+            ExactEmbeddedHeadNormParameterProgramProvider(),
+            ExactHeadNormCodebookProvider(),
+        ),
     )
 
 
@@ -26,7 +31,10 @@ class BuiltinCandidateToolchainResolver:
     """Resolve built-in provider plans without model-family dispatch."""
 
     def __init__(self) -> None:
-        self._resolvers = (CodebookToolchainResolver(),)
+        self._resolvers = (
+            CodebookToolchainResolver(),
+            EmbeddedParameterProgramToolchainResolver(),
+        )
 
     def resolve(self, plan: ProviderCandidatePlan):
         failures = []

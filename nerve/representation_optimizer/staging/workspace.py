@@ -9,6 +9,9 @@ from typing import Callable, Iterable, Iterator
 
 from nerve.compilation import Json, ModelCompileCancelled, ModelCompileError
 from nerve.representation_optimizer.contracts import canonical_json_bytes
+from nerve.representation_optimizer.providers.source_artifacts import (
+    PackageSourceArtifactResolver,
+)
 from nerve.representation_optimizer.staging.contracts import (
     CONSTRUCTION_PHASES,
     STAGED_ARTIFACT_DIGEST_SCHEMA,
@@ -29,6 +32,7 @@ class CandidateConstructionContext:
         representation_graph: Json,
         target_lowering: Json,
         build_plan: CandidateBuildPlan,
+        source_artifacts: PackageSourceArtifactResolver,
         started_ns: int,
         cancel_requested: Callable[[], bool] | None,
     ) -> None:
@@ -38,6 +42,7 @@ class CandidateConstructionContext:
         self._representation_graph = deepcopy(representation_graph)
         self._target_lowering = deepcopy(target_lowering)
         self._build_plan = build_plan
+        self._source_artifacts = source_artifacts
         self._started_ns = started_ns
         self._cancel_requested = cancel_requested
         self._phase: str | None = None
@@ -176,33 +181,26 @@ class CandidateConstructionContext:
             raise ModelCompileError(
                 "candidate source region read requires at least one region"
             )
-        buffers = [bytearray() for _ in requested]
-        cursor = 0
-        for chunk in self.iter_source_artifact(
+        expected = self._declared_sources.get(relative_path)
+        if expected is None:
+            raise ModelCompileError(
+                f"candidate attempted to read undeclared source artifact "
+                f"{relative_path!r}"
+            )
+        artifact = self._source_artifacts.resolve_path(relative_path)
+        if artifact.digest != expected:
+            raise ModelCompileError(
+                f"candidate source artifact digest mismatch: "
+                f"{relative_path!r}"
+            )
+        self.checkpoint()
+        payloads = self._source_artifacts.read_path_regions(
             relative_path,
-            chunk_bytes=chunk_bytes,
-        ):
-            chunk_end = cursor + len(chunk)
-            for index, (offset, byte_count) in enumerate(requested):
-                end = offset + byte_count
-                overlap_start = max(cursor, offset)
-                overlap_end = min(chunk_end, end)
-                if overlap_start < overlap_end:
-                    buffers[index].extend(
-                        chunk[
-                            overlap_start - cursor : overlap_end - cursor
-                        ]
-                    )
-            cursor = chunk_end
-        for index, ((offset, byte_count), payload) in enumerate(
-            zip(requested, buffers, strict=True)
-        ):
-            if len(payload) != byte_count:
-                raise ModelCompileError(
-                    f"candidate source region {index} exceeds artifact "
-                    f"{relative_path!r} at offset {offset}"
-                )
-        return tuple(bytes(payload) for payload in buffers)
+            requested,
+        )
+        self._read_sources.add(relative_path)
+        self.checkpoint()
+        return payloads
 
     def read_source_artifact_region(
         self,
@@ -268,6 +266,14 @@ class CandidateConstructionContext:
         if not isinstance(payload, bytes):
             raise ModelCompileError("candidate artifact payload must be bytes")
         self.write_artifact_stream(relative_path, (payload,))
+
+    def artifact_reference(self, relative_path: str) -> str:
+        """Return the candidate-root-relative reference for one output."""
+        if relative_path not in self._declared_outputs:
+            raise ModelCompileError(
+                f"candidate referenced undeclared artifact {relative_path!r}"
+            )
+        return relative_path
 
     def write_artifact_stream(
         self,
