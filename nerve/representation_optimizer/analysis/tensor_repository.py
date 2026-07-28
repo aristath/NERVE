@@ -194,10 +194,38 @@ class PackageTensorRepository:
             and quantization.get("format") == "compressed_tensors_pack_quantized"
             and int(quantization.get("bits", 0)) == 4
         ):
-            values = self._decode_int4(info, logical_shape, quantization)
-            return (_select(values, indices), True)
+            return (
+                self._decode_compressed_int4(
+                    info,
+                    logical_shape,
+                    quantization,
+                    indices,
+                ),
+                True,
+            )
+        if (
+            dtype == "I32"
+            and isinstance(quantization, dict)
+            and quantization.get("format") == "auto_gptq"
+            and int(quantization.get("bits", 0)) == 4
+        ):
+            return (
+                self._decode_auto_gptq_int4(
+                    info,
+                    logical_shape,
+                    quantization,
+                    indices,
+                ),
+                True,
+            )
 
         storage_shape = tuple(int(value) for value in info.get("shape", []))
+        if storage_shape != logical_shape:
+            raise ModelCompileError(
+                f"analysis has no decoder for dtype {dtype!r}, quantization "
+                f"{quantization!r}, storage shape {storage_shape}, and logical "
+                f"shape {logical_shape}"
+            )
         raw = self._memmap(info, dtype, storage_shape)
         selected = _select(raw, indices)
         if dtype == "BF16":
@@ -294,36 +322,149 @@ class PackageTensorRepository:
         quantized = blocks[:, 4:].copy().view(np.int8).astype(np.float32)
         return (quantized * scales).reshape(logical_shape)
 
-    def _decode_int4(
+    def _decode_compressed_int4(
         self,
         info: Json,
         logical_shape: tuple[int, ...],
         quantization: Json,
+        indices: tuple[tuple[int, ...], ...],
     ) -> np.ndarray:
+        if len(logical_shape) < 2:
+            raise ModelCompileError(
+                "compressed-tensors INT4 analysis requires a rank-2 or higher tensor"
+            )
         storage_shape = tuple(int(value) for value in info["shape"])
-        packed = np.asarray(self._memmap(info, "I32", storage_shape), dtype=np.uint32)
-        shifts = np.arange(8, dtype=np.uint32) * np.uint32(4)
-        unpacked = ((packed[..., None] >> shifts) & np.uint32(0x0F)).astype(np.int16)
-        unpacked -= int(quantization.get("signed_offset", 8))
-        values = unpacked.reshape(logical_shape).astype(np.float32)
+        expected_storage_shape = (
+            *logical_shape[:-1],
+            (logical_shape[-1] + 7) // 8,
+        )
+        if storage_shape != expected_storage_shape:
+            raise ModelCompileError(
+                "compressed-tensors INT4 storage shape "
+                f"{storage_shape} does not encode logical shape {logical_shape}"
+            )
+        logical_indices = _logical_indices(logical_shape, indices)
+        packed_indices = (
+            *logical_indices[:-1],
+            logical_indices[-1] // 8,
+        )
+        packed = np.asarray(
+            self._memmap(info, "I32", storage_shape)[np.ix_(*packed_indices)],
+            dtype=np.uint32,
+        )
+        shifts = (logical_indices[-1] % 8) * np.uint32(4)
+        shifts = shifts.reshape((1,) * (len(logical_shape) - 1) + (-1,))
+        values = ((packed >> shifts) & np.uint32(0x0F)).astype(np.int16)
+        values -= int(quantization.get("signed_offset", 8))
         scale_name = quantization.get("scales")
         if not isinstance(scale_name, str) or scale_name not in self._tensors:
-            return values
+            raise ModelCompileError(
+                "compressed-tensors INT4 analysis requires its scale tensor"
+            )
         scale_info = self._tensors[scale_name]
         scale_shape = tuple(int(value) for value in scale_info["shape"])
+        group_size = int(quantization.get("group_size", 0))
+        expected_scale_shape = (
+            *logical_shape[:-1],
+            (logical_shape[-1] + group_size - 1) // group_size,
+        ) if group_size > 0 else ()
+        if group_size <= 0 or scale_shape != expected_scale_shape:
+            raise ModelCompileError(
+                "compressed-tensors INT4 scale shape "
+                f"{scale_shape} is incompatible with logical shape "
+                f"{logical_shape} and group size {group_size}"
+            )
         raw_scales = self._memmap(
             scale_info,
             str(scale_info["dtype"]),
             scale_shape,
         )
-        scales = (
-            _bf16_to_f32(raw_scales)
-            if scale_info["dtype"] == "BF16"
-            else np.asarray(raw_scales, dtype=np.float32)
+        scale_indices = (
+            *logical_indices[:-1],
+            logical_indices[-1] // group_size,
         )
-        group_size = int(quantization["group_size"])
-        expanded = np.repeat(scales, group_size, axis=-1)
-        return values * expanded[..., : logical_shape[-1]]
+        scales = _to_f32(
+            raw_scales[np.ix_(*scale_indices)],
+            str(scale_info["dtype"]),
+        )
+        return values.astype(np.float32) * scales
+
+    def _decode_auto_gptq_int4(
+        self,
+        info: Json,
+        logical_shape: tuple[int, ...],
+        quantization: Json,
+        indices: tuple[tuple[int, ...], ...],
+    ) -> np.ndarray:
+        if len(logical_shape) != 2:
+            raise ModelCompileError("AutoGPTQ INT4 analysis requires a rank-2 tensor")
+        output_features, input_features = logical_shape
+        storage_shape = tuple(int(value) for value in info["shape"])
+        expected_storage_shape = ((input_features + 7) // 8, output_features)
+        if storage_shape != expected_storage_shape:
+            raise ModelCompileError(
+                f"AutoGPTQ INT4 storage shape {storage_shape} does not encode "
+                f"logical shape {logical_shape}"
+            )
+        group_size = int(quantization.get("group_size", 0))
+        if group_size <= 0:
+            raise ModelCompileError("AutoGPTQ INT4 group size must be positive")
+        group_count = (input_features + group_size - 1) // group_size
+        qzeros_name = quantization.get("qzeros")
+        scales_name = quantization.get("scales")
+        if (
+            not isinstance(qzeros_name, str)
+            or qzeros_name not in self._tensors
+            or not isinstance(scales_name, str)
+            or scales_name not in self._tensors
+        ):
+            raise ModelCompileError(
+                "AutoGPTQ INT4 analysis requires zero-point and scale tensors"
+            )
+        qzeros_info = self._tensors[qzeros_name]
+        scales_info = self._tensors[scales_name]
+        qzeros_shape = tuple(int(value) for value in qzeros_info["shape"])
+        scales_shape = tuple(int(value) for value in scales_info["shape"])
+        expected_qzeros_shape = (group_count, (output_features + 7) // 8)
+        expected_scales_shape = (group_count, output_features)
+        if (
+            str(qzeros_info.get("dtype")) != "I32"
+            or qzeros_shape != expected_qzeros_shape
+            or scales_shape != expected_scales_shape
+        ):
+            raise ModelCompileError(
+                "AutoGPTQ INT4 auxiliary tensors are incompatible with logical "
+                f"shape {logical_shape}: qzeros={qzeros_shape}, scales={scales_shape}"
+            )
+
+        output_indices, input_indices = _logical_indices(logical_shape, indices)
+        input_groups = input_indices // group_size
+        packed = np.asarray(
+            self._memmap(info, "I32", storage_shape)[
+                np.ix_(input_indices // 8, output_indices)
+            ],
+            dtype=np.uint32,
+        )
+        weight_shifts = ((input_indices % 8) * np.uint32(4))[:, None]
+        quantized = ((packed >> weight_shifts) & np.uint32(0x0F)).astype(np.int16)
+
+        qzeros = np.asarray(
+            self._memmap(qzeros_info, "I32", qzeros_shape)[
+                np.ix_(input_groups, output_indices // 8)
+            ],
+            dtype=np.uint32,
+        )
+        zero_shifts = ((output_indices % 8) * np.uint32(4))[None, :]
+        zero_points = ((qzeros >> zero_shifts) & np.uint32(0x0F)).astype(np.int16)
+        zero_points += int(quantization.get("zero_point_add", 0))
+
+        raw_scales = self._memmap(
+            scales_info,
+            str(scales_info["dtype"]),
+            scales_shape,
+        )[np.ix_(input_groups, output_indices)]
+        scales = _to_f32(raw_scales, str(scales_info["dtype"]))
+        return ((quantized - zero_points).astype(np.float32) * scales).T
 
     def _memmap_bytes(self, info: Json) -> np.memmap:
         source_ref = info.get("source_file")
@@ -387,6 +528,20 @@ def _select(
     return np.asarray(values[np.ix_(*indices)])
 
 
+def _logical_indices(
+    logical_shape: tuple[int, ...],
+    indices: tuple[tuple[int, ...], ...],
+) -> tuple[np.ndarray, ...]:
+    if indices and len(indices) != len(logical_shape):
+        raise ModelCompileError(
+            "analysis sample index rank does not match the logical tensor rank"
+        )
+    selected = indices or tuple(
+        tuple(range(dimension)) for dimension in logical_shape
+    )
+    return tuple(np.asarray(axis, dtype=np.int64) for axis in selected)
+
+
 def _scale_indices(
     logical_shape: tuple[int, ...],
     scale_shape: tuple[int, ...],
@@ -409,6 +564,16 @@ def _scale_indices(
             tuple(min(value // block, scale_dimension - 1) for value in selected)
         )
     return tuple(result)
+
+
+def _to_f32(values: np.ndarray, dtype: str) -> np.ndarray:
+    if dtype == "BF16":
+        return _bf16_to_f32(values)
+    if dtype in {"F16", "F32", "F64"}:
+        return np.asarray(values, dtype=np.float32)
+    raise ModelCompileError(
+        f"analysis cannot decode quantization scale dtype {dtype!r}"
+    )
 
 
 def _bf16_to_f32(values: np.ndarray) -> np.ndarray:

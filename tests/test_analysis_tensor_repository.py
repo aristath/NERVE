@@ -203,6 +203,107 @@ def test_package_repository_decodes_group_scaled_int4(tmp_path: Path):
     np.testing.assert_array_equal(observed.values, expected)
 
 
+def test_package_repository_decodes_and_samples_autogptq_int4(tmp_path: Path):
+    output_features = 10
+    input_features = 16
+    group_size = 4
+    group_count = input_features // group_size
+    quantized = np.fromfunction(
+        lambda output, input_: (output * 3 + input_ * 5) % 16,
+        (output_features, input_features),
+        dtype=int,
+    ).astype(np.uint32)
+    zero_points = np.fromfunction(
+        lambda group, output: 1 + (group * 2 + output) % 8,
+        (group_count, output_features),
+        dtype=int,
+    ).astype(np.uint32)
+    scales = np.fromfunction(
+        lambda group, output: (group + 1) * (output + 1) / 16,
+        (group_count, output_features),
+        dtype=float,
+    ).astype(np.float16)
+
+    qweight = np.zeros((input_features // 8, output_features), dtype=np.uint32)
+    for input_index in range(input_features):
+        qweight[input_index // 8] |= (
+            quantized[:, input_index]
+            << np.uint32((input_index % 8) * 4)
+        )
+    qzeros = np.zeros(
+        (group_count, (output_features + 7) // 8),
+        dtype=np.uint32,
+    )
+    for output_index in range(output_features):
+        qzeros[:, output_index // 8] |= (
+            (zero_points[:, output_index] - 1)
+            << np.uint32((output_index % 8) * 4)
+        )
+
+    repository = _package(
+        tmp_path,
+        [
+            (
+                "qweight",
+                "I32",
+                list(qweight.shape),
+                qweight.astype("<u4").tobytes(),
+                {
+                    "logical_shape": [output_features, input_features],
+                    "quantization": {
+                        "format": "auto_gptq",
+                        "bits": 4,
+                        "group_size": group_size,
+                        "symmetric": True,
+                        "zero_point_add": 1,
+                        "qzeros": "qzeros",
+                        "scales": "scales",
+                    },
+                },
+            ),
+            (
+                "qzeros",
+                "I32",
+                list(qzeros.shape),
+                qzeros.astype("<u4").tobytes(),
+                {},
+            ),
+            (
+                "scales",
+                "F16",
+                list(scales.shape),
+                scales.astype("<f2").tobytes(),
+                {},
+            ),
+        ],
+    )
+    expected = np.empty((output_features, input_features), dtype=np.float32)
+    for input_index in range(input_features):
+        group = input_index // group_size
+        expected[:, input_index] = (
+            quantized[:, input_index].astype(np.float32)
+            - zero_points[group].astype(np.float32)
+        ) * scales[group].astype(np.float32)
+
+    exhaustive = repository.observe(
+        "qweight",
+        exhaustive_element_limit=None,
+        sampled_element_limit=160,
+    )
+    np.testing.assert_array_equal(exhaustive.values, expected)
+
+    sampled = repository.observe(
+        "qweight",
+        exhaustive_element_limit=1,
+        sampled_element_limit=15,
+    )
+    assert sampled.exhaustive is False
+    np.testing.assert_array_equal(
+        sampled.values,
+        expected[np.ix_(*sampled.sample_indices)],
+    )
+
+
 def test_package_repository_sampling_is_deterministic_and_declared(tmp_path: Path):
     values = np.arange(64, dtype=np.float32).reshape(8, 8)
     repository = _package(
