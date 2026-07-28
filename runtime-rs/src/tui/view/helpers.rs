@@ -238,6 +238,8 @@ mod tests {
                         },
                         "execution": {
                             "phases": ["decode", "prefill"],
+                            "alternative_phases": ["decode", "prefill"],
+                            "source_retained_phases": [],
                             "activation_batch": {
                                 "minimum": 1,
                                 "maximum": 65536

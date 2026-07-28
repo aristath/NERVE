@@ -134,11 +134,7 @@ mod tests {
         assert!(error.0.contains("must stay inside the package"));
 
         std::fs::create_dir_all(root.join("weights")).unwrap();
-        std::fs::write(
-            root.join("weights/weight.safetensors"),
-            b"fixture",
-        )
-        .unwrap();
+        std::fs::write(root.join("weights/weight.safetensors"), b"fixture").unwrap();
         std::fs::write(
             &index_path,
             serde_json::to_vec(&serde_json::json!({
@@ -220,14 +216,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
             vec![Some(vec![5120]), Some(vec![40])]
         );
     }
@@ -272,19 +261,8 @@ mod tests {
         )]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
-            vec![
-                Some(vec![5120]),
-                Some(vec![5120]),
-                Some(vec![40]),
-            ]
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
+            vec![Some(vec![5120]), Some(vec![5120]), Some(vec![40]),]
         );
     }
 
@@ -325,9 +303,8 @@ mod tests {
             },
         )]);
 
-        let error =
-            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None)
-                .unwrap_err();
+        let error = infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None)
+            .unwrap_err();
         assert!(error.0.contains("4096 elements"));
         assert!(error.0.contains("shape Some([5120])"));
     }
@@ -431,10 +408,7 @@ mod tests {
             id: "codebook_head_norm_rope".to_string(),
             op: "parallel_head_norm_rope_2way_codebook_u8".to_string(),
             inputs: vec!["query".to_string(), "key".to_string()],
-            outputs: vec![
-                "positioned_query".to_string(),
-                "positioned_key".to_string(),
-            ],
+            outputs: vec!["positioned_query".to_string(), "positioned_key".to_string()],
             params: vec![
                 "query_addresses".to_string(),
                 "key_addresses".to_string(),
@@ -459,30 +433,27 @@ mod tests {
         ]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "attention",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("attention", &node, &signals, &BTreeMap::new(), None,)
+                .unwrap(),
+            vec![Some(vec![6144]), Some(vec![1024])]
+        );
+
+        let mut embedded = node.clone();
+        embedded.op = "parallel_head_norm_rope_2way_embedded_parameters".to_string();
+        embedded.params.clear();
+        assert_eq!(
+            infer_node_output_shapes("attention", &embedded, &signals, &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![6144]), Some(vec![1024])]
         );
 
         let mut invalid = node;
         invalid.params.pop();
         assert!(
-            infer_node_output_shapes(
-                "attention",
-                &invalid,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap_err()
-            .0
-            .contains("3 parameters")
+            infer_node_output_shapes("attention", &invalid, &signals, &BTreeMap::new(), None,)
+                .unwrap_err()
+                .0
+                .contains("3 parameters")
         );
     }
 
@@ -763,7 +734,8 @@ mod tests {
 
     #[test]
     fn plans_fixture_model_lowered_execution_graph_activation_schedule() {
-        let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let graph =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
 
         let plan = StreamCircuitExecutionPlan::from_graph(&graph).unwrap();
 
@@ -817,7 +789,8 @@ mod tests {
 
     #[test]
     fn tensor_index_enables_fixture_model_signal_shape_planning() {
-        let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let graph =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
 
         let plan = StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index)
@@ -836,10 +809,7 @@ mod tests {
             layer_00.signal("q_projected").unwrap().shape,
             Some(vec![16])
         );
-        assert_eq!(
-            layer_00.signal("k_projected").unwrap().shape,
-            Some(vec![8])
-        );
+        assert_eq!(layer_00.signal("k_projected").unwrap().shape, Some(vec![8]));
         assert_eq!(layer_00.signal("k_memory").unwrap().shape, None);
         assert_eq!(
             layer_00.signal("k_memory").unwrap().storage,
@@ -901,7 +871,8 @@ mod tests {
 
     #[test]
     fn resource_plan_names_fixture_model_mount_resources() {
-        let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let graph =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let execution_plan = StreamCircuitExecutionPlan::from_graph(&graph).unwrap();
 
         let resource_plan =
@@ -1004,7 +975,8 @@ mod tests {
 
     #[test]
     fn resource_plan_rejects_mismatched_execution_plan() {
-        let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let graph =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let mut execution_plan = StreamCircuitExecutionPlan::from_graph(&graph).unwrap();
         execution_plan.circuits.pop();
 
@@ -1016,7 +988,8 @@ mod tests {
 
     #[test]
     fn activation_plan_tracks_signal_producers_and_consumers() {
-        let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let graph =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let plan = StreamCircuitExecutionPlan::from_graph(&graph).unwrap();
         let layer_00 = &plan.circuits[1];
 
@@ -1052,10 +1025,7 @@ mod tests {
 
         let k_memory = layer_00.signal("k_memory").unwrap();
         assert_eq!(k_memory.storage, SignalStorage::StateView);
-        assert_eq!(
-            k_memory.consumers,
-            vec!["attention_read".to_string()]
-        );
+        assert_eq!(k_memory.consumers, vec!["attention_read".to_string()]);
     }
 
     #[test]
@@ -1136,7 +1106,8 @@ mod tests {
 
     #[test]
     fn activation_plan_rejects_unscheduled_signal_dependency() {
-        let graph = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let graph =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
         let mut circuit = graph
             .circuits
             .iter()

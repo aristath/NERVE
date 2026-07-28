@@ -13,14 +13,17 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             .device_slice
             .create_mounted_stream_circuit(device)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-        mounted.buffers.zero_state_buffers().map_err(|error| {
-            VulkanResidentInProcessPlacedRuntimeError::Package(
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to zero speculative decoder {:?} state: {error}",
-                    model.id
-                )),
-            )
-        })?;
+        mounted
+            .buffers
+            .initialize_state_buffers(device)
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to initialize speculative decoder {:?} state: {error}",
+                        model.id
+                    )),
+                )
+            })?;
         mounted
             .buffers
             .apply_clone_state_policies()

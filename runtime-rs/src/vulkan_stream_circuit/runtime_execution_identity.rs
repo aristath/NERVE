@@ -33,7 +33,7 @@ fn canonical_runtime_execution_identity(
         "schema": "nerve.runtime_execution_identity.v1",
         "package": {
             "id": runtime_model.package.package_id,
-            "compiler_fingerprint": runtime_model.package.compiler_fingerprint,
+            "schema": runtime_model.package.schema,
             "artifact_integrity": runtime_model.package.artifact_integrity,
         },
         "graph": {

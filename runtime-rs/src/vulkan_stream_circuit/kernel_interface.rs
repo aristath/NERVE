@@ -124,6 +124,7 @@ impl VulkanKernelStreamMetadata {
                 "rotary_position_embedding"
                     | "parallel_head_norm_rope_2way"
                     | "parallel_head_norm_rope_2way_codebook_u8"
+                    | "parallel_head_norm_rope_2way_embedded_parameters"
                     | "append_state_update"
                     | "scaled_dot_product_attention"
                     | "append_scaled_dot_product_attention"
@@ -203,7 +204,11 @@ impl VulkanKernelDispatchPlan {
         self.commands.len()
     }
 
-    pub fn command(&self, component_id: &str, node_id: &str) -> Option<&VulkanKernelDispatchCommand> {
+    pub fn command(
+        &self,
+        component_id: &str,
+        node_id: &str,
+    ) -> Option<&VulkanKernelDispatchCommand> {
         self.commands
             .iter()
             .find(|command| command.component_id == component_id && command.node_id == node_id)

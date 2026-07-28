@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nerve_runtime::{
-    RuntimeStagedCandidate, VulkanComputeDeviceCatalog, VulkanResidentModelPackageDeviceSlice,
+    RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
+    VulkanResidentBufferPool, VulkanResidentModelPackageDeviceSlice,
     VulkanResidentModelPackageManifest, VulkanResidentTargetedComponentSession,
     VulkanTargetedComponentExecutionPhase,
 };
@@ -61,12 +63,19 @@ struct MountCommand {
     maximum_quantum_wait: Duration,
 }
 
+#[derive(Default)]
+struct ExecutorHost {
+    manifests: BTreeMap<PathBuf, VulkanResidentModelPackageManifest>,
+    devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
+    parameter_pool: VulkanResidentBufferPool,
+}
+
 fn main() {
     if std::env::args()
         .skip(1)
-        .eq(["--package-compiler-fingerprint"])
+        .eq(["--runtime-implementation-fingerprint"])
     {
-        println!("{}", nerve_runtime::VULKAN_PACKAGE_COMPILER_FINGERPRINT);
+        println!("{}", nerve_runtime::RUNTIME_IMPLEMENTATION_FINGERPRINT);
         return;
     }
     if let Err(error) = run() {
@@ -80,9 +89,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut input = BufReader::new(stdin.lock());
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    let command = read_command(&mut input)?
-        .ok_or_else(|| invalid_input("executor input ended before mount"))?;
-    let mount = MountCommand::from_command(command)?;
+    let mut host = ExecutorHost::default();
+    while let Some(command) = read_command(&mut input)? {
+        let mount = MountCommand::from_command(command)?;
+        execute_session(&mut host, &mut input, &mut output, mount)?;
+    }
+    Ok(())
+}
+
+fn execute_session(
+    host: &mut ExecutorHost,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    mount: MountCommand,
+) -> Result<(), Box<dyn Error>> {
     let mount_started = Instant::now();
     let package_manifest = mount.package_manifest.canonicalize()?;
     if !package_manifest.is_file() {
@@ -93,24 +113,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| invalid_input("package manifest has no package root"))?
         .to_path_buf();
 
-    let allowlist = BTreeSet::from([mount.physical_device_id.clone()]);
-    let catalog = VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowlist)?;
-    let device_info = catalog
-        .available_compute_devices()
-        .iter()
-        .find(|device| device.physical_device_id == mount.physical_device_id)
-        .cloned()
-        .ok_or_else(|| invalid_input("allowed physical device is unavailable"))?;
-    if device_info.vendor_id != AMD_VENDOR_ID {
-        return Err(invalid_input(format!(
-            "optimizer execution requires an AMD GPU, but {:?} reports vendor 0x{:04x}",
-            device_info.device_name, device_info.vendor_id
-        ))
-        .into());
-    }
-    let device = catalog.open_physical_device_index(device_info.physical_device_index)?;
-
-    let manifest = VulkanResidentModelPackageManifest::from_json_file(&package_manifest)?;
+    let manifest = host.manifest(&package_manifest)?;
     let node_devices =
         BTreeMap::from([(mount.component_id.clone(), mount.logical_device_id.clone())]);
     let mut runtime_model = manifest.mount_runtime_graph_controls(
@@ -131,6 +134,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     } else if mount.candidate_id.is_some() {
         return Err(invalid_input("candidate_id requires a sealed candidate_root").into());
     }
+    let device = host.device(&mount.physical_device_id, &mount.logical_device_id)?;
     let placed_device = runtime_model
         .placement
         .device_for_component(&mount.component_id);
@@ -142,13 +146,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         .into());
     }
     let package_id = runtime_model.package.package_id.clone();
-    let slice = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
-        &device,
-        &package_root,
-        runtime_model,
-        &mount.logical_device_id,
-        Some(mount.dynamic_state_capacity_activations),
-    )?;
+    let slice =
+        VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device_with_parameter_pool(
+            &device,
+            &package_root,
+            runtime_model,
+            &mount.logical_device_id,
+            Some(mount.dynamic_state_capacity_activations),
+            &host.parameter_pool,
+        )?;
     let session = VulkanResidentTargetedComponentSession::from_device_slice(
         &device,
         slice,
@@ -164,8 +170,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         session.resident_parameter_bytes(),
         session.resident_transient_bytes(),
     );
+    let pool_stats = host.parameter_pool.stats();
     write_response(
-        &mut output,
+        output,
         &mount.request_id,
         "mounted",
         json!({
@@ -175,16 +182,20 @@ fn run() -> Result<(), Box<dyn Error>> {
             "physical_node_id": mount.physical_node_id,
             "logical_device_id": mount.logical_device_id,
             "physical_device_id": mount.physical_device_id,
-            "device_name": device_info.device_name,
+            "device_name": device.device_name(),
             "mount_duration_ns": nonzero_elapsed_ns(mount_started),
             "resident_parameter_bytes": session.resident_parameter_bytes(),
             "resident_transient_bytes": session.resident_transient_bytes(),
+            "resident_asset_pool_bytes": pool_stats.resident_bytes,
+            "resident_asset_pool_buffers": pool_stats.resident_buffer_count,
+            "resident_asset_pool_hits": pool_stats.hit_count,
+            "resident_asset_pool_misses": pool_stats.miss_count,
             "mounted_state_digest": mounted_digest,
         }),
     )?;
 
     let close_request_id = loop {
-        let command = read_command(&mut input)?.ok_or_else(|| {
+        let command = read_command(input)?.ok_or_else(|| {
             invalid_input("executor input ended without an explicit close command")
         })?;
         match command {
@@ -198,7 +209,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let report =
                     session.execute(&device, useful_units, seed, mount.maximum_quantum_wait)?;
                 write_response(
-                    &mut output,
+                    output,
                     &request_id,
                     "completed",
                     serde_json::to_value(report)?,
@@ -209,25 +220,86 @@ fn run() -> Result<(), Box<dyn Error>> {
                 break request_id;
             }
             ExecutorCommand::Mount { .. } => {
-                return Err(invalid_input("executor cannot mount a second session").into());
+                return Err(
+                    invalid_input("executor cannot mount another session before close").into(),
+                );
             }
         }
     };
     let release_started = Instant::now();
     drop(session);
-    drop(device);
-    drop(catalog);
+    let pool_stats = host.parameter_pool.stats();
     write_response(
-        &mut output,
+        output,
         &close_request_id,
         "released",
         json!({
             "released": true,
             "release_duration_ns": nonzero_elapsed_ns(release_started),
             "mounted_state_digest": mounted_digest,
+            "resident_asset_pool_bytes": pool_stats.resident_bytes,
+            "resident_asset_pool_buffers": pool_stats.resident_buffer_count,
+            "resident_asset_pool_hits": pool_stats.hit_count,
+            "resident_asset_pool_misses": pool_stats.miss_count,
         }),
     )?;
     Ok(())
+}
+
+impl ExecutorHost {
+    fn manifest(
+        &mut self,
+        path: &PathBuf,
+    ) -> Result<VulkanResidentModelPackageManifest, Box<dyn Error>> {
+        if !self.manifests.contains_key(path) {
+            self.manifests.insert(
+                path.clone(),
+                VulkanResidentModelPackageManifest::from_json_file(path)?,
+            );
+        }
+        Ok(self
+            .manifests
+            .get(path)
+            .expect("executor manifest was inserted")
+            .clone())
+    }
+
+    fn device(
+        &mut self,
+        physical_device_id: &str,
+        logical_device_id: &str,
+    ) -> Result<Rc<VulkanComputeDevice>, Box<dyn Error>> {
+        if !self.devices.contains_key(physical_device_id) {
+            let allowlist = BTreeSet::from([physical_device_id.to_string()]);
+            let catalog =
+                VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowlist)?;
+            let device_info = catalog
+                .available_compute_devices()
+                .iter()
+                .find(|device| device.physical_device_id == physical_device_id)
+                .cloned()
+                .ok_or_else(|| invalid_input("allowed physical device is unavailable"))?;
+            if device_info.vendor_id != AMD_VENDOR_ID {
+                return Err(invalid_input(format!(
+                    "optimizer execution requires an AMD GPU, but {:?} reports vendor 0x{:04x}",
+                    device_info.device_name, device_info.vendor_id
+                ))
+                .into());
+            }
+            self.devices.insert(
+                physical_device_id.to_string(),
+                Rc::new(catalog.open_physical_device_index(device_info.physical_device_index)?),
+            );
+        }
+        let device = self
+            .devices
+            .get(physical_device_id)
+            .expect("executor device was inserted")
+            .clone();
+        self.parameter_pool
+            .register_device(logical_device_id, device.clone())?;
+        Ok(device)
+    }
 }
 
 impl MountCommand {
@@ -248,7 +320,7 @@ impl MountCommand {
             maximum_quantum_wait_ns,
         } = command
         else {
-            return Err(invalid_input("the first executor command must be mount").into());
+            return Err(invalid_input("an executor session must begin with mount").into());
         };
         require_schema(&schema)?;
         for (name, value) in [

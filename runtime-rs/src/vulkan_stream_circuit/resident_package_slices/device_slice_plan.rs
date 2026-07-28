@@ -138,6 +138,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
         device: &VulkanComputeDevice,
         tensor_index: &TensorIndex,
         excluded_tensors: &BTreeSet<String>,
+        parameter_pool: Option<&VulkanResidentBufferPool>,
     ) -> Result<VulkanResidentModelPackageDeviceSlice, VulkanResidentTokenModelPackageError> {
         let parameter_buffer_plan =
             VulkanPermanentParameterBufferPlan::from_placed_resident_plan_excluding_tensors(
@@ -150,22 +151,44 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                     self.device_id
                 ))
             })?;
-        let parameter_buffers = Arc::new(parameter_buffer_plan.allocate_buffers(device).map_err(
-            |error| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to allocate resident parameter buffers for device {:?}: {error}",
-                    self.device_id
-                ))
-            },
-        )?);
-        parameter_buffers
-            .load_from_tensor_index(tensor_index)
-            .map_err(|error| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to load resident model parameters for device {:?}: {error}",
-                    self.device_id
-                ))
-            })?;
+        let parameter_buffers = Arc::new(match parameter_pool {
+            Some(pool) => parameter_buffer_plan
+                .allocate_and_load_from_pool(
+                    tensor_index,
+                    pool,
+                )
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(
+                        format!(
+                            "failed to acquire pooled resident model parameters for device {:?}: {error}",
+                            self.device_id
+                        ),
+                    )
+                })?,
+            None => {
+                let buffers = parameter_buffer_plan
+                    .allocate_buffers(device)
+                    .map_err(|error| {
+                        VulkanResidentTokenModelPackageError::new(
+                            format!(
+                                "failed to allocate resident parameter buffers for device {:?}: {error}",
+                                self.device_id
+                            ),
+                        )
+                    })?;
+                buffers
+                    .load_from_tensor_index(tensor_index)
+                    .map_err(|error| {
+                        VulkanResidentTokenModelPackageError::new(
+                            format!(
+                                "failed to load resident model parameters for device {:?}: {error}",
+                                self.device_id
+                            ),
+                        )
+                    })?;
+                buffers
+            }
+        });
 
         Ok(VulkanResidentModelPackageDeviceSlice {
             package_id: self.package_id,

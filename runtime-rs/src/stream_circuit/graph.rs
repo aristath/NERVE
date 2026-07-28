@@ -605,6 +605,46 @@ fn represented_source_parameter_ids(
                 node.id
             ));
         }
+        let descriptor_abi = representation
+            .get("descriptor_abi")
+            .and_then(Value::as_str);
+        if !matches!(
+            descriptor_abi,
+            Some("source_parameters_replaced" | "source_parameters_retained")
+        ) {
+            issues.push(format!(
+                "node {} parameter_representation requires a supported descriptor_abi",
+                node.id
+            ));
+        }
+        let alternative_phases = representation_execution_phases(
+            representation,
+            "alternative_execution_phases",
+            &node.id,
+            false,
+            issues,
+        );
+        let source_retained_phases = representation_execution_phases(
+            representation,
+            "source_retained_execution_phases",
+            &node.id,
+            true,
+            issues,
+        );
+        if !alternative_phases.is_disjoint(&source_retained_phases) {
+            issues.push(format!(
+                "node {} parameter_representation execution phases overlap",
+                node.id
+            ));
+        }
+        if !source_retained_phases.is_empty()
+            && descriptor_abi != Some("source_parameters_retained")
+        {
+            issues.push(format!(
+                "node {} source-retained execution requires retained source descriptors",
+                node.id
+            ));
+        }
         let Some(source_parameters) = representation
             .get("source_parameter_ids")
             .and_then(Value::as_array)
@@ -637,11 +677,26 @@ fn represented_source_parameter_ids(
                 ));
                 continue;
             }
-            if physical_param_ids.contains(parameter) {
-                issues.push(format!(
-                    "node {} represented source parameter {:?} remains physically bound",
-                    node.id, parameter
-                ));
+            match descriptor_abi {
+                Some("source_parameters_replaced") => {
+                    if physical_param_ids.contains(parameter) || node.params.iter().any(|id| id == parameter) {
+                        issues.push(format!(
+                            "node {} represented source parameter {:?} remains physically bound",
+                            node.id, parameter
+                        ));
+                    }
+                }
+                Some("source_parameters_retained") => {
+                    if !physical_param_ids.contains(parameter)
+                        || !node.params.iter().any(|id| id == parameter)
+                    {
+                        issues.push(format!(
+                            "node {} retained source parameter {:?} is not physically bound",
+                            node.id, parameter
+                        ));
+                    }
+                }
+                _ => {}
             }
             if let Some(previous) = owners.insert(parameter.to_string(), node.id.as_str()) {
                 issues.push(format!(
@@ -661,6 +716,41 @@ fn represented_source_parameter_ids(
         }
     }
     represented
+}
+
+fn representation_execution_phases(
+    representation: &Map<String, Value>,
+    field: &str,
+    node_id: &str,
+    allow_empty: bool,
+    issues: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let Some(values) = representation.get(field).and_then(Value::as_array) else {
+        issues.push(format!(
+            "node {node_id} parameter_representation requires {field}"
+        ));
+        return BTreeSet::new();
+    };
+    let phases = values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let unique = phases.iter().cloned().collect::<BTreeSet<_>>();
+    let supported = ["decode", "prefill"];
+    if phases.len() != values.len()
+        || (!allow_empty && phases.is_empty())
+        || phases.iter().any(|phase| !supported.contains(&phase.as_str()))
+        || phases.iter().map(String::as_str).collect::<Vec<_>>()
+            != unique.iter().map(String::as_str).collect::<Vec<_>>()
+    {
+        issues.push(format!(
+            "node {node_id} parameter_representation {field} must be a sorted unique \
+             {}list of supported execution phases",
+            if allow_empty { "" } else { "non-empty " }
+        ));
+    }
+    unique
 }
 
 fn visit_semantic_module<'a>(

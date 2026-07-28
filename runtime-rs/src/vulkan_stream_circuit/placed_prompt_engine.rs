@@ -183,6 +183,49 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         Ok(zeroed)
     }
 
+    pub fn reset_stream_for_new_session(
+        &mut self,
+        stream_id: &str,
+        random_seed: u32,
+    ) -> Result<usize, VulkanResidentInProcessPlacedPromptEngineError> {
+        if self.active_transaction_stream_ids.contains(stream_id) {
+            return Err(placed_scheduler_divergence(
+                "cannot reset a stream with an active transaction",
+            )
+            .into());
+        }
+        let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                stream_id: stream_id.to_string(),
+            }
+        })?;
+        let zeroed = stream.reset_for_new_session(random_seed)?;
+        self.runtime_scheduler
+            .reset_stream_transient_state(stream_id)?;
+        self.stream_histories
+            .insert(stream_id.to_string(), Default::default());
+        self.latest_prefix_checkpoint_by_stream.remove(stream_id);
+        self.multi_stream_batch_runners
+            .retain(|key, _| !key.stream_ids.iter().any(|id| id == stream_id));
+        Ok(zeroed)
+    }
+
+    pub fn set_stream_random_seed(
+        &self,
+        stream_id: &str,
+        random_seed: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedPromptEngineError> {
+        self.streams
+            .get(stream_id)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                    stream_id: stream_id.to_string(),
+                }
+            })?
+            .set_random_seed(random_seed)?;
+        Ok(())
+    }
+
     pub fn remove_stream(
         &mut self,
         stream_id: &str,

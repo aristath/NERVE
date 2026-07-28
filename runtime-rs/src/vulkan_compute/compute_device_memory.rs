@@ -845,6 +845,35 @@ impl VulkanComputeDevice {
         })
     }
 
+    fn create_host_readback_resident_buffer(
+        &self,
+        byte_capacity: usize,
+    ) -> Result<VulkanResidentBuffer, VulkanError> {
+        if byte_capacity == 0 {
+            return Err(VulkanError(
+                "resident readback buffer capacity must not be zero".to_string(),
+            ));
+        }
+        let (buffer, memory, byte_capacity, memory_access) =
+            self.create_resident_storage_buffer(
+                byte_capacity,
+                vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_CACHED,
+            )?;
+        Ok(VulkanResidentBuffer {
+            device: self.device.clone(),
+            buffer,
+            memory,
+            memory_access,
+            byte_capacity,
+            persistent_mapping: None,
+            persistent_mapping_requires_unmap: false,
+            _shared_host_allocation: None,
+            _shared_device_memory_identity: None,
+        })
+    }
+
     fn create_resident_storage_buffer(
         &self,
         byte_capacity: usize,
@@ -1294,6 +1323,83 @@ impl VulkanComputeDevice {
                 copy_count: copies.len(),
             })
         }
+    }
+
+    pub fn read_resident_buffer_ranges(
+        &self,
+        ranges: &[VulkanResidentBufferReadRange<'_>],
+    ) -> Result<VulkanResidentBufferReadback, VulkanError> {
+        if ranges.is_empty() {
+            return Ok(VulkanResidentBufferReadback {
+                bytes: Vec::new(),
+                ranges: Vec::new(),
+            });
+        }
+        let mut packed_ranges = Vec::with_capacity(ranges.len());
+        let total_byte_count = ranges.iter().try_fold(0usize, |offset, range| {
+            let end = offset.checked_add(range.byte_len).ok_or_else(|| {
+                VulkanError("resident buffer readback capacity overflowed".to_string())
+            })?;
+            packed_ranges.push(offset..end);
+            Ok(end)
+        })?;
+        let staging = self.create_host_readback_resident_buffer(total_byte_count)?;
+        let copies = ranges
+            .iter()
+            .zip(&packed_ranges)
+            .map(|(range, destination)| {
+                VulkanResidentBufferRangeCopy::new(
+                    range.source,
+                    &staging,
+                    range.source_offset,
+                    destination.start,
+                    range.byte_len,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.create_resident_buffer_copy_batch(&copies)?.run()?;
+        Ok(VulkanResidentBufferReadback {
+            bytes: staging.read_bytes(total_byte_count)?,
+            ranges: packed_ranges,
+        })
+    }
+
+    pub fn write_resident_buffer_ranges(
+        &self,
+        ranges: &[VulkanResidentBufferWriteRange<'_>],
+    ) -> Result<usize, VulkanError> {
+        if ranges.is_empty() {
+            return Ok(0);
+        }
+        let mut packed_ranges = Vec::with_capacity(ranges.len());
+        let total_byte_count = ranges.iter().try_fold(0usize, |offset, range| {
+            let end = offset.checked_add(range.bytes.len()).ok_or_else(|| {
+                VulkanError("resident buffer upload capacity overflowed".to_string())
+            })?;
+            packed_ranges.push(offset..end);
+            Ok(end)
+        })?;
+        let staging = self.create_host_visible_resident_buffer(total_byte_count)?;
+        let mut packed_bytes = Vec::with_capacity(total_byte_count);
+        for range in ranges {
+            packed_bytes.extend_from_slice(range.bytes);
+        }
+        staging.write_bytes(&packed_bytes)?;
+        let copies = ranges
+            .iter()
+            .zip(&packed_ranges)
+            .map(|(range, source)| {
+                VulkanResidentBufferRangeCopy::new(
+                    &staging,
+                    range.destination,
+                    source.start,
+                    range.destination_offset,
+                    range.bytes.len(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.create_resident_buffer_copy_batch(&copies)?.run()?;
+        Ok(total_byte_count)
     }
 
     pub fn run_resident_buffer_copy(

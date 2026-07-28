@@ -119,6 +119,32 @@ impl VulkanStreamCircuitStreamBuffers {
         Ok(total_zeroed)
     }
 
+    pub fn initialize_state_buffers(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<usize, VulkanError> {
+        let payloads = self
+            .state_buffers
+            .iter()
+            .map(|state| {
+                let initialized_byte_count = state.layout.dynamic_data_offset;
+                let mut bytes = vec![0u8; initialized_byte_count];
+                let page_table = state.layout.initial_page_table_bytes()?;
+                bytes[..page_table.len()].copy_from_slice(&page_table);
+                Ok(bytes)
+            })
+            .collect::<Result<Vec<_>, VulkanError>>()?;
+        let ranges = self
+            .state_buffers
+            .iter()
+            .zip(&payloads)
+            .map(|(state, bytes)| {
+                VulkanResidentBufferWriteRange::new(&state.buffer, 0, bytes)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        device.write_resident_buffer_ranges(&ranges)
+    }
+
     pub fn apply_clone_state_policies(&self) -> Result<usize, VulkanError> {
         self.apply_clone_state_policies_after(&BTreeSet::new())
     }

@@ -3,14 +3,15 @@ use std::error::Error;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use nerve_runtime::{
     RuntimeChatSession, RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
-    VulkanResidentInProcessPlacedPromptEngine, VulkanResidentInProcessPlacedPromptStream,
-    VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
-    VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
+    VulkanResidentBufferPool, VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
+    VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
+    VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
+    VulkanResidentRuntimeModel, VulkanResidentTokenInputEvent, VulkanResidentTokenTextCodec,
     chat_stop_token_ids_from_manifest, chat_transcript_codec,
     execute_vulkan_resident_chat_transaction, reset_vulkan_resident_execution_counters,
     vulkan_resident_execution_counters,
@@ -19,10 +20,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v1";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v2";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v3";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v3";
+const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
+const COMPONENT_ACTIVATIONS_STEP_UNIT: &str = "component_activations";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -35,7 +38,10 @@ enum ExecutorCommand {
         candidate_id: Option<String>,
         physical_device_ids: Vec<String>,
         component_placement: BTreeMap<String, String>,
-        context_capacity: Option<usize>,
+        context_capacity: ValidationContextCapacity,
+        validation_turns: Vec<String>,
+        teacher_forced_assistant_turns: Vec<String>,
+        execution_mode: String,
         random_seed: u32,
         enable_thinking: bool,
         graph_operation: String,
@@ -47,7 +53,8 @@ enum ExecutorCommand {
         turns: Vec<String>,
         teacher_forced_assistant_turns: Vec<String>,
         execution_mode: String,
-        max_output_tokens: usize,
+        step_unit: String,
+        max_output_tokens: Option<usize>,
     },
     Close {
         schema: String,
@@ -55,7 +62,15 @@ enum ExecutorCommand {
     },
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ValidationContextCapacity {
+    Declared { activations: usize },
+    FixtureExact,
+}
+
 struct MountedValidation {
+    package_key: ValidationPackageKey,
     package_id: String,
     candidate_id: Option<String>,
     physical_device_ids: Vec<String>,
@@ -63,16 +78,38 @@ struct MountedValidation {
     chat: RuntimeChatSession,
     transcript_codec: VulkanResidentHfTokenizerTextCodec,
     stop_token_ids: Vec<u32>,
+    signal_processor_component_count: usize,
     mounted_state_digest: String,
+    random_seed: u32,
+    validation_fixture_digest: String,
+    execution_mode: String,
     executed: bool,
+}
+
+struct ValidationDevicePool {
+    physical_device_ids: Vec<String>,
+    parameter_pool: VulkanResidentBufferPool,
+    devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
+    physical_to_logical: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidationPackageKey {
+    package_manifest: PathBuf,
+    candidate_id: Option<String>,
+    physical_device_ids: Vec<String>,
+    component_placement: BTreeMap<String, String>,
+    context_capacity: usize,
+    graph_operation: String,
+    graph_target_component_id: Option<String>,
 }
 
 fn main() {
     if std::env::args()
         .skip(1)
-        .eq(["--package-compiler-fingerprint"])
+        .eq(["--runtime-implementation-fingerprint"])
     {
-        println!("{}", nerve_runtime::VULKAN_PACKAGE_COMPILER_FINGERPRINT);
+        println!("{}", nerve_runtime::RUNTIME_IMPLEMENTATION_FINGERPRINT);
         return;
     }
     if let Err(error) = run() {
@@ -86,81 +123,130 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut input = BufReader::new(stdin.lock());
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    let command = read_command(&mut input)?
-        .ok_or_else(|| invalid_input("executor input ended before mount"))?;
-    let mount_started = Instant::now();
-    let (mount_request_id, mut mounted) = mount(command)?;
-    let mounted_state_digest = mounted.engine.stream_resident_state_digest(STREAM_ID)?;
-    mounted.mounted_state_digest = mounted_state_digest.clone();
-    write_response(
-        &mut output,
-        &mount_request_id,
-        "mounted",
-        json!({
-            "package_id": mounted.package_id,
-            "candidate_id": mounted.candidate_id,
-            "physical_device_ids": mounted.physical_device_ids,
-            "context_capacity": mounted
-                .engine
-                .stream(STREAM_ID)
-                .expect("mounted stream exists")
-                .package()
-                .dynamic_state_capacity_activations,
-            "mounted_state_digest": mounted_state_digest,
-            "mount_duration_ns": nonzero_elapsed_ns(mount_started),
-        }),
-    )?;
-
-    let close_request_id = loop {
-        let command = read_command(&mut input)?.ok_or_else(|| {
-            invalid_input("validation executor input ended without explicit close")
-        })?;
+    let mut devices = None;
+    let mut reusable_role = None;
+    let mut mounted: Option<MountedValidation> = None;
+    while let Some(command) = read_command(&mut input)? {
         match command {
+            command @ ExecutorCommand::Mount { .. } => {
+                if mounted.is_some() {
+                    return Err(invalid_input(
+                        "executor cannot mount overlapping validation roles",
+                    )
+                    .into());
+                }
+                let mount_started = Instant::now();
+                let (mount_request_id, mut next, reused) =
+                    mount(command, &mut devices, &mut reusable_role)?;
+                let mounted_state_digest = if reused {
+                    next.mounted_state_digest.clone()
+                } else {
+                    next.engine.stream_resident_state_digest(STREAM_ID)?
+                };
+                next.mounted_state_digest = mounted_state_digest.clone();
+                write_response(
+                    &mut output,
+                    &mount_request_id,
+                    "mounted",
+                    json!({
+                        "package_id": next.package_id,
+                        "candidate_id": next.candidate_id,
+                        "physical_device_ids": next.physical_device_ids,
+                        "context_capacity": next
+                            .engine
+                            .stream(STREAM_ID)
+                            .expect("mounted stream exists")
+                            .package()
+                            .dynamic_state_capacity_activations,
+                        "mounted_state_digest": mounted_state_digest,
+                        "mount_duration_ns": nonzero_elapsed_ns(mount_started),
+                    }),
+                )?;
+                mounted = Some(next);
+            }
             ExecutorCommand::Execute {
                 schema,
                 request_id,
                 turns,
                 teacher_forced_assistant_turns,
                 execution_mode,
+                step_unit,
                 max_output_tokens,
             } => {
                 require_schema(&schema)?;
-                let report = mounted.execute(
+                let role = mounted.as_mut().ok_or_else(|| {
+                    invalid_input("executor cannot execute without a mounted role")
+                })?;
+                let mut progress_sequence = 0usize;
+                let report = role.execute(
                     turns,
                     teacher_forced_assistant_turns,
                     &execution_mode,
+                    &step_unit,
                     max_output_tokens,
+                    &mut |payload| {
+                        write_progress(&mut output, &request_id, progress_sequence, payload)?;
+                        progress_sequence = progress_sequence.saturating_add(1);
+                        Ok(())
+                    },
                 )?;
                 write_response(&mut output, &request_id, "completed", report)?;
             }
             ExecutorCommand::Close { schema, request_id } => {
                 require_schema(&schema)?;
-                break request_id;
-            }
-            ExecutorCommand::Mount { .. } => {
-                return Err(invalid_input("executor cannot mount a second role").into());
+                let mut role = mounted
+                    .take()
+                    .ok_or_else(|| invalid_input("executor cannot close without a mounted role"))?;
+                let release_started = Instant::now();
+                let mounted_state_digest = role.mounted_state_digest.clone();
+                let reset_started = Instant::now();
+                role.engine
+                    .reset_stream_for_new_session(STREAM_ID, role.random_seed)?;
+                let reset_duration_ns = nonzero_elapsed_ns(reset_started);
+                let proof_started = Instant::now();
+                let reset_state_digest = role.engine.stream_resident_state_digest(STREAM_ID)?;
+                let state_proof_duration_ns = nonzero_elapsed_ns(proof_started);
+                if reset_state_digest != mounted_state_digest {
+                    return Err(invalid_input(
+                        "released validation role did not return to its exact initial state",
+                    )
+                    .into());
+                }
+                let released_device_ids = role
+                    .engine
+                    .stream(STREAM_ID)
+                    .expect("reset stream remains resident")
+                    .package()
+                    .device_ids
+                    .clone();
+                reusable_role = Some(role);
+                write_response(
+                    &mut output,
+                    &request_id,
+                    "released",
+                    json!({
+                        "released": true,
+                        "mounted_state_digest": mounted_state_digest,
+                        "released_device_ids": released_device_ids,
+                        "reset_duration_ns": reset_duration_ns,
+                        "state_proof_duration_ns": state_proof_duration_ns,
+                        "release_duration_ns": nonzero_elapsed_ns(release_started),
+                    }),
+                )?;
             }
         }
-    };
-    let release_started = Instant::now();
-    let mounted_state_digest = mounted.mounted_state_digest.clone();
-    let removed = mounted.engine.remove_stream(STREAM_ID)?;
-    drop(mounted);
-    write_response(
-        &mut output,
-        &close_request_id,
-        "released",
-        json!({
-            "released": true,
-            "mounted_state_digest": mounted_state_digest,
-            "released_device_ids": removed.device_ids,
-            "release_duration_ns": nonzero_elapsed_ns(release_started),
-        }),
-    )?;
+    }
+    if mounted.is_some() {
+        return Err(invalid_input("validation executor input ended with a mounted role").into());
+    }
     Ok(())
 }
 
-fn mount(command: ExecutorCommand) -> Result<(String, MountedValidation), Box<dyn Error>> {
+fn mount(
+    command: ExecutorCommand,
+    devices: &mut Option<ValidationDevicePool>,
+    reusable_role: &mut Option<MountedValidation>,
+) -> Result<(String, MountedValidation, bool), Box<dyn Error>> {
     let ExecutorCommand::Mount {
         schema,
         request_id,
@@ -170,6 +256,9 @@ fn mount(command: ExecutorCommand) -> Result<(String, MountedValidation), Box<dy
         physical_device_ids,
         component_placement,
         context_capacity,
+        validation_turns,
+        teacher_forced_assistant_turns,
+        execution_mode,
         random_seed,
         enable_thinking,
         graph_operation,
@@ -197,19 +286,26 @@ fn mount(command: ExecutorCommand) -> Result<(String, MountedValidation), Box<dy
         .ok_or_else(|| invalid_input("package manifest has no package root"))?
         .to_path_buf();
     let manifest = VulkanResidentModelPackageManifest::from_json_file(&package_manifest)?;
-    let context_capacity = context_capacity.unwrap_or(manifest.max_context_activations);
-    if context_capacity == 0 {
-        return Err(invalid_input("resolved context_capacity must be positive").into());
-    }
-    if context_capacity > manifest.max_context_activations {
-        return Err(invalid_input(format!(
-            "requested context capacity {context_capacity} exceeds package limit {}",
-            manifest.max_context_activations
-        ))
-        .into());
-    }
     let tokenizer_dir = resolve_package_path(&package_root, &manifest.tokenizer.path);
-    let (devices, physical_to_logical) = open_amd_devices(&physical_device_ids)?;
+    let chat_variables =
+        BTreeMap::from([("enable_thinking".to_string(), Value::Bool(enable_thinking))]);
+    let chat = RuntimeChatSession::from_tokenizer_dir(&tokenizer_dir, &chat_variables)?;
+    let transcript_codec = chat_transcript_codec(&tokenizer_dir)?;
+    let context_capacity = resolve_context_capacity(
+        context_capacity,
+        manifest.max_context_activations,
+        &chat,
+        &transcript_codec,
+        &validation_turns,
+        &teacher_forced_assistant_turns,
+        &execution_mode,
+    )?;
+    let validation_fixture_digest = execution_fixture_digest(
+        &validation_turns,
+        &teacher_forced_assistant_turns,
+        &execution_mode,
+    );
+    let (bound_devices, physical_to_logical) = bound_amd_devices(devices, &physical_device_ids)?;
     let default_logical_device = physical_to_logical
         .get(&physical_device_ids[0])
         .expect("declared physical device has logical binding");
@@ -247,32 +343,68 @@ fn mount(command: ExecutorCommand) -> Result<(String, MountedValidation), Box<dy
         return Err(invalid_input("candidate_id requires a sealed candidate_root").into());
     }
     validate_runtime_placement(&runtime_model, &physical_to_logical)?;
-    let chat_variables =
-        BTreeMap::from([("enable_thinking".to_string(), Value::Bool(enable_thinking))]);
-    let chat = RuntimeChatSession::from_tokenizer_dir(&tokenizer_dir, &chat_variables)?;
+    let signal_processor_component_count = signal_processor_component_count(&runtime_model)?;
     let stop_token_ids = chat_stop_token_ids_from_manifest(
         &package_root,
         &tokenizer_dir,
         &runtime_model.package,
         &chat.formatter,
     )?;
-    let transcript_codec = chat_transcript_codec(&tokenizer_dir)?;
+    let package_key = ValidationPackageKey {
+        package_manifest,
+        candidate_id: candidate_id.clone(),
+        physical_device_ids: physical_device_ids.clone(),
+        component_placement,
+        context_capacity,
+        graph_operation,
+        graph_target_component_id,
+    };
+    if reusable_role
+        .as_ref()
+        .is_some_and(|role| role.package_key == package_key)
+    {
+        let mut role = reusable_role.take().expect("matching reusable role exists");
+        role.engine.set_stream_random_seed(STREAM_ID, random_seed)?;
+        role.chat = chat;
+        role.transcript_codec = transcript_codec;
+        role.stop_token_ids = stop_token_ids;
+        role.random_seed = random_seed;
+        role.validation_fixture_digest = validation_fixture_digest;
+        role.execution_mode = execution_mode;
+        role.executed = false;
+        return Ok((request_id, role, true));
+    }
+    *reusable_role = None;
+    let parameter_pool = &devices
+        .as_ref()
+        .expect("bound validation device pool exists")
+        .parameter_pool;
+    let package = Arc::new(
+        VulkanResidentInProcessPlacedModelPackage::
+            from_runtime_model_for_bound_devices_with_parameter_pool(
+                &bound_devices,
+                &package_root,
+                runtime_model,
+                Some(context_capacity),
+                false,
+                parameter_pool,
+            )?,
+    );
+    // The newly mounted package now owns every immutable buffer it needs.
+    // Remove pooled buffers which belong only to a previous graph or
+    // placement variant so validation cannot accumulate one model copy per
+    // variant. Buffers shared with the new package remain referenced and are
+    // therefore retained.
+    parameter_pool.evict_unreferenced();
     let stream =
-        VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(
-            devices,
-            &package_root,
-            runtime_model,
-            Some(context_capacity),
-            random_seed,
-            0,
-            VulkanResidentSamplerRuntimeConfig::default(),
-        )?;
+        VulkanResidentInProcessPlacedPromptStream::new(package, bound_devices, random_seed)?;
     let package_id = stream.package().package_id.clone();
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     engine.add_stream(STREAM_ID, stream)?;
     Ok((
         request_id,
         MountedValidation {
+            package_key,
             package_id,
             candidate_id,
             physical_device_ids,
@@ -280,30 +412,174 @@ fn mount(command: ExecutorCommand) -> Result<(String, MountedValidation), Box<dy
             chat,
             transcript_codec,
             stop_token_ids,
+            signal_processor_component_count,
             mounted_state_digest: String::new(),
+            random_seed,
+            validation_fixture_digest,
+            execution_mode,
             executed: false,
         },
+        false,
     ))
 }
 
+fn resolve_context_capacity(
+    request: ValidationContextCapacity,
+    package_limit: usize,
+    chat: &RuntimeChatSession,
+    transcript_codec: &VulkanResidentHfTokenizerTextCodec,
+    turns: &[String],
+    assistant_turns: &[String],
+    execution_mode: &str,
+) -> Result<usize, Box<dyn Error>> {
+    let context_capacity = match request {
+        ValidationContextCapacity::Declared { activations } => activations,
+        ValidationContextCapacity::FixtureExact => {
+            if !matches!(
+                execution_mode,
+                "teacher_forced" | "lifecycle_teacher_forced"
+            ) {
+                return Err(invalid_input(
+                    "fixture-exact context capacity requires a bounded teacher-forced execution",
+                )
+                .into());
+            }
+            teacher_forced_fixture_context_capacity(
+                chat,
+                transcript_codec,
+                turns,
+                assistant_turns,
+                execution_mode == "lifecycle_teacher_forced",
+            )?
+        }
+    };
+    if context_capacity == 0 {
+        return Err(invalid_input("resolved context_capacity must be positive").into());
+    }
+    if context_capacity > package_limit {
+        return Err(invalid_input(format!(
+            "requested context capacity {context_capacity} exceeds package limit {package_limit}"
+        ))
+        .into());
+    }
+    Ok(context_capacity)
+}
+
+fn teacher_forced_fixture_context_capacity<C>(
+    chat: &RuntimeChatSession,
+    transcript_codec: &C,
+    turns: &[String],
+    assistant_turns: &[String],
+    reserve_lifecycle_activation: bool,
+) -> Result<usize, Box<dyn Error>>
+where
+    C: VulkanResidentTokenTextCodec,
+{
+    if turns.is_empty()
+        || turns.len() != assistant_turns.len()
+        || turns.iter().any(|turn| turn.trim().is_empty())
+        || assistant_turns.iter().any(|turn| turn.trim().is_empty())
+    {
+        return Err(invalid_input(
+            "fixture-exact capacity requires matching non-empty teacher-forced turns",
+        )
+        .into());
+    }
+    let mut simulated_chat = chat.clone();
+    let mut required = 0usize;
+    for (user_content, assistant_content) in turns.iter().zip(assistant_turns) {
+        let prepared = simulated_chat.prepare_user_turn(user_content, transcript_codec)?;
+        required = required.max(prepared.canonical_user_token_ids.len());
+        let (_, canonical_committed_token_ids) = simulated_chat
+            .render_assistant_commit_token_delta(
+                &prepared,
+                user_content,
+                assistant_content,
+                transcript_codec,
+            )?;
+        required = required.max(canonical_committed_token_ids.len());
+        simulated_chat.commit_assistant_turn(
+            user_content,
+            assistant_content,
+            canonical_committed_token_ids,
+        );
+    }
+    if reserve_lifecycle_activation {
+        required = required
+            .checked_add(1)
+            .ok_or_else(|| invalid_input("fixture-exact lifecycle context capacity overflowed"))?;
+    }
+    Ok(required.max(1))
+}
+
+fn execution_fixture_digest(
+    turns: &[String],
+    assistant_turns: &[String],
+    execution_mode: &str,
+) -> String {
+    artifact_digest(
+        &serde_json::to_vec(&json!({
+            "turns": turns,
+            "teacher_forced_assistant_turns": assistant_turns,
+            "execution_mode": execution_mode,
+        }))
+        .expect("validation fixture is serializable"),
+    )
+}
+
+fn positive_output_allowance(value: Option<usize>) -> Result<usize, Box<dyn Error>> {
+    value.filter(|value| *value > 0).ok_or_else(|| {
+        invalid_input("free-running validation requires a positive output allowance").into()
+    })
+}
+
 impl MountedValidation {
-    fn execute(
+    fn execute<F>(
         &mut self,
         turns: Vec<String>,
         teacher_forced_assistant_turns: Vec<String>,
         execution_mode: &str,
-        max_output_tokens: usize,
-    ) -> Result<Value, Box<dyn Error>> {
+        step_unit: &str,
+        max_output_tokens: Option<usize>,
+        on_progress: &mut F,
+    ) -> Result<Value, Box<dyn Error>>
+    where
+        F: FnMut(Value) -> Result<(), Box<dyn Error>>,
+    {
         if self.executed {
             return Err(
                 invalid_input("validation role can execute only once before release").into(),
             );
         }
         self.executed = true;
+        if step_unit != COMPONENT_ACTIVATIONS_STEP_UNIT {
+            return Err(
+                invalid_input(format!("unsupported validation step unit {step_unit:?}")).into(),
+            );
+        }
+        if execution_mode != self.execution_mode
+            || execution_fixture_digest(&turns, &teacher_forced_assistant_turns, execution_mode)
+                != self.validation_fixture_digest
+        {
+            return Err(invalid_input(
+                "validation execute request differs from the fixture bound at mount",
+            )
+            .into());
+        }
         match execution_mode {
-            "conversation" => self.execute_conversation(turns, max_output_tokens),
-            "teacher_forced" => self.execute_teacher_forced(turns, teacher_forced_assistant_turns),
-            "lifecycle" => self.execute_lifecycle(turns, max_output_tokens),
+            "conversation" => self.execute_conversation(
+                turns,
+                positive_output_allowance(max_output_tokens)?,
+                on_progress,
+            ),
+            "teacher_forced" => {
+                self.execute_teacher_forced(turns, teacher_forced_assistant_turns, on_progress)
+            }
+            "lifecycle_teacher_forced" => self.execute_lifecycle_teacher_forced(
+                turns,
+                teacher_forced_assistant_turns,
+                on_progress,
+            ),
             _ => Err(invalid_input(format!(
                 "unsupported validation execution_mode {execution_mode:?}"
             ))
@@ -311,11 +587,15 @@ impl MountedValidation {
         }
     }
 
-    fn execute_conversation(
+    fn execute_conversation<F>(
         &mut self,
         turns: Vec<String>,
         max_output_tokens: usize,
-    ) -> Result<Value, Box<dyn Error>> {
+        on_progress: &mut F,
+    ) -> Result<Value, Box<dyn Error>>
+    where
+        F: FnMut(Value) -> Result<(), Box<dyn Error>>,
+    {
         if turns.is_empty() || turns.iter().any(|turn| turn.trim().is_empty()) {
             return Err(invalid_input("validation conversation requires non-empty turns").into());
         }
@@ -329,9 +609,11 @@ impl MountedValidation {
         let mut total_scheduler_steps = 0usize;
         let mut total_execution_counters = VulkanResidentExecutionCounters::default();
         for (turn_index, user_content) in turns.iter().enumerate() {
+            let turn_started = Instant::now();
             let prepared = self
                 .chat
                 .prepare_user_turn(user_content, &self.transcript_codec)?;
+            let mut progress_error: Option<Box<dyn Error>> = None;
             let transaction = execute_vulkan_resident_chat_transaction(
                 &mut self.engine,
                 STREAM_ID,
@@ -342,20 +624,41 @@ impl MountedValidation {
                 user_content,
                 &prepared,
                 max_output_tokens,
-                |_| {},
+                |event| {
+                    let generated_tokens = event.output_event.output_index.saturating_add(1);
+                    if (generated_tokens == 1 || generated_tokens % 32 == 0)
+                        && progress_error.is_none()
+                    {
+                        if let Err(error) = on_progress(json!({
+                            "phase": "generation",
+                            "turn_index": turn_index,
+                            "generated_tokens": generated_tokens,
+                            "elapsed_ns": nonzero_elapsed_ns(turn_started),
+                        })) {
+                            progress_error = Some(error);
+                        }
+                    }
+                },
             )?;
+            if let Some(error) = progress_error {
+                return Err(error);
+            }
             let engine_runs = [
                 &transaction.user_run.engine_run,
                 &transaction.generation_run.engine_run,
                 &transaction.commit_run.engine_run,
             ];
-            let component_activations = engine_runs
+            let model_activations = engine_runs
                 .iter()
                 .map(|run| {
                     run.prefill_activation_count
                         .saturating_add(run.decode_activation_count)
                 })
                 .sum::<usize>();
+            let component_activations = component_activation_count(
+                model_activations,
+                self.signal_processor_component_count,
+            )?;
             let scheduler_steps = engine_runs
                 .iter()
                 .map(|run| run.scheduler_step_count)
@@ -367,12 +670,22 @@ impl MountedValidation {
                 &mut total_execution_counters,
                 transaction.execution_counters,
             );
+            let turn_state_digest =
+                validation_state_digest(&self.engine.stream_resident_state_digest(STREAM_ID)?);
+            let stop_reason = validation_conversation_stop_reason(
+                &transaction.generated_token_ids,
+                &self.stop_token_ids,
+                max_output_tokens,
+            )?;
             traces.push(json!({
                 "turn_index": turn_index,
                 "user": user_content,
                 "assistant": transaction.assistant_content,
                 "generated_token_ids": transaction.generated_token_ids,
                 "canonical_committed_token_ids": transaction.canonical_committed_token_ids,
+                "stop_reason": stop_reason,
+                "state_digest": turn_state_digest,
+                "model_activations": model_activations,
                 "component_activations": component_activations,
                 "scheduler_steps": scheduler_steps,
                 "elapsed_ns": transaction.elapsed_ns,
@@ -387,8 +700,17 @@ impl MountedValidation {
                 &transaction.assistant_content,
                 transaction.canonical_committed_token_ids,
             );
+            on_progress(json!({
+                "phase": "turn_completed",
+                "turn_index": turn_index,
+                "generated_tokens": transaction.generated_token_ids.len(),
+                "elapsed_ns": transaction.elapsed_ns,
+                "component_activations": component_activations,
+                "scheduler_steps": scheduler_steps,
+            }))?;
         }
-        let state_digest = self.engine.stream_resident_state_digest(STREAM_ID)?;
+        let resident_state_digest = self.engine.stream_resident_state_digest(STREAM_ID)?;
+        let state_digest = validation_state_digest(&resident_state_digest);
         let output_digest = artifact_digest(
             &serde_json::to_vec(&behavioral_outputs).expect("conversation output is serializable"),
         );
@@ -396,6 +718,7 @@ impl MountedValidation {
             "output_digest": output_digest,
             "state_digest": state_digest,
             "steps": total_component_activations,
+            "step_unit": COMPONENT_ACTIVATIONS_STEP_UNIT,
             "scheduler_steps": total_scheduler_steps,
             "elapsed_ns": nonzero_elapsed_ns(started),
             "turns": traces,
@@ -403,11 +726,15 @@ impl MountedValidation {
         }))
     }
 
-    fn execute_teacher_forced(
+    fn execute_teacher_forced<F>(
         &mut self,
         turns: Vec<String>,
         assistant_turns: Vec<String>,
-    ) -> Result<Value, Box<dyn Error>> {
+        on_progress: &mut F,
+    ) -> Result<Value, Box<dyn Error>>
+    where
+        F: FnMut(Value) -> Result<(), Box<dyn Error>>,
+    {
         if turns.is_empty()
             || turns.len() != assistant_turns.len()
             || turns.iter().any(|turn| turn.trim().is_empty())
@@ -458,13 +785,17 @@ impl MountedValidation {
                 .with_origin("validation_teacher_forced_assistant"),
             )?;
             let engine_runs = [&user_run.engine_run, &commit_run.engine_run];
-            let component_activations = engine_runs
+            let model_activations = engine_runs
                 .iter()
                 .map(|run| {
                     run.prefill_activation_count
                         .saturating_add(run.decode_activation_count)
                 })
                 .sum::<usize>();
+            let component_activations = component_activation_count(
+                model_activations,
+                self.signal_processor_component_count,
+            )?;
             let scheduler_steps = engine_runs
                 .iter()
                 .map(|run| run.scheduler_step_count)
@@ -474,12 +805,17 @@ impl MountedValidation {
             total_component_activations =
                 total_component_activations.saturating_add(component_activations);
             total_scheduler_steps = total_scheduler_steps.saturating_add(scheduler_steps);
+            let turn_state_digest =
+                validation_state_digest(&self.engine.stream_resident_state_digest(STREAM_ID)?);
             traces.push(json!({
                 "turn_index": turn_index,
                 "user": user_content,
                 "assistant": assistant_content,
                 "generated_token_ids": [],
                 "canonical_committed_token_ids": canonical_committed_token_ids,
+                "stop_reason": "fixture_completed",
+                "state_digest": turn_state_digest,
+                "model_activations": model_activations,
                 "component_activations": component_activations,
                 "scheduler_steps": scheduler_steps,
                 "elapsed_ns": nonzero_elapsed_ns(turn_started),
@@ -494,16 +830,25 @@ impl MountedValidation {
                 assistant_content,
                 canonical_committed_token_ids,
             );
+            on_progress(json!({
+                "phase": "teacher_forced_turn_completed",
+                "turn_index": turn_index,
+                "generated_tokens": 0,
+                "elapsed_ns": nonzero_elapsed_ns(turn_started),
+                "component_activations": component_activations,
+                "scheduler_steps": scheduler_steps,
+            }))?;
         }
         Ok(json!({
             "output_digest": artifact_digest(
                 &serde_json::to_vec(&behavioral_outputs)
                     .expect("teacher-forced output is serializable"),
             ),
-            "state_digest": self
-                .engine
-                .stream_resident_state_digest(STREAM_ID)?,
+            "state_digest": validation_state_digest(
+                &self.engine.stream_resident_state_digest(STREAM_ID)?,
+            ),
             "steps": total_component_activations,
+            "step_unit": COMPONENT_ACTIVATIONS_STEP_UNIT,
             "scheduler_steps": total_scheduler_steps,
             "elapsed_ns": nonzero_elapsed_ns(started),
             "turns": traces,
@@ -511,12 +856,17 @@ impl MountedValidation {
         }))
     }
 
-    fn execute_lifecycle(
+    fn execute_lifecycle_teacher_forced<F>(
         &mut self,
         turns: Vec<String>,
-        max_output_tokens: usize,
-    ) -> Result<Value, Box<dyn Error>> {
-        let mut report = self.execute_conversation(turns, max_output_tokens)?;
+        assistant_turns: Vec<String>,
+        on_progress: &mut F,
+    ) -> Result<Value, Box<dyn Error>>
+    where
+        F: FnMut(Value) -> Result<(), Box<dyn Error>>,
+    {
+        let mut report = self.execute_teacher_forced(turns, assistant_turns, on_progress)?;
+        let lifecycle_started = Instant::now();
         reset_vulkan_resident_execution_counters();
         let before_fork = self.engine.stream_resident_state_digest(STREAM_ID)?;
         self.engine
@@ -566,12 +916,16 @@ impl MountedValidation {
         if !self.engine.snapshot().idle {
             return Err(invalid_input("interrupted stream did not resume to idle").into());
         }
-        let additional_activations = rollback
+        let additional_model_activations = rollback
             .engine_run
             .prefill_activation_count
             .saturating_add(rollback.engine_run.decode_activation_count)
             .saturating_add(resumed.prefill_activation_count)
             .saturating_add(resumed.decode_activation_count);
+        let additional_component_activations = component_activation_count(
+            additional_model_activations,
+            self.signal_processor_component_count,
+        )?;
         let additional_steps = rollback
             .engine_run
             .scheduler_step_count
@@ -591,12 +945,9 @@ impl MountedValidation {
         );
         object.insert(
             "steps".to_string(),
-            json!(
-                object["steps"]
-                    .as_u64()
-                    .unwrap_or_default()
-                    .saturating_add(u64::try_from(additional_activations).unwrap_or(u64::MAX),)
-            ),
+            json!(object["steps"].as_u64().unwrap_or_default().saturating_add(
+                u64::try_from(additional_component_activations).unwrap_or(u64::MAX),
+            )),
         );
         object.insert(
             "scheduler_steps".to_string(),
@@ -630,7 +981,9 @@ impl MountedValidation {
         );
         object.insert(
             "state_digest".to_string(),
-            json!(self.engine.stream_resident_state_digest(STREAM_ID)?),
+            json!(validation_state_digest(
+                &self.engine.stream_resident_state_digest(STREAM_ID)?,
+            )),
         );
         object
             .get_mut("turns")
@@ -640,7 +993,32 @@ impl MountedValidation {
             .and_then(Value::as_object_mut)
             .expect("conversation report has a final turn")
             .insert("lifecycle".to_string(), lifecycle);
+        on_progress(json!({
+            "phase": "lifecycle_completed",
+            "elapsed_ns": nonzero_elapsed_ns(lifecycle_started),
+            "component_activations": additional_component_activations,
+            "scheduler_steps": additional_steps,
+        }))?;
         Ok(report)
+    }
+}
+
+fn validation_conversation_stop_reason(
+    generated_token_ids: &[u32],
+    stop_token_ids: &[u32],
+    output_allowance: usize,
+) -> Result<&'static str, io::Error> {
+    if generated_token_ids
+        .last()
+        .is_some_and(|token_id| stop_token_ids.contains(token_id))
+    {
+        Ok("eos")
+    } else if generated_token_ids.len() == output_allowance {
+        Ok("output_allowance")
+    } else {
+        Err(invalid_input(
+            "validation conversation ended without an ordinary stop boundary",
+        ))
     }
 }
 
@@ -815,6 +1193,38 @@ fn open_amd_devices(
     Ok((devices, physical_to_logical))
 }
 
+fn bound_amd_devices(
+    pool: &mut Option<ValidationDevicePool>,
+    physical_device_ids: &[String],
+) -> Result<
+    (
+        BTreeMap<String, Rc<VulkanComputeDevice>>,
+        BTreeMap<String, String>,
+    ),
+    Box<dyn Error>,
+> {
+    if let Some(existing) = pool {
+        if existing.physical_device_ids != physical_device_ids {
+            return Err(invalid_input(
+                "one validation stage cannot change its physical device topology",
+            )
+            .into());
+        }
+        return Ok((
+            existing.devices.clone(),
+            existing.physical_to_logical.clone(),
+        ));
+    }
+    let (devices, physical_to_logical) = open_amd_devices(physical_device_ids)?;
+    *pool = Some(ValidationDevicePool {
+        physical_device_ids: physical_device_ids.to_vec(),
+        parameter_pool: VulkanResidentBufferPool::default(),
+        devices: devices.clone(),
+        physical_to_logical: physical_to_logical.clone(),
+    });
+    Ok((devices, physical_to_logical))
+}
+
 fn validate_runtime_placement(
     runtime_model: &VulkanResidentRuntimeModel,
     physical_to_logical: &BTreeMap<String, String>,
@@ -831,6 +1241,35 @@ fn validate_runtime_placement(
         .into());
     }
     Ok(())
+}
+
+fn signal_processor_component_count(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Result<usize, Box<dyn Error>> {
+    let count = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .count();
+    if count == 0 {
+        return Err(invalid_input("mounted validation graph contains no signal processors").into());
+    }
+    Ok(count)
+}
+
+fn component_activation_count(
+    model_activation_count: usize,
+    signal_processor_component_count: usize,
+) -> Result<usize, io::Error> {
+    if signal_processor_component_count == 0 {
+        return Err(invalid_input(
+            "component activation accounting requires signal processors",
+        ));
+    }
+    model_activation_count
+        .checked_mul(signal_processor_component_count)
+        .ok_or_else(|| invalid_input("component activation count overflowed"))
 }
 
 fn add_counters(
@@ -940,6 +1379,26 @@ fn write_response(
     Ok(())
 }
 
+fn write_progress(
+    output: &mut impl Write,
+    request_id: &str,
+    sequence: usize,
+    payload: Value,
+) -> Result<(), Box<dyn Error>> {
+    serde_json::to_writer(
+        &mut *output,
+        &json!({
+            "schema": PROGRESS_SCHEMA,
+            "request_id": request_id,
+            "sequence": sequence,
+            "payload": payload,
+        }),
+    )?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    Ok(())
+}
+
 fn require_schema(schema: &str) -> Result<(), Box<dyn Error>> {
     if schema != COMMAND_SCHEMA {
         return Err(
@@ -956,6 +1415,10 @@ fn artifact_digest(bytes: &[u8]) -> String {
     )
 }
 
+fn validation_state_digest(device_state_digest: &str) -> String {
+    artifact_digest(device_state_digest.as_bytes())
+}
+
 fn nonzero_elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos())
         .unwrap_or(u64::MAX)
@@ -969,6 +1432,49 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ByteCodec;
+
+    impl VulkanResidentTokenTextCodec for ByteCodec {
+        fn encode_text(
+            &self,
+            text: &str,
+        ) -> Result<Vec<u32>, nerve_runtime::VulkanResidentTokenTextCodecError> {
+            Ok(text.bytes().map(u32::from).collect())
+        }
+
+        fn decode_tokens(
+            &self,
+            token_ids: &[u32],
+        ) -> Result<String, nerve_runtime::VulkanResidentTokenTextCodecError> {
+            token_ids
+                .iter()
+                .map(|token| {
+                    char::from_u32(*token).ok_or_else(|| {
+                        nerve_runtime::VulkanResidentTokenTextCodecError::new("invalid byte token")
+                    })
+                })
+                .collect()
+        }
+    }
+
+    fn fixture_chat() -> RuntimeChatSession {
+        RuntimeChatSession {
+            formatter: nerve_runtime::RuntimeChatFormatter {
+                template_source: concat!(
+                    "{% for message in messages %}",
+                    "{{ message.role }}:{{ message.content }}\\n",
+                    "{% endfor %}",
+                    "{% if add_generation_prompt %}assistant:{% endif %}",
+                )
+                .to_string(),
+                template_variables: serde_json::Map::new(),
+                render_time: chrono::Local::now().fixed_offset(),
+            },
+            messages: Vec::new(),
+            committed_token_ids: Vec::new(),
+        }
+    }
 
     #[test]
     fn validation_executor_protocol_rejects_unknown_fields() {
@@ -985,5 +1491,126 @@ mod tests {
         assert_eq!(first, artifact_digest(b"first"));
         assert_ne!(first, artifact_digest(b"second"));
         assert!(first.starts_with("nerve.optimizer.artifact_sha256.v1:"));
+    }
+
+    #[test]
+    fn validation_conversation_completion_requires_eos_or_output_allowance() {
+        assert_eq!(
+            validation_conversation_stop_reason(&[7, 99], &[99], 2).unwrap(),
+            "eos"
+        );
+        assert_eq!(
+            validation_conversation_stop_reason(&[7, 8], &[99], 2).unwrap(),
+            "output_allowance"
+        );
+        assert!(validation_conversation_stop_reason(&[7], &[99], 2).is_err());
+    }
+
+    #[test]
+    fn validation_progress_is_line_delimited_and_request_bound() {
+        let mut output = Vec::new();
+        write_progress(
+            &mut output,
+            "request-1",
+            3,
+            json!({"phase": "generation", "generated_tokens": 32}),
+        )
+        .unwrap();
+        let document: Value = serde_json::from_slice(
+            output
+                .strip_suffix(b"\n")
+                .expect("progress is newline terminated"),
+        )
+        .unwrap();
+        assert_eq!(document["schema"], PROGRESS_SCHEMA);
+        assert_eq!(document["request_id"], "request-1");
+        assert_eq!(document["sequence"], 3);
+        assert_eq!(document["payload"]["generated_tokens"], 32);
+    }
+
+    #[test]
+    fn validation_state_digest_content_binds_device_state_identity() {
+        let first = validation_state_digest("nerve.optimizer.device_state_sha256.v1:first");
+        assert_eq!(
+            first,
+            validation_state_digest("nerve.optimizer.device_state_sha256.v1:first",)
+        );
+        assert_ne!(
+            first,
+            validation_state_digest("nerve.optimizer.device_state_sha256.v1:second",)
+        );
+        assert!(first.starts_with("nerve.optimizer.artifact_sha256.v1:"));
+    }
+
+    #[test]
+    fn validation_component_activation_horizon_counts_mounted_processors() {
+        assert_eq!(component_activation_count(39, 64).unwrap(), 2_496);
+        assert!(component_activation_count(1, 0).is_err());
+        assert!(component_activation_count(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn fixture_context_capacity_is_derived_from_the_exact_teacher_forced_transcript() {
+        let chat = fixture_chat();
+        let turns = vec!["Who are you?".to_string(), "Capital of Greece?".to_string()];
+        let assistants = vec!["A model.".to_string(), "Athens.".to_string()];
+        let exact =
+            teacher_forced_fixture_context_capacity(&chat, &ByteCodec, &turns, &assistants, false)
+                .unwrap();
+        let lifecycle =
+            teacher_forced_fixture_context_capacity(&chat, &ByteCodec, &turns, &assistants, true)
+                .unwrap();
+        let first_turn_only = teacher_forced_fixture_context_capacity(
+            &chat,
+            &ByteCodec,
+            &turns[..1],
+            &assistants[..1],
+            false,
+        )
+        .unwrap();
+
+        assert!(exact > first_turn_only);
+        assert_eq!(lifecycle, exact + 1);
+        assert!(
+            teacher_forced_fixture_context_capacity(
+                &chat,
+                &ByteCodec,
+                &turns,
+                &assistants[..1],
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validation_package_identity_excludes_transient_stream_state() {
+        let key = ValidationPackageKey {
+            package_manifest: PathBuf::from("/package/manifest.json"),
+            candidate_id: Some("candidate".to_string()),
+            physical_device_ids: vec!["device-a".to_string()],
+            component_placement: BTreeMap::from([(
+                "component".to_string(),
+                "device-a".to_string(),
+            )]),
+            context_capacity: 131_072,
+            graph_operation: "none".to_string(),
+            graph_target_component_id: None,
+        };
+        assert_eq!(key, key.clone());
+        assert_ne!(
+            key,
+            ValidationPackageKey {
+                context_capacity: 65_536,
+                ..key.clone()
+            }
+        );
+        assert_ne!(
+            key,
+            ValidationPackageKey {
+                candidate_id: None,
+                ..key.clone()
+            }
+        );
     }
 }

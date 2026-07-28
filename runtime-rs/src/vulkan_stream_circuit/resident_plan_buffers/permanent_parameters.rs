@@ -196,10 +196,90 @@ impl VulkanPermanentParameterBufferPlan {
             buffers.push(VulkanPermanentParameterBufferAllocation {
                 parameter: parameter.clone(),
                 byte_capacity,
-                buffer: device.create_resident_buffer(byte_capacity)?,
+                buffer: Arc::new(
+                    device.create_resident_buffer(byte_capacity)?,
+                ),
             });
         }
 
+        Ok(VulkanPermanentParameterBuffers {
+            plan: self.clone(),
+            buffers,
+            total_byte_capacity,
+        })
+    }
+
+    pub fn allocate_and_load_from_pool(
+        &self,
+        tensor_index: &TensorIndex,
+        pool: &VulkanResidentBufferPool,
+    ) -> Result<
+        VulkanPermanentParameterBuffers,
+        VulkanPermanentParameterLoadError,
+    > {
+        let mut buffers = Vec::with_capacity(self.parameters.len());
+        let mut total_byte_capacity = 0usize;
+        for parameter in &self.parameters {
+            let byte_capacity = parameter.byte_capacity.ok_or_else(|| {
+                VulkanPermanentParameterLoadError(format!(
+                    "{} permanent parameter {:?} has unknown byte capacity",
+                    self.device_id, parameter.tensor
+                ))
+            })?;
+            let metadata = tensor_index
+                .tensors
+                .get(&parameter.tensor)
+                .ok_or_else(|| {
+                    VulkanPermanentParameterLoadError(format!(
+                        "tensor index has no permanent parameter {:?}",
+                        parameter.tensor
+                    ))
+                })?;
+            let content_identity = metadata
+                .immutable_content_identity(&parameter.tensor)
+                .map_err(|error| {
+                    VulkanPermanentParameterLoadError(
+                        error.to_string(),
+                    )
+                })?;
+            let key = VulkanResidentBufferPoolKey::new(
+                "nerve.tensor_parameter.v1",
+                &self.device_id,
+                &parameter.tensor,
+                content_identity,
+                0,
+                byte_capacity,
+            )?;
+            let buffer = if let Some(buffer) =
+                pool.resident_buffer(&key)
+            {
+                buffer
+            } else {
+                let buffer = pool.allocate_unpublished(&key)?;
+                let allocation =
+                    VulkanPermanentParameterBufferAllocation {
+                        parameter: parameter.clone(),
+                        byte_capacity,
+                        buffer: buffer.clone(),
+                    };
+                load_parameter_allocation_from_tensor_index(
+                    &allocation,
+                    tensor_index,
+                )?;
+                pool.publish(key, buffer.clone())?;
+                buffer
+            };
+            total_byte_capacity = checked_add_bytes(
+                total_byte_capacity,
+                byte_capacity,
+                "pooled permanent parameter buffer allocation",
+            )?;
+            buffers.push(VulkanPermanentParameterBufferAllocation {
+                parameter: parameter.clone(),
+                byte_capacity,
+                buffer,
+            });
+        }
         Ok(VulkanPermanentParameterBuffers {
             plan: self.clone(),
             buffers,
@@ -281,7 +361,7 @@ impl VulkanPermanentParameterBuffers {
 pub struct VulkanPermanentParameterBufferAllocation {
     pub parameter: VulkanPermanentParameterBuffer,
     pub byte_capacity: usize,
-    pub buffer: VulkanResidentBuffer,
+    pub buffer: Arc<VulkanResidentBuffer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

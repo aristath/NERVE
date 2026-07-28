@@ -35,6 +35,42 @@ impl VulkanResidentModelPackageDeviceSlice {
         device_id: impl AsRef<str>,
         dynamic_state_capacity_activations: Option<usize>,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::from_runtime_model_for_device_with_optional_parameter_pool(
+            device,
+            manifest_dir,
+            runtime_model,
+            device_id,
+            dynamic_state_capacity_activations,
+            None,
+        )
+    }
+
+    pub fn from_runtime_model_for_device_with_parameter_pool(
+        device: &VulkanComputeDevice,
+        manifest_dir: impl AsRef<Path>,
+        runtime_model: VulkanResidentRuntimeModel,
+        device_id: impl AsRef<str>,
+        dynamic_state_capacity_activations: Option<usize>,
+        parameter_pool: &VulkanResidentBufferPool,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::from_runtime_model_for_device_with_optional_parameter_pool(
+            device,
+            manifest_dir,
+            runtime_model,
+            device_id,
+            dynamic_state_capacity_activations,
+            Some(parameter_pool),
+        )
+    }
+
+    fn from_runtime_model_for_device_with_optional_parameter_pool(
+        device: &VulkanComputeDevice,
+        manifest_dir: impl AsRef<Path>,
+        runtime_model: VulkanResidentRuntimeModel,
+        device_id: impl AsRef<str>,
+        dynamic_state_capacity_activations: Option<usize>,
+        parameter_pool: Option<&VulkanResidentBufferPool>,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let manifest_dir = manifest_dir.as_ref();
         let device_id = device_id.as_ref();
         let capacity = dynamic_state_capacity_activations
@@ -48,7 +84,12 @@ impl VulkanResidentModelPackageDeviceSlice {
             device_id,
             capacity,
         )?;
-        plan.materialize(device, &tensor_index, &BTreeSet::new())
+        plan.materialize(
+            device,
+            &tensor_index,
+            &BTreeSet::new(),
+            parameter_pool,
+        )
     }
 
     pub fn create_mounted_stream_circuit(

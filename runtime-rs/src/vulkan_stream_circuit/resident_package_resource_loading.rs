@@ -3,6 +3,7 @@ fn load_resident_package_transducer_parameter_buffers(
     device_id: &str,
     resource_plan: &StreamCircuitResourcePlan,
     tensor_index: &TensorIndex,
+    parameter_pool: Option<&VulkanResidentBufferPool>,
 ) -> Result<VulkanPermanentParameterBuffers, VulkanResidentTokenModelPackageError> {
     let transducer_parameter_plan = VulkanPermanentParameterBufferPlan::from_transducer_parameters(
         device_id,
@@ -14,21 +15,32 @@ fn load_resident_package_transducer_parameter_buffers(
             "failed to create transducer parameter plan: {error}"
         ))
     })?;
-    let transducer_parameter_buffers =
-        transducer_parameter_plan
-            .allocate_buffers(device)
+    let transducer_parameter_buffers = match parameter_pool {
+        Some(pool) => transducer_parameter_plan
+            .allocate_and_load_from_pool(tensor_index, pool)
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to allocate transducer parameter buffers: {error}"
+                    "failed to acquire pooled transducer parameters: {error}"
                 ))
-            })?;
-    transducer_parameter_buffers
-        .load_from_tensor_index(tensor_index)
-        .map_err(|error| {
-            VulkanResidentTokenModelPackageError::new(format!(
-                "failed to load transducer parameters: {error}"
-            ))
-        })?;
+            })?,
+        None => {
+            let buffers = transducer_parameter_plan
+                .allocate_buffers(device)
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to allocate transducer parameter buffers: {error}"
+                    ))
+                })?;
+            buffers
+                .load_from_tensor_index(tensor_index)
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to load transducer parameters: {error}"
+                    ))
+                })?;
+            buffers
+        }
+    };
     Ok(transducer_parameter_buffers)
 }
 
@@ -38,6 +50,7 @@ fn load_resident_package_transducer_parameter_buffers_for(
     resource_plan: &StreamCircuitResourcePlan,
     tensor_index: &TensorIndex,
     transducer_id: &str,
+    parameter_pool: Option<&VulkanResidentBufferPool>,
 ) -> Result<VulkanPermanentParameterBuffers, VulkanResidentTokenModelPackageError> {
     let transducer_parameter_plan =
         VulkanPermanentParameterBufferPlan::from_transducer_parameters_for(
@@ -51,21 +64,32 @@ fn load_resident_package_transducer_parameter_buffers_for(
                 "failed to create {transducer_id} parameter plan: {error}"
             ))
         })?;
-    let transducer_parameter_buffers =
-        transducer_parameter_plan
-            .allocate_buffers(device)
+    let transducer_parameter_buffers = match parameter_pool {
+        Some(pool) => transducer_parameter_plan
+            .allocate_and_load_from_pool(tensor_index, pool)
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to allocate {transducer_id} parameter buffers: {error}"
+                    "failed to acquire pooled {transducer_id} parameters: {error}"
                 ))
-            })?;
-    transducer_parameter_buffers
-        .load_from_tensor_index(tensor_index)
-        .map_err(|error| {
-            VulkanResidentTokenModelPackageError::new(format!(
-                "failed to load {transducer_id} parameters: {error}"
-            ))
-        })?;
+            })?,
+        None => {
+            let buffers = transducer_parameter_plan
+                .allocate_buffers(device)
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to allocate {transducer_id} parameter buffers: {error}"
+                    ))
+                })?;
+            buffers
+                .load_from_tensor_index(tensor_index)
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to load {transducer_id} parameters: {error}"
+                    ))
+                })?;
+            buffers
+        }
+    };
     Ok(transducer_parameter_buffers)
 }
 
@@ -132,4 +156,3 @@ fn load_resident_package_parameter_buffers_for_tensors(
         })?;
     Ok(buffers)
 }
-

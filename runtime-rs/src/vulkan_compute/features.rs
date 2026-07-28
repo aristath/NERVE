@@ -7,6 +7,7 @@ use std::fmt::{Display, Formatter};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 #[cfg(test)]
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},

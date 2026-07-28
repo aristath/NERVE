@@ -24,6 +24,8 @@ impl RuntimeImplementationPredicate {
             &self.hardware.required_processes,
             &self.hardware.required_features,
             &self.execution.phases,
+            &self.execution.alternative_phases,
+            &self.execution.source_retained_phases,
             &self.placement.required_interconnects,
         ] {
             if !sorted_unique(values) {
@@ -31,6 +33,37 @@ impl RuntimeImplementationPredicate {
                     "runtime implementation predicate lists must be sorted and unique".to_string(),
                 );
             }
+        }
+        let phases = self
+            .execution
+            .phases
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let alternative_phases = self
+            .execution
+            .alternative_phases
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let source_retained_phases = self
+            .execution
+            .source_retained_phases
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if alternative_phases.is_empty()
+            || !alternative_phases.is_disjoint(&source_retained_phases)
+            || alternative_phases
+                .union(&source_retained_phases)
+                .copied()
+                .collect::<BTreeSet<_>>()
+                != phases
+        {
+            return Err(
+                "runtime execution phases must be partitioned into alternative and source-retained phases"
+                    .to_string(),
+            );
         }
         let classes = self
             .hardware
@@ -111,6 +144,13 @@ impl RuntimeImplementationPredicate {
                     self.execution.phases
                 ));
             }
+        }
+        if !execution
+            .phases
+            .iter()
+            .any(|phase| self.execution.alternative_phases.contains(phase))
+        {
+            reasons.push("runtime request does not execute an alternative phase".to_string());
         }
         for (label, predicate_range, requested_range) in [
             (

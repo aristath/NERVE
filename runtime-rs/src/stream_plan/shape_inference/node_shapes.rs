@@ -58,13 +58,14 @@ fn infer_node_output_shapes(
         )),
         "sigmoid_scalar_multiply" => Ok(repeat_shape(first_input_shape(node, signals), outputs)),
         "parallel_head_norm_rope_2way"
-        | "parallel_head_norm_rope_2way_codebook_u8" => {
-            let expected_parameters =
-                if node.op == "parallel_head_norm_rope_2way" {
-                    2
-                } else {
-                    3
-                };
+        | "parallel_head_norm_rope_2way_codebook_u8"
+        | "parallel_head_norm_rope_2way_embedded_parameters" => {
+            let expected_parameters = match node.op.as_str() {
+                "parallel_head_norm_rope_2way" => 2,
+                "parallel_head_norm_rope_2way_codebook_u8" => 3,
+                "parallel_head_norm_rope_2way_embedded_parameters" => 0,
+                _ => unreachable!("matched head-normalization operation"),
+            };
             if node.inputs.len() != 2
                 || node.outputs.len() != 2
                 || node.params.len() != expected_parameters
@@ -177,11 +178,9 @@ fn infer_node_output_shapes(
                     routes
                         .checked_mul(intermediate)
                         .and_then(|data_elements| {
-                            routes
-                                .checked_mul(2)
-                                .and_then(|schedule_elements| {
-                                    data_elements.checked_add(schedule_elements)
-                                })
+                            routes.checked_mul(2).and_then(|schedule_elements| {
+                                data_elements.checked_add(schedule_elements)
+                            })
                         })
                         .map(|elements| vec![elements])
                 });
@@ -283,10 +282,7 @@ fn apply_physical_output_representation_shapes(
                 node.id, shapes[logical_index]
             )));
         }
-        let physical_shapes = [
-            vec![element_count],
-            vec![element_count / block_columns],
-        ];
+        let physical_shapes = [vec![element_count], vec![element_count / block_columns]];
         for (output, shape) in outputs.iter().zip(physical_shapes) {
             let output = output.as_str().ok_or_else(|| {
                 CircuitPlanError(format!(

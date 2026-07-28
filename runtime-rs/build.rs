@@ -1,124 +1,47 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const COMPILER_FINGERPRINT_SCHEMA: &str = "nerve.package_compiler_sha256.v2";
-const COMPILER_SOURCE_MANIFEST: &str = "compiler_sources.txt";
 const HARDWARE_DISCOVERY_FINGERPRINT_SCHEMA: &str = "nerve.hardware_discovery_sha256.v1";
 const HARDWARE_CALIBRATOR_FINGERPRINT_SCHEMA: &str = "nerve.hardware_calibrator_sha256.v1";
+const RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA: &str = "nerve.runtime_implementation_sha256.v1";
 
-fn directory_files(path: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
-    fs::read_dir(path)
-        .unwrap_or_else(|error| panic!("failed to read compiler input directory {path:?}: {error}"))
-        .map(|entry| entry.expect("failed to read compiler input entry").path())
-        .filter(|path| path.is_file())
-        .filter_map(|path| {
-            let name = path.file_name()?.to_str()?;
-            Some((format!("{prefix}/{name}"), path))
-        })
-        .collect()
-}
-
-fn directory_files_with_extension(
+fn recursive_directory_files_with_extension(
     path: &Path,
     prefix: &str,
     extension: &str,
 ) -> Vec<(String, PathBuf)> {
-    directory_files(path, prefix)
-        .into_iter()
-        .filter(|(_relative, path)| {
-            path.extension().and_then(|value| value.to_str()) == Some(extension)
-        })
-        .collect()
+    let mut pending = vec![path.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).unwrap_or_else(|error| {
+            panic!("failed to read runtime input directory {directory:?}: {error}")
+        }) {
+            let path = entry.expect("failed to read runtime input entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+                let relative = path
+                    .strip_prefix(
+                        path.ancestors()
+                            .find(|ancestor| {
+                                ancestor.file_name().and_then(|value| value.to_str()) == Some("src")
+                            })
+                            .expect("runtime source path has src ancestor"),
+                    )
+                    .expect("runtime source remains below src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.push((format!("{prefix}/{relative}"), path));
+            }
+        }
+    }
+    files
 }
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repository_root = manifest_dir
-        .parent()
-        .expect("runtime crate must live inside the repository");
-    let compiler_dir = repository_root.join("nerve");
-    let compiler_source_manifest = compiler_dir.join(COMPILER_SOURCE_MANIFEST);
-    println!(
-        "cargo:rerun-if-changed={}",
-        compiler_source_manifest.display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest_dir.join("shaders").display()
-    );
-    let descriptor_dir = compiler_dir.join("representation_optimizer/descriptors");
-    println!("cargo:rerun-if-changed={}", descriptor_dir.display());
-    let source_manifest = fs::read_to_string(&compiler_source_manifest).unwrap_or_else(|error| {
-        panic!(
-            "failed to read compiler source manifest {:?}: {error}",
-            compiler_source_manifest
-        )
-    });
-    let relative_sources = source_manifest
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let mut sorted_sources = relative_sources.clone();
-    sorted_sources.sort_unstable();
-    sorted_sources.dedup();
-    assert!(
-        !relative_sources.is_empty() && relative_sources == sorted_sources,
-        "compiler source manifest {:?} must contain unique sorted paths",
-        compiler_source_manifest
-    );
-    let mut inputs = relative_sources
-        .into_iter()
-        .map(|relative| {
-            let path = Path::new(relative);
-            assert!(
-                path.components().count() >= 2
-                    && path.components().next() == Some(Component::Normal("nerve".as_ref()))
-                    && path
-                        .components()
-                        .all(|component| matches!(component, Component::Normal(_)))
-                    && path.extension().and_then(|value| value.to_str()) == Some("py"),
-                "invalid compiler source path {relative:?} in {:?}",
-                compiler_source_manifest
-            );
-            let source = repository_root.join(path);
-            assert!(
-                source.is_file(),
-                "compiler source {relative:?} declared by {:?} is missing",
-                compiler_source_manifest
-            );
-            (relative.to_string(), source)
-        })
-        .chain(directory_files_with_extension(
-            &descriptor_dir,
-            "nerve/representation_optimizer/descriptors",
-            "json",
-        ))
-        .chain(directory_files(
-            &manifest_dir.join("shaders"),
-            "runtime-rs/shaders",
-        ))
-        .collect::<Vec<_>>();
-    inputs.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let mut digest = Sha256::new();
-    for (relative, path) in inputs {
-        println!("cargo:rerun-if-changed={}", path.display());
-        let relative_bytes = relative.as_bytes();
-        let source_bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read compiler input {path:?}: {error}"));
-        digest.update((relative_bytes.len() as u64).to_le_bytes());
-        digest.update(relative_bytes);
-        digest.update((source_bytes.len() as u64).to_le_bytes());
-        digest.update(source_bytes);
-    }
-    println!(
-        "cargo:rustc-env=NERVE_PACKAGE_COMPILER_FINGERPRINT={COMPILER_FINGERPRINT_SCHEMA}:{:x}",
-        digest.finalize()
-    );
-
     let hardware_discovery_sources = [
         "Cargo.lock",
         "Cargo.toml",
@@ -182,5 +105,31 @@ fn main() {
     println!(
         "cargo:rustc-env=NERVE_HARDWARE_CALIBRATOR_FINGERPRINT={HARDWARE_CALIBRATOR_FINGERPRINT_SCHEMA}:{:x}",
         calibrator_digest.finalize()
+    );
+
+    let mut runtime_inputs = ["Cargo.lock", "Cargo.toml", "build.rs"]
+        .into_iter()
+        .map(|relative| (relative.to_string(), manifest_dir.join(relative)))
+        .chain(recursive_directory_files_with_extension(
+            &manifest_dir.join("src"),
+            "src",
+            "rs",
+        ))
+        .collect::<Vec<_>>();
+    runtime_inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut runtime_digest = Sha256::new();
+    for (relative, path) in runtime_inputs {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = fs::read(&path).unwrap_or_else(|error| {
+            panic!("failed to read runtime-implementation input {path:?}: {error}")
+        });
+        runtime_digest.update((relative.len() as u64).to_le_bytes());
+        runtime_digest.update(relative.as_bytes());
+        runtime_digest.update((source.len() as u64).to_le_bytes());
+        runtime_digest.update(source);
+    }
+    println!(
+        "cargo:rustc-env=NERVE_RUNTIME_IMPLEMENTATION_FINGERPRINT={RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:{:x}",
+        runtime_digest.finalize()
     );
 }

@@ -186,7 +186,10 @@
         represented.nodes[0].attrs = serde_json::json!({
             "parameter_representation": {
                 "kind": "shared_codebook",
-                "source_parameter_ids": ["weight"]
+                "source_parameter_ids": ["weight"],
+                "descriptor_abi": "source_parameters_replaced",
+                "alternative_execution_phases": ["decode", "prefill"],
+                "source_retained_execution_phases": []
             }
         });
         represented.validate_contract().unwrap();
@@ -195,7 +198,10 @@
         unknown_representation_source.nodes[0].attrs = serde_json::json!({
             "parameter_representation": {
                 "kind": "shared_codebook",
-                "source_parameter_ids": ["unknown_weight"]
+                "source_parameter_ids": ["unknown_weight"],
+                "descriptor_abi": "source_parameters_replaced",
+                "alternative_execution_phases": ["decode", "prefill"],
+                "source_retained_execution_phases": []
             }
         });
         assert!(
@@ -221,6 +227,29 @@
                 .unwrap_err()
                 .to_string()
                 .contains("remains physically bound")
+        );
+
+        let mut phase_selective = circuit.clone();
+        phase_selective.semantic_execution_nodes = phase_selective.nodes.clone();
+        phase_selective.nodes[0].attrs = serde_json::json!({
+            "parameter_representation": {
+                "kind": "embedded_exact_program",
+                "source_parameter_ids": ["weight"],
+                "descriptor_abi": "source_parameters_retained",
+                "alternative_execution_phases": ["decode"],
+                "source_retained_execution_phases": ["prefill"]
+            }
+        });
+        phase_selective.validate_contract().unwrap();
+
+        let mut missing_retained_binding = phase_selective;
+        missing_retained_binding.parameters.refs.remove("weight");
+        assert!(
+            missing_retained_binding
+                .validate_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("retained source parameter")
         );
 
         let mut missing_state = circuit;

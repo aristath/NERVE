@@ -108,6 +108,8 @@ fn predicate(profiles: &[&HardwareProcessProfile], mode: &str) -> RuntimeImpleme
         },
         execution: RuntimeExecutionPredicate {
             phases: vec!["decode".to_string()],
+            alternative_phases: vec!["decode".to_string()],
+            source_retained_phases: Vec::new(),
             activation_batch: RuntimeInclusiveRange {
                 minimum: 1,
                 maximum: 8,
@@ -147,15 +149,12 @@ fn loaded_implementation(
         workload_id: "workload_decode".to_string(),
         decision: "materially_faster".to_string(),
         paired: RuntimePairedComparison {
-            geometric_speedup_ppm: i64::try_from(
+            speedup_ppm: i64::try_from(
                 (reference_latency_ns.saturating_sub(candidate_latency_ns)) * 1_000_000
                     / reference_latency_ns,
             )
             .unwrap(),
-            confidence_interval_low_ppm: 1,
-            confidence_interval_high_ppm: 2,
-            relative_ci_width_ppm: 1,
-            order_bias_ppm: 0,
+            candidate_is_faster: candidate_latency_ns < reference_latency_ns,
         },
     };
     LoadedRuntimeImplementation {
@@ -219,20 +218,22 @@ fn loaded_implementation(
             conversion_ns,
             conversion_bytes: conversion_ns,
             boundary_count: u64::from(conversion_ns > 0),
-            speedup_ppm: compared.paired.geometric_speedup_ppm,
+            speedup_ppm: compared.paired.speedup_ppm,
         }],
         candidate_root: PathBuf::from(format!("/fixture/{implementation_id}/candidate")),
         mount_plan: RuntimeMountPlan {
             schema: RUNTIME_MOUNT_PLAN_SCHEMA.to_string(),
             candidate_id: format!("candidate_{implementation_id}"),
             adapter_id: VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER.to_string(),
-            component_replacements: source_components
-                .iter()
-                .map(|source_component_id| RuntimeComponentReplacement {
-                    source_component_id: (*source_component_id).to_string(),
-                    overlay_ref: format!("overlays/{source_component_id}.json"),
-                })
-                .collect(),
+            regions: vec![RuntimeMountRegion {
+                component_replacements: source_components
+                    .iter()
+                    .map(|source_component_id| RuntimeComponentReplacement {
+                        source_component_id: (*source_component_id).to_string(),
+                        overlay_ref: format!("overlays/{source_component_id}.json"),
+                    })
+                    .collect(),
+            }],
             tensor_index_refs: Vec::new(),
         },
     }
@@ -295,6 +296,27 @@ fn request(
             .collect(),
         exact_baseline_compatible: true,
     }
+}
+
+#[test]
+fn paired_comparison_uses_only_the_binary_microbenchmark_decision() {
+    let comparison: RuntimePairedComparison = serde_json::from_value(json!({
+        "speedup_ppm": 1,
+        "candidate_is_faster": true,
+    }))
+    .unwrap();
+    assert_eq!(comparison.speedup_ppm, 1);
+    assert!(comparison.candidate_is_faster);
+
+    let statistical_record = serde_json::from_value::<RuntimePairedComparison>(json!({
+        "geometric_speedup_ppm": 1,
+        "confidence_interval_low_ppm": 1,
+        "confidence_interval_high_ppm": 1,
+        "relative_ci_width_ppm": 1,
+        "order_bias_ppm": 0,
+    }))
+    .unwrap_err();
+    assert!(statistical_record.to_string().contains("unknown field"));
 }
 
 #[test]
@@ -416,6 +438,55 @@ fn selector_uses_the_weakest_measured_anchor_across_a_sustained_regime() {
 }
 
 #[test]
+fn selector_prices_only_alternative_phases_in_a_phase_selective_implementation() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
+    let mut target = predicate(&[&gpu], "local");
+    target.execution.phases = vec!["decode".to_string(), "prefill".to_string()];
+    target.execution.alternative_phases = vec!["decode".to_string()];
+    target.execution.source_retained_phases = vec!["prefill".to_string()];
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![loaded_implementation(
+            "implementation_decode_only",
+            &["layer"],
+            &["scope_layer"],
+            target,
+            1_000,
+            800,
+            0,
+        )],
+    };
+    let mut mixed_request = request(
+        vec![selection_device("gpu0", gpu.clone())],
+        &[("layer0", "layer", &["gpu0"])],
+        &[],
+    );
+    mixed_request.execution.phases = vec!["decode".to_string(), "prefill".to_string()];
+
+    let mixed = catalog.select(&mixed_request).unwrap();
+    assert_eq!(mixed.selected.len(), 1);
+    assert_eq!(mixed.selected[0].speedup_ppm, 200_000);
+
+    mixed_request.execution.phases = vec!["prefill".to_string()];
+    let source_only = catalog.select(&mixed_request).unwrap();
+    assert!(source_only.selected.is_empty());
+    assert!(
+        source_only.rejected[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("does not execute an alternative phase"))
+    );
+}
+
+#[test]
 fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
     let cpu = profile(HardwareDeviceKind::Cpu, "cpu-a", "zen-fixture", "native");
     let gpu_a = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
@@ -496,7 +567,7 @@ fn selector_refuses_uncovered_regions_when_exact_execution_is_incompatible() {
 }
 
 #[test]
-fn duplicate_source_instances_are_selected_independently() {
+fn one_implementation_covers_every_duplicate_source_instance() {
     let gpu_a = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
     let gpu_b = profile(HardwareDeviceKind::Gpu, "gpu-b", "gfx-fixture", "vulkan");
     let catalog = RuntimeImplementationCatalog {
@@ -513,7 +584,7 @@ fn duplicate_source_instances_are_selected_independently() {
             "implementation_layer",
             &["layer"],
             &["scope_layer"],
-            predicate(&[&gpu_a], "local"),
+            predicate(&[&gpu_a, &gpu_b], "distributed"),
             1_000,
             800,
             0,
@@ -533,15 +604,76 @@ fn duplicate_source_instances_are_selected_independently() {
 
     let report = catalog.select(&request).unwrap();
 
-    assert_eq!(report.selected.len(), 2);
+    assert_eq!(report.selected.len(), 1);
     assert_eq!(
-        report
-            .selected
+        report.selected[0]
+            .instance_ids
             .iter()
-            .map(|selection| selection.instance_ids[0].as_str())
+            .map(String::as_str)
             .collect::<Vec<_>>(),
         vec!["layer_duplicate", "layer_original"]
     );
+}
+
+#[test]
+fn one_implementation_can_cover_disconnected_semantic_regions() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
+    let mut implementation = loaded_implementation(
+        "implementation_regions",
+        &["layer_a", "layer_b"],
+        &["scope_a", "scope_b"],
+        predicate(&[&gpu], "local"),
+        1_000,
+        800,
+        0,
+    );
+    implementation.mount_plan.regions = vec![
+        RuntimeMountRegion {
+            component_replacements: vec![RuntimeComponentReplacement {
+                source_component_id: "layer_a".to_string(),
+                overlay_ref: "overlays/layer_a.json".to_string(),
+            }],
+        },
+        RuntimeMountRegion {
+            component_replacements: vec![RuntimeComponentReplacement {
+                source_component_id: "layer_b".to_string(),
+                overlay_ref: "overlays/layer_b.json".to_string(),
+            }],
+        },
+    ];
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![implementation],
+    };
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[
+            ("instance_a", "layer_a", &["gpu0"]),
+            ("exact_middle", "middle", &["gpu0"]),
+            ("instance_b", "layer_b", &["gpu0"]),
+        ],
+        &[
+            ("instance_a", "exact_middle"),
+            ("exact_middle", "instance_b"),
+        ],
+    );
+
+    let report = catalog.select(&request).unwrap();
+
+    assert_eq!(report.selected.len(), 1);
+    assert_eq!(
+        report.selected[0].instance_ids,
+        ["instance_a".to_string(), "instance_b".to_string()]
+    );
+    assert_eq!(report.exact_instance_ids, ["exact_middle".to_string()]);
 }
 
 #[test]

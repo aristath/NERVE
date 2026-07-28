@@ -47,3 +47,6 @@ pub use vulkan_compute::*;
 pub use vulkan_distributed::*;
 #[cfg(feature = "vulkan")]
 pub use vulkan_stream_circuit::*;
+
+pub const RUNTIME_IMPLEMENTATION_FINGERPRINT: &str =
+    env!("NERVE_RUNTIME_IMPLEMENTATION_FINGERPRINT");

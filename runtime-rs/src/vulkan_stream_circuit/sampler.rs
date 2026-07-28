@@ -846,6 +846,29 @@ impl VulkanResidentSamplerRunner {
         Ok(())
     }
 
+    fn reset_session_state(
+        &self,
+        random_seed: u32,
+    ) -> Result<(), VulkanResidentSamplerRunnerError> {
+        self.output_buffer
+            .write_bytes(&vec![0; self.output_buffer.byte_capacity()])?;
+        self.set_random_seed(random_seed)?;
+        if let Some(buffer) = &self._seen_token_snapshot_buffer {
+            buffer.write_bytes(&vec![0; buffer.byte_capacity()])?;
+        }
+        self.reset_token_state()
+    }
+
+    fn set_random_seed(
+        &self,
+        random_seed: u32,
+    ) -> Result<(), VulkanResidentSamplerRunnerError> {
+        if let Some(buffer) = &self._sampler_seed_buffer {
+            buffer.write_bytes(&random_seed.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
     fn completed_run(&self) -> Result<VulkanResidentSamplerRun, VulkanResidentSamplerRunnerError> {
         let output = self.output_buffer.read_bytes(self.output_byte_capacity)?;
         let token_id = u32::from_le_bytes([output[0], output[1], output[2], output[3]]);

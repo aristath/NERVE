@@ -18,7 +18,7 @@ const FIXTURE_MODEL_INPUT_FRAME_SIGNAL: &str = "input_frame";
 const FIXTURE_MODEL_HIDDEN_SIZE: usize = 16;
 
 #[test]
-fn package_loader_rejects_stale_compiler_contracts_before_package_setup() {
+fn package_loader_rejects_unsupported_package_schema_before_package_setup() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -40,21 +40,6 @@ fn package_loader_rejects_stale_compiler_contracts_before_package_setup() {
         .unwrap_err()
         .to_string();
     assert!(schema_error.contains("recompile the model"));
-
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec(&serde_json::json!({
-            "schema": VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA,
-            "compiler_fingerprint": "stale"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let fingerprint_error = VulkanResidentModelPackageManifest::from_json_file(&manifest_path)
-        .unwrap_err()
-        .to_string();
-    assert!(fingerprint_error.contains("does not match runtime fingerprint"));
-    assert!(fingerprint_error.contains("recompile the model"));
 
     std::fs::remove_file(manifest_path).unwrap();
 }

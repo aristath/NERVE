@@ -182,11 +182,11 @@ fn load_implementation(
     }
     if implementation.comparison.benchmark_decision != "materially_faster"
         || implementation.comparison.validation_status != "passed"
-        || implementation
-            .comparison
-            .workloads
-            .iter()
-            .any(|workload| workload.decision != "materially_faster")
+        || implementation.comparison.workloads.iter().any(|workload| {
+            workload.decision != "materially_faster"
+                || !workload.paired.candidate_is_faster
+                || workload.paired.speedup_ppm <= 0
+        })
     {
         return invalid("runtime registry contains an unqualified implementation");
     }
@@ -302,26 +302,49 @@ pub(super) fn validate_mount_plan(
     if mount_plan.schema != RUNTIME_MOUNT_PLAN_SCHEMA
         || mount_plan.candidate_id != candidate_id
         || mount_plan.adapter_id != VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER
-        || mount_plan.component_replacements.is_empty()
+        || mount_plan.regions.is_empty()
     {
         return invalid("runtime implementation mount plan is unsupported");
     }
-    let replacement_sources = mount_plan
-        .component_replacements
+    let region_sources = mount_plan
+        .regions
         .iter()
-        .map(|replacement| replacement.source_component_id.as_str())
+        .map(|region| {
+            region
+                .component_replacements
+                .iter()
+                .map(|replacement| replacement.source_component_id.as_str())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
-    if !strictly_sorted_unique(&replacement_sources)
-        || replacement_sources
+    if region_sources
+        .iter()
+        .any(|sources| sources.is_empty() || !strictly_sorted_unique(sources))
+        || region_sources.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return invalid("runtime mount-plan regions must be non-empty, sorted, and unique");
+    }
+    let replacement_sources = region_sources.iter().flatten().copied().collect::<Vec<_>>();
+    if replacement_sources.len()
+        != replacement_sources
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+        || replacement_sources.iter().copied().collect::<BTreeSet<_>>()
             != source_component_ids
                 .iter()
                 .map(String::as_str)
-                .collect::<Vec<_>>()
+                .collect::<BTreeSet<_>>()
     {
         return invalid("runtime mount plan must replace exactly its covered source components");
     }
     let mut references = BTreeSet::new();
-    for replacement in &mount_plan.component_replacements {
+    for replacement in mount_plan
+        .regions
+        .iter()
+        .flat_map(|region| region.component_replacements.iter())
+    {
         if !references.insert(replacement.overlay_ref.as_str()) {
             return invalid("runtime mount plan reuses an artifact reference");
         }
@@ -423,7 +446,8 @@ fn load_workload_metrics(
         let candidate_latency_ns = unsigned_u64(candidate_latency, "mean", "candidate latency")?;
         if reference_latency_ns == 0
             || candidate_latency_ns >= reference_latency_ns
-            || comparison.paired.geometric_speedup_ppm <= 0
+            || !comparison.paired.candidate_is_faster
+            || comparison.paired.speedup_ppm <= 0
         {
             return invalid(
                 "runtime implementation benchmark metrics do not describe a measured win",
@@ -448,7 +472,7 @@ fn load_workload_metrics(
                 "boundary_count",
                 "candidate workload metrics",
             )?,
-            speedup_ppm: comparison.paired.geometric_speedup_ppm,
+            speedup_ppm: comparison.paired.speedup_ppm,
         });
     }
     metrics.sort_by(|left, right| left.workload_id.cmp(&right.workload_id));

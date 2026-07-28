@@ -20,6 +20,73 @@ pub struct VulkanResidentBufferCopyBatch {
     copy_count: usize,
 }
 
+pub struct VulkanResidentBufferReadback {
+    bytes: Vec<u8>,
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl VulkanResidentBufferReadback {
+    pub fn range_count(&self) -> usize {
+        self.ranges.len()
+    }
+
+    pub fn range_bytes(&self, index: usize) -> Result<&[u8], VulkanError> {
+        let range = self.ranges.get(index).ok_or_else(|| {
+            VulkanError(format!(
+                "resident buffer readback has {} ranges, not index {index}",
+                self.ranges.len()
+            ))
+        })?;
+        Ok(&self.bytes[range.clone()])
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct VulkanResidentBufferReadRange<'a> {
+    source: &'a VulkanResidentBuffer,
+    source_offset: usize,
+    byte_len: usize,
+}
+
+impl<'a> VulkanResidentBufferReadRange<'a> {
+    pub fn new(
+        source: &'a VulkanResidentBuffer,
+        source_offset: usize,
+        byte_len: usize,
+    ) -> Result<Self, VulkanError> {
+        validate_resident_transfer_range(source_offset, byte_len)?;
+        source.byte_range(source_offset, byte_len)?;
+        Ok(Self {
+            source,
+            source_offset,
+            byte_len,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct VulkanResidentBufferWriteRange<'a> {
+    destination: &'a VulkanResidentBuffer,
+    destination_offset: usize,
+    bytes: &'a [u8],
+}
+
+impl<'a> VulkanResidentBufferWriteRange<'a> {
+    pub fn new(
+        destination: &'a VulkanResidentBuffer,
+        destination_offset: usize,
+        bytes: &'a [u8],
+    ) -> Result<Self, VulkanError> {
+        validate_resident_transfer_range(destination_offset, bytes.len())?;
+        destination.byte_range(destination_offset, bytes.len())?;
+        Ok(Self {
+            destination,
+            destination_offset,
+            bytes,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct VulkanResidentBufferRangeCopy<'a> {
     source: &'a VulkanResidentBuffer,
@@ -37,20 +104,8 @@ impl<'a> VulkanResidentBufferRangeCopy<'a> {
         destination_offset: usize,
         byte_len: usize,
     ) -> Result<Self, VulkanError> {
-        const VULKAN_BUFFER_COPY_ALIGNMENT: usize = 4;
-        if byte_len == 0 {
-            return Err(VulkanError(
-                "resident buffer range copy length must not be zero".to_string(),
-            ));
-        }
-        if !source_offset.is_multiple_of(VULKAN_BUFFER_COPY_ALIGNMENT)
-            || !destination_offset.is_multiple_of(VULKAN_BUFFER_COPY_ALIGNMENT)
-            || !byte_len.is_multiple_of(VULKAN_BUFFER_COPY_ALIGNMENT)
-        {
-            return Err(VulkanError(format!(
-                "resident buffer range copy offsets and length must be multiples of {VULKAN_BUFFER_COPY_ALIGNMENT}, got source offset {source_offset}, destination offset {destination_offset}, and length {byte_len}"
-            )));
-        }
+        validate_resident_transfer_range(source_offset, byte_len)?;
+        validate_resident_transfer_range(destination_offset, byte_len)?;
         source.byte_range(source_offset, byte_len)?;
         destination.byte_range(destination_offset, byte_len)?;
         Ok(Self {
@@ -61,6 +116,23 @@ impl<'a> VulkanResidentBufferRangeCopy<'a> {
             byte_len: byte_len as vk::DeviceSize,
         })
     }
+}
+
+fn validate_resident_transfer_range(offset: usize, byte_len: usize) -> Result<(), VulkanError> {
+    const VULKAN_BUFFER_COPY_ALIGNMENT: usize = 4;
+    if byte_len == 0 {
+        return Err(VulkanError(
+            "resident buffer transfer length must not be zero".to_string(),
+        ));
+    }
+    if !offset.is_multiple_of(VULKAN_BUFFER_COPY_ALIGNMENT)
+        || !byte_len.is_multiple_of(VULKAN_BUFFER_COPY_ALIGNMENT)
+    {
+        return Err(VulkanError(format!(
+            "resident buffer transfer offset and length must be multiples of {VULKAN_BUFFER_COPY_ALIGNMENT}, got offset {offset} and length {byte_len}"
+        )));
+    }
+    Ok(())
 }
 
 pub struct VulkanResidentMappedBufferCopy {

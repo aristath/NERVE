@@ -1,7 +1,6 @@
 {
   "schema": "nerve.vulkan_resident_model_package.v4",
   "package_id": "model_d119caf1_vulkan_resident",
-  "compiler_fingerprint": "nerve.package_compiler_sha256.v2:9a221f2cfce2d88eb32abd49cac33ae4f8b685f70743dc9cf3de7ae50beda59e",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
     "hardware_profiles": [
@@ -3018,7 +3017,7 @@
       },
       "optimization/stage.json": {
         "byte_count": 2968,
-        "sha256": "93526d282659a60dd93c6deff86b681d5b264a0cdf04f9a10339ee575f147074"
+        "sha256": "0dc5639c163276f4bd5264b7d7b5148b31efecba34ce0fdff504bf9f41811fd6"
       },
       "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv": {
         "byte_count": 23748,

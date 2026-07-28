@@ -1416,6 +1416,44 @@ mod tests {
     }
 
     #[test]
+    fn resident_buffer_batch_io_uses_one_transfer_per_direction() {
+        let device = match selected_test_vulkan_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping Vulkan smoke: {error}");
+                return;
+            }
+        };
+        let first = device.create_resident_buffer(16).unwrap();
+        let second = device.create_resident_buffer(16).unwrap();
+        let first_bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+        let second_bytes = [11, 12, 13, 14, 15, 16, 17, 18];
+        let writes = [
+            VulkanResidentBufferWriteRange::new(&first, 4, &first_bytes).unwrap(),
+            VulkanResidentBufferWriteRange::new(&second, 0, &second_bytes).unwrap(),
+        ];
+        reset_vulkan_resident_execution_counters();
+
+        assert_eq!(
+            device.write_resident_buffer_ranges(&writes).unwrap(),
+            first_bytes.len() + second_bytes.len()
+        );
+        let reads = [
+            VulkanResidentBufferReadRange::new(&second, 0, second_bytes.len()).unwrap(),
+            VulkanResidentBufferReadRange::new(&first, 4, first_bytes.len()).unwrap(),
+        ];
+        let readback = device.read_resident_buffer_ranges(&reads).unwrap();
+
+        assert_eq!(readback.range_count(), 2);
+        assert_eq!(readback.range_bytes(0).unwrap(), second_bytes);
+        assert_eq!(readback.range_bytes(1).unwrap(), first_bytes);
+        assert!(readback.range_bytes(2).is_err());
+        let counters = vulkan_resident_execution_counters();
+        assert_eq!(counters.resident_copy_queue_submits, 2);
+        assert_eq!(counters.resident_copy_waits, 2);
+    }
+
+    #[test]
     fn resident_byte_copy_binding_can_be_reused() {
         let device = match selected_test_vulkan_device() {
             Ok(device) => device,

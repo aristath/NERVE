@@ -97,6 +97,7 @@ impl VulkanResidentModelPackage {
                 &default_device_id,
                 &resource_plan,
                 &tensor_index,
+                None,
             )?);
         let input_transducer_spirv_words = load_required_resident_model_package_shader(
             manifest_dir,
@@ -219,11 +220,14 @@ impl VulkanResidentModelPackage {
                 "failed to mount Vulkan stream circuit for stream instance: {error}"
             ))
         })?;
-        mounted.buffers.zero_state_buffers().map_err(|error| {
-            VulkanResidentTokenModelPackageError::new(format!(
-                "failed to zero stream state buffers: {error}"
-            ))
-        })?;
+        mounted
+            .buffers
+            .initialize_state_buffers(device)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to initialize stream state buffers: {error}"
+                ))
+            })?;
         let inherited = source
             .map(|source| {
                 mounted

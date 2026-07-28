@@ -517,7 +517,10 @@ fn component_batch_bindings<'a>(
                                 format!("component batch is missing parameter {tensor:?}"),
                             ))
                         })?;
-                    (&parameter.buffer, parameter.byte_capacity)
+                    (
+                        parameter.buffer.as_ref(),
+                        parameter.byte_capacity,
+                    )
                 }
                 VulkanBoundDescriptorTarget::StreamStateBuffer {
                     buffer_index,

@@ -47,6 +47,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             runtime_model,
             dynamic_state_capacity_activations,
             true,
+            None,
             |_| Ok(device),
         )
     }
@@ -63,6 +64,41 @@ impl VulkanResidentInProcessPlacedModelPackage {
             runtime_model,
             dynamic_state_capacity_activations,
             mount_speculative_decoders,
+            None,
+            |device_id| {
+                devices
+                    .get(device_id)
+                    .map(|device| device.as_ref())
+                    .ok_or_else(
+                        || VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: device_id.to_string(),
+                        },
+                    )
+            },
+        )
+    }
+
+    pub fn from_runtime_model_for_bound_devices_with_parameter_pool(
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        manifest_dir: impl AsRef<Path>,
+        runtime_model: VulkanResidentRuntimeModel,
+        dynamic_state_capacity_activations: Option<usize>,
+        mount_speculative_decoders: bool,
+        parameter_pool: &VulkanResidentBufferPool,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        for (device_id, device) in devices {
+            parameter_pool
+                .register_device(device_id, device.clone())
+                .map_err(
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                )?;
+        }
+        Self::from_runtime_model_for_device_resolver(
+            manifest_dir,
+            runtime_model,
+            dynamic_state_capacity_activations,
+            mount_speculative_decoders,
+            Some(parameter_pool),
             |device_id| {
                 devices
                     .get(device_id)
@@ -81,6 +117,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
         mount_speculative_decoders: bool,
+        parameter_pool: Option<&VulkanResidentBufferPool>,
         device_for: F,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError>
     where
@@ -135,6 +172,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     &input_device_id,
                     &resource_plan,
                     &tensor_index,
+                    parameter_pool,
                 )?);
                 (shared.clone(), shared)
             } else {
@@ -145,6 +183,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         &resource_plan,
                         &tensor_index,
                         "input_transducer",
+                        parameter_pool,
                     )?),
                     Arc::new(load_resident_package_transducer_parameter_buffers_for(
                         output_device,
@@ -152,6 +191,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         &resource_plan,
                         &tensor_index,
                         "output_transducer",
+                        parameter_pool,
                     )?),
                 )
             };
@@ -301,11 +341,20 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )
             })?;
         let distributed_parameter_buffers = Arc::new(
-            VulkanDistributedParameterBuffers::allocate_and_load(
-                &distributed_parameter_allocation_plan,
-                &tensor_index,
-                |device_id| device_for(device_id),
-            )
+            match parameter_pool {
+                Some(pool) => VulkanDistributedParameterBuffers::
+                    allocate_and_load_from_pool(
+                        &distributed_parameter_allocation_plan,
+                        &tensor_index,
+                        pool,
+                    ),
+                None => VulkanDistributedParameterBuffers::
+                    allocate_and_load(
+                        &distributed_parameter_allocation_plan,
+                        &tensor_index,
+                        |device_id| device_for(device_id),
+                    ),
+            }
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
@@ -321,7 +370,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
             let excluded_tensors =
                 distributed_parameter_exclusion_plan.tensors_for_device(&package_slice.device_id);
             let package_slice = package_slice
-                .materialize(slice_device, &tensor_index, &excluded_tensors)
+                .materialize(
+                    slice_device,
+                    &tensor_index,
+                    &excluded_tensors,
+                    parameter_pool,
+                )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
             device_slices.push(Arc::new(package_slice));
         }
@@ -587,14 +641,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         .cloned(),
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-            mounted.buffers.zero_state_buffers().map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to zero stream state buffers for placed device {:?}: {error}",
-                        package_slice.device_id
-                    )),
-                )
-            })?;
+            mounted
+                .buffers
+                .initialize_state_buffers(device)
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to initialize stream state buffers for placed device {:?}: {error}",
+                            package_slice.device_id
+                        )),
+                    )
+                })?;
             let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
             let mounted_bound = mounted
                 .mounted_placed_bound_dispatch_plan(&reusable_manifest)

@@ -188,6 +188,27 @@ pub struct TensorMetadata {
     pub layout: Option<String>,
 }
 
+impl TensorMetadata {
+    pub fn immutable_content_identity(
+        &self,
+        tensor: &str,
+    ) -> Result<&str, CircuitPlanError> {
+        self.data_sha256
+            .as_deref()
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "tensor {tensor:?} cannot enter immutable residency without a valid data_sha256 identity"
+                ))
+            })
+    }
+}
+
 #[cfg(test)]
 mod tensor_index_fragment_tests {
     use super::*;

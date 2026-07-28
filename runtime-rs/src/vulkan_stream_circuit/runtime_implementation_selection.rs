@@ -367,46 +367,83 @@ impl VulkanResidentRuntimeModel {
                 "staged runtime candidate changed after it was loaded",
             ));
         }
-        let mut instance_ids = Vec::new();
-        for source_component_id in &candidate.source_component_ids {
-            let matches = self
-                .runtime_graph
-                .instances
-                .iter()
-                .filter(|instance| {
-                    instance.source_component_id == *source_component_id
-                })
-                .map(|instance| instance.instance_id.clone())
-                .collect::<Vec<_>>();
-            if matches.len() != 1 {
-                return Err(VulkanResidentTokenModelPackageError::new(
-                    format!(
-                        "staged candidate {:?} requires exactly one runtime instance of source component {:?}, found {}",
-                        candidate.candidate_id,
-                        source_component_id,
-                        matches.len(),
-                    ),
-                ));
-            }
-            instance_ids.push(matches[0].clone());
-        }
-        instance_ids.sort();
+        let mut instances = self
+            .runtime_graph
+            .instances
+            .iter()
+            .map(|instance| crate::RuntimeSelectionInstance {
+                instance_id: instance.instance_id.clone(),
+                source_component_id: instance
+                    .source_component_id
+                    .clone(),
+                logical_device_ids: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        instances.sort_by(|left, right| {
+            left.instance_id.cmp(&right.instance_id)
+        });
+        let mut edges = self
+            .runtime_graph
+            .effective_edges()
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(
+                    error.to_string(),
+                )
+            })?
+            .into_iter()
+            .map(|edge| crate::RuntimeSelectionEdge {
+                source_instance_id: edge.source.component_id,
+                destination_instance_id: edge.destination.component_id,
+            })
+            .collect::<Vec<_>>();
+        edges.sort_by(|left, right| {
+            (
+                left.source_instance_id.as_str(),
+                left.destination_instance_id.as_str(),
+            )
+                .cmp(&(
+                    right.source_instance_id.as_str(),
+                    right.destination_instance_id.as_str(),
+                ))
+        });
+        let Some(region_applications) =
+            crate::implementation_selection::maximum_nonoverlapping_region_applications(
+                &candidate.mount_plan.regions,
+                &instances,
+                &edges,
+            )
+        else {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                format!(
+                    "staged candidate {:?} has no complete matching runtime region for source components {:?}",
+                    candidate.candidate_id,
+                    candidate.source_component_ids,
+                ),
+            ));
+        };
+        let applications = vec![
+            crate::implementation_selection::flatten_region_applications(
+                &region_applications,
+            ),
+        ];
         let mut mounted_instances = BTreeSet::new();
         let mut loaded_tensor_fragments = BTreeSet::new();
-        mount_runtime_candidate_application(
-            &mut self,
-            &package_root,
-            RuntimeCandidateApplication {
-                candidate_root: &candidate.candidate_root,
-                mount_plan: &candidate.mount_plan,
-                application_id: &candidate.candidate_id,
-                instance_ids: &instance_ids,
-            },
-            RuntimeCandidateMountLedger {
-                mounted_instances: &mut mounted_instances,
-                loaded_tensor_fragments: &mut loaded_tensor_fragments,
-            },
-        )?;
+        for instance_ids in &applications {
+            mount_runtime_candidate_application(
+                &mut self,
+                &package_root,
+                RuntimeCandidateApplication {
+                    candidate_root: &candidate.candidate_root,
+                    mount_plan: &candidate.mount_plan,
+                    application_id: &candidate.candidate_id,
+                    instance_ids,
+                },
+                RuntimeCandidateMountLedger {
+                    mounted_instances: &mut mounted_instances,
+                    loaded_tensor_fragments: &mut loaded_tensor_fragments,
+                },
+            )?;
+        }
         self.tensor_index_fragments.sort_by(|left, right| {
             left.index_path.cmp(&right.index_path)
         });
@@ -481,7 +518,7 @@ fn mount_runtime_candidate_application(
     runtime_model: &mut VulkanResidentRuntimeModel,
     package_root: &Path,
     application: RuntimeCandidateApplication<'_>,
-    ledger: RuntimeCandidateMountLedger<'_>,
+    mut ledger: RuntimeCandidateMountLedger<'_>,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
     let RuntimeCandidateApplication {
         candidate_root,
@@ -489,6 +526,102 @@ fn mount_runtime_candidate_application(
         application_id,
         instance_ids,
     } = application;
+    let effective_edges = runtime_model
+        .runtime_graph
+        .effective_edges()
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(error.to_string())
+        })?;
+    let selection_instances = runtime_model
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| crate::RuntimeSelectionInstance {
+            instance_id: instance.instance_id.clone(),
+            source_component_id: instance.source_component_id.clone(),
+            logical_device_ids: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let selection_edges = effective_edges
+        .iter()
+        .map(|edge| crate::RuntimeSelectionEdge {
+            source_instance_id: edge.source.component_id.clone(),
+            destination_instance_id: edge.destination.component_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let region_applications =
+        crate::implementation_selection::maximum_nonoverlapping_region_applications(
+            &mount_plan.regions,
+            &selection_instances,
+            &selection_edges,
+        )
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime candidate application {application_id:?} has no complete matching semantic regions",
+            ))
+        })?;
+    let mut declared_instance_ids = instance_ids.to_vec();
+    declared_instance_ids.sort();
+    if crate::implementation_selection::flatten_region_applications(
+        &region_applications,
+    ) != declared_instance_ids
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime candidate application {application_id:?} instance coverage disagrees with its semantic regions",
+        )));
+    }
+    for (region_index, (region, applications)) in mount_plan
+        .regions
+        .iter()
+        .zip(&region_applications)
+        .enumerate()
+    {
+        for (region_application_index, region_instance_ids) in
+            applications.iter().enumerate()
+        {
+            mount_runtime_candidate_region_application(
+                runtime_model,
+                package_root,
+                candidate_root,
+                region,
+                &format!(
+                    "{application_id}:region_{region_index}:application_{region_application_index}"
+                ),
+                region_instance_ids,
+                &effective_edges,
+                &mut ledger,
+            )?;
+        }
+    }
+    for reference in &mount_plan.tensor_index_refs {
+        let index_path = contained_candidate_artifact(
+            candidate_root,
+            reference,
+            "runtime tensor-index fragment",
+        )?;
+        if ledger.loaded_tensor_fragments.insert(index_path.clone()) {
+            runtime_model.tensor_index_fragments.push(
+                VulkanRuntimeTensorIndexFragment {
+                    index_path,
+                    candidate_root: candidate_root.to_path_buf(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mount_runtime_candidate_region_application(
+    runtime_model: &mut VulkanResidentRuntimeModel,
+    package_root: &Path,
+    candidate_root: &Path,
+    region: &crate::RuntimeMountRegion,
+    application_id: &str,
+    instance_ids: &[String],
+    effective_edges: &[crate::stream_circuit::StreamCircuitGraphEdge],
+    ledger: &mut RuntimeCandidateMountLedger<'_>,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
     let runtime_instances = runtime_model
         .runtime_graph
         .instances
@@ -506,12 +639,6 @@ fn mount_runtime_candidate_application(
             (component.component_id.clone(), component.clone())
         })
         .collect::<BTreeMap<_, _>>();
-    let effective_edges = runtime_model
-        .runtime_graph
-        .effective_edges()
-        .map_err(|error| {
-            VulkanResidentTokenModelPackageError::new(error.to_string())
-        })?;
     let island_instances = instance_ids
         .iter()
         .map(|instance_id| {
@@ -543,7 +670,7 @@ fn mount_runtime_candidate_application(
         )));
     }
 
-    for replacement in &mount_plan.component_replacements {
+    for replacement in &region.component_replacements {
         let matching_instances = island_instances
             .values()
             .filter(|instance| {
@@ -616,21 +743,6 @@ fn mount_runtime_candidate_application(
             matching_instances[0].instance_id.as_str(),
             overlay,
         )?;
-    }
-    for reference in &mount_plan.tensor_index_refs {
-        let index_path = contained_candidate_artifact(
-            candidate_root,
-            reference,
-            "runtime tensor-index fragment",
-        )?;
-        if ledger.loaded_tensor_fragments.insert(index_path.clone()) {
-            runtime_model.tensor_index_fragments.push(
-                VulkanRuntimeTensorIndexFragment {
-                    index_path,
-                    candidate_root: candidate_root.to_path_buf(),
-                },
-            );
-        }
     }
     Ok(())
 }

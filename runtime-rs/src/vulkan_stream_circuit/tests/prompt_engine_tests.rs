@@ -88,6 +88,118 @@ fn placed_prompt_engine_owns_streams_and_submits_input_events() {
 }
 
 #[test]
+fn placed_package_pool_reuses_immutable_parameters_across_graph_variants() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error)
+            if std::env::var_os(
+                "NERVE_TEST_VULKAN_DEVICE_INDEX",
+            )
+            .is_some() =>
+        {
+            panic!(
+                "explicit Vulkan device for resident parameter pool was unavailable: {error}"
+            )
+        }
+        Err(error) => {
+            eprintln!(
+                "skipping resident parameter pool test: {error}"
+            );
+            return;
+        }
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let manifest =
+        VulkanResidentModelPackageManifest::from_json_file(
+            &manifest_path,
+        )
+        .unwrap();
+    let source = manifest.resolved_source_graph(manifest_dir).unwrap();
+    let runtime_graph = manifest
+        .runtime_graph_from_controls(
+            Some("gpu0"),
+            &BTreeMap::new(),
+            &[],
+            None,
+        )
+        .unwrap();
+    let exact_model =
+        manifest.clone().mount_runtime_graph(&runtime_graph).unwrap();
+    let duplicated_model = manifest
+        .mount_runtime_graph(
+            &runtime_graph
+                .duplicate_after_instance(
+                    &source,
+                    "layer_00",
+                    "layer_00__duplicate",
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let devices = BTreeMap::from([(
+        "gpu0".to_string(),
+        Rc::new(device),
+    )]);
+    let pool = VulkanResidentBufferPool::default();
+
+    let exact =
+        VulkanResidentInProcessPlacedModelPackage::
+            from_runtime_model_for_bound_devices_with_parameter_pool(
+                &devices,
+                manifest_dir,
+                exact_model,
+                Some(64),
+                false,
+                &pool,
+            )
+            .unwrap();
+    let exact_stats = pool.stats();
+    assert!(exact_stats.miss_count > 0);
+    assert!(exact_stats.resident_bytes > 0);
+    drop(exact);
+    let stale_key = VulkanResidentBufferPoolKey::new(
+        "nerve.test.stale_variant.v1",
+        "gpu0",
+        "stale_parameter",
+        "0".repeat(64),
+        0,
+        4096,
+    )
+    .unwrap();
+    let stale_buffer =
+        pool.allocate_unpublished(&stale_key).unwrap();
+    pool.publish(stale_key, stale_buffer.clone()).unwrap();
+    drop(stale_buffer);
+
+    let duplicated =
+        VulkanResidentInProcessPlacedModelPackage::
+            from_runtime_model_for_bound_devices_with_parameter_pool(
+                &devices,
+                manifest_dir,
+                duplicated_model,
+                Some(64),
+                false,
+                &pool,
+            )
+            .unwrap();
+    assert_eq!(pool.evict_unreferenced(), 1);
+    let duplicated_stats = pool.stats();
+    assert!(duplicated_stats.hit_count > exact_stats.hit_count);
+    assert_eq!(
+        duplicated_stats.miss_count,
+        exact_stats.miss_count
+    );
+    assert_eq!(
+        duplicated_stats.resident_bytes,
+        exact_stats.resident_bytes
+    );
+    drop(duplicated);
+    drop(pool);
+    drop(devices);
+}
+
+#[test]
 fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
@@ -632,6 +744,62 @@ fn placed_prompt_engine_fork_cow_reset_and_removal_are_physically_consistent() {
             .live_block_count,
         0
     );
+}
+
+#[test]
+fn placed_prompt_engine_new_session_reset_restores_exact_initial_state() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) => {
+            eprintln!(
+                "skipping placed prompt engine new-session reset test: {error}"
+            );
+            return;
+        }
+    };
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let devices =
+        BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream =
+        VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+            devices,
+            manifest_path.parent().unwrap(),
+            runtime_model,
+            Some(64),
+            7,
+            0,
+        )
+        .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    let initial = engine.stream_resident_state_digest("main").unwrap();
+    let first = engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("first", vec![4], 1),
+        )
+        .unwrap();
+    assert_ne!(
+        engine.stream_resident_state_digest("main").unwrap(),
+        initial
+    );
+
+    let zeroed = engine.reset_stream_for_new_session("main", 7).unwrap();
+    assert!(zeroed > 0);
+    assert_eq!(
+        engine.stream_resident_state_digest("main").unwrap(),
+        initial
+    );
+    let replay = engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("replay", vec![4], 1),
+        )
+        .unwrap();
+    assert_eq!(replay.generated_token_ids, first.generated_token_ids);
 }
 
 #[test]

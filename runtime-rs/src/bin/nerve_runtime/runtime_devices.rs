@@ -124,6 +124,7 @@ fn runtime_bound_vulkan_devices(
     args: &Args,
     logical_device_ids: &[String],
 ) -> Result<RuntimeBoundVulkanDevices, Box<dyn Error>> {
+    validate_explicit_logical_device_bindings(args, logical_device_ids)?;
     let device_catalog = runtime_vulkan_device_catalog(args)?;
     let available_devices = device_catalog.available_compute_devices();
     let available_profiles = device_catalog.available_hardware_profiles()?;
@@ -188,6 +189,33 @@ fn runtime_bound_vulkan_devices(
         physical_device_ids,
         available_devices: available_devices.to_vec(),
     })
+}
+
+fn validate_explicit_logical_device_bindings(
+    args: &Args,
+    logical_device_ids: &[String],
+) -> Result<(), io::Error> {
+    let declared = logical_device_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let unknown = args
+        .device_bindings
+        .keys()
+        .filter(|device_id| !declared.contains(device_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "runtime device bindings reference logical devices absent from \
+                 the effective graph: {unknown:?}; declared logical devices: \
+                 {logical_device_ids:?}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn bound_devices_report(bound_devices: &RuntimeBoundVulkanDevices) -> Vec<RuntimeBoundDevice> {

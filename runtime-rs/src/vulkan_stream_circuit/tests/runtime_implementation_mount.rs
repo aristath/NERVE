@@ -23,6 +23,24 @@ fn fixture_sha256(path: &Path) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[cfg(unix)]
+fn fixture_source_file_signature(path: &Path) -> serde_json::Value {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = path.metadata().unwrap();
+    let timestamp_ns = |seconds: i64, nanoseconds: i64| {
+        u64::try_from(seconds).unwrap() * 1_000_000_000
+            + u64::try_from(nanoseconds).unwrap()
+    };
+    serde_json::json!({
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "byte_count": metadata.len(),
+        "modified_ns": timestamp_ns(metadata.mtime(), metadata.mtime_nsec()),
+        "changed_ns": timestamp_ns(metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
 fn staged_candidate_integrity_files(
     root: &Path,
     directory: &Path,
@@ -167,14 +185,40 @@ fn staged_runtime_candidate_fixture() -> (
     )
     .unwrap();
     std::fs::write(
+        candidate_root.join("contracts/source_seal.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "nerve.optimizer.source_package_seal.v2",
+            "package_id": "fixture_package",
+            "manifest_digest": "fixture_manifest_digest",
+            "optimizer_stage_digest": "fixture_stage_digest",
+            "exact_baseline_digest": "fixture_exact_digest",
+            "scope_catalog_digest": "fixture_scope_digest",
+            "package_integrity_contract_digest": "fixture_integrity_digest",
+            "source_inputs": {
+                "vulkan_resident_package.json": {
+                    "digest": format!(
+                        "{}:{}",
+                        crate::STAGED_ARTIFACT_DIGEST_SCHEMA,
+                        fixture_sha256(&source_path),
+                    ),
+                    "signature": fixture_source_file_signature(&source_path),
+                },
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
         candidate_root.join("contracts/mount_plan.json"),
         serde_json::to_vec(&serde_json::json!({
             "schema": crate::RUNTIME_MOUNT_PLAN_SCHEMA,
             "candidate_id": candidate_id,
             "adapter_id": crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
-            "component_replacements": [{
-                "source_component_id": "layer_00",
-                "overlay_ref": "overlays/layer_00.json",
+            "regions": [{
+                "component_replacements": [{
+                    "source_component_id": "layer_00",
+                    "overlay_ref": "overlays/layer_00.json",
+                }],
             }],
             "tensor_index_refs": [],
         }))
@@ -206,6 +250,8 @@ fn runtime_implementation_test_predicate(
         },
         execution: crate::RuntimeExecutionPredicate {
             phases: vec!["decode".to_string()],
+            alternative_phases: vec!["decode".to_string()],
+            source_retained_phases: Vec::new(),
             activation_batch: crate::RuntimeInclusiveRange {
                 minimum: 1,
                 maximum: 1,
@@ -367,12 +413,14 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
             adapter_id:
                 crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER
                     .to_string(),
-            component_replacements: vec![
-                crate::RuntimeComponentReplacement {
-                    source_component_id: "layer_00".to_string(),
-                    overlay_ref: overlay_ref.to_string(),
-                },
-            ],
+            regions: vec![crate::RuntimeMountRegion {
+                component_replacements: vec![
+                    crate::RuntimeComponentReplacement {
+                        source_component_id: "layer_00".to_string(),
+                        overlay_ref: overlay_ref.to_string(),
+                    },
+                ],
+            }],
             tensor_index_refs: Vec::new(),
         },
     };
@@ -583,6 +631,70 @@ fn sealed_staged_candidate_uses_the_normal_runtime_mount_path() {
     );
     assert!(mounted.implementation_selection.is_none());
     mounted.load_runtime_tensor_index(&package_root).unwrap();
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sealed_staged_candidate_mounts_every_duplicated_source_instance() {
+    let (root, package_root, candidate_root, _) =
+        staged_runtime_candidate_fixture();
+    let manifest =
+        VulkanResidentModelPackageManifest::from_json_file(
+            package_root.join("vulkan_resident_package.json"),
+        )
+        .unwrap();
+    let source = manifest.resolved_source_graph(&package_root).unwrap();
+    let runtime_graph = manifest
+        .runtime_graph_from_controls(
+            Some("gpu0"),
+            &BTreeMap::new(),
+            &[],
+            None,
+        )
+        .unwrap()
+        .duplicate_after_instance(
+            &source,
+            "layer_00",
+            "layer_00__duplicate",
+        )
+        .unwrap();
+    let runtime_model =
+        manifest.mount_runtime_graph(&runtime_graph).unwrap();
+    let candidate = crate::RuntimeStagedCandidate::load(
+        &package_root,
+        &candidate_root,
+    )
+    .unwrap();
+    let mounted = runtime_model
+        .apply_staged_runtime_candidate(&package_root, &candidate)
+        .unwrap();
+
+    let staged_components = mounted
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| {
+            component.implementation == "staged_alternative"
+        })
+        .map(|component| component.component_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        staged_components,
+        BTreeSet::from(["layer_00", "layer_00__duplicate"])
+    );
+    let staged_executions = mounted
+        .component_executions
+        .iter()
+        .filter(|execution| {
+            execution.implementation == "staged_alternative"
+        })
+        .map(|execution| execution.component_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        staged_executions,
+        BTreeSet::from(["layer_00", "layer_00__duplicate"])
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -195,6 +195,39 @@ impl VulkanResidentInProcessPlacedPromptStream {
         Ok(zeroed)
     }
 
+    pub fn reset_for_new_session(
+        &mut self,
+        random_seed: u32,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.is_idle() || self.pending_scheduler_activation.is_some() {
+            return Err(placed_scheduler_divergence(
+                "cannot reset placed prompt stream for a new session while work is pending",
+            ));
+        }
+        let zeroed = self
+            .processor
+            .reset_for_new_session(&self.devices, random_seed)?;
+        self.transient_state_pages.clear();
+        self.session.next_stream_tick = 0;
+        self.session.completed_prompt_event_count = 0;
+        self.session.generated_token_count = 0;
+        self.session.output_token_count = 0;
+        self.session.transport.reset_tick_state();
+        self.active_input_event = None;
+        self.pending_input_events.clear();
+        self.speculative_execution_policy =
+            VulkanSpeculativeExecutionPolicy::default();
+        self.pending_scheduler_activation = None;
+        Ok(zeroed)
+    }
+
+    pub fn set_random_seed(
+        &self,
+        random_seed: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.processor.set_random_seed(random_seed)
+    }
+
     pub fn next_stream_tick(&self) -> u64 {
         self.session.next_stream_tick
     }
@@ -222,7 +255,13 @@ impl VulkanResidentInProcessPlacedPromptStream {
             ));
         }
         let mut digest = Sha256::new();
-        digest.update(self.processor.resident_state_snapshot_digest()?);
+        digest.update(
+            self.processor
+                .resident_state_snapshot_digest(
+                    &self.devices,
+                    &self.transient_state_pages,
+                )?,
+        );
         let pages = self.transient_state_pages.snapshot_bytes();
         digest.update((pages.len() as u64).to_le_bytes());
         digest.update(pages);

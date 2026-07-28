@@ -652,7 +652,10 @@ impl VulkanMountedPlacedStreamCircuit {
                         }
                     },
                 )?;
-                Ok((&allocation.buffer, allocation.byte_capacity))
+                Ok((
+                    allocation.buffer.as_ref(),
+                    allocation.byte_capacity,
+                ))
             }
             VulkanBoundDescriptorTarget::BoundaryInput { signal_id }
             | VulkanBoundDescriptorTarget::BoundaryOutput { signal_id } => Err(

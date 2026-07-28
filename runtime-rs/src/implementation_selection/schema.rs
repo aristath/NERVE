@@ -8,11 +8,11 @@ pub const IMPLEMENTATION_REGISTRY_SCHEMA: &str = "nerve.optimizer.implementation
 pub const OPTIMIZER_STAGE_SCHEMA: &str = "nerve.optimizer.stage.v3";
 pub const OPTIMIZATION_SCOPE_CATALOG_SCHEMA: &str = "nerve.optimizer.optimization_scope_catalog.v1";
 pub const RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA: &str =
-    "nerve.optimizer.runtime_implementation_predicate.v2";
+    "nerve.optimizer.runtime_implementation_predicate.v3";
 pub const PROMOTION_DECISION_SCHEMA: &str = "nerve.optimizer.promotion_decision.v2";
-pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v1";
+pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v2";
 pub const VALIDATION_RECORD_SCHEMA: &str = "nerve.optimizer.validation_record.v1";
-pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v1";
+pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v2";
 pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v1";
 pub const VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER: &str =
     "vulkan_stream_circuit_component_overlay.v1";
@@ -51,6 +51,8 @@ pub struct RuntimeCapabilityClassCount {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeExecutionPredicate {
     pub phases: Vec<String>,
+    pub alternative_phases: Vec<String>,
+    pub source_retained_phases: Vec<String>,
     pub activation_batch: RuntimeInclusiveRange,
     pub context_activations: RuntimeInclusiveRange,
     pub state_activations: RuntimeInclusiveRange,
@@ -174,11 +176,8 @@ pub struct RuntimeComparedWorkload {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimePairedComparison {
-    pub geometric_speedup_ppm: i64,
-    pub confidence_interval_low_ppm: i64,
-    pub confidence_interval_high_ppm: i64,
-    pub relative_ci_width_ppm: u64,
-    pub order_bias_ppm: i64,
+    pub speedup_ppm: i64,
+    pub candidate_is_faster: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,8 +208,14 @@ pub struct RuntimeMountPlan {
     pub schema: String,
     pub candidate_id: String,
     pub adapter_id: String,
-    pub component_replacements: Vec<RuntimeComponentReplacement>,
+    pub regions: Vec<RuntimeMountRegion>,
     pub tensor_index_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeMountRegion {
+    pub component_replacements: Vec<RuntimeComponentReplacement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -8,10 +8,13 @@ use crate::stream_plan::{TensorIndex, TensorMetadata};
 use crate::stream_circuit::ComponentEdgePlacement;
 use crate::tensor_storage::{TensorStorage, TensorStorageRange};
 use crate::vulkan_compute::{
-    VulkanComputeDevice, VulkanError, VulkanResidentBuffer, VulkanResidentKernelBufferAccess,
-    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
-    VulkanResidentKernelSequenceStep, VulkanResidentQueueSubmissionBatch,
-    VulkanSharedResidentBufferRoute, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
+    VulkanComputeDevice, VulkanError, VulkanResidentBuffer,
+    VulkanResidentBufferPool, VulkanResidentBufferPoolKey,
+    VulkanResidentKernelBufferAccess,
+    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch,
+    VulkanResidentKernelSequence, VulkanResidentKernelSequenceStep,
+    VulkanResidentQueueSubmissionBatch, VulkanSharedResidentBufferRoute,
+    VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
     VulkanTimelineSemaphoreReplayState,
 };
 use crate::vulkan_stream_circuit::{
@@ -1013,7 +1016,7 @@ impl VulkanDistributedParameterBuffers {
             }
             buffers.push(VulkanDistributedParameterBufferAllocation {
                 allocation: allocation.clone(),
-                buffer,
+                buffer: Arc::new(buffer),
             });
         }
         plan.load_from_tensor_index(tensor_index, |allocation, bytes| {
@@ -1041,6 +1044,165 @@ impl VulkanDistributedParameterBuffers {
         })
     }
 
+    pub fn allocate_and_load_from_pool(
+        plan: &VulkanDistributedParameterAllocationPlan,
+        tensor_index: &TensorIndex,
+        pool: &VulkanResidentBufferPool,
+    ) -> Result<Self, VulkanDistributedParameterBufferError> {
+        let mut buffers = Vec::with_capacity(plan.allocations.len());
+        let mut buffer_index = BTreeMap::new();
+        let mut unpublished = Vec::new();
+        let mut total_byte_capacity = 0usize;
+        for allocation in &plan.allocations {
+            let metadata = tensor_index
+                .tensors
+                .get(&allocation.tensor)
+                .ok_or_else(|| {
+                    VulkanDistributedParameterBufferError(format!(
+                        "tensor index has no distributed parameter {:?}",
+                        allocation.tensor
+                    ))
+                })?;
+            let content_identity = metadata
+                .immutable_content_identity(&allocation.tensor)
+                .map_err(|error| {
+                    VulkanDistributedParameterBufferError(
+                        error.to_string(),
+                    )
+                })?;
+            let key = VulkanResidentBufferPoolKey::new(
+                "nerve.tensor_parameter.v1",
+                &allocation.device_id,
+                &allocation.tensor,
+                content_identity,
+                allocation.byte_offset,
+                allocation.byte_count,
+            )
+            .map_err(VulkanDistributedParameterBufferError::from)?;
+            let (buffer, publish) =
+                if let Some(buffer) = pool.resident_buffer(&key) {
+                    (buffer, false)
+                } else {
+                    (
+                        pool.allocate_unpublished(&key)
+                            .map_err(
+                                VulkanDistributedParameterBufferError::from,
+                            )?,
+                        true,
+                    )
+                };
+            total_byte_capacity = total_byte_capacity
+                .checked_add(allocation.byte_count)
+                .ok_or_else(|| {
+                    VulkanDistributedParameterBufferError(
+                        "distributed parameter buffer byte capacity overflowed"
+                            .to_string(),
+                    )
+                })?;
+            let allocation_key =
+                VulkanDistributedParameterAllocationKey::from(allocation);
+            if buffer_index
+                .insert(allocation_key, buffers.len())
+                .is_some()
+            {
+                return Err(VulkanDistributedParameterBufferError(format!(
+                    "distributed parameter buffer repeats tensor {:?} range {}..{} on {:?}",
+                    allocation.tensor,
+                    allocation.byte_offset,
+                    allocation.byte_offset + allocation.byte_count,
+                    allocation.device_id
+                )));
+            }
+            if publish {
+                unpublished.push((
+                    key,
+                    allocation.clone(),
+                    buffer.clone(),
+                ));
+            }
+            buffers.push(VulkanDistributedParameterBufferAllocation {
+                allocation: allocation.clone(),
+                buffer,
+            });
+        }
+        let unpublished_allocations = unpublished
+            .iter()
+            .map(|(_, allocation, _)| allocation.clone())
+            .collect::<Vec<_>>();
+        if !unpublished_allocations.is_empty() {
+            let total_byte_capacity = unpublished_allocations
+                .iter()
+                .try_fold(0usize, |total, allocation| {
+                    total.checked_add(allocation.byte_count).ok_or_else(
+                        || {
+                            VulkanDistributedParameterBufferError(
+                                "pooled distributed parameter load byte count overflowed"
+                                    .to_string(),
+                            )
+                        },
+                    )
+                })?;
+            let load_plan = VulkanDistributedParameterAllocationPlan {
+                allocation_count: unpublished_allocations.len(),
+                tensor_count: unpublished_allocations
+                    .iter()
+                    .map(|allocation| allocation.tensor.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                total_byte_capacity,
+                allocations: unpublished_allocations,
+            };
+            load_plan
+                .load_from_tensor_index(
+                    tensor_index,
+                    |allocation, bytes| {
+                        let key =
+                            VulkanDistributedParameterAllocationKey::from(
+                                allocation,
+                            );
+                        let index = *buffer_index.get(&key).ok_or_else(
+                            || {
+                                VulkanDistributedParameterLoadError(
+                                    format!(
+                                        "pooled distributed parameter buffer for tensor {:?} range {}..{} on {:?} is missing",
+                                        allocation.tensor,
+                                        allocation.byte_offset,
+                                        allocation.byte_offset
+                                            + allocation.byte_count,
+                                        allocation.device_id
+                                    ),
+                                )
+                            },
+                        )?;
+                        buffers[index]
+                            .buffer
+                            .write_bytes(bytes)
+                            .map_err(|error| {
+                                VulkanDistributedParameterLoadError(
+                                    error.to_string(),
+                                )
+                            })
+                    },
+                )
+                .map_err(|error| {
+                    VulkanDistributedParameterBufferError(
+                        error.to_string(),
+                    )
+                })?;
+            for (key, _, buffer) in unpublished {
+                pool.publish(key, buffer)
+                    .map_err(
+                        VulkanDistributedParameterBufferError::from,
+                    )?;
+            }
+        }
+        Ok(Self {
+            plan: plan.clone(),
+            buffers,
+            total_byte_capacity,
+        })
+    }
+
     pub fn parameter_buffer(
         &self,
         device_id: &str,
@@ -1059,7 +1221,7 @@ impl VulkanDistributedParameterBuffers {
 
 pub struct VulkanDistributedParameterBufferAllocation {
     pub allocation: VulkanDistributedParameterAllocation,
-    pub buffer: VulkanResidentBuffer,
+    pub buffer: Arc<VulkanResidentBuffer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

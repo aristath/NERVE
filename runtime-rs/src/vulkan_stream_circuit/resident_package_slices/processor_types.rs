@@ -21,13 +21,93 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
 impl VulkanResidentInProcessPlacedStreamProcessor {
     fn resident_state_snapshot_digest(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        transient_pages: &VulkanResidentTransientStatePageTable,
     ) -> Result<[u8; 32], VulkanResidentInProcessPlacedRuntimeError> {
         use sha2::{Digest, Sha256};
 
         let mut digest = Sha256::new();
         for slice in &self.device_slices {
             update_digest_frame(&mut digest, slice.device_id.as_bytes());
-            for state in &slice.mounted.buffers.state_buffers {
+            let device = devices.get(&slice.device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: slice.device_id.clone(),
+                }
+            })?;
+            let state_snapshots = slice
+                .mounted
+                .buffers
+                .state_buffers
+                .iter()
+                .map(|state| {
+                    let key = TransientStateKey::new(
+                        state.component_id.clone(),
+                        state.state_id.clone(),
+                    );
+                    let page_indices =
+                        transient_pages.resident_page_indices(&key);
+                    let read_byte_count = page_indices
+                        .iter()
+                        .copied()
+                        .try_fold(
+                            state.layout.dynamic_data_offset,
+                            |maximum, page_index| {
+                                state
+                                    .layout
+                                    .dynamic_physical_page_offset(page_index)
+                                    .and_then(|offset| {
+                                        offset
+                                            .checked_add(
+                                                state
+                                                    .layout
+                                                    .dynamic_page_byte_capacity,
+                                            )
+                                            .ok_or_else(|| {
+                                                VulkanError(
+                                                    "resident state digest range overflowed"
+                                                        .to_string(),
+                                                )
+                                            })
+                                    })
+                                    .map(|end| maximum.max(end))
+                            },
+                        )?;
+                    Ok((page_indices, read_byte_count))
+                })
+                .collect::<Result<Vec<_>, VulkanError>>()
+                .map_err(
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                )?;
+            let read_ranges = slice
+                .mounted
+                .buffers
+                .state_buffers
+                .iter()
+                .zip(&state_snapshots)
+                .map(|(state, (_, read_byte_count))| {
+                    VulkanResidentBufferReadRange::new(
+                        &state.buffer,
+                        0,
+                        *read_byte_count,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                )?;
+            let readback = device
+                .read_resident_buffer_ranges(&read_ranges)
+                .map_err(
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                )?;
+            for (state_index, (state, (page_indices, _))) in slice
+                .mounted
+                .buffers
+                .state_buffers
+                .iter()
+                .zip(&state_snapshots)
+                .enumerate()
+            {
                 update_digest_frame(&mut digest, state.component_id.as_bytes());
                 update_digest_frame(&mut digest, state.state_id.as_bytes());
                 update_digest_frame(&mut digest, state.state_type.as_bytes());
@@ -35,13 +115,33 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     &mut digest,
                     &state.byte_capacity.to_le_bytes(),
                 );
-                let bytes = state
-                    .buffer
-                    .read_bytes(state.byte_capacity)
+                let snapshot = readback
+                    .range_bytes(state_index)
                     .map_err(
                         VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
                     )?;
-                update_digest_frame(&mut digest, &bytes);
+                update_digest_frame(
+                    &mut digest,
+                    &snapshot[..state.layout.dynamic_data_offset],
+                );
+                for page_index in page_indices {
+                    update_digest_frame(
+                        &mut digest,
+                        &page_index.to_le_bytes(),
+                    );
+                    let offset = state
+                        .layout
+                        .dynamic_physical_page_offset(*page_index)
+                        .map_err(
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                        )?;
+                    update_digest_frame(
+                        &mut digest,
+                        &snapshot[offset
+                            ..offset
+                                + state.layout.dynamic_page_byte_capacity],
+                    );
+                }
             }
         }
         Ok(digest.finalize().into())
@@ -85,6 +185,59 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     ))
                 })
             })
+    }
+
+    fn initialize_transient_state_buffers(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        self.device_slices
+            .iter()
+            .try_fold(0usize, |total, slice| {
+                let device = devices.get(&slice.device_id).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                        device_id: slice.device_id.clone(),
+                    }
+                })?;
+                let bytes = slice
+                    .mounted
+                    .buffers
+                    .initialize_state_buffers(device)
+                    .map_err(
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                    )?;
+                total.checked_add(bytes).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(
+                            "state initialization byte count overflowed"
+                                .to_string(),
+                        ),
+                    )
+                })
+            })
+    }
+
+    fn reset_for_new_session(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        random_seed: u32,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        let initialized =
+            self.initialize_transient_state_buffers(devices)?;
+        self.sampler
+            .reset_session_state(random_seed)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        self.verification_state_transactions.borrow_mut().take();
+        Ok(initialized)
+    }
+
+    fn set_random_seed(
+        &self,
+        random_seed: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.sampler
+            .set_random_seed(random_seed)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)
     }
 }
 

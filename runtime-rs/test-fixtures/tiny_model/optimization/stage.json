@@ -47,7 +47,7 @@
     "nerve.optimizer.benchmark_observation.v1",
     "nerve.optimizer.benchmark_residency_event.v1",
     "nerve.optimizer.benchmark_run.v1",
-    "nerve.optimizer.benchmark_record.v1",
+    "nerve.optimizer.benchmark_record.v2",
     "nerve.optimizer.benchmark_evidence_integrity.v1",
     "nerve.optimizer.behavioral_error_contract.v1",
     "nerve.optimizer.validation_requirements.v1",
@@ -59,7 +59,7 @@
     "nerve.optimizer.prebenchmark_record.v1",
     "nerve.optimizer.validation_evidence_integrity.v1",
     "nerve.optimizer.validation_record.v1",
-    "nerve.optimizer.runtime_implementation_predicate.v2",
+    "nerve.optimizer.runtime_implementation_predicate.v3",
     "nerve.optimizer.promotion_decision.v2",
     "nerve.optimizer.implementation_registry.v1",
     "nerve.optimizer.relowering_request.v1"

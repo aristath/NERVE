@@ -25,7 +25,7 @@ mod tests {
         parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
         resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
-        runtime_physical_device_bindings_in,
+        runtime_physical_device_bindings_in, validate_explicit_logical_device_bindings,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -97,6 +97,37 @@ mod tests {
                 "{invalid:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_device_bindings_must_exist_in_the_effective_graph() {
+        let args = parse_args_from(
+            [
+                "--bind-device",
+                "gpu0=vulkan-uuid:00000000070000000000000000000000",
+                "--bind-device",
+                "gpu1=vulkan-uuid:000000000a0000000000000000000000",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        let error = validate_explicit_logical_device_bindings(
+            &args,
+            &["runtime_default".to_string()],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("absent from the effective graph")
+        );
+        validate_explicit_logical_device_bindings(
+            &args,
+            &["gpu0".to_string(), "gpu1".to_string()],
+        )
+        .unwrap();
     }
 
     #[test]

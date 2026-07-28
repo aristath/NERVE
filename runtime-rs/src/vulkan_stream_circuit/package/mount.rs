@@ -16,18 +16,6 @@ impl VulkanResidentModelPackageManifest {
                 ),
             ));
         }
-        let compiler_fingerprint = raw_manifest
-            .get("compiler_fingerprint")
-            .and_then(Value::as_str)
-            .unwrap_or("<missing>");
-        if compiler_fingerprint != VULKAN_PACKAGE_COMPILER_FINGERPRINT {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "compiled package fingerprint {compiler_fingerprint:?} does not match runtime fingerprint {VULKAN_PACKAGE_COMPILER_FINGERPRINT:?}; recompile the model"
-                ),
-            ));
-        }
         let compiler_owned_placement = ["device_id", "placement"]
             .into_iter()
             .filter(|field| raw_manifest.get(field).is_some())

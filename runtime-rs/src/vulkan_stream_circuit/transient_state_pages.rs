@@ -63,6 +63,24 @@ impl VulkanResidentTransientStatePageTable {
         self.states.clear();
     }
 
+    fn resident_page_indices(
+        &self,
+        key: &TransientStateKey,
+    ) -> Vec<usize> {
+        self.states
+            .get(key)
+            .map(|pages| {
+                pages
+                    .block_to_physical
+                    .values()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn bind_slot(
         &mut self,
         resident_state: &VulkanStreamStateBufferAllocation,

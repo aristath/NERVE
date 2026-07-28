@@ -47,9 +47,10 @@ use crate::vulkan::{DEFAULT_COMPUTE_LOCAL_SIZE_X, DEFAULT_SPIRV_ENTRY_POINT, rea
 use crate::vulkan_compute::{
     VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT, VulkanComputeDevice, VulkanError,
     VulkanResidentBuffer, VulkanResidentBufferCopy, VulkanResidentBufferCopyBatch,
-    VulkanResidentBufferRangeCopy, VulkanResidentExecutionQuantumMeasurement,
-    VulkanResidentKernelBufferAccess, VulkanResidentKernelBufferBinding,
-    VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
+    VulkanResidentBufferPool, VulkanResidentBufferPoolKey, VulkanResidentBufferRangeCopy,
+    VulkanResidentBufferReadRange, VulkanResidentBufferWriteRange,
+    VulkanResidentExecutionQuantumMeasurement, VulkanResidentKernelBufferAccess,
+    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate, VulkanShaderFeature,
@@ -80,7 +81,6 @@ pub const VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA: &str =
     "nerve.vulkan_reusable_kernel_artifacts.v1";
 pub const VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA: &str =
     "nerve.vulkan_resident_model_package.v4";
-pub const VULKAN_PACKAGE_COMPILER_FINGERPRINT: &str = env!("NERVE_PACKAGE_COMPILER_FINGERPRINT");
 const CONTRACT_DIGEST_ALGORITHM: &str = "nerve.json_tree_sha256.v1";
 const VULKAN_STREAM_CONTROL_BYTE_CAPACITY: usize = 5 * std::mem::size_of::<u32>();
 const VULKAN_STREAM_CONTROL_TOKEN_BYTE_CAPACITY: usize = std::mem::size_of::<u32>();
