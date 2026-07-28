@@ -853,7 +853,11 @@ def validate_benchmark_run(document: Json) -> None:
     if len(trace_paths) != len(set(trace_paths)):
         raise BenchmarkContractError("benchmark run reuses a raw trace artifact path")
     order = _string_list(document["execution_order"], "execution_order")
-    if not observation_ids or order != observation_ids or len(order) != len(set(order)):
+    if (
+        (document["status"] == "completed" and not observation_ids)
+        or order != observation_ids
+        or len(order) != len(set(order))
+    ):
         raise BenchmarkContractError(
             "benchmark execution_order must exactly cover observations"
         )
@@ -866,7 +870,7 @@ def validate_benchmark_run(document: Json) -> None:
         BenchmarkResidencyEvent.from_json(event)
         for event in _list(document["residency_events"], "residency_events")
     ]
-    if not events:
+    if document["status"] == "completed" and not events:
         raise BenchmarkContractError("benchmark run must retain residency evidence")
     if any(event.to_json()["plan_id"] != document["plan_id"] for event in events):
         raise BenchmarkContractError(

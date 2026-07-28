@@ -3,10 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
+import time
 
 import pytest
 
-from nerve.compilation import ModelCompileError
+from nerve.compilation import ModelCompileCancelled, ModelCompileError
 from nerve.representation_optimizer.benchmarking.contracts import (
     BENCHMARK_OBSERVATION_SCHEMA,
     BENCHMARK_RESIDENCY_EVENT_SCHEMA,
@@ -114,6 +115,25 @@ class FixtureExecutionAdapter:
         payload = self.trace_artifacts[relative_path]
         for offset in range(0, len(payload), chunk_bytes):
             yield payload[offset : offset + chunk_bytes]
+
+
+class DeadlineAwareExecutionAdapter(FixtureExecutionAdapter):
+    def open_session(self, request):
+        self.mount_requests.append(request)
+        return DeadlineAwareExecutionSession(self, request)
+
+
+class DeadlineAwareFixtureAdapter(FixtureExecutionAdapter):
+    def iter_fixture_artifact(
+        self,
+        relative_path,
+        *,
+        candidate_id,
+        chunk_bytes=8 * 1024 * 1024,
+    ):
+        del relative_path, candidate_id, chunk_bytes
+        while True:
+            yield b""
 
 
 class FixtureExecutionSession:
@@ -396,6 +416,18 @@ class FixtureExecutionSession:
         }
         document["event_id"] = benchmark_residency_event_id(document)
         return document
+
+
+class DeadlineAwareExecutionSession(FixtureExecutionSession):
+    def execute(self, request):
+        del request
+        while True:
+            if (
+                self.request.cancel_requested is not None
+                and self.request.cancel_requested()
+            ):
+                raise ModelCompileCancelled("deadline reached")
+            time.sleep(0.001)
 
 
 def _fixture(
@@ -956,22 +988,58 @@ def test_microbenchmark_retains_raw_traces_without_extra_repetitions(
 
 def test_microbenchmark_fails_when_one_minute_contract_is_exceeded(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, _, _, plan, adapter = _fixture(tmp_path)
-    clock = iter((0, 1, 2, 60_000_000_001))
-    monkeypatch.setattr(
-        "nerve.representation_optimizer.benchmarking.runner.time.monotonic_ns",
-        lambda: next(clock),
-    )
+    _, _, _, plan, _ = _fixture(tmp_path)
+    document = plan.to_json()
+    document["policy"]["maximum_benchmark_duration_ns"] = 5_000_000
+    document["plan_id"] = benchmark_plan_id(document)
+    plan = BenchmarkPlan.from_json(document)
+    adapter = DeadlineAwareExecutionAdapter()
 
+    started = time.monotonic()
     run = execute_benchmark_plan(plan, adapter).to_json()
+    elapsed = time.monotonic() - started
 
     assert run["status"] == "timeout"
     assert run["diagnostics"] == [
         "microbenchmark exceeded its one-minute wall-clock contract"
     ]
+    assert run["observations"] == []
+    assert elapsed < 1
     assert adapter.closed_sessions == len(adapter.mount_requests) == 1
+
+
+def test_microbenchmark_deadline_also_bounds_fixture_verification(
+    tmp_path: Path,
+) -> None:
+    _, _, _, plan, _ = _fixture(tmp_path)
+    document = plan.to_json()
+    document["policy"]["maximum_benchmark_duration_ns"] = 5_000_000
+    document["plan_id"] = benchmark_plan_id(document)
+    plan = BenchmarkPlan.from_json(document)
+    adapter = DeadlineAwareFixtureAdapter()
+
+    started = time.monotonic()
+    run = execute_benchmark_plan(plan, adapter).to_json()
+
+    assert run["status"] == "timeout"
+    assert run["observations"] == []
+    assert run["residency_events"] == []
+    assert time.monotonic() - started < 1
+    assert adapter.mount_requests == []
+
+
+def test_external_cancellation_is_not_misreported_as_benchmark_timeout(
+    tmp_path: Path,
+) -> None:
+    _, _, _, plan, adapter = _fixture(tmp_path)
+
+    with pytest.raises(ModelCompileCancelled, match="cancelled"):
+        execute_benchmark_plan(
+            plan,
+            adapter,
+            cancel_requested=lambda: True,
+        )
 
 
 def test_fixture_bytes_are_verified_before_any_implementation_mount(

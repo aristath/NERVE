@@ -45,8 +45,23 @@ def execute_benchmark_plan(
     block_index = 0
     benchmark_started_ns = time.monotonic_ns()
     maximum_duration_ns = policy["maximum_benchmark_duration_ns"]
+    deadline_reached = False
 
-    _verify_fixture_artifacts(plan, adapter)
+    def benchmark_stop_requested() -> bool:
+        nonlocal deadline_reached
+        if cancel_requested is not None and cancel_requested():
+            return True
+        if time.monotonic_ns() - benchmark_started_ns >= maximum_duration_ns:
+            deadline_reached = True
+            return True
+        return False
+
+    def record_timeout() -> None:
+        nonlocal run_status
+        run_status = "timeout"
+        message = "microbenchmark exceeded its one-minute wall-clock contract"
+        if message not in diagnostics:
+            diagnostics.append(message)
 
     def execute(
         session: NormalExecutionSession,
@@ -60,7 +75,7 @@ def execute_benchmark_plan(
         order_index: int,
     ) -> Json | None:
         nonlocal run_status
-        _checkpoint(cancel_requested)
+        _checkpoint(benchmark_stop_requested)
         request = BenchmarkExecutionRequest(
             plan_id=document["plan_id"],
             role=role,
@@ -104,12 +119,11 @@ def execute_benchmark_plan(
                 f"{observation_document['stop_reason']}"
             )
             return None
-        if time.monotonic_ns() - benchmark_started_ns > maximum_duration_ns:
-            run_status = "timeout"
-            diagnostics.append(
-                "microbenchmark exceeded its one-minute wall-clock contract"
-            )
-            return None
+        if benchmark_stop_requested():
+            if deadline_reached:
+                record_timeout()
+                return None
+            _checkpoint(benchmark_stop_requested)
         return observation_document
 
     def open_session(
@@ -119,7 +133,7 @@ def execute_benchmark_plan(
         seed: int,
     ) -> tuple[NormalExecutionSession, BenchmarkResidencyEvent, int]:
         nonlocal block_index
-        _checkpoint(cancel_requested)
+        _checkpoint(benchmark_stop_requested)
         current_block = block_index
         session, mount = _open_session(
             plan,
@@ -128,7 +142,7 @@ def execute_benchmark_plan(
             role=role,
             seed=seed,
             block_index=current_block,
-            cancel_requested=cancel_requested,
+            cancel_requested=benchmark_stop_requested,
         )
         block_index += 1
         events.append(mount.to_json())
@@ -230,6 +244,11 @@ def execute_benchmark_plan(
             close_session(session, mount)
 
     try:
+        _verify_fixture_artifacts(
+            plan,
+            adapter,
+            cancel_requested=benchmark_stop_requested,
+        )
         for workload_index, workload in enumerate(document["workloads"]):
             warmup_groups: list[Json] = []
             seeds = workload["randomness"]["seeds"]
@@ -352,19 +371,19 @@ def execute_benchmark_plan(
                 }
             )
     except ModelCompileCancelled as error:
-        if not observations:
+        if deadline_reached:
+            record_timeout()
+        elif not observations:
             raise
-        run_status = "cancelled"
-        diagnostics.append(str(error))
+        else:
+            run_status = "cancelled"
+            diagnostics.append(str(error))
 
-    if (
-        run_status == "completed"
-        and time.monotonic_ns() - benchmark_started_ns > maximum_duration_ns
-    ):
-        run_status = "timeout"
-        diagnostics.append(
-            "microbenchmark exceeded its one-minute wall-clock contract"
-        )
+    if run_status == "completed" and benchmark_stop_requested():
+        if deadline_reached:
+            record_timeout()
+        else:
+            _checkpoint(benchmark_stop_requested)
 
     run_document = {
         "schema": BENCHMARK_RUN_SCHEMA,
@@ -836,6 +855,8 @@ def _validate_observation(
 def _verify_fixture_artifacts(
     plan: BenchmarkPlan,
     adapter: NormalExecutionAdapter,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
     artifacts: dict[str, str] = {}
     limit_evidence: dict[str, list[Json]] = {}
@@ -866,12 +887,14 @@ def _verify_fixture_artifacts(
                 }
             )
     for relative_path, expected_digest in sorted(artifacts.items()):
+        _checkpoint(cancel_requested)
         digest = sha256()
         captured = bytearray()
         for chunk in adapter.iter_fixture_artifact(
             relative_path,
             candidate_id=plan.candidate_id,
         ):
+            _checkpoint(cancel_requested)
             if not isinstance(chunk, bytes):
                 raise ModelCompileError(
                     "benchmark fixture source yielded a non-byte chunk"
