@@ -85,7 +85,7 @@ class FixtureWholeModelExecutor:
                         "turn_index": 0,
                         "generated_tokens": 0,
                         "elapsed_ns": 101,
-                        "component_activations": 512,
+                        "component_activations": 180,
                         "scheduler_steps": 8,
                     },
                 }
@@ -105,7 +105,7 @@ class FixtureWholeModelExecutor:
                     "state_digest": _digest(
                         f"turn-state-{index}".encode()
                     ),
-                    "component_activations": 512,
+                    "component_activations": 180,
                     "scheduler_steps": 8,
                     "elapsed_ns": 101,
                     "execution_counters": {
@@ -117,7 +117,7 @@ class FixtureWholeModelExecutor:
             payload = {
                 "output_digest": _digest(b"output"),
                 "state_digest": _digest(b"state"),
-                "steps": 1_024,
+                "steps": 360,
                 "step_unit": document["step_unit"],
                 "scheduler_steps": 16,
                 "elapsed_ns": 202,
@@ -259,8 +259,8 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         },
         seeds=(17,),
         step_unit="component_activations",
-        completion_condition="minimum_steps",
-        minimum_steps=512,
+        completion_condition="all_fixture_turns",
+        minimum_steps=None,
         output_allowance=None,
         output_allowance_basis={"kind": "unlimited"},
         metrics=("token_exact_match",),
@@ -389,15 +389,17 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     assert [
         command["command"] for command in executor.commands
     ] == ["mount", "execute", "close"] * 2
-    assert result["steps"] == 1_024
+    # Fixture completion is semantic: a short but complete conversation must
+    # not be rejected because it did not cross an unrelated activation count.
+    assert result["steps"] == 360
     assert result["horizon_completion"] == {
-        "condition": "minimum_steps",
+        "condition": "all_fixture_turns",
         "satisfied": True,
-        "observed_steps": 1_024,
-        "minimum_steps": 512,
-        "expected_turns": None,
-        "completed_turns": None,
-        "stop_reasons": [],
+        "observed_steps": 360,
+        "minimum_steps": None,
+        "expected_turns": 2,
+        "completed_turns": 2,
+        "stop_reasons": ["fixture_completed", "fixture_completed"],
     }
     assert result["default_statistics"]["scheduler_steps"] == 16
     progress_ref = next(

@@ -91,9 +91,11 @@ _RUN_STATUSES = ("completed", "failed", "cancelled")
 _STAGE_STATUSES = ("passed", "failed", "not_applicable", "not_run")
 _HORIZON_COMPLETION_CONDITIONS = (
     "minimum_steps",
+    "all_fixture_turns",
     "semantic_stop_or_allowance_per_turn",
 )
 _SEMANTIC_STOP_REASONS = ("eos", "output_allowance")
+_FIXTURE_STOP_REASONS = ("fixture_completed",)
 _COVERAGE_CHECK_CONSTRAINTS = {
     "component_output_error": (
         {"sanity", "full_local"},
@@ -895,7 +897,23 @@ def validate_validation_check(document: Json) -> None:
         )
     elif minimum_steps is not None:
         raise ValidationContractError(
-            "semantic horizon completion cannot declare minimum steps"
+            "turn-completion horizon cannot declare minimum steps"
+        )
+    if completion_condition == "all_fixture_turns" and (
+        document["kind"]
+        not in {
+            "teacher_forced",
+            "lifecycle_operation",
+            "graph_edit",
+            "placement",
+        }
+        or regime["execution_scope"] != "whole_model"
+        or document["controls"].get("execution_mode")
+        not in {"teacher_forced", "lifecycle_teacher_forced"}
+    ):
+        raise ValidationContractError(
+            "fixture-turn horizon completion is incompatible with anything "
+            "except teacher-forced whole-model execution"
         )
     if completion_condition == "semantic_stop_or_allowance_per_turn" and (
         document["kind"] not in {"free_running", "reasoning_conversation"}
@@ -1195,6 +1213,30 @@ def _horizon_completion(
                 f"{path} minimum-step evidence contains conversation fields"
             )
         satisfied = completed_steps >= minimum_steps
+    elif condition == "all_fixture_turns":
+        if completion["minimum_steps"] is not None:
+            raise ValidationContractError(
+                f"{path} fixture-turn evidence contains a minimum step count"
+            )
+        expected_turns = _positive_integer(
+            completion["expected_turns"],
+            f"{path}.expected_turns",
+        )
+        completed_turns = _nonnegative_integer(
+            completion["completed_turns"],
+            f"{path}.completed_turns",
+        )
+        if completed_turns > expected_turns:
+            raise ValidationContractError(
+                f"{path}.completed_turns exceeds expected turns"
+            )
+        if len(stop_reasons) != completed_turns or any(
+            reason not in _FIXTURE_STOP_REASONS for reason in stop_reasons
+        ):
+            raise ValidationContractError(
+                f"{path}.stop_reasons do not prove completed fixture turns"
+            )
+        satisfied = completed_turns == expected_turns
     else:
         if completion["minimum_steps"] is not None:
             raise ValidationContractError(

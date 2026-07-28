@@ -566,6 +566,21 @@ class ResidentWholeModelValidationSession:
                 "completed_turns": None,
                 "stop_reasons": [],
             }
+        elif completion_condition == "all_fixture_turns":
+            if any(reason != "fixture_completed" for reason in stop_reasons):
+                raise ModelCompileError(
+                    "teacher-forced validation did not complete its declared "
+                    "fixture turns"
+                )
+            horizon_completion = {
+                "condition": completion_condition,
+                "satisfied": len(report["turns"]) == len(self.turns),
+                "observed_steps": report["steps"],
+                "minimum_steps": None,
+                "expected_turns": len(self.turns),
+                "completed_turns": len(report["turns"]),
+                "stop_reasons": stop_reasons,
+            }
         elif (
             completion_condition
             == "semantic_stop_or_allowance_per_turn"

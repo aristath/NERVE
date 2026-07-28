@@ -723,6 +723,8 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
     assert all(
         check["regime"]["context_size"] == 0
         and check["horizon"]["output_allowance"] is None
+        and check["horizon"]["completion_condition"] == "all_fixture_turns"
+        and check["horizon"]["minimum_steps"] is None
         for check in structural_checks
     )
     multiple_seed_checks = [
