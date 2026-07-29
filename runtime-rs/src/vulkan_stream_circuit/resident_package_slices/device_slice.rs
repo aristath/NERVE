@@ -162,4 +162,8 @@ impl VulkanResidentModelPackageDeviceSlice {
     pub fn prepared_plan(&self) -> &VulkanPreparedDispatchPlan {
         &self.prepared_plan
     }
+
+    pub fn physical_residency_schedule(&self) -> &VulkanPhysicalResidencySchedule {
+        &self.physical_residency_schedule
+    }
 }

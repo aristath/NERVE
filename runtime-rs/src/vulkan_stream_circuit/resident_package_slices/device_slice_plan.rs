@@ -7,6 +7,7 @@ struct VulkanResidentModelPackageDeviceSlicePlan {
     outgoing_edge_count: usize,
     placed_plan: VulkanPlacedStreamCircuitPlan,
     prepared_plan: VulkanPreparedDispatchPlan,
+    physical_residency_schedule: VulkanPhysicalResidencySchedule,
     loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,
     batch_kernels: Vec<VulkanResidentComponentBatchKernelArtifact>,
 }
@@ -101,6 +102,17 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &runtime_model.component_executions,
             &prepared_plan,
         )?;
+        let physical_residency_schedule =
+            VulkanPhysicalResidencySchedule::from_prepared_dispatch_plan(
+                &runtime_model.package.resource_residency,
+                "target",
+                &prepared_plan,
+            )
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to lower physical residency checkpoints for device {device_id:?}: {error}"
+                ))
+            })?;
         let component_kernel_shaders =
             resident_package_component_kernel_shader_refs_for_prepared_dispatches(
                 &runtime_model.component_executions,
@@ -128,6 +140,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             outgoing_edge_count: placed_plan.placed_resident_plan.outgoing_edges.len(),
             placed_plan,
             prepared_plan,
+            physical_residency_schedule,
             loaded_manifest,
             batch_kernels,
         })
@@ -200,6 +213,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             permanent_parameter_count: parameter_buffers.plan.parameter_count,
             permanent_parameter_bytes: parameter_buffers.total_byte_capacity,
             reusable_kernel_word_count: self.loaded_manifest.total_word_count,
+            physical_residency_schedule: self.physical_residency_schedule,
             placed_plan: self.placed_plan,
             prepared_plan: self.prepared_plan,
             loaded_manifest: self.loaded_manifest,

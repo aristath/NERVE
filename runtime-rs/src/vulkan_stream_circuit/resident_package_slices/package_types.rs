@@ -31,6 +31,7 @@ pub struct VulkanResidentModelPackageDeviceSlice {
     pub permanent_parameter_count: usize,
     pub permanent_parameter_bytes: usize,
     pub reusable_kernel_word_count: usize,
+    physical_residency_schedule: VulkanPhysicalResidencySchedule,
     placed_plan: VulkanPlacedStreamCircuitPlan,
     prepared_plan: VulkanPreparedDispatchPlan,
     loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,

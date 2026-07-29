@@ -267,6 +267,20 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })?;
             device_slice_plans.push(package_slice);
         }
+        validate_physical_residency_schedule_coverage(
+            &runtime_model.package.resource_residency,
+            "target",
+            device_slice_plans
+                .iter()
+                .map(|slice| &slice.physical_residency_schedule),
+        )
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to validate placed physical residency checkpoints: {error}"
+                )),
+            )
+        })?;
 
         let prepared_plans = device_slice_plans
             .iter()
