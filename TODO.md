@@ -74,22 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 3. Add compiler residency analysis and planning
-
-- Discover independently selected parameter regions from the semantic graph,
-  selector outputs, physical kernel access patterns, and tensor partition axes.
-- Classify required resources into the always-resident spine or dynamic
-  residency groups.
-- Emit compact partition descriptions rather than one verbose metadata object
-  per expert when a regular template can describe the same layout.
-- Reject ambiguous, overlapping, misaligned, or non-atomic plans at compile
-  time instead of guessing.
-- Keep device selection, available-memory assumptions, and runtime policy out of
-  compiled placement.
-
-Completion requires compiler fixtures for at least two structurally different
-dynamic-resource patterns, including but not limited to routed experts.
-
 ### 4. Make compiled packages range-addressable and independently verifiable
 
 - Preserve efficient large backing files; do not create thousands of tiny

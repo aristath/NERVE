@@ -26,11 +26,12 @@ model names, and runtime placement. Atomic-group, selector, template, and
 checkpoint identities are derived from their compiled semantics. The same
 derived partition identity is verified byte-for-byte in Python and Rust.
 
-The current compiler emits an exact eager baseline: 969 referenced immutable
-resources in one always-resident atomic spine, with 970 semantic access
-bindings. It deliberately does not manufacture one residency group per tensor.
-Compiler residency analysis will replace this conservative spine with dynamic
-groups and compact partition templates in the next milestone.
+At this milestone snapshot, the compiler emitted an exact eager baseline: 969
+referenced immutable resources in one always-resident atomic spine, with 970
+semantic access bindings. It deliberately did not manufacture one residency
+group per tensor. The following compiler-analysis milestone replaced that
+conservative snapshot with graph-derived dynamic groups and compact partition
+templates; see `COMPILER_RESIDENCY_ANALYSIS.md`.
 
 ## Validation
 
