@@ -74,23 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 7. Implement the per-device residency manager
-
-- Own the generic residency state machine, capacity accounting, resource
-  identity, load coalescing, atomic publication, reference ownership, and
-  explicit unload.
-- Guarantee a single physical load for concurrent requests for the same
-  immutable resource on the same device.
-- Share compatible resident resources across streams and duplicated or rewired
-  graph instances while keeping their mutable state independent.
-- Return deterministic capacity errors before beginning a load that cannot be
-  completed atomically.
-- Maintain a per-device directory that can later distinguish local residency
-  from a resource resident on another execution device.
-
-Completion requires concurrency, sharing, capacity, rollback, cancellation, and
-explicit-unload tests with no leaked allocations.
-
 ### 8. Add stable GPU addressing for independently resident resources
 
 - Build device-local immutable arenas or another measured stable-address scheme
