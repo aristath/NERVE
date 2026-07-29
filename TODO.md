@@ -74,21 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 6. Implement the asynchronous backing-store path
-
-- Add bounded range reads using the best measured host mechanism for the target
-  system, with reusable pinned staging storage.
-- Coalesce nearby or concurrent missing ranges while preserving atomic-group
-  boundaries and integrity checks.
-- Upload with transfer queues and timeline synchronization where supported;
-  never use `deviceWaitIdle` as a loading primitive.
-- Bound host memory, staging memory, outstanding I/O, and outstanding transfers.
-- Make cancellation and I/O failure release staging resources predictably.
-
-Completion requires sequential read/upload tests for isolated, adjacent,
-duplicate, cancelled, corrupt, and failed requests, with measured cold-load
-latency and bandwidth.
-
 ### 7. Implement the per-device residency manager
 
 - Own the generic residency state machine, capacity accounting, resource
