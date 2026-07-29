@@ -608,6 +608,27 @@ def _ffn_tail(
                     "intermediate_size": int(feed_forward["intermediate_size"]),
                     "num_experts": int(feed_forward["num_experts"]),
                     "experts_per_token": int(feed_forward["experts_per_token"]),
+                    "selected_parameter_accesses": [
+                        {
+                            "selection_signal": "moe_routes",
+                            "partition_axis": 0,
+                            "parameter_ids": sorted(
+                                [
+                                    "moe_input",
+                                    *(
+                                        ["moe_input_scale_inv"]
+                                        if "moe_input_scale_inv" in parameters
+                                        else []
+                                    ),
+                                    *(
+                                        ["moe_input_scales"]
+                                        if "moe_input_scales" in parameters
+                                        else []
+                                    ),
+                                ]
+                            ),
+                        }
+                    ],
                 },
             },
             {
@@ -633,6 +654,27 @@ def _ffn_tail(
                     "intermediate_size": int(feed_forward["intermediate_size"]),
                     "num_experts": int(feed_forward["num_experts"]),
                     "experts_per_token": int(feed_forward["experts_per_token"]),
+                    "selected_parameter_accesses": [
+                        {
+                            "selection_signal": "moe_routes",
+                            "partition_axis": 0,
+                            "parameter_ids": sorted(
+                                [
+                                    "moe_output",
+                                    *(
+                                        ["moe_output_scale_inv"]
+                                        if "moe_output_scale_inv" in parameters
+                                        else []
+                                    ),
+                                    *(
+                                        ["moe_output_scales"]
+                                        if "moe_output_scales" in parameters
+                                        else []
+                                    ),
+                                ]
+                            ),
+                        }
+                    ],
                 },
             },
             {

@@ -1,0 +1,925 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+from nerve.compilation import Json, ModelCompileError, read_json
+from nerve.resource_residency import (
+    RESOURCE_IDENTITY_ALGORITHM,
+    RESOURCE_RESIDENCY_SCHEMA,
+    RESOURCE_STATE_MACHINE_SCHEMA,
+    SUPPORTED_RESIDENCY_POLICIES,
+    atomic_group_identity,
+    checkpoint_identity,
+    compiled_immutable_resource,
+    compiled_parameter_bindings,
+    partition_template_identity,
+    residency_content_id,
+    selector_identity,
+    validate_resource_residency_contract,
+)
+
+
+RESIDENCY_ANALYSIS_SCHEMA = "nerve.compiler_resource_residency_analysis.v1"
+TENSOR_PARTITION_INTEGRITY_SCHEMA = "nerve.tensor_partition_integrity.v1"
+SELECTED_PARAMETER_ACCESSES_ATTRIBUTE = "selected_parameter_accesses"
+ROW_MAJOR_LAYOUT = "row_major"
+
+_SELECTION_DOMAIN_FIELDS = frozenset(("id", "resource_count"))
+_ACCESS_FIELDS = frozenset(
+    ("selection_signal", "partition_axis", "parameter_ids")
+)
+_COMPATIBILITY = {
+    "device_api": "vulkan",
+    "storage_class": "storage_buffer",
+    "read_only": True,
+    "required_features": [],
+}
+
+
+def analyze_lowered_resource_residency(
+    *,
+    lowered_index: Json,
+    lowered_dir: Path,
+    tensor_index: Json,
+) -> Json:
+    """Discover dynamic tensor partitions before package assets are written."""
+
+    components: list[Json] = []
+    for circuit_ref in lowered_index["graph"]["circuits"]:
+        circuit = read_json(lowered_dir / circuit_ref["circuit"])
+        components.append(
+            _analysis_component(
+                execution_scope="target",
+                component_id=circuit_ref["id"],
+                nodes=circuit["nodes"],
+                parameter_refs=circuit["parameters"]["refs"],
+            )
+        )
+    for draft in lowered_index.get("draft_execution_graphs", []):
+        draft_id = _non_empty_string(draft.get("id"), "draft execution graph id")
+        for circuit_ref in draft["circuits"]:
+            circuit = read_json(lowered_dir / circuit_ref["circuit"])
+            components.append(
+                _analysis_component(
+                    execution_scope=f"draft:{draft_id}",
+                    component_id=circuit_ref["id"],
+                    nodes=circuit["nodes"],
+                    parameter_refs=circuit["parameters"]["refs"],
+                )
+            )
+    return analyze_resource_residency_components(
+        components=components,
+        tensor_index=tensor_index,
+        require_direct_packaging=True,
+    )
+
+
+def analyze_manifest_resource_residency(
+    *,
+    manifest: Json,
+    tensor_index: Json,
+) -> Json:
+    """Re-analyze the compiled physical graph after circuit optimization."""
+
+    components: list[Json] = []
+
+    def collect(execution_scope: str, graph: Any) -> None:
+        if not isinstance(graph, dict) or not isinstance(
+            graph.get("components"), list
+        ):
+            raise ModelCompileError(
+                f"{execution_scope} compiled circuit graph is invalid"
+            )
+        for component in graph["components"]:
+            if not isinstance(component, dict):
+                raise ModelCompileError(
+                    f"{execution_scope} compiled component is invalid"
+                )
+            circuit = component.get("circuit")
+            params = component.get("params")
+            if not isinstance(circuit, dict) or not isinstance(params, dict):
+                raise ModelCompileError(
+                    f"{execution_scope} compiled component is incomplete"
+                )
+            components.append(
+                _analysis_component(
+                    execution_scope=execution_scope,
+                    component_id=component.get("component_id"),
+                    nodes=circuit.get("nodes"),
+                    parameter_refs=params.get("refs"),
+                )
+            )
+
+    collect("target", manifest.get("circuit_graph"))
+    decoders = manifest.get("speculative_decoders", [])
+    if not isinstance(decoders, list):
+        raise ModelCompileError("compiled speculative decoders are invalid")
+    for decoder in decoders:
+        if not isinstance(decoder, dict):
+            raise ModelCompileError("compiled speculative decoder is invalid")
+        decoder_id = _non_empty_string(
+            decoder.get("id"), "compiled speculative decoder id"
+        )
+        collect(f"draft:{decoder_id}", decoder.get("circuit_graph"))
+
+    return analyze_resource_residency_components(
+        components=components,
+        tensor_index=tensor_index,
+        require_direct_packaging=False,
+    )
+
+
+def analyze_resource_residency_components(
+    *,
+    components: list[Json],
+    tensor_index: Json,
+    require_direct_packaging: bool,
+) -> Json:
+    """Classify physical parameter accesses without model-family knowledge.
+
+    A selector is discovered solely through ``selection_domain`` metadata.
+    A physical consumer opts parameters into that domain through
+    ``selected_parameter_accesses``. Nothing is inferred from operation,
+    component, parameter, tensor, or architecture names.
+    """
+
+    tensors = tensor_index.get("tensors")
+    if not isinstance(tensors, dict):
+        raise ModelCompileError("tensor index has no tensor mapping")
+
+    dynamic_semantics: dict[tuple[str, str, str, str], tuple[str, str, str, str]] = {}
+    tensor_uses: dict[str, list[tuple[tuple[str, str, str, str], bool]]] = defaultdict(
+        list
+    )
+    groups: list[Json] = []
+
+    for component in components:
+        scope = _non_empty_string(
+            component.get("execution_scope"), "execution scope"
+        )
+        component_id = _non_empty_string(
+            component.get("component_id"), "component id"
+        )
+        nodes = component.get("nodes")
+        refs = component.get("parameter_refs")
+        if not isinstance(nodes, list) or any(
+            not isinstance(node, dict) for node in nodes
+        ):
+            raise ModelCompileError(
+                f"{scope} component {component_id!r} has invalid nodes"
+            )
+        if not isinstance(refs, dict):
+            raise ModelCompileError(
+                f"{scope} component {component_id!r} has invalid parameter refs"
+            )
+
+        node_ids: set[str] = set()
+        signal_producers: dict[str, tuple[int, Json]] = {}
+        selectors: dict[str, Json] = {}
+        for node_index, node in enumerate(nodes):
+            node_id = _non_empty_string(node.get("id"), "physical node id")
+            if node_id in node_ids:
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} repeats node {node_id!r}"
+                )
+            node_ids.add(node_id)
+            outputs = node.get("outputs", [])
+            if not isinstance(outputs, list):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} node {node_id!r} has invalid outputs"
+                )
+            for output in outputs:
+                output = _non_empty_string(output, "physical output signal")
+                if output in signal_producers:
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} has multiple producers "
+                        f"for signal {output!r}"
+                    )
+                signal_producers[output] = (node_index, node)
+
+            attrs = node.get("attrs", {})
+            if attrs is None:
+                attrs = {}
+            if not isinstance(attrs, dict):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} node {node_id!r} has invalid attrs"
+                )
+            domain = attrs.get("selection_domain")
+            if domain is None:
+                continue
+            if not isinstance(domain, dict) or set(domain) != _SELECTION_DOMAIN_FIELDS:
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector {node_id!r} "
+                    "has an ambiguous selection domain"
+                )
+            domain_id = _non_empty_string(
+                domain.get("id"), "selection domain id"
+            )
+            resource_count = _positive_int(
+                domain.get("resource_count"), "selection domain resource count"
+            )
+            if not outputs:
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector {node_id!r} "
+                    "does not produce a selection signal"
+                )
+            selectors[node_id] = {
+                "node_index": node_index,
+                "node_id": node_id,
+                "domain_id": domain_id,
+                "resource_count": resource_count,
+                "outputs": set(outputs),
+                "accesses": [],
+            }
+
+        covered_node_parameters: set[tuple[str, str]] = set()
+        for node_index, node in enumerate(nodes):
+            node_id = str(node["id"])
+            inputs = node.get("inputs", [])
+            params = node.get("params", [])
+            attrs = node.get("attrs", {}) or {}
+            if not isinstance(inputs, list) or not isinstance(params, list):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} node {node_id!r} "
+                    "has invalid inputs or parameters"
+                )
+            parameter_ids = [
+                _non_empty_string(parameter, "physical parameter id")
+                for parameter in params
+            ]
+            if len(parameter_ids) != len(set(parameter_ids)):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} node {node_id!r} "
+                    "repeats a parameter"
+                )
+            accesses = attrs.get(SELECTED_PARAMETER_ACCESSES_ATTRIBUTE, [])
+            if not isinstance(accesses, list) or any(
+                not isinstance(access, dict) for access in accesses
+            ):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} node {node_id!r} "
+                    "has invalid selected parameter accesses"
+                )
+            seen_signals: set[str] = set()
+            for access in accesses:
+                if set(access) != _ACCESS_FIELDS:
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        "has an ambiguous selected parameter access"
+                    )
+                selection_signal = _non_empty_string(
+                    access.get("selection_signal"), "selection signal"
+                )
+                if selection_signal in seen_signals:
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        f"repeats access for selection signal {selection_signal!r}"
+                    )
+                seen_signals.add(selection_signal)
+                if selection_signal not in inputs:
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        f"does not physically consume selection signal {selection_signal!r}"
+                    )
+                producer = signal_producers.get(selection_signal)
+                selector = None if producer is None else selectors.get(
+                    str(producer[1]["id"])
+                )
+                if (
+                    producer is None
+                    or selector is None
+                    or producer[0] >= node_index
+                    or selection_signal not in selector["outputs"]
+                ):
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        f"access signal {selection_signal!r} is not produced by "
+                        "an earlier resource selector"
+                    )
+                partition_axis = _non_negative_int(
+                    access.get("partition_axis"), "selected partition axis"
+                )
+                selected_parameters = access.get("parameter_ids")
+                if (
+                    not isinstance(selected_parameters, list)
+                    or not selected_parameters
+                    or any(
+                        not isinstance(parameter, str) or not parameter
+                        for parameter in selected_parameters
+                    )
+                    or selected_parameters != sorted(set(selected_parameters))
+                ):
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        "selected parameters must be non-empty, unique, and sorted"
+                    )
+                unknown_parameters = set(selected_parameters).difference(
+                    parameter_ids
+                )
+                if unknown_parameters:
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        f"selects parameters it does not access: {sorted(unknown_parameters)}"
+                    )
+
+                group_key = (
+                    scope,
+                    component_id,
+                    selector["node_id"],
+                    selection_signal,
+                )
+                for parameter_id in selected_parameters:
+                    node_parameter = (node_id, parameter_id)
+                    if node_parameter in covered_node_parameters:
+                        raise ModelCompileError(
+                            f"{scope} component {component_id!r} node {node_id!r} "
+                            f"selects parameter {parameter_id!r} more than once"
+                        )
+                    covered_node_parameters.add(node_parameter)
+                    parameter = refs.get(parameter_id)
+                    if not isinstance(parameter, dict):
+                        raise ModelCompileError(
+                            f"{scope} component {component_id!r} node {node_id!r} "
+                            f"references unknown parameter {parameter_id!r}"
+                        )
+                    tensor_name = _non_empty_string(
+                        parameter.get("tensor"), "parameter tensor"
+                    )
+                    _validate_partitioned_tensor(
+                        tensor_name=tensor_name,
+                        metadata=tensors.get(tensor_name),
+                        partition_axis=partition_axis,
+                        partition_count=selector["resource_count"],
+                        require_direct_packaging=require_direct_packaging,
+                    )
+                    semantic_key = (scope, component_id, node_id, parameter_id)
+                    dynamic_semantics[semantic_key] = group_key
+                    tensor_uses[tensor_name].append((semantic_key, True))
+                    selector["accesses"].append(
+                        {
+                            "node_index": node_index,
+                            "node_id": node_id,
+                            "parameter_id": parameter_id,
+                            "tensor": tensor_name,
+                            "partition_axis": partition_axis,
+                            "selection_signal": selection_signal,
+                        }
+                    )
+
+            for parameter_id in parameter_ids:
+                parameter = refs.get(parameter_id)
+                if not isinstance(parameter, dict):
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} node {node_id!r} "
+                        f"references unknown parameter {parameter_id!r}"
+                    )
+                semantic_key = (scope, component_id, node_id, parameter_id)
+                if semantic_key in dynamic_semantics:
+                    continue
+                tensor_name = _non_empty_string(
+                    parameter.get("tensor"), "parameter tensor"
+                )
+                if tensor_name not in tensors:
+                    raise ModelCompileError(
+                        f"compiled parameter references missing tensor {tensor_name!r}"
+                    )
+                tensor_uses[tensor_name].append((semantic_key, False))
+
+        for selector in selectors.values():
+            if not selector["accesses"]:
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector "
+                    f"{selector['node_id']!r} does not select any physical parameter access"
+                )
+            accesses = sorted(
+                selector["accesses"],
+                key=lambda access: (
+                    access["node_index"],
+                    access["node_id"],
+                    access["parameter_id"],
+                ),
+            )
+            axes = {access["partition_axis"] for access in accesses}
+            selected_signals = {
+                access["selection_signal"] for access in accesses
+            }
+            if len(axes) != 1:
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector "
+                    f"{selector['node_id']!r} mixes incompatible partition axes"
+                )
+            if len(selected_signals) != 1:
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector "
+                    f"{selector['node_id']!r} maps multiple selection signals"
+                )
+            groups.append(
+                {
+                    "execution_scope": scope,
+                    "component_id": component_id,
+                    "selector_node_id": selector["node_id"],
+                    "selection_signal": next(iter(selected_signals)),
+                    "domain_id": selector["domain_id"],
+                    "partition_count": selector["resource_count"],
+                    "partition_axis": next(iter(axes)),
+                    "resume_node_id": accesses[0]["node_id"],
+                    "accesses": [
+                        {
+                            key: access[key]
+                            for key in (
+                                "node_id",
+                                "parameter_id",
+                                "tensor",
+                                "partition_axis",
+                            )
+                        }
+                        for access in accesses
+                    ],
+                }
+            )
+
+    groups.sort(
+        key=lambda group: (
+            group["execution_scope"],
+            group["component_id"],
+            group["selector_node_id"],
+            group["selection_signal"],
+        )
+    )
+    groups_by_key = {
+        (
+            group["execution_scope"],
+            group["component_id"],
+            group["selector_node_id"],
+            group["selection_signal"],
+        ): group
+        for group in groups
+    }
+    if len(groups_by_key) != len(groups):
+        raise ModelCompileError("compiler residency groups are not uniquely addressable")
+
+    dynamic_tensors: dict[str, Json] = {}
+    spine_tensors: list[str] = []
+    for tensor_name, uses in sorted(tensor_uses.items()):
+        selected = [semantic for semantic, is_dynamic in uses if is_dynamic]
+        unconditional = [semantic for semantic, is_dynamic in uses if not is_dynamic]
+        if selected and unconditional:
+            raise ModelCompileError(
+                f"tensor {tensor_name!r} is both selected and unconditionally accessed"
+            )
+        if not selected:
+            spine_tensors.append(tensor_name)
+            continue
+        owning_groups = {dynamic_semantics[semantic] for semantic in selected}
+        partitionings = {
+            (
+                groups_by_key[group_key]["partition_axis"],
+                groups_by_key[group_key]["partition_count"],
+            )
+            for group_key in owning_groups
+        }
+        if len(partitionings) != 1:
+            raise ModelCompileError(
+                f"tensor {tensor_name!r} has incompatible dynamic selection groups"
+            )
+        partition_axis, partition_count = next(iter(partitionings))
+        dynamic_tensors[tensor_name] = {
+            "partition_axis": partition_axis,
+            "partition_count": partition_count,
+        }
+
+    return {
+        "schema": RESIDENCY_ANALYSIS_SCHEMA,
+        "groups": groups,
+        "dynamic_tensors": dynamic_tensors,
+        "spine_tensors": sorted(spine_tensors),
+    }
+
+
+def partition_counts_for_packaging(analysis: Json) -> dict[str, int]:
+    if analysis.get("schema") != RESIDENCY_ANALYSIS_SCHEMA:
+        raise ModelCompileError("compiler residency analysis schema is invalid")
+    dynamic_tensors = analysis.get("dynamic_tensors")
+    if not isinstance(dynamic_tensors, dict):
+        raise ModelCompileError("compiler residency analysis has no dynamic tensors")
+    counts = {}
+    for tensor_name, metadata in dynamic_tensors.items():
+        if not isinstance(tensor_name, str) or not tensor_name or not isinstance(
+            metadata, dict
+        ):
+            raise ModelCompileError(
+                "compiler residency analysis has an invalid dynamic tensor"
+            )
+        counts[tensor_name] = _positive_int(
+            metadata.get("partition_count"), "dynamic tensor partition count"
+        )
+    return counts
+
+
+def build_planned_resource_residency_contract(
+    *,
+    package_dir: Path,
+    tensor_index: Json,
+    manifest: Json,
+) -> Json:
+    analysis = analyze_manifest_resource_residency(
+        manifest=manifest,
+        tensor_index=tensor_index,
+    )
+    tensors = tensor_index["tensors"]
+    parameter_bindings = compiled_parameter_bindings(manifest)
+    dynamic_tensors = set(analysis["dynamic_tensors"])
+    referenced_tensors = set(parameter_bindings)
+    if dynamic_tensors | set(analysis["spine_tensors"]) != referenced_tensors:
+        raise ModelCompileError(
+            "compiler residency analysis does not exactly cover compiled tensors"
+        )
+
+    spine_resources = [
+        compiled_immutable_resource(
+            package_dir=package_dir,
+            tensor_index=tensor_index,
+            tensor_name=tensor_name,
+            lifetime="always_resident",
+        )
+        for tensor_name in sorted(referenced_tensors - dynamic_tensors)
+    ]
+    resources_by_id = {resource["id"]: resource for resource in spine_resources}
+    if len(resources_by_id) != len(spine_resources):
+        # Equal immutable content is intentionally shareable.
+        spine_resources = list(resources_by_id.values())
+    if not spine_resources:
+        raise ModelCompileError(
+            "compiled package has no always-resident execution spine"
+        )
+    spine_group = {
+        "id": "",
+        "lifetime": "always_resident",
+        "resource_ids": sorted(resources_by_id),
+        "dependencies": [],
+    }
+    spine_group["id"] = atomic_group_identity(spine_group)
+
+    templates_by_id: dict[str, Json] = {}
+    selectors: list[Json] = []
+    checkpoints: list[Json] = []
+    dynamic_binding_mapping: dict[tuple[str, str, str, str], Json] = {}
+    seen_dynamic_tensors: set[str] = set()
+    for group in analysis["groups"]:
+        members = []
+        tensor_to_seed: dict[str, str] = {}
+        for tensor_name in sorted(
+            {access["tensor"] for access in group["accesses"]}
+        ):
+            seen_dynamic_tensors.add(tensor_name)
+            metadata = tensors.get(tensor_name)
+            member = _partition_member_template(
+                tensor_name=tensor_name,
+                metadata=metadata,
+                partition_count=group["partition_count"],
+                partition_axis=group["partition_axis"],
+            )
+            tensor_to_seed[tensor_name] = member["resource_identity_seed"]
+            members.append(member)
+        members.sort(key=lambda member: member["resource_identity_seed"])
+        group_seed = residency_content_id(
+            "partition_group_seed",
+            {
+                "partition_count": group["partition_count"],
+                "resource_identity_seeds": [
+                    member["resource_identity_seed"] for member in members
+                ],
+            },
+        )
+        template = {
+            "id": "",
+            "partition_count": group["partition_count"],
+            "lifetime": "dynamic",
+            "group_identity_seed": group_seed,
+            "member_templates": members,
+            "dependencies": [spine_group["id"]],
+        }
+        template["id"] = partition_template_identity(template)
+        templates_by_id.setdefault(template["id"], template)
+
+        selector = {
+            "id": "",
+            "execution_scope": group["execution_scope"],
+            "component_id": group["component_id"],
+            "node_id": group["selector_node_id"],
+            "domain_id": group["domain_id"],
+            "resource_count": group["partition_count"],
+            "mapping": {
+                "kind": "partition_template",
+                "partition_template_id": template["id"],
+            },
+        }
+        selector["id"] = selector_identity(selector)
+        selectors.append(selector)
+        checkpoint = {
+            "id": "",
+            "execution_scope": group["execution_scope"],
+            "component_id": group["component_id"],
+            "after_node_id": group["selector_node_id"],
+            "resume_node_id": group["resume_node_id"],
+            "selector_ids": [selector["id"]],
+        }
+        checkpoint["id"] = checkpoint_identity(checkpoint)
+        checkpoints.append(checkpoint)
+
+        for access in group["accesses"]:
+            semantic_key = (
+                group["execution_scope"],
+                group["component_id"],
+                access["node_id"],
+                access["parameter_id"],
+            )
+            dynamic_binding_mapping[semantic_key] = {
+                "kind": "partition_template_member",
+                "partition_template_id": template["id"],
+                "resource_identity_seed": tensor_to_seed[access["tensor"]],
+            }
+
+    if seen_dynamic_tensors != dynamic_tensors:
+        raise ModelCompileError(
+            "dynamic residency templates do not exactly cover selected tensors"
+        )
+
+    bindings = []
+    for tensor_name, uses in parameter_bindings.items():
+        for use in uses:
+            semantic_key = (
+                use["execution_scope"],
+                use["component_id"],
+                use["node_id"],
+                use["parameter_id"],
+            )
+            mapping = dynamic_binding_mapping.get(semantic_key)
+            if mapping is None:
+                mapping = {
+                    "kind": "atomic_group",
+                    "atomic_group_id": spine_group["id"],
+                }
+            bindings.append({**use, "mapping": mapping})
+    bindings.sort(key=_binding_sort_key)
+
+    contract = {
+        "schema": RESOURCE_RESIDENCY_SCHEMA,
+        "identity_algorithm": RESOURCE_IDENTITY_ALGORITHM,
+        "state_machine_schema": RESOURCE_STATE_MACHINE_SCHEMA,
+        "supported_policies": list(SUPPORTED_RESIDENCY_POLICIES),
+        "resources": sorted(spine_resources, key=lambda resource: resource["id"]),
+        "atomic_groups": [spine_group],
+        "partition_templates": sorted(
+            templates_by_id.values(), key=lambda template: template["id"]
+        ),
+        "bindings": bindings,
+        "selectors": sorted(selectors, key=lambda selector: selector["id"]),
+        "checkpoints": sorted(
+            checkpoints, key=lambda checkpoint: checkpoint["id"]
+        ),
+    }
+    validate_resource_residency_contract(package_dir, contract, manifest)
+    return contract
+
+
+def _analysis_component(
+    *,
+    execution_scope: Any,
+    component_id: Any,
+    nodes: Any,
+    parameter_refs: Any,
+) -> Json:
+    return {
+        "execution_scope": execution_scope,
+        "component_id": component_id,
+        "nodes": deepcopy(nodes),
+        "parameter_refs": deepcopy(parameter_refs),
+    }
+
+
+def _validate_partitioned_tensor(
+    *,
+    tensor_name: str,
+    metadata: Any,
+    partition_axis: int,
+    partition_count: int,
+    require_direct_packaging: bool,
+) -> None:
+    if not isinstance(metadata, dict):
+        raise ModelCompileError(
+            f"selected parameter references missing tensor {tensor_name!r}"
+        )
+    shape = metadata.get("shape")
+    byte_count = metadata.get("byte_count")
+    if (
+        not isinstance(shape, list)
+        or not shape
+        or any(
+            not isinstance(dimension, int)
+            or isinstance(dimension, bool)
+            or dimension <= 0
+            for dimension in shape
+        )
+        or partition_axis >= len(shape)
+        or shape[partition_axis] != partition_count
+        or not isinstance(byte_count, int)
+        or isinstance(byte_count, bool)
+        or byte_count <= 0
+        or byte_count % partition_count
+    ):
+        raise ModelCompileError(
+            f"tensor {tensor_name!r} cannot be partitioned into the selected domain"
+        )
+    if partition_axis != 0:
+        raise ModelCompileError(
+            f"row-major tensor {tensor_name!r} has a non-contiguous selected axis; "
+            "compile a partition-major physical representation first"
+        )
+    layout = metadata.get("layout")
+    if layout is not None and layout != ROW_MAJOR_LAYOUT:
+        raise ModelCompileError(
+            f"selected tensor {tensor_name!r} has unsupported layout {layout!r}"
+        )
+    if require_direct_packaging and (
+        metadata.get("derived") is not None
+        or metadata.get("compile_only") is True
+    ):
+        raise ModelCompileError(
+            f"selected tensor {tensor_name!r} requires a non-atomic packaging transform"
+        )
+
+
+def _partition_member_template(
+    *,
+    tensor_name: str,
+    metadata: Any,
+    partition_count: int,
+    partition_axis: int,
+) -> Json:
+    if not isinstance(metadata, dict):
+        raise ModelCompileError(
+            f"dynamic tensor {tensor_name!r} is absent from the package index"
+        )
+    _validate_partitioned_tensor(
+        tensor_name=tensor_name,
+        metadata=metadata,
+        partition_axis=partition_axis,
+        partition_count=partition_count,
+        require_direct_packaging=False,
+    )
+    integrity = metadata.get("partition_integrity")
+    expected_fields = {
+        "schema",
+        "partition_axis",
+        "partition_count",
+        "partition_byte_count",
+        "digest_table_path",
+        "digest_table_byte_offset",
+        "digest_stride_bytes",
+        "table_sha256",
+    }
+    if not isinstance(integrity, dict) or set(integrity) != expected_fields:
+        raise ModelCompileError(
+            f"dynamic tensor {tensor_name!r} has no exact partition integrity contract"
+        )
+    partition_bytes = int(metadata["byte_count"]) // partition_count
+    if (
+        integrity.get("schema") != TENSOR_PARTITION_INTEGRITY_SCHEMA
+        or integrity.get("partition_axis") != partition_axis
+        or integrity.get("partition_count") != partition_count
+        or integrity.get("partition_byte_count") != partition_bytes
+        or integrity.get("digest_stride_bytes") != 32
+        or not _is_sha256(integrity.get("table_sha256"))
+    ):
+        raise ModelCompileError(
+            f"dynamic tensor {tensor_name!r} partition integrity is inconsistent"
+        )
+    source_file = _safe_relative_path(
+        metadata.get("source_file"), f"dynamic tensor {tensor_name!r} source"
+    )
+    digest_path = _safe_relative_path(
+        integrity.get("digest_table_path"),
+        f"dynamic tensor {tensor_name!r} digest table",
+    )
+    header_bytes = metadata.get("safetensors_header_bytes")
+    if not isinstance(header_bytes, int) or isinstance(header_bytes, bool):
+        raise ModelCompileError(
+            f"dynamic tensor {tensor_name!r} has no packaged header size"
+        )
+    offsets = metadata.get("data_offsets")
+    if (
+        not isinstance(offsets, list)
+        or len(offsets) != 2
+        or any(
+            not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
+            for offset in offsets
+        )
+    ):
+        raise ModelCompileError(
+            f"dynamic tensor {tensor_name!r} has invalid packaged offsets"
+        )
+    base = 8 + header_bytes + offsets[0]
+    alignment = _largest_common_power_of_two_divisor(base, partition_bytes)
+    resource_seed = residency_content_id(
+        "partition_resource_seed",
+        {
+            "data_sha256": metadata.get("data_sha256"),
+            "dtype": metadata.get("dtype"),
+            "partition_axis": partition_axis,
+            "partition_count": partition_count,
+            "partition_shape": [
+                1,
+                *list(metadata["shape"])[1:],
+            ],
+            "partition_byte_count": partition_bytes,
+            "compatibility": _COMPATIBILITY,
+        },
+    )
+    return {
+        "resource_identity_seed": resource_seed,
+        "range_templates": [
+            {
+                "artifact_path": source_file,
+                "base_byte_offset": base,
+                "stride_bytes": partition_bytes,
+                "byte_count": partition_bytes,
+                "alignment_bytes": alignment,
+                "integrity": {
+                    "algorithm": "sha256_table",
+                    "digest_table_path": digest_path,
+                    "digest_table_byte_offset": _non_negative_int(
+                        integrity.get("digest_table_byte_offset"),
+                        "partition digest table offset",
+                    ),
+                    "digest_stride_bytes": 32,
+                    "table_sha256": integrity["table_sha256"],
+                },
+            }
+        ],
+        "compatibility": deepcopy(_COMPATIBILITY),
+    }
+
+
+def _binding_sort_key(binding: Json) -> tuple[str, str, str, str, str]:
+    mapping = binding["mapping"]
+    mapping_key = "|".join(
+        str(mapping.get(field, ""))
+        for field in (
+            "kind",
+            "atomic_group_id",
+            "partition_template_id",
+            "resource_identity_seed",
+        )
+    )
+    return (
+        binding["execution_scope"],
+        binding["component_id"],
+        binding["node_id"],
+        binding["parameter_id"],
+        mapping_key,
+    )
+
+
+def _non_empty_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ModelCompileError(f"{label} must be a non-empty string")
+    return value
+
+
+def _positive_int(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ModelCompileError(f"{label} must be a positive integer")
+    return value
+
+
+def _non_negative_int(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ModelCompileError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _safe_relative_path(value: Any, label: str) -> str:
+    value = _non_empty_string(value, label)
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ModelCompileError(f"{label} must stay inside the compiled package")
+    return value
+
+
+def _largest_common_power_of_two_divisor(first: int, second: int) -> int:
+    common = first | second
+    if common == 0:
+        return 1
+    return min(common & -common, 4096)
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )

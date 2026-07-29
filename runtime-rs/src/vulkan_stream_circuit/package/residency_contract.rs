@@ -90,7 +90,19 @@ pub struct CompiledResourceBinding {
     pub component_id: String,
     pub node_id: String,
     pub parameter_id: String,
-    pub atomic_group_id: String,
+    pub mapping: CompiledResourceBindingMapping,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompiledResourceBindingMapping {
+    AtomicGroup {
+        atomic_group_id: String,
+    },
+    PartitionTemplateMember {
+        partition_template_id: String,
+        resource_identity_seed: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,7 +526,7 @@ fn validate_compiled_resource_residency(
         return invalid_residency("compiled partition templates are not sorted");
     }
 
-    validate_bindings_against_package(manifest, &group_ids)?;
+    validate_bindings_against_package(manifest, &group_ids, &template_ids)?;
     validate_selectors_and_checkpoints(manifest, &template_ids)
 }
 
@@ -657,17 +669,61 @@ fn validate_partition_template(
 fn validate_bindings_against_package(
     manifest: &VulkanResidentModelPackageManifest,
     group_ids: &BTreeSet<&str>,
+    template_ids: &BTreeSet<&str>,
 ) -> io::Result<()> {
     let semantics = compiled_parameter_semantics(manifest)?;
     let mut keys = Vec::new();
     let mut bound_semantics = BTreeSet::new();
     for binding in &manifest.resource_residency.bindings {
+        let mapping_key = match &binding.mapping {
+            CompiledResourceBindingMapping::AtomicGroup { atomic_group_id } => {
+                if !group_ids.contains(atomic_group_id.as_str()) {
+                    return invalid_residency(
+                        "compiled resource binding maps an unknown atomic group",
+                    );
+                }
+                format!("atomic_group|{atomic_group_id}||")
+            }
+            CompiledResourceBindingMapping::PartitionTemplateMember {
+                partition_template_id,
+                resource_identity_seed,
+            } => {
+                validate_content_id(
+                    "resource binding partition template id",
+                    partition_template_id,
+                )?;
+                validate_content_id(
+                    "resource binding partition resource seed",
+                    resource_identity_seed,
+                )?;
+                let template = manifest
+                    .resource_residency
+                    .partition_templates
+                    .iter()
+                    .find(|template| template.id == *partition_template_id);
+                if !template_ids.contains(partition_template_id.as_str())
+                    || template.is_none_or(|template| {
+                        !template.member_templates.iter().any(|member| {
+                            member.resource_identity_seed
+                                == *resource_identity_seed
+                        })
+                    })
+                {
+                    return invalid_residency(
+                        "compiled resource binding maps an unknown partition member",
+                    );
+                }
+                format!(
+                    "partition_template_member||{partition_template_id}|{resource_identity_seed}"
+                )
+            }
+        };
         let key = (
-            binding.execution_scope.as_str(),
-            binding.component_id.as_str(),
-            binding.node_id.as_str(),
-            binding.parameter_id.as_str(),
-            binding.atomic_group_id.as_str(),
+            binding.execution_scope.clone(),
+            binding.component_id.clone(),
+            binding.node_id.clone(),
+            binding.parameter_id.clone(),
+            mapping_key,
         );
         let semantic_key = (
             binding.execution_scope.clone(),
@@ -683,7 +739,6 @@ fn validate_bindings_against_package(
         ]
             .iter()
             .any(|value| value.trim().is_empty())
-            || !group_ids.contains(binding.atomic_group_id.as_str())
             || !semantics.contains(&semantic_key)
             || !bound_semantics.insert(semantic_key)
         {
@@ -836,13 +891,12 @@ fn validate_selectors_and_checkpoints(
                             "selector maps an unknown partition template",
                         )
                     })?;
-                if template.partition_count != selector.resource_count
-                    || !selected_templates.insert(partition_template_id.as_str())
-                {
+                if template.partition_count != selector.resource_count {
                     return invalid_residency(
                         "selector partition mapping is inconsistent",
                     );
                 }
+                selected_templates.insert(partition_template_id.as_str());
             }
         }
         if compiled_selector_identity(selector)? != selector.id {
@@ -867,7 +921,7 @@ fn validate_selectors_and_checkpoints(
         || selected_templates != *template_ids
     {
         return invalid_residency(
-            "compiled dynamic resources are not mapped exactly once",
+            "compiled dynamic resources are not mapped by a selector",
         );
     }
 
@@ -1065,4 +1119,86 @@ fn invalid_residency<T>(message: impl Into<String>) -> io::Result<T> {
 
 fn invalid_residency_error(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod shared_template_tests {
+    use super::*;
+    use crate::test_support::tiny_model_package_manifest_path;
+
+    #[test]
+    fn compatible_partition_template_is_shareable_across_selectors() {
+        let mut manifest = VulkanResidentModelPackageManifest::from_json_file(
+            &tiny_model_package_manifest_path(),
+        )
+        .unwrap();
+        let template_id =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string();
+        manifest.resource_residency.partition_templates =
+            vec![CompiledPartitionTemplate {
+                id: template_id.clone(),
+                partition_count: 3,
+                lifetime: CompiledResourceLifetime::Dynamic,
+                group_identity_seed:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                member_templates: Vec::new(),
+                dependencies: Vec::new(),
+            }];
+
+        let prototype = manifest
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.component_id == "layer_00")
+            .unwrap()
+            .clone();
+        let mut selectors = Vec::new();
+        let mut checkpoints = Vec::new();
+        for component_id in ["selector_owner_a", "selector_owner_b"] {
+            let mut component = prototype.clone();
+            component.component_id = component_id.to_string();
+            let selector_node_id = component.circuit.nodes[0].id.clone();
+            let resume_node_id = component.circuit.nodes[1].id.clone();
+            component.circuit.nodes[0].attrs = serde_json::json!({
+                "selection_domain": {
+                    "id": "shared_partitions",
+                    "resource_count": 3
+                }
+            });
+            manifest.circuit_graph.components.push(component);
+
+            let mut selector = CompiledResourceSelector {
+                id: String::new(),
+                execution_scope: "target".to_string(),
+                component_id: component_id.to_string(),
+                node_id: selector_node_id.clone(),
+                domain_id: "shared_partitions".to_string(),
+                resource_count: 3,
+                mapping: CompiledResourceSelectorMapping::PartitionTemplate {
+                    partition_template_id: template_id.clone(),
+                },
+            };
+            selector.id = compiled_selector_identity(&selector).unwrap();
+            let mut checkpoint = CompiledResidencyCheckpoint {
+                id: String::new(),
+                execution_scope: "target".to_string(),
+                component_id: component_id.to_string(),
+                after_node_id: selector_node_id,
+                resume_node_id,
+                selector_ids: vec![selector.id.clone()],
+            };
+            checkpoint.id = compiled_checkpoint_identity(&checkpoint).unwrap();
+            selectors.push(selector);
+            checkpoints.push(checkpoint);
+        }
+        selectors.sort_by(|left, right| left.id.cmp(&right.id));
+        checkpoints.sort_by(|left, right| left.id.cmp(&right.id));
+        manifest.resource_residency.selectors = selectors;
+        manifest.resource_residency.checkpoints = checkpoints;
+
+        let template_ids = BTreeSet::from([template_id.as_str()]);
+        validate_selectors_and_checkpoints(&manifest, &template_ids).unwrap();
+    }
 }

@@ -61,6 +61,63 @@ fn concrete_resource_identity_does_not_depend_on_package_paths() {
 }
 
 #[test]
+fn resource_bindings_are_strictly_typed_for_concrete_and_partition_resources() {
+    let concrete: CompiledResourceBinding = serde_json::from_value(
+        serde_json::json!({
+            "execution_scope": "target",
+            "component_id": "component",
+            "node_id": "compute",
+            "parameter_id": "weight",
+            "mapping": {
+                "kind": "atomic_group",
+                "atomic_group_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        concrete.mapping,
+        CompiledResourceBindingMapping::AtomicGroup { .. }
+    ));
+
+    let partition: CompiledResourceBinding = serde_json::from_value(
+        serde_json::json!({
+            "execution_scope": "target",
+            "component_id": "component",
+            "node_id": "selected_compute",
+            "parameter_id": "bank",
+            "mapping": {
+                "kind": "partition_template_member",
+                "partition_template_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "resource_identity_seed": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        partition.mapping,
+        CompiledResourceBindingMapping::PartitionTemplateMember { .. }
+    ));
+
+    let error = serde_json::from_value::<CompiledResourceBinding>(
+        serde_json::json!({
+            "execution_scope": "target",
+            "component_id": "component",
+            "node_id": "selected_compute",
+            "parameter_id": "bank",
+            "mapping": {
+                "kind": "partition_template_member",
+                "partition_template_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "resource_identity_seed": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "silent_fallback": true
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
 fn package_loader_rejects_unknown_resource_residency_contracts() {
     let source_manifest_path = fixture_model_package_manifest_path();
     let source_manifest = fixture_model_package_manifest();

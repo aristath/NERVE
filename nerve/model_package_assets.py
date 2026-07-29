@@ -1,6 +1,9 @@
 from nerve.model_package_common import *
 from nerve.model_package_tensors import *
 from nerve.model_package_packed_tensors import *
+from nerve.resource_residency_planning import (
+    TENSOR_PARTITION_INTEGRITY_SCHEMA,
+)
 
 def stream_control_binding_for_node(circuit: Json, node: Json) -> int:
     state_view_signals = {
@@ -143,6 +146,7 @@ def copy_tensor_package(
     tensor_index: Json,
     package_dir: Path,
     *,
+    partition_counts: dict[str, int] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> Json:
@@ -160,6 +164,15 @@ def copy_tensor_package(
     total = len(tensors)
     derived_groups_written: set[str] = set()
     derived_tensors_written: set[str] = set()
+    partition_counts = dict(partition_counts or {})
+    unknown_partition_tensors = set(partition_counts).difference(packaged["tensors"])
+    if unknown_partition_tensors:
+        raise ModelCompileError(
+            "partition plan references unknown tensors: "
+            + ", ".join(sorted(unknown_partition_tensors))
+        )
+    partition_digest_payload = bytearray()
+    partition_integrity_records: list[tuple[Json, int, int, int]] = []
     for index, (tensor_name, info) in enumerate(tensors, start=1):
         check_compile_cancelled(cancel_requested)
         if tensor_name in derived_tensors_written:
@@ -172,6 +185,22 @@ def copy_tensor_package(
         digest = blake2s(tensor_name.encode("utf-8"), digest_size=8).hexdigest()
         destination = weights_dir / f"tensor_{digest}.safetensors"
         derivation = info.get("derived")
+        partition_count = partition_counts.get(tensor_name)
+        quantization = info.get("quantization")
+        partition_digests: list[bytes] = []
+        if partition_count is not None and (
+            isinstance(derivation, dict)
+            or (
+                isinstance(quantization, dict)
+                and quantization.get("format") == "auto_gptq"
+                and auto_gptq_packing(info) == AUTO_GPTQ_INPUT_MAJOR_PACKING
+                and auto_gptq_zero_encoding(info) == AUTO_GPTQ_PER_GROUP_ZERO
+            )
+        ):
+            raise ModelCompileError(
+                f"selected tensor {tensor_name!r} requires a packaging transform "
+                "that does not preserve independently verifiable partitions"
+            )
         if (
             isinstance(derivation, dict)
             and derivation.get("kind") == "bf16_to_fp8_e4m3_scale"
@@ -287,7 +316,6 @@ def copy_tensor_package(
                 }
             )
             continue
-        quantization = info.get("quantization")
         if (
             isinstance(quantization, dict)
             and quantization.get("format") == "auto_gptq"
@@ -326,22 +354,47 @@ def copy_tensor_package(
             quantization.pop("zero_point_add", None)
             quantization.pop("qzeros", None)
         elif info.get("source_parts"):
-            header_bytes, data_sha256 = write_compiled_composite_tensor(
-                tensor_name=tensor_name,
-                info=info,
-                destination=destination,
-                layout=layout,
+            header_bytes, data_sha256, partition_digests = (
+                write_compiled_composite_tensor(
+                    tensor_name=tensor_name,
+                    info=info,
+                    destination=destination,
+                    layout=layout,
+                    partition_count=partition_count,
+                )
             )
         else:
             source = Path(info["source_file"])
             if not source.is_file():
                 raise ModelCompileError(f"tensor source file does not exist: {source}")
-            header_bytes, data_sha256 = write_compiled_tensor(
+            header_bytes, data_sha256, partition_digests = write_compiled_tensor(
                 tensor_name=tensor_name,
                 info=info,
                 source=source,
                 destination=destination,
                 layout=layout,
+                partition_count=partition_count,
+            )
+        if partition_count is not None:
+            if len(partition_digests) != partition_count:
+                raise ModelCompileError(
+                    f"selected tensor {tensor_name!r} emitted incomplete "
+                    "partition integrity"
+                )
+            digest_offset = len(partition_digest_payload)
+            for partition_digest in partition_digests:
+                if len(partition_digest) != 32:
+                    raise ModelCompileError(
+                        f"selected tensor {tensor_name!r} emitted an invalid digest"
+                    )
+                partition_digest_payload.extend(partition_digest)
+            partition_integrity_records.append(
+                (
+                    info,
+                    partition_count,
+                    int(info["byte_count"]) // partition_count,
+                    digest_offset,
+                )
             )
         if isinstance(quantization, dict):
             quantization.pop("execution_zero_point_encoding", None)
@@ -350,6 +403,7 @@ def copy_tensor_package(
         info["data_offsets"] = [0, int(info["byte_count"])]
         info["data_sha256"] = data_sha256
         info["layout"] = layout
+        info["safetensors_header_bytes"] = header_bytes
         info.pop("source_parts", None)
         info.pop("source_header_bytes", None)
         info.pop("layout_hint", None)
@@ -370,6 +424,29 @@ def copy_tensor_package(
                 "metadata": source_metadata,
             }
         )
+
+    if partition_integrity_records:
+        integrity_path = package_dir / "integrity" / "resource_partitions.sha256"
+        integrity_path.parent.mkdir(parents=True, exist_ok=True)
+        integrity_path.write_bytes(bytes(partition_digest_payload))
+        table_sha256 = sha256(partition_digest_payload).hexdigest()
+        relative_integrity_path = relative_json_path(package_dir, integrity_path)
+        for (
+            info,
+            partition_count,
+            partition_byte_count,
+            digest_offset,
+        ) in partition_integrity_records:
+            info["partition_integrity"] = {
+                "schema": TENSOR_PARTITION_INTEGRITY_SCHEMA,
+                "partition_axis": 0,
+                "partition_count": partition_count,
+                "partition_byte_count": partition_byte_count,
+                "digest_table_path": relative_integrity_path,
+                "digest_table_byte_offset": digest_offset,
+                "digest_stride_bytes": 32,
+                "table_sha256": table_sha256,
+            }
 
     packaged["tensors"] = {
         name: info

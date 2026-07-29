@@ -46,8 +46,21 @@ def write_compiled_tensor(
     source: Path,
     destination: Path,
     layout: str,
-) -> tuple[int, str]:
+    partition_count: int | None = None,
+) -> tuple[int, str, list[bytes]]:
     byte_count = int(info["byte_count"])
+    if (
+        partition_count is not None
+        and (
+            not isinstance(partition_count, int)
+            or isinstance(partition_count, bool)
+            or partition_count <= 0
+            or byte_count % partition_count
+        )
+    ):
+        raise ModelCompileError(
+            f"tensor {tensor_name!r} has an invalid partition count"
+        )
     header = {
         "__metadata__": {"format": "nerve", "layout": layout},
         tensor_name: {
@@ -63,6 +76,7 @@ def write_compiled_tensor(
     )
     source_start = 8 + source_header_bytes + int(info["data_offsets"][0])
     data_digest = sha256()
+    partition_digests: list[bytes] = []
 
     with (
         source.open("rb") as source_handle,
@@ -71,10 +85,31 @@ def write_compiled_tensor(
         destination_handle.write(struct.pack("<Q", len(header_payload)))
         destination_handle.write(header_payload)
         source_handle.seek(source_start)
-        copy_exact_bytes(
-            source_handle, destination_handle, byte_count, digest=data_digest
-        )
-    return len(header_payload), data_digest.hexdigest()
+        if partition_count is None:
+            copy_exact_bytes(
+                source_handle, destination_handle, byte_count, digest=data_digest
+            )
+        else:
+            partition_bytes = byte_count // partition_count
+            for _ in range(partition_count):
+                partition_digest = sha256()
+                copy_exact_bytes(
+                    source_handle,
+                    destination_handle,
+                    partition_bytes,
+                    digest=_DigestFanout(data_digest, partition_digest),
+                )
+                partition_digests.append(partition_digest.digest())
+    return len(header_payload), data_digest.hexdigest(), partition_digests
+
+
+class _DigestFanout:
+    def __init__(self, *digests: Any) -> None:
+        self._digests = digests
+
+    def update(self, payload: bytes) -> None:
+        for digest in self._digests:
+            digest.update(payload)
 
 
 def write_compiled_composite_tensor(
@@ -83,12 +118,25 @@ def write_compiled_composite_tensor(
     info: Json,
     destination: Path,
     layout: str,
-) -> tuple[int, str]:
+    partition_count: int | None = None,
+) -> tuple[int, str, list[bytes]]:
     if layout != ROW_MAJOR_LAYOUT:
         raise ModelCompileError(
             f"composite tensor {tensor_name!r} requires unsupported layout {layout!r}"
         )
     byte_count = int(info["byte_count"])
+    if (
+        partition_count is not None
+        and (
+            not isinstance(partition_count, int)
+            or isinstance(partition_count, bool)
+            or partition_count <= 0
+            or byte_count % partition_count
+        )
+    ):
+        raise ModelCompileError(
+            f"composite tensor {tensor_name!r} has an invalid partition count"
+        )
     header = {
         "__metadata__": {"format": "nerve", "layout": layout},
         tensor_name: {
@@ -101,6 +149,12 @@ def write_compiled_composite_tensor(
     header_payload += b" " * (-len(header_payload) % 8)
     written = 0
     data_digest = sha256()
+    partition_digests: list[bytes] = []
+    partition_bytes = (
+        None if partition_count is None else byte_count // partition_count
+    )
+    partition_remaining = partition_bytes
+    partition_digest = sha256() if partition_bytes is not None else None
     with destination.open("wb") as destination_handle:
         destination_handle.write(struct.pack("<Q", len(header_payload)))
         destination_handle.write(header_payload)
@@ -120,18 +174,45 @@ def write_compiled_composite_tensor(
                 )
             with source.open("rb") as source_handle:
                 source_handle.seek(8 + source_header_bytes + offsets[0])
-                copy_exact_bytes(
-                    source_handle,
-                    destination_handle,
-                    part_bytes,
-                    digest=data_digest,
-                )
+                part_remaining = part_bytes
+                while part_remaining:
+                    transfer_bytes = (
+                        part_remaining
+                        if partition_remaining is None
+                        else min(part_remaining, partition_remaining)
+                    )
+                    digest = (
+                        data_digest
+                        if partition_digest is None
+                        else _DigestFanout(data_digest, partition_digest)
+                    )
+                    copy_exact_bytes(
+                        source_handle,
+                        destination_handle,
+                        transfer_bytes,
+                        digest=digest,
+                    )
+                    part_remaining -= transfer_bytes
+                    if partition_remaining is not None:
+                        partition_remaining -= transfer_bytes
+                        if partition_remaining == 0:
+                            assert partition_digest is not None
+                            partition_digests.append(partition_digest.digest())
+                            partition_digest = sha256()
+                            partition_remaining = partition_bytes
             written += part_bytes
     if written != byte_count:
         raise ModelCompileError(
             f"composite tensor {tensor_name!r} wrote {written} bytes; expected {byte_count}"
         )
-    return len(header_payload), data_digest.hexdigest()
+    if (
+        partition_count is not None
+        and len(partition_digests) != partition_count
+    ):
+        raise ModelCompileError(
+            f"composite tensor {tensor_name!r} did not end on a partition boundary"
+        )
+    return len(header_payload), data_digest.hexdigest(), partition_digests
 
 
 def write_compiled_derived_fp8_e4m3_output_projection(

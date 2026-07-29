@@ -193,7 +193,10 @@ def test_builds_a_complete_eager_contract_from_compiled_access_semantics(
             "component_id": "component",
             "node_id": "compute",
             "parameter_id": "weight",
-            "atomic_group_id": contract["atomic_groups"][0]["id"],
+            "mapping": {
+                "kind": "atomic_group",
+                "atomic_group_id": contract["atomic_groups"][0]["id"],
+            },
         }
     ]
     validate_resource_residency_contract(tmp_path, contract, manifest)
@@ -214,7 +217,10 @@ def test_eager_spine_is_one_semantic_group_not_one_group_per_tensor(
     assert contract["atomic_groups"][0]["resource_ids"] == sorted(
         resource["id"] for resource in contract["resources"]
     )
-    assert {binding["atomic_group_id"] for binding in contract["bindings"]} == {
+    assert {
+        binding["mapping"]["atomic_group_id"]
+        for binding in contract["bindings"]
+    } == {
         contract["atomic_groups"][0]["id"]
     }
 
@@ -352,7 +358,7 @@ def test_validates_concrete_dynamic_group_selector_and_checkpoint(
     group["lifetime"] = "dynamic"
     group["resource_ids"] = [resource["id"]]
     group["id"] = atomic_group_identity(group)
-    contract["bindings"][0]["atomic_group_id"] = group["id"]
+    contract["bindings"][0]["mapping"]["atomic_group_id"] = group["id"]
     selector = {
         "id": "",
         "execution_scope": "target",

@@ -50,8 +50,12 @@ _BINDING_FIELDS = frozenset(
         "component_id",
         "node_id",
         "parameter_id",
-        "atomic_group_id",
+        "mapping",
     )
+)
+_ATOMIC_GROUP_BINDING_FIELDS = frozenset(("kind", "atomic_group_id"))
+_PARTITION_MEMBER_BINDING_FIELDS = frozenset(
+    ("kind", "partition_template_id", "resource_identity_seed")
 )
 _PARTITION_TEMPLATE_FIELDS = frozenset(
     (
@@ -267,93 +271,19 @@ def build_eager_resource_residency_contract(
     baseline contract is deliberately exact rather than predictive.
     """
 
-    tensor_bindings = _compiled_parameter_bindings(manifest)
+    tensor_bindings = compiled_parameter_bindings(manifest)
     tensors = tensor_index.get("tensors")
     if not isinstance(tensors, dict):
         raise ModelCompileError("tensor index has no tensor mapping")
 
-    compatibility = {
-        "device_api": "vulkan",
-        "storage_class": "storage_buffer",
-        "read_only": True,
-        "required_features": [],
-    }
     resources_by_id: dict[str, Json] = {}
-    source_headers = {
-        record["path"]: record["safetensors_header_bytes"]
-        for record in tensor_index.get("source", {}).get("weights_files", [])
-        if isinstance(record, dict)
-        and isinstance(record.get("path"), str)
-        and isinstance(record.get("safetensors_header_bytes"), int)
-        and not isinstance(record.get("safetensors_header_bytes"), bool)
-    }
-
     for tensor_name in sorted(tensor_bindings):
-        metadata = tensors.get(tensor_name)
-        if not isinstance(metadata, dict):
-            raise ModelCompileError(
-                f"compiled circuit references tensor {tensor_name!r} absent from the index"
-            )
-        source_file = _require_safe_relative_path(
-            metadata.get("source_file"), f"tensor {tensor_name!r} source"
+        resource = compiled_immutable_resource(
+            package_dir=package_dir,
+            tensor_index=tensor_index,
+            tensor_name=tensor_name,
+            lifetime="always_resident",
         )
-        offsets = metadata.get("data_offsets")
-        header_bytes = metadata.get(
-            "safetensors_header_bytes",
-            source_headers.get(source_file),
-        )
-        byte_count = metadata.get("byte_count")
-        digest = metadata.get("data_sha256")
-        if (
-            not isinstance(offsets, list)
-            or len(offsets) != 2
-            or any(
-                not isinstance(value, int) or isinstance(value, bool) or value < 0
-                for value in offsets
-            )
-            or offsets[1] < offsets[0]
-            or not isinstance(header_bytes, int)
-            or isinstance(header_bytes, bool)
-            or header_bytes <= 0
-            or not isinstance(byte_count, int)
-            or isinstance(byte_count, bool)
-            or byte_count <= 0
-            or offsets[1] - offsets[0] != byte_count
-            or not _is_lower_hex_sha256(digest)
-        ):
-            raise ModelCompileError(
-                f"compiled tensor {tensor_name!r} cannot form a bounded residency range"
-            )
-        absolute_offset = 8 + header_bytes + offsets[0]
-        source_path = package_dir / source_file
-        try:
-            artifact_bytes = source_path.stat().st_size
-        except OSError as error:
-            raise ModelCompileError(
-                f"compiled tensor {tensor_name!r} source cannot be inspected: {error}"
-            ) from error
-        if absolute_offset + byte_count > artifact_bytes:
-            raise ModelCompileError(
-                f"compiled tensor {tensor_name!r} range exceeds {source_file!r}"
-            )
-        byte_range = {
-            "artifact_path": source_file,
-            "byte_offset": absolute_offset,
-            "byte_count": byte_count,
-            "alignment_bytes": _largest_power_of_two_divisor(absolute_offset),
-            "integrity": {
-                "algorithm": SHA256_INTEGRITY_ALGORITHM,
-                "digest": digest,
-            },
-        }
-        resource = {
-            "id": "",
-            "lifetime": "always_resident",
-            "ranges": [byte_range],
-            "dependencies": [],
-            "compatibility": compatibility,
-        }
-        resource["id"] = resource_identity(resource)
         resource_id = resource["id"]
         existing = resources_by_id.get(resource_id)
         if existing is None or _range_location_key(resource) < _range_location_key(existing):
@@ -376,7 +306,10 @@ def build_eager_resource_residency_contract(
             bindings.append(
                 {
                     **use,
-                    "atomic_group_id": eager_spine_group["id"],
+                    "mapping": {
+                        "kind": "atomic_group",
+                        "atomic_group_id": eager_spine_group["id"],
+                    },
                 }
             )
     bindings.sort(key=_binding_key)
@@ -395,6 +328,97 @@ def build_eager_resource_residency_contract(
     }
     validate_resource_residency_contract(package_dir, contract, manifest)
     return contract
+
+
+def compiled_immutable_resource(
+    *,
+    package_dir: Path,
+    tensor_index: Json,
+    tensor_name: str,
+    lifetime: str,
+) -> Json:
+    tensors = tensor_index.get("tensors")
+    metadata = tensors.get(tensor_name) if isinstance(tensors, dict) else None
+    if not isinstance(metadata, dict):
+        raise ModelCompileError(
+            f"compiled circuit references tensor {tensor_name!r} absent from the index"
+        )
+    source_file = _require_safe_relative_path(
+        metadata.get("source_file"), f"tensor {tensor_name!r} source"
+    )
+    source_headers = {
+        record["path"]: record["safetensors_header_bytes"]
+        for record in tensor_index.get("source", {}).get("weights_files", [])
+        if isinstance(record, dict)
+        and isinstance(record.get("path"), str)
+        and isinstance(record.get("safetensors_header_bytes"), int)
+        and not isinstance(record.get("safetensors_header_bytes"), bool)
+    }
+    offsets = metadata.get("data_offsets")
+    header_bytes = metadata.get(
+        "safetensors_header_bytes",
+        source_headers.get(source_file),
+    )
+    byte_count = metadata.get("byte_count")
+    digest = metadata.get("data_sha256")
+    if (
+        lifetime not in RESOURCE_LIFETIMES
+        or not isinstance(offsets, list)
+        or len(offsets) != 2
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in offsets
+        )
+        or offsets[1] < offsets[0]
+        or not isinstance(header_bytes, int)
+        or isinstance(header_bytes, bool)
+        or header_bytes <= 0
+        or not isinstance(byte_count, int)
+        or isinstance(byte_count, bool)
+        or byte_count <= 0
+        or offsets[1] - offsets[0] != byte_count
+        or not _is_lower_hex_sha256(digest)
+    ):
+        raise ModelCompileError(
+            f"compiled tensor {tensor_name!r} cannot form a bounded residency range"
+        )
+    absolute_offset = 8 + header_bytes + offsets[0]
+    source_path = package_dir / source_file
+    try:
+        artifact_bytes = source_path.stat().st_size
+    except OSError as error:
+        raise ModelCompileError(
+            f"compiled tensor {tensor_name!r} source cannot be inspected: {error}"
+        ) from error
+    if absolute_offset + byte_count > artifact_bytes:
+        raise ModelCompileError(
+            f"compiled tensor {tensor_name!r} range exceeds {source_file!r}"
+        )
+    resource = {
+        "id": "",
+        "lifetime": lifetime,
+        "ranges": [
+            {
+                "artifact_path": source_file,
+                "byte_offset": absolute_offset,
+                "byte_count": byte_count,
+                "alignment_bytes": _largest_power_of_two_divisor(absolute_offset),
+                "integrity": {
+                    "algorithm": SHA256_INTEGRITY_ALGORITHM,
+                    "digest": digest,
+                },
+            }
+        ],
+        "dependencies": [],
+        "compatibility": {
+            "device_api": "vulkan",
+            "storage_class": "storage_buffer",
+            "read_only": True,
+            "required_features": [],
+        },
+    }
+    resource["id"] = resource_identity(resource)
+    return resource
 
 
 def validate_resource_residency_contract(
@@ -432,7 +456,12 @@ def validate_resource_residency_contract(
     group_by_id = _validate_atomic_groups(groups, resource_by_id)
     template_by_id = _validate_partition_templates(package_dir, templates, group_by_id)
     parameter_semantics, component_nodes = _compiled_semantics(manifest)
-    _validate_bindings(bindings, group_by_id, parameter_semantics)
+    _validate_bindings(
+        bindings,
+        group_by_id,
+        template_by_id,
+        parameter_semantics,
+    )
     selector_by_id = _validate_selectors(
         selectors,
         group_by_id,
@@ -739,6 +768,7 @@ def _validate_range_template(
 def _validate_bindings(
     bindings: list[Json],
     group_by_id: dict[str, Json],
+    template_by_id: dict[str, Json],
     parameter_semantics: set[tuple[str, str, str, str]],
 ) -> None:
     keys = []
@@ -747,12 +777,45 @@ def _validate_bindings(
         _require_exact_fields(binding, _BINDING_FIELDS, "resource binding")
         for field in ("execution_scope", "component_id", "node_id", "parameter_id"):
             _require_non_empty_string(binding[field], f"resource binding {field}")
-        group_id = _require_content_id(
-            binding["atomic_group_id"], "resource binding atomic group id"
-        )
-        if group_id not in group_by_id:
+        mapping = _require_object(binding["mapping"], "resource binding mapping")
+        if mapping.get("kind") == "atomic_group":
+            _require_exact_fields(
+                mapping,
+                _ATOMIC_GROUP_BINDING_FIELDS,
+                "atomic group resource binding",
+            )
+            group_id = _require_content_id(
+                mapping["atomic_group_id"], "resource binding atomic group id"
+            )
+            if group_id not in group_by_id:
+                raise ModelCompileError(
+                    f"resource binding references unknown atomic group {group_id!r}"
+                )
+        elif mapping.get("kind") == "partition_template_member":
+            _require_exact_fields(
+                mapping,
+                _PARTITION_MEMBER_BINDING_FIELDS,
+                "partition member resource binding",
+            )
+            template_id = _require_content_id(
+                mapping["partition_template_id"],
+                "resource binding partition template id",
+            )
+            resource_seed = _require_content_id(
+                mapping["resource_identity_seed"],
+                "resource binding partition resource seed",
+            )
+            template = template_by_id.get(template_id)
+            if template is None or resource_seed not in {
+                member["resource_identity_seed"]
+                for member in template["member_templates"]
+            }:
+                raise ModelCompileError(
+                    "resource binding references an unknown partition template member"
+                )
+        else:
             raise ModelCompileError(
-                f"resource binding references unknown atomic group {group_id!r}"
+                f"resource binding has unsupported mapping {mapping.get('kind')!r}"
             )
         keys.append(_binding_key(binding))
         bound_semantics.append(_binding_key(binding)[:4])
@@ -847,10 +910,6 @@ def _validate_selectors(
                 raise ModelCompileError(
                     f"selector {selector_id!r} resource count disagrees with its template"
                 )
-            if template_id in selected_templates:
-                raise ModelCompileError(
-                    f"partition template {template_id!r} has multiple selectors"
-                )
             selected_templates.add(template_id)
         else:
             raise ModelCompileError(
@@ -873,7 +932,7 @@ def _validate_selectors(
         )
     if selected_templates != set(template_by_id):
         raise ModelCompileError(
-            "every partition template must be mapped by exactly one selector"
+            "every partition template must be mapped by at least one selector"
         )
     return selector_by_id
 
@@ -946,7 +1005,7 @@ def _validate_checkpoints(
         )
 
 
-def _compiled_parameter_bindings(manifest: Json) -> dict[str, list[Json]]:
+def compiled_parameter_bindings(manifest: Json) -> dict[str, list[Json]]:
     by_tensor: dict[str, list[Json]] = defaultdict(list)
 
     def collect(scope: str, graph: Any) -> None:
@@ -1081,12 +1140,24 @@ def _range_location_key(resource: Json) -> tuple[str, int, int]:
 
 
 def _binding_key(binding: Json) -> tuple[str, str, str, str, str]:
+    mapping = binding.get("mapping")
+    if not isinstance(mapping, dict):
+        mapping = {}
+    mapping_key = "|".join(
+        str(mapping.get(field, ""))
+        for field in (
+            "kind",
+            "atomic_group_id",
+            "partition_template_id",
+            "resource_identity_seed",
+        )
+    )
     return (
         str(binding["execution_scope"]),
         str(binding["component_id"]),
         str(binding["node_id"]),
         str(binding["parameter_id"]),
-        str(binding.get("atomic_group_id", "")),
+        mapping_key,
     )
 
 

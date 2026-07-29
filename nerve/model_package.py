@@ -13,6 +13,10 @@ from nerve.model_package_tensors import *
 from nerve.model_package_derived_tensors import *
 from nerve.compiler_target import CompilerTarget
 from nerve.representation_optimizer.stage import initialize_optimizer_stage
+from nerve.resource_residency_planning import (
+    analyze_lowered_resource_residency,
+    partition_counts_for_packaging,
+)
 
 def compile_model_package(
     model_dir: Path,
@@ -82,6 +86,11 @@ def compile_model_package(
         lowered_index=lowered["index"],
         lowered_dir=lowered_dir,
     )
+    residency_analysis = analyze_lowered_resource_residency(
+        lowered_index=lowered["index"],
+        lowered_dir=lowered_dir,
+        tensor_index=tensor_index,
+    )
 
     emit_compile_event(
         event_sink,
@@ -110,6 +119,7 @@ def compile_model_package(
     packaged_tensor_index = copy_tensor_package(
         tensor_index,
         package_dir,
+        partition_counts=partition_counts_for_packaging(residency_analysis),
         progress=lambda current, total, tensor_name: emit_compile_event(
             event_sink,
             "TensorPackagingStarted",

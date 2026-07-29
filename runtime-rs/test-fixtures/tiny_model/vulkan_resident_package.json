@@ -2976,8 +2976,8 @@
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_0096122738da5577.safetensors",
-            "byte_offset": 168,
+            "artifact_path": "weights/tensor_efc64374061622ae.safetensors",
+            "byte_offset": 136,
             "byte_count": 32,
             "alignment_bytes": 8,
             "integrity": {
@@ -3205,84 +3205,120 @@
         "component_id": "input_transducer",
         "node_id": "token_embedding",
         "parameter_id": "weight",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "attention_out_projection__operator_residual",
         "parameter_id": "attention_out_projection",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "ffn_down_projection__ffn_residual",
         "parameter_id": "ffn_down",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
         "parameter_id": "ffn_gate",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
         "parameter_id": "ffn_up",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "ffn_norm",
         "parameter_id": "ffn_norm",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "operator_norm",
         "parameter_id": "operator_norm",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "q_projection__k_projection__v_projection",
         "parameter_id": "k_projection",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "q_projection__k_projection__v_projection",
         "parameter_id": "q_projection",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "layer_00",
         "node_id": "q_projection__k_projection__v_projection",
         "parameter_id": "v_projection",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "output_transducer",
         "node_id": "output_norm",
         "parameter_id": "output_norm.weight",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       },
       {
         "execution_scope": "target",
         "component_id": "output_transducer",
         "node_id": "output_projection",
         "parameter_id": "output_projection.weight",
-        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        "mapping": {
+          "kind": "atomic_group",
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+        }
       }
     ],
     "selectors": [],
@@ -3566,8 +3602,8 @@
         "sha256": "24641bf75bb74ff97a65dc9880e0d69ff4699bd205aa8fea3b3c0f658154144a"
       },
       "tensors.json": {
-        "byte_count": 7272,
-        "sha256": "8d9e4c69b7ea86becd326f0a7e617247ca99d9bf102ee30cf7d2cb49e534af78"
+        "byte_count": 7701,
+        "sha256": "d12d289a6b1bef01f6d4f5090d1dc132838603644a949ddba17a83b7e29cb0a4"
       },
       "tokenizer/chat_template.jinja": {
         "byte_count": 145,
@@ -3590,8 +3626,8 @@
         "sha256": "d38fd405a80035658cbc12bc1ea96d4f905576e0998e8de390f1cf277af13346"
       },
       "transpiled/tensors.json": {
-        "byte_count": 7272,
-        "sha256": "8d9e4c69b7ea86becd326f0a7e617247ca99d9bf102ee30cf7d2cb49e534af78"
+        "byte_count": 7701,
+        "sha256": "d12d289a6b1bef01f6d4f5090d1dc132838603644a949ddba17a83b7e29cb0a4"
       }
     }
   }

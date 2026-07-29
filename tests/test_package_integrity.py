@@ -485,7 +485,10 @@ def minimal_package(root: Path) -> dict[str, object]:
                 "component_id": component_id,
                 "node_id": node["id"],
                 "parameter_id": parameter_id,
-                "atomic_group_id": atomic_group["id"],
+                "mapping": {
+                    "kind": "atomic_group",
+                    "atomic_group_id": atomic_group["id"],
+                },
             }
             for component_id, candidate in circuits.items()
             for node in candidate["nodes"]
@@ -500,7 +503,7 @@ def minimal_package(root: Path) -> dict[str, object]:
             binding["component_id"],
             binding["node_id"],
             binding["parameter_id"],
-            binding["atomic_group_id"],
+            binding["mapping"]["atomic_group_id"],
         )
     )
     lowered_index_path = root / "lowered" / "execution_graph.circuits.json"

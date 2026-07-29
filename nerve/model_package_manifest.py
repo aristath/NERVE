@@ -16,7 +16,9 @@ from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
 )
-from nerve.resource_residency import build_eager_resource_residency_contract
+from nerve.resource_residency_planning import (
+    build_planned_resource_residency_contract,
+)
 
 
 def can_emit_physical_representation_from_producer(
@@ -737,7 +739,7 @@ def build_vulkan_resident_package_manifest(
         "component_executions": component_executions,
         "speculative_decoders": speculative_decoders,
     }
-    manifest["resource_residency"] = build_eager_resource_residency_contract(
+    manifest["resource_residency"] = build_planned_resource_residency_contract(
         package_dir=package_dir,
         tensor_index=tensor_index,
         manifest=manifest,
