@@ -622,7 +622,10 @@ impl VulkanMountedPlacedStreamCircuit {
             VulkanKernelDescriptorUsage::OutputSignal | VulkanKernelDescriptorUsage::StateWrite => {
                 VulkanResidentKernelBufferAccess::Write
             }
-            VulkanKernelDescriptorUsage::StateView => VulkanResidentKernelBufferAccess::ReadWrite,
+            VulkanKernelDescriptorUsage::StateView
+            | VulkanKernelDescriptorUsage::SelectionTelemetry => {
+                VulkanResidentKernelBufferAccess::ReadWrite
+            }
         };
 
         Ok(VulkanResidentKernelBufferBinding::new(binding, buffer, byte_len).with_access(access))
@@ -706,6 +709,25 @@ impl VulkanMountedPlacedStreamCircuit {
                                 buffer_index: *buffer_index,
                             }
                         })?;
+                Ok((&allocation.buffer, *byte_capacity))
+            }
+            VulkanBoundDescriptorTarget::SelectionTelemetry {
+                buffer_index,
+                byte_capacity,
+                ..
+            } => {
+                let allocation = self
+                    .buffers
+                    .selection_telemetry_buffers
+                    .get(*buffer_index)
+                    .ok_or_else(|| {
+                        VulkanMountedPlacedResidentKernelDispatchError::MissingMountedBuffer {
+                            dispatch_index: dispatch.dispatch_index,
+                            binding: descriptor.binding,
+                            buffer_kind: "selection_telemetry".to_string(),
+                            buffer_index: *buffer_index,
+                        }
+                    })?;
                 Ok((&allocation.buffer, *byte_capacity))
             }
         }

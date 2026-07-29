@@ -690,6 +690,8 @@ mod tests {
         router_logits.write_bytes(&u16_bytes(&scores)).unwrap();
         let expert_routes = device.create_resident_buffer(16).unwrap();
         expert_routes.write_bytes(&[0; 16]).unwrap();
+        let selection_telemetry = device.create_resident_buffer(128 * 4).unwrap();
+        selection_telemetry.write_bytes(&[0; 128 * 4]).unwrap();
         let dispatch = device
             .create_resident_kernel_dispatch(
                 &spirv_words,
@@ -698,6 +700,12 @@ mod tests {
                         .with_access(VulkanResidentKernelBufferAccess::Read),
                     VulkanResidentKernelBufferBinding::new(1, &expert_routes, 16)
                         .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(
+                        2,
+                        &selection_telemetry,
+                        128 * 4,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
                 ],
                 1,
                 64,
@@ -722,6 +730,16 @@ mod tests {
             "selected softmax weights sum to {weight_sum}"
         );
         assert_eq!(routes[0] >> 16, routes[2] >> 16);
+        let counts = bytes_to_u32(&selection_telemetry.read_bytes(128 * 4).unwrap());
+        assert_eq!(
+            counts
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, count)| *count > 0)
+                .collect::<Vec<_>>(),
+            vec![(3, 1), (7, 1), (64, 1), (65, 1)],
+        );
     }
 
     #[test]

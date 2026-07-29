@@ -90,6 +90,18 @@ fn run_placed_chat(
             );
             let mut previous_output_at = None;
             let mut sustained_decode_samples = Vec::new();
+            let selection_before = engine
+                .stream("main")
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "placed chat engine lost its main stream",
+                    )
+                })?
+                .selection_telemetry_snapshot()?;
+            let mut selection_after_user = None;
+            let mut selection_after_generation = None;
+            let mut selection_after_commit = None;
             let transaction = execute_vulkan_resident_chat_transaction(
                 &mut engine,
                 "main",
@@ -141,7 +153,60 @@ fn run_placed_chat(
                         Err(error) => output_error = Some(error.to_string()),
                     }
                 },
+                |phase, engine| {
+                    let snapshot = engine
+                        .stream("main")
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "placed chat engine lost its main stream",
+                            )
+                        })?
+                        .selection_telemetry_snapshot()?;
+                    match phase {
+                        VulkanResidentChatTransactionPhase::UserCommitted => {
+                            selection_after_user = Some(snapshot);
+                        }
+                        VulkanResidentChatTransactionPhase::GenerationCompleted => {
+                            selection_after_generation = Some(snapshot);
+                        }
+                        VulkanResidentChatTransactionPhase::AssistantCommitted => {
+                            selection_after_commit = Some(snapshot);
+                        }
+                    }
+                    Ok(())
+                },
             )?;
+            let selection_after_user = selection_after_user.ok_or_else(|| {
+                io::Error::other(
+                    "placed chat transaction did not report its user phase",
+                )
+            })?;
+            let selection_after_generation =
+                selection_after_generation.ok_or_else(|| {
+                    io::Error::other(
+                        "placed chat transaction did not report its generation phase",
+                    )
+                })?;
+            let selection_after = selection_after_commit.ok_or_else(|| {
+                io::Error::other(
+                    "placed chat transaction did not report its commit phase",
+                )
+            })?;
+            let selection_user_coverage = selection_after_user
+                .delta_since(&selection_before)?
+                .report();
+            let selection_generation_coverage = selection_after_generation
+                .delta_since(&selection_after_user)?
+                .report();
+            let selection_commit_coverage = selection_after
+                .delta_since(&selection_after_generation)?
+                .report();
+            let selection_post_generation_cumulative =
+                selection_after_generation.report();
+            let selection_coverage =
+                selection_after.delta_since(&selection_before)?.report();
+            let cumulative_selection_coverage = selection_after.report();
             let submitted_run = transaction
                 .generation_run
                 .engine_run
@@ -278,6 +343,12 @@ fn run_placed_chat(
                     prefill_activation_count,
                     decode_activation_count,
                 ),
+                selection_user_coverage,
+                selection_generation_coverage,
+                selection_commit_coverage,
+                selection_post_generation_cumulative,
+                selection_coverage,
+                cumulative_selection_coverage,
                 transport_edges,
             })
         },
@@ -326,11 +397,31 @@ fn execute_placed_prompt_run(
     let stream_snapshot = engine.add_stream("main", stream)?;
     let setup_time_ns = elapsed_nanos_u64(setup_start);
     let run_start = Instant::now();
+    let selection_before = engine
+        .stream("main")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "placed prompt engine lost its main stream",
+            )
+        })?
+        .selection_telemetry_snapshot()?;
     let input_event =
         VulkanResidentTokenInputEvent::new("prompt", prompt_ids.to_vec(), args.max_new_tokens);
     let input_event_id = input_event.id.clone();
     reset_vulkan_resident_execution_counters();
     let submitted_run = engine.submit_input_event_until_idle("main", input_event)?;
+    let selection_after = engine
+        .stream("main")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "placed prompt engine lost its main stream",
+            )
+        })?
+        .selection_telemetry_snapshot()?;
+    let selection_coverage =
+        selection_after.delta_since(&selection_before)?.report();
     let run_time_ns = elapsed_nanos_u64(run_start);
     let engine_run = submitted_run.engine_run;
     let prefill_activation_count = engine_run.prefill_activation_count;
@@ -457,6 +548,7 @@ fn execute_placed_prompt_run(
             prefill_activation_count,
             decode_activation_count,
         ),
+        selection_coverage,
     })
 }
 
@@ -527,6 +619,10 @@ fn print_placed_prompt_report(
         print_runtime_execution_counters(&vulkan_resident_execution_counters());
         print_runtime_feedback_stats(&report.resident_feedback);
         print_runtime_sparse_moe_stats(&report.sparse_moe);
+        print_runtime_selection_coverage_stats(
+            "selection_coverage",
+            &report.selection_coverage,
+        );
         print_runtime_transport_edges(&report.transport.edges);
         print_speculative_profile(report);
         print_placed_component_timing_profile(&report.component_timing_summaries, 5);

@@ -583,6 +583,10 @@ def _ffn_tail(
                     "normalize_selected": bool(routing["normalize_selected"]),
                     "logit_softcap": float(routing["logit_softcap"]),
                     "selection_bias": "moe_router_correction_bias" in parameters,
+                    "selection_domain": {
+                        "id": "routed_experts",
+                        "resource_count": int(feed_forward["num_experts"]),
+                    },
                 },
             },
             {

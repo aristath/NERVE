@@ -98,6 +98,7 @@ pub struct StreamCircuitResourcePlan {
     pub transducer_parameter_ref_count: usize,
     pub transducer_parameters: Vec<PlannedParameterResource>,
     pub state_allocations: Vec<PlannedStateResource>,
+    pub selection_domains: Vec<PlannedSelectionDomain>,
     pub activation_banks: Vec<PlannedActivationSlotBank>,
     pub temporary_signal_count: usize,
     pub state_view_signal_count: usize,
@@ -139,6 +140,7 @@ impl StreamCircuitResourcePlan {
         let mut transducer_parameters_by_tensor: BTreeMap<String, Vec<PlannedParameterUse>> =
             BTreeMap::new();
         let mut state_allocations = Vec::new();
+        let mut selection_domains = Vec::new();
         let mut activation_banks = Vec::new();
         let mut unknown_temporary_shape_count = 0;
         let mut unknown_state_view_shape_count = 0;
@@ -200,6 +202,17 @@ impl StreamCircuitResourcePlan {
                         .map(state_dtype_bytes)
                         .transpose()?,
                 });
+            }
+            for node in &activation_plan.nodes {
+                if let Some(domain) = &node.selection_domain {
+                    selection_domains.push(PlannedSelectionDomain {
+                        component_id: artifact.component.id.clone(),
+                        circuit_id: artifact.circuit.id.clone(),
+                        node_id: node.id.clone(),
+                        domain_id: domain.domain_id.clone(),
+                        resource_count: domain.resource_count,
+                    });
+                }
             }
 
             unknown_temporary_shape_count += activation_plan
@@ -263,6 +276,7 @@ impl StreamCircuitResourcePlan {
             transducer_parameter_ref_count,
             transducer_parameters,
             state_allocations,
+            selection_domains,
             activation_banks,
             temporary_signal_count: execution_plan.temporary_signal_count(),
             state_view_signal_count: execution_plan.state_view_signal_count(),

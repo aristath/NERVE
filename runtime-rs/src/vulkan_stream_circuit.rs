@@ -22,9 +22,11 @@ use crate::stream_circuit::{
     ComponentEdgePlacement, EdgeTransport, LOWERED_EXECUTION_GRAPH_SCHEMA, LoweredCircuitRef,
     LoweredExecutionGraph, LoweredExecutionGraphGraph, LoweredExecutionGraphSource,
     LoweredExecutionGraphSummary, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, ResolvedCircuitArtifact,
-    ResolvedLoweredExecutionGraph, RuntimeSparseMoeWorkReport, StreamCircuit,
-    StreamCircuitGraphBoundary, StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan,
-    StreamCircuitPlacementSpec, StreamCircuitRuntimeGraph,
+    ResolvedLoweredExecutionGraph, RuntimeSelectedResourceCountReport,
+    RuntimeSelectionCoverageReport, RuntimeSelectionDomainCoverageReport,
+    RuntimeSparseMoeWorkReport, StreamCircuit, StreamCircuitGraphBoundary,
+    StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan, StreamCircuitPlacementSpec,
+    StreamCircuitRuntimeGraph,
 };
 use crate::stream_plan::{
     CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort, SignalProducer,
@@ -127,6 +129,7 @@ include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
 include!("vulkan_stream_circuit/sparse_moe_execution.rs");
+include!("vulkan_stream_circuit/selection_telemetry.rs");
 include!("vulkan_stream_circuit/placed_model_package_loader.rs");
 include!("vulkan_stream_circuit/placed_stream_processor.rs");
 include!("vulkan_stream_circuit/placed_prompt_event.rs");

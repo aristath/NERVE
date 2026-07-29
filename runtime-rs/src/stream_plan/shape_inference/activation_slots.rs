@@ -1132,6 +1132,7 @@ mod tests {
             params: Vec::new(),
             state_reads: Vec::new(),
             state_writes: Vec::new(),
+            selection_domain: None,
         };
         let signal = |id: &str, producer: &str, consumers: &[&str]| PlannedSignal {
             id: id.to_string(),

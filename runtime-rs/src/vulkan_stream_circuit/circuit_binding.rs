@@ -188,6 +188,15 @@ pub struct VulkanNodeBinding {
     pub parameters: Vec<VulkanParameterBinding>,
     pub state_reads: Vec<VulkanStateBinding>,
     pub state_writes: Vec<VulkanStateBinding>,
+    pub selection_domain: Option<VulkanSelectionDomainBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanSelectionDomainBinding {
+    pub component_id: String,
+    pub node_id: String,
+    pub domain_id: String,
+    pub resource_count: usize,
 }
 
 impl VulkanNodeBinding {
@@ -267,4 +276,3 @@ impl Display for VulkanBindingPlanError {
 }
 
 impl Error for VulkanBindingPlanError {}
-

@@ -268,6 +268,78 @@ fn print_runtime_sparse_moe_stats(stats: &RuntimeSparseMoeWorkReport) {
     );
 }
 
+fn print_runtime_selection_coverage_stats(
+    label: &str,
+    stats: &RuntimeSelectionCoverageReport,
+) {
+    if stats.domain_count == 0 {
+        return;
+    }
+    println!("{label}:");
+    println!("  domain_count={}", stats.domain_count);
+    println!(
+        "  selected_resources={}/{}",
+        stats.selected_resource_count, stats.addressable_resource_count
+    );
+    println!("  selection_count={}", stats.selection_count);
+    for domain in &stats.domains {
+        let selected = domain
+            .selected_resources
+            .iter()
+            .map(|resource| {
+                format!("{}:{}", resource.resource_id, resource.selection_count)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "  domain={}.{}.{} scope={} selected={}/{} selections={} resources=[{}]",
+            domain.component_id,
+            domain.node_id,
+            domain.domain_id,
+            domain.execution_scope,
+            domain.selected_resource_count,
+            domain.resource_count,
+            domain.selection_count,
+            selected,
+        );
+    }
+}
+
+fn print_runtime_selection_phase_coverage_stats(
+    phases: &[(&str, &RuntimeSelectionCoverageReport)],
+) {
+    if phases.iter().all(|(_, report)| report.domain_count == 0) {
+        return;
+    }
+    println!("selection_phases:");
+    for (phase, report) in phases {
+        let domains = report
+            .domains
+            .iter()
+            .map(|domain| {
+                format!(
+                    "{}@{}/{}/{}:{}/{}",
+                    domain.execution_scope,
+                    domain.component_id,
+                    domain.node_id,
+                    domain.domain_id,
+                    domain.selected_resource_count,
+                    domain.resource_count,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "  phase={} selected={}/{} selections={} domains=[{}]",
+            phase,
+            report.selected_resource_count,
+            report.addressable_resource_count,
+            report.selection_count,
+            domains,
+        );
+    }
+}
+
 fn print_runtime_prefix_state_cache_stats(stats: &VulkanResidentPlacedPrefixStateCacheStats) {
     println!("prefix_state_cache:");
     println!("  hits={}", stats.hit_count);

@@ -32,6 +32,15 @@ pub struct PlannedStateResource {
     pub element_bytes: Option<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedSelectionDomain {
+    pub component_id: String,
+    pub circuit_id: String,
+    pub node_id: String,
+    pub domain_id: String,
+    pub resource_count: usize,
+}
+
 fn state_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {
     match dtype {
         "BF16" | "F16" => Ok(2),
@@ -246,7 +255,7 @@ impl CircuitActivationPlan {
                 );
             }
 
-            planned_nodes.push(PlannedNode::from_node(index, node));
+        planned_nodes.push(PlannedNode::from_node(&component_id, index, node)?);
         }
 
         for output in &circuit.boundary.outputs {
@@ -450,11 +459,22 @@ pub struct PlannedNode {
     pub params: Vec<String>,
     pub state_reads: Vec<String>,
     pub state_writes: Vec<String>,
+    pub selection_domain: Option<PlannedNodeSelectionDomain>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedNodeSelectionDomain {
+    pub domain_id: String,
+    pub resource_count: usize,
 }
 
 impl PlannedNode {
-    fn from_node(index: usize, node: &CircuitNode) -> Self {
-        Self {
+    fn from_node(
+        component_id: &str,
+        index: usize,
+        node: &CircuitNode,
+    ) -> Result<Self, CircuitPlanError> {
+        Ok(Self {
             index,
             id: node.id.clone(),
             op: node.op.clone(),
@@ -474,8 +494,54 @@ impl PlannedNode {
             params: node.params.clone(),
             state_reads: node.state_reads.clone(),
             state_writes: node.state_writes.clone(),
-        }
+            selection_domain: planned_node_selection_domain(component_id, node)?,
+        })
     }
+}
+
+fn planned_node_selection_domain(
+    component_id: &str,
+    node: &CircuitNode,
+) -> Result<Option<PlannedNodeSelectionDomain>, CircuitPlanError> {
+    let Some(domain) = node
+        .attrs
+        .as_object()
+        .and_then(|attrs| attrs.get("selection_domain"))
+    else {
+        return Ok(None);
+    };
+    let domain = domain.as_object().ok_or_else(|| {
+        CircuitPlanError(format!(
+            "{component_id} node {} selection_domain must be an object",
+            node.id
+        ))
+    })?;
+    let domain_id = domain
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.id must be a non-empty string",
+                node.id
+            ))
+        })?
+        .to_string();
+    let resource_count = domain
+        .get("resource_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.resource_count must be a positive integer",
+                node.id
+            ))
+        })?;
+    Ok(Some(PlannedNodeSelectionDomain {
+        domain_id,
+        resource_count,
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -542,4 +608,87 @@ pub struct SignalSlotAssignment {
     pub slot: usize,
     pub produced_at: usize,
     pub last_consumed_at: usize,
+}
+
+#[cfg(test)]
+mod selection_domain_tests {
+    use super::*;
+
+    fn node_with_selection_domain(selection_domain: serde_json::Value) -> CircuitNode {
+        CircuitNode {
+            id: "selector".to_string(),
+            op: "top_k".to_string(),
+            inputs: Vec::new(),
+            outputs: vec!["selected".to_string()],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "selection_domain": selection_domain,
+            }),
+        }
+    }
+
+    #[test]
+    fn selection_domain_contract_accepts_a_positive_resource_domain() {
+        let node = node_with_selection_domain(serde_json::json!({
+            "id": "addressable_resources",
+            "resource_count": 256,
+        }));
+
+        assert_eq!(
+            planned_node_selection_domain("component", &node).unwrap(),
+            Some(PlannedNodeSelectionDomain {
+                domain_id: "addressable_resources".to_string(),
+                resource_count: 256,
+            })
+        );
+    }
+
+    #[test]
+    fn selection_domain_contract_rejects_malformed_metadata() {
+        let invalid = [
+            (
+                serde_json::json!("addressable_resources"),
+                "must be an object",
+            ),
+            (
+                serde_json::json!({"resource_count": 256}),
+                "id must be a non-empty string",
+            ),
+            (
+                serde_json::json!({"id": "", "resource_count": 256}),
+                "id must be a non-empty string",
+            ),
+            (
+                serde_json::json!({"id": "  ", "resource_count": 256}),
+                "id must be a non-empty string",
+            ),
+            (
+                serde_json::json!({"id": "resources"}),
+                "resource_count must be a positive integer",
+            ),
+            (
+                serde_json::json!({"id": "resources", "resource_count": 0}),
+                "resource_count must be a positive integer",
+            ),
+            (
+                serde_json::json!({"id": "resources", "resource_count": 1.5}),
+                "resource_count must be a positive integer",
+            ),
+            (
+                serde_json::json!({"id": "resources", "resource_count": -1}),
+                "resource_count must be a positive integer",
+            ),
+        ];
+
+        for (selection_domain, expected) in invalid {
+            let node = node_with_selection_domain(selection_domain);
+            let error = planned_node_selection_domain("component", &node).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in {error}"
+            );
+        }
+    }
 }

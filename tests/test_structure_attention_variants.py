@@ -298,6 +298,10 @@ def test_discovers_sparse_moe_and_model_specific_numerics_by_structure(
         "normalize_selected": True,
         "logit_softcap": 0.0,
         "selection_bias": True,
+        "selection_domain": {
+            "id": "routed_experts",
+            "resource_count": 32,
+        },
     }
     assert nodes["moe_topk"]["params"] == ["moe_router_correction_bias"]
     assert nodes["sparse_moe_gate_up"]["params"] == ["moe_input"]

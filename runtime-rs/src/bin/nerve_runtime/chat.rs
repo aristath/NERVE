@@ -20,6 +20,12 @@ struct RuntimeChatTurn {
     resident_feedback: RuntimeFeedbackExecutionReport,
     transport_edges: Vec<RuntimePlacedTransportEdgeReport>,
     sparse_moe: RuntimeSparseMoeWorkReport,
+    selection_user_coverage: RuntimeSelectionCoverageReport,
+    selection_generation_coverage: RuntimeSelectionCoverageReport,
+    selection_commit_coverage: RuntimeSelectionCoverageReport,
+    selection_post_generation_cumulative: RuntimeSelectionCoverageReport,
+    selection_coverage: RuntimeSelectionCoverageReport,
+    cumulative_selection_coverage: RuntimeSelectionCoverageReport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +237,25 @@ where
             );
             print_runtime_feedback_stats(&turn.resident_feedback);
             print_runtime_sparse_moe_stats(&turn.sparse_moe);
+            print_runtime_selection_phase_coverage_stats(
+                &[
+                    ("user", &turn.selection_user_coverage),
+                    ("generation", &turn.selection_generation_coverage),
+                    ("commit", &turn.selection_commit_coverage),
+                    (
+                        "post_generation_cumulative",
+                        &turn.selection_post_generation_cumulative,
+                    ),
+                ],
+            );
+            print_runtime_selection_coverage_stats(
+                "selection_coverage",
+                &turn.selection_coverage,
+            );
+            print_runtime_selection_coverage_stats(
+                "cumulative_selection_coverage",
+                &turn.cumulative_selection_coverage,
+            );
             print_runtime_transport_edges(&turn.transport_edges);
             chat_session.commit_assistant_turn(
                 input_text,

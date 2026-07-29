@@ -33,6 +33,7 @@ fn static_state_test_buffers(
             clone_from: None,
             buffer,
         }],
+        selection_telemetry_buffers: Vec::new(),
         activation_slot_buffers: Vec::new(),
     }
 }

@@ -58,6 +58,8 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert "const float RESIDUAL_SCALE = 0.22;" in scaled_add
     assert "const uint NUM_EXPERTS = 32u;" in router
     assert "const uint EXPERTS_PER_TOKEN = 8u;" in router
+    assert "buffer SelectionTelemetry" in router
+    assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in router
     assert "const uint INTERMEDIATE_SIZE = 512u;" in gate_up
     assert "const uint INTERMEDIATE_SIZE = 512u;" in down
     assert "const uint HIDDEN_SIZE = 1024u;" in reduce
@@ -224,8 +226,11 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "uintBitsToFloat(router_selection_bias.words[expert])" in primary_source
     assert "binding = 1) buffer ExpertRoutes" in primary_source
     assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
+    assert "binding = 3) buffer SelectionTelemetry" in primary_source
+    assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in primary_source
     assert "binding = 2) buffer ExpertRoutes" not in primary_source
     assert "gl_WorkGroupID.y" in batch_source
+    assert "binding = 3) buffer SelectionTelemetry" in batch_source
     reduce_source = (tmp_path / reduce_file).read_text()
     assert "const float ROUTED_SCALE = 2.5;" in reduce_source
     assert "f32_to_bf16(lo * ROUTED_SCALE)" in reduce_source

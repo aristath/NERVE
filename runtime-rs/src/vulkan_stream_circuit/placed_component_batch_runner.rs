@@ -475,7 +475,10 @@ fn component_batch_bindings<'a>(
             VulkanKernelDescriptorUsage::OutputSignal | VulkanKernelDescriptorUsage::StateWrite => {
                 VulkanResidentKernelBufferAccess::Write
             }
-            VulkanKernelDescriptorUsage::StateView => VulkanResidentKernelBufferAccess::ReadWrite,
+            VulkanKernelDescriptorUsage::StateView
+            | VulkanKernelDescriptorUsage::SelectionTelemetry => {
+                VulkanResidentKernelBufferAccess::ReadWrite
+            }
         };
         if let Some((key, frame_byte_capacity)) =
             component_batch_signal_target_with_mounted(mounted, descriptor)?
@@ -542,6 +545,24 @@ fn component_batch_bindings<'a>(
                             ))
                         })?;
                     (&state.buffer, *byte_capacity)
+                }
+                VulkanBoundDescriptorTarget::SelectionTelemetry {
+                    buffer_index,
+                    byte_capacity,
+                    ..
+                } => {
+                    let telemetry = mounted
+                        .buffers
+                        .selection_telemetry_buffers
+                        .get(*buffer_index)
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                format!(
+                                    "component batch has no selection telemetry buffer {buffer_index}"
+                                ),
+                            ))
+                        })?;
+                    (&telemetry.buffer, *byte_capacity)
                 }
                 VulkanBoundDescriptorTarget::BoundaryInput { .. }
                 | VulkanBoundDescriptorTarget::BoundaryOutput { .. }

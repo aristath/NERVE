@@ -57,6 +57,14 @@ fn descriptor_bindings_for_kernel(
             VulkanKernelDescriptorResource::Signal(state_view.clone()),
         );
     }
+    if let Some(domain) = &kernel.selection_domain {
+        push_descriptor_binding(
+            &mut bindings,
+            VulkanKernelDescriptorUsage::SelectionTelemetry,
+            domain.domain_id.clone(),
+            VulkanKernelDescriptorResource::SelectionTelemetry(domain.clone()),
+        );
+    }
 
     bindings
 }
@@ -379,6 +387,14 @@ fn bind_node(
         parameters,
         state_reads,
         state_writes,
+        selection_domain: node.selection_domain.as_ref().map(|domain| {
+            VulkanSelectionDomainBinding {
+                component_id: circuit.component_id.clone(),
+                node_id: node.id.clone(),
+                domain_id: domain.domain_id.clone(),
+                resource_count: domain.resource_count,
+            }
+        }),
     })
 }
 

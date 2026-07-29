@@ -6,6 +6,7 @@ pub enum VulkanKernelDescriptorResource {
         component_id: String,
         binding: VulkanStateBinding,
     },
+    SelectionTelemetry(VulkanSelectionDomainBinding),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,20 @@ impl VulkanDescriptorResourcePlan {
                     .map(move |slot| ((bank.component_id.as_str(), slot.slot), slot))
             })
             .collect();
+        let selection_index: BTreeMap<_, _> = resident_plan
+            .selection_telemetry
+            .iter()
+            .map(|domain| {
+                (
+                    (
+                        domain.component_id.as_str(),
+                        domain.node_id.as_str(),
+                        domain.domain_id.as_str(),
+                    ),
+                    domain,
+                )
+            })
+            .collect();
 
         let dispatches = dispatch_plan
             .commands
@@ -51,6 +66,7 @@ impl VulkanDescriptorResourcePlan {
                     &parameter_index,
                     &state_index,
                     &activation_index,
+                    &selection_index,
                     dynamic_state_capacity_activations,
                 )
             })
@@ -95,6 +111,10 @@ impl VulkanDispatchDescriptorResourcePlan {
         parameter_index: &BTreeMap<&str, &VulkanResidentParameter>,
         state_index: &BTreeMap<(&str, &str), &VulkanResidentStateBuffer>,
         activation_index: &BTreeMap<(&str, usize), &VulkanResidentActivationSlot>,
+        selection_index: &BTreeMap<
+            (&str, &str, &str),
+            &VulkanResidentSelectionTelemetry,
+        >,
         dynamic_state_capacity_activations: usize,
     ) -> Result<Self, VulkanDescriptorResourcePlanError> {
         let descriptors = command
@@ -107,6 +127,7 @@ impl VulkanDispatchDescriptorResourcePlan {
                     parameter_index,
                     state_index,
                     activation_index,
+                    selection_index,
                     dynamic_state_capacity_activations,
                 )
             })
@@ -138,6 +159,10 @@ impl VulkanResolvedDescriptorBinding {
         parameter_index: &BTreeMap<&str, &VulkanResidentParameter>,
         state_index: &BTreeMap<(&str, &str), &VulkanResidentStateBuffer>,
         activation_index: &BTreeMap<(&str, usize), &VulkanResidentActivationSlot>,
+        selection_index: &BTreeMap<
+            (&str, &str, &str),
+            &VulkanResidentSelectionTelemetry,
+        >,
         dynamic_state_capacity_activations: usize,
     ) -> Result<Self, VulkanDescriptorResourcePlanError> {
         Ok(Self {
@@ -150,6 +175,7 @@ impl VulkanResolvedDescriptorBinding {
                 parameter_index,
                 state_index,
                 activation_index,
+                selection_index,
                 dynamic_state_capacity_activations,
             )?,
         })
@@ -192,6 +218,13 @@ pub enum VulkanDescriptorResourceAddress {
         static_bytes: Option<usize>,
         bytes_per_activation: Option<usize>,
     },
+    SelectionTelemetry {
+        component_id: String,
+        node_id: String,
+        domain_id: String,
+        resource_count: usize,
+        byte_capacity: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +244,10 @@ fn resolve_descriptor_resource(
     parameter_index: &BTreeMap<&str, &VulkanResidentParameter>,
     state_index: &BTreeMap<(&str, &str), &VulkanResidentStateBuffer>,
     activation_index: &BTreeMap<(&str, usize), &VulkanResidentActivationSlot>,
+    selection_index: &BTreeMap<
+        (&str, &str, &str),
+        &VulkanResidentSelectionTelemetry,
+    >,
     dynamic_state_capacity_activations: usize,
 ) -> Result<VulkanDescriptorResourceAddress, VulkanDescriptorResourcePlanError> {
     match &descriptor.resource {
@@ -257,6 +294,43 @@ fn resolve_descriptor_resource(
                 dynamic_state_capacity_activations,
                 false,
             )
+        }
+        VulkanKernelDescriptorResource::SelectionTelemetry(domain) => {
+            let resident = selection_index
+                .get(&(
+                    domain.component_id.as_str(),
+                    domain.node_id.as_str(),
+                    domain.domain_id.as_str(),
+                ))
+                .ok_or_else(|| {
+                    VulkanDescriptorResourcePlanError(format!(
+                        "{} descriptor {} selection domain {}.{}.{} is not resident",
+                        command.kernel_id,
+                        descriptor.binding,
+                        domain.component_id,
+                        domain.node_id,
+                        domain.domain_id
+                    ))
+                })?;
+            if resident.resource_count != domain.resource_count {
+                return Err(VulkanDescriptorResourcePlanError(format!(
+                    "{} descriptor {} selection domain {}.{}.{} resource count {} does not match resident {}",
+                    command.kernel_id,
+                    descriptor.binding,
+                    domain.component_id,
+                    domain.node_id,
+                    domain.domain_id,
+                    domain.resource_count,
+                    resident.resource_count
+                )));
+            }
+            Ok(VulkanDescriptorResourceAddress::SelectionTelemetry {
+                component_id: domain.component_id.clone(),
+                node_id: domain.node_id.clone(),
+                domain_id: domain.domain_id.clone(),
+                resource_count: domain.resource_count,
+                byte_capacity: resident.byte_capacity,
+            })
         }
     }
 }

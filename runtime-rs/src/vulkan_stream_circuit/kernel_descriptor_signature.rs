@@ -15,6 +15,7 @@ pub enum VulkanKernelDescriptorResourceClass {
     SignalBuffer,
     ParameterBuffer,
     StateBuffer,
+    SelectionTelemetryBuffer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +96,9 @@ impl VulkanKernelDescriptorResourceClass {
             VulkanKernelDescriptorResource::Signal(_) => Self::SignalBuffer,
             VulkanKernelDescriptorResource::Parameter(_) => Self::ParameterBuffer,
             VulkanKernelDescriptorResource::State { .. } => Self::StateBuffer,
+            VulkanKernelDescriptorResource::SelectionTelemetry(_) => {
+                Self::SelectionTelemetryBuffer
+            }
         }
     }
 }
@@ -133,6 +137,9 @@ fn descriptor_resource_byte_capacity(resource: &VulkanKernelDescriptorResource) 
                 (None, None) => None,
             }
         }
+        VulkanKernelDescriptorResource::SelectionTelemetry(domain) => {
+            domain.resource_count.checked_mul(size_of::<u32>())
+        }
     }
 }
 
@@ -140,7 +147,7 @@ fn descriptor_resource_shape(resource: &VulkanKernelDescriptorResource) -> Optio
     match resource {
         VulkanKernelDescriptorResource::Parameter(parameter) => parameter.shape.clone(),
         VulkanKernelDescriptorResource::Signal(_)
-        | VulkanKernelDescriptorResource::State { .. } => None,
+        | VulkanKernelDescriptorResource::State { .. }
+        | VulkanKernelDescriptorResource::SelectionTelemetry(_) => None,
     }
 }
-

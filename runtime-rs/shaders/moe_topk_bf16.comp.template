@@ -13,6 +13,10 @@ layout(set = 0, binding = 1) buffer ExpertRoutes {
     uint words[];
 } expert_routes;
 
+layout(set = 0, binding = 2) buffer SelectionTelemetry {
+    uint counts[];
+} selection_telemetry;
+
 const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
 const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
 
@@ -115,6 +119,7 @@ void main() {
                 exp(read_router(expert) - maximum) / denominator
             );
             expert_routes.words[route] = (weight << 16u) | expert;
+            atomicAdd(selection_telemetry.counts[expert], 1u);
         }
     }
 }

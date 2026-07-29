@@ -5,6 +5,7 @@ pub struct VulkanStreamCircuitResidentPlan {
     pub permanent_parameters: Vec<VulkanResidentParameter>,
     pub permanent_parameter_bytes: Option<usize>,
     pub stream_state_buffers: Vec<VulkanResidentStateBuffer>,
+    pub selection_telemetry: Vec<VulkanResidentSelectionTelemetry>,
     pub state_view_signal_count: usize,
     pub activation_banks: Vec<VulkanResidentActivationBank>,
     pub per_stream_static_state_elements: usize,
@@ -15,6 +16,15 @@ pub struct VulkanStreamCircuitResidentPlan {
     pub per_stream_activation_slot_bytes: Option<usize>,
     pub unresolved_parameter_tensors: Vec<String>,
     pub unresolved_activation_slots: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanResidentSelectionTelemetry {
+    pub component_id: String,
+    pub node_id: String,
+    pub domain_id: String,
+    pub resource_count: usize,
+    pub byte_capacity: usize,
 }
 
 impl VulkanStreamCircuitResidentPlan {
@@ -148,6 +158,29 @@ impl VulkanStreamCircuitResidentPlan {
                 clone_from,
             });
         }
+        let selection_telemetry = resource_plan
+            .selection_domains
+            .iter()
+            .filter(|domain| hosts_component(&domain.component_id))
+            .map(|domain| {
+                let byte_capacity = domain
+                    .resource_count
+                    .checked_mul(size_of::<u32>())
+                    .ok_or_else(|| {
+                        VulkanResidentPlanError(format!(
+                            "{}.{} selection telemetry byte capacity overflowed",
+                            domain.component_id, domain.node_id
+                        ))
+                    })?;
+                Ok(VulkanResidentSelectionTelemetry {
+                    component_id: domain.component_id.clone(),
+                    node_id: domain.node_id.clone(),
+                    domain_id: domain.domain_id.clone(),
+                    resource_count: domain.resource_count,
+                    byte_capacity,
+                })
+            })
+            .collect::<Result<Vec<_>, VulkanResidentPlanError>>()?;
 
         let mut activation_banks = Vec::with_capacity(resource_plan.activation_banks.len());
         let mut per_stream_activation_slot_elements = Some(0usize);
@@ -224,6 +257,7 @@ impl VulkanStreamCircuitResidentPlan {
             permanent_parameters,
             permanent_parameter_bytes,
             stream_state_buffers,
+            selection_telemetry,
             state_view_signal_count,
             activation_banks,
             per_stream_static_state_elements,
@@ -262,6 +296,8 @@ impl VulkanStreamCircuitResidentPlan {
         activation_overrides: &[VulkanActivationSlotBufferOverride],
     ) -> Result<VulkanStreamCircuitStreamBuffers, VulkanError> {
         let mut state_buffers = Vec::with_capacity(self.stream_state_buffers.len());
+        let mut selection_telemetry_buffers =
+            Vec::with_capacity(self.selection_telemetry.len());
         let mut activation_slot_buffers = Vec::new();
         let mut total_byte_capacity = 0usize;
         let mut override_index = BTreeMap::new();
@@ -342,6 +378,24 @@ impl VulkanStreamCircuitResidentPlan {
             });
         }
 
+        for telemetry in &self.selection_telemetry {
+            total_byte_capacity = checked_add_bytes(
+                total_byte_capacity,
+                telemetry.byte_capacity,
+                "selection telemetry buffer allocation",
+            )?;
+            let buffer = device.create_resident_buffer(telemetry.byte_capacity)?;
+            buffer.write_bytes(&vec![0u8; telemetry.byte_capacity])?;
+            selection_telemetry_buffers.push(VulkanSelectionTelemetryBufferAllocation {
+                component_id: telemetry.component_id.clone(),
+                node_id: telemetry.node_id.clone(),
+                domain_id: telemetry.domain_id.clone(),
+                resource_count: telemetry.resource_count,
+                byte_capacity: telemetry.byte_capacity,
+                buffer,
+            });
+        }
+
         for bank in &self.activation_banks {
             for slot in &bank.slots {
                 let byte_capacity = slot.bytes.ok_or_else(|| {
@@ -379,6 +433,7 @@ impl VulkanStreamCircuitResidentPlan {
         Ok(VulkanStreamCircuitStreamBuffers {
             dynamic_state_capacity_activations,
             state_buffers,
+            selection_telemetry_buffers,
             activation_slot_buffers,
             total_byte_capacity,
         })

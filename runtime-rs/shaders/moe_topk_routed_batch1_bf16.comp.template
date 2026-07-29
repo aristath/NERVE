@@ -15,6 +15,10 @@ layout(set = 0, binding = {{ROUTES_BINDING}}) buffer ExpertRoutes {
     uint words[];
 } expert_routes;
 
+layout(set = 0, binding = {{TELEMETRY_BINDING}}) buffer SelectionTelemetry {
+    uint counts[];
+} selection_telemetry;
+
 layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
 
 const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
@@ -153,6 +157,7 @@ void main() {
             if (NORMALIZE_SELECTED || !ROUTER_SIGMOID) weight /= denominator;
             expert_routes.words[route_base + route] =
                 (f32_to_bf16(weight) << 16u) | expert;
+            atomicAdd(selection_telemetry.counts[expert], 1u);
         }
     }
 }

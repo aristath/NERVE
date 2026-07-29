@@ -870,6 +870,7 @@ impl MountedValidation {
                         }
                     }
                 },
+                |_, _| Ok(()),
             )?;
             if let Some(error) = progress_error {
                 return Err(error);

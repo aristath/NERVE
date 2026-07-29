@@ -177,6 +177,14 @@ pub enum VulkanBoundDescriptorTarget {
         static_bytes: Option<usize>,
         bytes_per_activation: Option<usize>,
     },
+    SelectionTelemetry {
+        buffer_index: usize,
+        component_id: String,
+        node_id: String,
+        domain_id: String,
+        resource_count: usize,
+        byte_capacity: usize,
+    },
 }
 
 impl VulkanBoundDescriptorTarget {
@@ -307,6 +315,38 @@ impl VulkanBoundDescriptorTarget {
                     bytes_per_activation: *bytes_per_activation,
                 })
             }
+            VulkanDescriptorResourceAddress::SelectionTelemetry {
+                component_id,
+                node_id,
+                domain_id,
+                resource_count,
+                byte_capacity,
+            } => {
+                let buffer_index = buffers
+                    .selection_telemetry_buffer_index(component_id, node_id, domain_id)
+                    .ok_or_else(|| VulkanBoundDispatchPlanError::MissingSelectionTelemetryBuffer {
+                        dispatch_index: dispatch.dispatch_index,
+                        binding: descriptor.binding,
+                        component_id: component_id.clone(),
+                        node_id: node_id.clone(),
+                        domain_id: domain_id.clone(),
+                    })?;
+                let buffer = &buffers.selection_telemetry_buffers[buffer_index];
+                validate_bound_byte_capacity(
+                    dispatch,
+                    descriptor,
+                    *byte_capacity,
+                    buffer.byte_capacity,
+                )?;
+                Ok(Self::SelectionTelemetry {
+                    buffer_index,
+                    component_id: component_id.clone(),
+                    node_id: node_id.clone(),
+                    domain_id: domain_id.clone(),
+                    resource_count: *resource_count,
+                    byte_capacity: *byte_capacity,
+                })
+            }
         }
     }
 }
@@ -346,6 +386,13 @@ pub enum VulkanBoundDispatchPlanError {
         binding: usize,
         component_id: String,
         slot: usize,
+    },
+    MissingSelectionTelemetryBuffer {
+        dispatch_index: usize,
+        binding: usize,
+        component_id: String,
+        node_id: String,
+        domain_id: String,
     },
     MissingEdgeEndpointBuffer {
         dispatch_index: usize,
@@ -408,6 +455,16 @@ impl Display for VulkanBoundDispatchPlanError {
             } => write!(
                 f,
                 "dispatch {dispatch_index} descriptor {binding} references missing activation slot buffer {component_id}.slot_{slot}"
+            ),
+            Self::MissingSelectionTelemetryBuffer {
+                dispatch_index,
+                binding,
+                component_id,
+                node_id,
+                domain_id,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} references missing selection telemetry buffer {component_id}.{node_id}.{domain_id}"
             ),
             Self::MissingEdgeEndpointBuffer {
                 dispatch_index,

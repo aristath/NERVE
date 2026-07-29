@@ -486,6 +486,33 @@ pub struct RuntimeSparseMoeWorkReport {
     pub reduction_device_resident: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSelectionCoverageReport {
+    pub domain_count: usize,
+    pub addressable_resource_count: usize,
+    pub selected_resource_count: usize,
+    pub selection_count: u64,
+    pub domains: Vec<RuntimeSelectionDomainCoverageReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSelectionDomainCoverageReport {
+    pub execution_scope: String,
+    pub component_id: String,
+    pub node_id: String,
+    pub domain_id: String,
+    pub resource_count: usize,
+    pub selected_resource_count: usize,
+    pub selection_count: u64,
+    pub selected_resources: Vec<RuntimeSelectedResourceCountReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSelectedResourceCountReport {
+    pub resource_id: usize,
+    pub selection_count: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePlacedPromptRunReport {
     pub ok: bool,
@@ -528,4 +555,5 @@ pub struct RuntimePlacedPromptRunReport {
     pub speculative_total_time_ns: u64,
     pub resident_feedback: RuntimeFeedbackExecutionReport,
     pub sparse_moe: RuntimeSparseMoeWorkReport,
+    pub selection_coverage: RuntimeSelectionCoverageReport,
 }

@@ -171,17 +171,40 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     fn reset_transient_state_buffers(
         &self,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
-        self.device_slices
+        let target_bytes = self
+            .device_slices
             .iter()
             .try_fold(0usize, |total, slice| {
-                let bytes = slice
+                let state_bytes = slice
                     .mounted
                     .buffers
                     .zero_state_buffers()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                total.checked_add(bytes).ok_or_else(|| {
+                let telemetry_bytes = slice
+                    .mounted
+                    .buffers
+                    .zero_selection_telemetry_buffers()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                total
+                    .checked_add(state_bytes)
+                    .and_then(|total| total.checked_add(telemetry_bytes))
+                    .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                         "reset transient state byte count overflowed".to_string(),
+                    ))
+                    })
+            })?;
+        self.speculative_decoders
+            .iter()
+            .try_fold(target_bytes, |total, decoder| {
+                let telemetry_bytes = decoder
+                    .mounted
+                    .buffers
+                    .zero_selection_telemetry_buffers()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                total.checked_add(telemetry_bytes).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "reset selection telemetry byte count overflowed".to_string(),
                     ))
                 })
             })

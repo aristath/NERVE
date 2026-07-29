@@ -51,7 +51,14 @@ pub struct VulkanResidentChatTransactionRun {
     pub elapsed_ns: u64,
 }
 
-pub fn execute_vulkan_resident_chat_transaction<T, F>(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VulkanResidentChatTransactionPhase {
+    UserCommitted,
+    GenerationCompleted,
+    AssistantCommitted,
+}
+
+pub fn execute_vulkan_resident_chat_transaction<T, F, P>(
     engine: &mut VulkanResidentInProcessPlacedPromptEngine,
     stream_id: &str,
     chat_session: &RuntimeChatSession,
@@ -62,10 +69,15 @@ pub fn execute_vulkan_resident_chat_transaction<T, F>(
     prepared: &RuntimePreparedChatTurn,
     max_new_tokens: usize,
     mut on_output_event: F,
+    mut on_phase_completed: P,
 ) -> Result<VulkanResidentChatTransactionRun, Box<dyn Error>>
 where
     T: VulkanResidentTokenTextCodec,
     F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
+    P: FnMut(
+        VulkanResidentChatTransactionPhase,
+        &VulkanResidentInProcessPlacedPromptEngine,
+    ) -> Result<(), Box<dyn Error>>,
 {
     reset_vulkan_resident_execution_counters();
     let started = Instant::now();
@@ -78,6 +90,7 @@ where
         )
         .with_origin("runtime_chat_canonical_user"),
     )?;
+    on_phase_completed(VulkanResidentChatTransactionPhase::UserCommitted, engine)?;
     let mut generation_event = VulkanResidentTokenInputEvent::new(
         format!("chat_{turn_index}_generation"),
         prepared.generation_prompt_token_delta.clone(),
@@ -92,6 +105,10 @@ where
         stream_id,
         generation_event,
         &mut on_output_event,
+    )?;
+    on_phase_completed(
+        VulkanResidentChatTransactionPhase::GenerationCompleted,
+        engine,
     )?;
     let assistant_content = transcript_codec.decode_tokens(assistant_content_token_ids(
         &generation_run.generated_token_ids,
@@ -112,6 +129,10 @@ where
             0,
         )
         .with_origin("runtime_chat_canonical_assistant"),
+    )?;
+    on_phase_completed(
+        VulkanResidentChatTransactionPhase::AssistantCommitted,
+        engine,
     )?;
     Ok(VulkanResidentChatTransactionRun {
         generated_token_ids: generation_run.generated_token_ids.clone(),

@@ -152,6 +152,7 @@ pub struct VulkanBoundDispatchPlan {
     pub permanent_parameter_descriptor_count: usize,
     pub stream_state_descriptor_count: usize,
     pub activation_slot_descriptor_count: usize,
+    pub selection_telemetry_descriptor_count: usize,
 }
 
 impl VulkanBoundDispatchPlan {
@@ -163,6 +164,7 @@ impl VulkanBoundDispatchPlan {
         let mut permanent_parameter_descriptor_count = 0usize;
         let mut stream_state_descriptor_count = 0usize;
         let mut activation_slot_descriptor_count = 0usize;
+        let mut selection_telemetry_descriptor_count = 0usize;
         let mut dispatches = Vec::with_capacity(prepared_plan.dispatches.len());
 
         for prepared in &prepared_plan.dispatches {
@@ -184,6 +186,9 @@ impl VulkanBoundDispatchPlan {
                     }
                     VulkanBoundDescriptorTarget::ActivationSlot { .. } => {
                         activation_slot_descriptor_count += 1;
+                    }
+                    VulkanBoundDescriptorTarget::SelectionTelemetry { .. } => {
+                        selection_telemetry_descriptor_count += 1;
                     }
                 }
                 descriptors.push(VulkanBoundDescriptor {
@@ -215,7 +220,8 @@ impl VulkanBoundDispatchPlan {
         let total_descriptor_count = boundary_descriptor_count
             + permanent_parameter_descriptor_count
             + stream_state_descriptor_count
-            + activation_slot_descriptor_count;
+            + activation_slot_descriptor_count
+            + selection_telemetry_descriptor_count;
         Ok(Self {
             backend_id: prepared_plan.backend_id.clone(),
             dispatches,
@@ -224,6 +230,7 @@ impl VulkanBoundDispatchPlan {
             permanent_parameter_descriptor_count,
             stream_state_descriptor_count,
             activation_slot_descriptor_count,
+            selection_telemetry_descriptor_count,
         })
     }
 

@@ -2845,6 +2845,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 # parameters. A biased router therefore keeps its route output
                 # at binding 1 and places the selection-bias parameter at 2.
                 "ROUTES_BINDING": "1",
+                "TELEMETRY_BINDING": "3" if has_bias else "2",
             },
         )
 

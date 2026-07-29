@@ -40,6 +40,7 @@ pub struct VulkanResidentActivationSlot {
 pub struct VulkanStreamCircuitStreamBuffers {
     pub dynamic_state_capacity_activations: usize,
     pub state_buffers: Vec<VulkanStreamStateBufferAllocation>,
+    pub selection_telemetry_buffers: Vec<VulkanSelectionTelemetryBufferAllocation>,
     pub activation_slot_buffers: Vec<VulkanActivationSlotBufferAllocation>,
     pub total_byte_capacity: usize,
 }
@@ -64,6 +65,15 @@ pub struct VulkanActivationSlotBufferAllocation {
     pub byte_capacity: usize,
     pub shared_across_devices: bool,
     pub buffer: Arc<VulkanResidentBuffer>,
+}
+
+pub struct VulkanSelectionTelemetryBufferAllocation {
+    pub component_id: String,
+    pub node_id: String,
+    pub domain_id: String,
+    pub resource_count: usize,
+    pub byte_capacity: usize,
+    pub buffer: VulkanResidentBuffer,
 }
 
 pub struct VulkanActivationSlotBufferOverride {
@@ -103,6 +113,47 @@ impl VulkanStreamCircuitStreamBuffers {
         self.activation_slot_buffers
             .iter()
             .position(|buffer| buffer.component_id == component_id && buffer.slot == slot)
+    }
+
+    pub fn selection_telemetry_buffer(
+        &self,
+        component_id: &str,
+        node_id: &str,
+        domain_id: &str,
+    ) -> Option<&VulkanSelectionTelemetryBufferAllocation> {
+        self.selection_telemetry_buffers.iter().find(|buffer| {
+            buffer.component_id == component_id
+                && buffer.node_id == node_id
+                && buffer.domain_id == domain_id
+        })
+    }
+
+    pub fn selection_telemetry_buffer_index(
+        &self,
+        component_id: &str,
+        node_id: &str,
+        domain_id: &str,
+    ) -> Option<usize> {
+        self.selection_telemetry_buffers.iter().position(|buffer| {
+            buffer.component_id == component_id
+                && buffer.node_id == node_id
+                && buffer.domain_id == domain_id
+        })
+    }
+
+    pub fn zero_selection_telemetry_buffers(&self) -> Result<usize, VulkanError> {
+        let mut total_zeroed = 0usize;
+        for telemetry in &self.selection_telemetry_buffers {
+            telemetry
+                .buffer
+                .write_bytes(&vec![0u8; telemetry.byte_capacity])?;
+            total_zeroed = total_zeroed
+                .checked_add(telemetry.byte_capacity)
+                .ok_or_else(|| {
+                    VulkanError("selection telemetry zero byte count overflowed".to_string())
+                })?;
+        }
+        Ok(total_zeroed)
     }
 
     pub fn zero_state_buffers(&self) -> Result<usize, VulkanError> {

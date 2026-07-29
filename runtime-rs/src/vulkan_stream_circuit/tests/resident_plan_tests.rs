@@ -8,6 +8,7 @@ fn resident_plan_uses_typed_activation_slot_byte_capacity() {
         transducer_parameter_ref_count: 0,
         transducer_parameters: Vec::new(),
         state_allocations: Vec::new(),
+        selection_domains: Vec::new(),
         activation_banks: vec![crate::stream_plan::PlannedActivationSlotBank {
             component_id: "layer_00".to_string(),
             circuit_id: "layer_00".to_string(),
@@ -157,8 +158,24 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
     let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
     let execution_plan =
         StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
-    let resource_plan =
+    let mut resource_plan =
         StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    resource_plan.selection_domains.extend([
+        crate::stream_plan::PlannedSelectionDomain {
+            component_id: "layer_00".to_string(),
+            circuit_id: "layer_00".to_string(),
+            node_id: "selector".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 256,
+        },
+        crate::stream_plan::PlannedSelectionDomain {
+            component_id: "layer_00_remote".to_string(),
+            circuit_id: "layer_00_remote".to_string(),
+            node_id: "selector".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 128,
+        },
+    ]);
     let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();
 
     let gpu0 = VulkanPlacedStreamCircuitResidentPlan::from_resource_plan_for_device(
@@ -188,6 +205,17 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
     assert_eq!(gpu0.resident_plan.circuit_count, 2);
     assert_eq!(gpu0.resident_plan.permanent_parameters.len(), 9);
     assert_eq!(gpu0.resident_plan.stream_state_buffers.len(), 2);
+    assert_eq!(gpu0.resident_plan.selection_telemetry.len(), 1);
+    assert_eq!(
+        gpu0.resident_plan.selection_telemetry[0],
+        VulkanResidentSelectionTelemetry {
+            component_id: "layer_00".to_string(),
+            node_id: "selector".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 256,
+            byte_capacity: 256 * std::mem::size_of::<u32>(),
+        }
+    );
     assert_eq!(gpu0.resident_plan.activation_banks.len(), 2);
     assert_eq!(gpu0.resident_plan.state_view_signal_count, 0);
     assert_eq!(gpu0.signal_element_bytes, Some(2));
@@ -224,6 +252,17 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
     assert_eq!(gpu1.resident_plan.circuit_count, 1);
     assert_eq!(gpu1.resident_plan.permanent_parameters.len(), 9);
     assert_eq!(gpu1.resident_plan.stream_state_buffers.len(), 1);
+    assert_eq!(gpu1.resident_plan.selection_telemetry.len(), 1);
+    assert_eq!(
+        gpu1.resident_plan.selection_telemetry[0],
+        VulkanResidentSelectionTelemetry {
+            component_id: "layer_00_remote".to_string(),
+            node_id: "selector".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 128,
+            byte_capacity: 128 * std::mem::size_of::<u32>(),
+        }
+    );
     assert_eq!(gpu1.resident_plan.state_view_signal_count, 0);
     assert_eq!(gpu1.incoming_edges[0].source_component_id, "layer_00");
     assert_eq!(
