@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v3";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v3";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v4";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v4";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
@@ -57,6 +57,10 @@ enum ExecutorCommand {
         max_output_tokens: Option<usize>,
     },
     Close {
+        schema: String,
+        request_id: String,
+    },
+    Shutdown {
         schema: String,
         request_id: String,
     },
@@ -126,6 +130,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut devices = None;
     let mut reusable_role = None;
     let mut mounted: Option<MountedValidation> = None;
+    let mut shutdown_completed = false;
     while let Some(command) = read_command(&mut input)? {
         match command {
             command @ ExecutorCommand::Mount { .. } => {
@@ -234,12 +239,139 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }),
                 )?;
             }
+            ExecutorCommand::Shutdown { schema, request_id } => {
+                require_schema(&schema)?;
+                if mounted.is_some() {
+                    return Err(invalid_input(
+                        "executor cannot shut down with a mounted validation role",
+                    )
+                    .into());
+                }
+                let report = shutdown_validation_resources(&mut reusable_role, &mut devices)?;
+                write_response(&mut output, &request_id, "shutdown_complete", report)?;
+                shutdown_completed = true;
+                break;
+            }
         }
     }
     if mounted.is_some() {
         return Err(invalid_input("validation executor input ended with a mounted role").into());
     }
+    if !shutdown_completed {
+        return Err(invalid_input(
+            "validation executor input ended without an acknowledged shutdown",
+        )
+        .into());
+    }
     Ok(())
+}
+
+fn shutdown_validation_resources(
+    reusable_role: &mut Option<MountedValidation>,
+    devices: &mut Option<ValidationDevicePool>,
+) -> Result<Value, Box<dyn Error>> {
+    let shutdown_started = Instant::now();
+    let pool = devices.as_ref().ok_or_else(|| {
+        invalid_input("validation executor cannot shut down before mounting a device topology")
+    })?;
+    if reusable_role.is_none() {
+        return Err(invalid_input(
+            "validation executor shutdown requires a normally released reusable role",
+        )
+        .into());
+    }
+    let physical_device_ids = pool.physical_device_ids.clone();
+    let pre_release_quiesce_started = Instant::now();
+    for physical_device_id in &physical_device_ids {
+        let logical_device_id = pool
+            .physical_to_logical
+            .get(physical_device_id)
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost physical device {physical_device_id:?}"
+                ))
+            })?;
+        pool.devices
+            .get(logical_device_id)
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost logical device {logical_device_id:?}"
+                ))
+            })?
+            .quiesce()?;
+    }
+    let pre_release_quiesce_duration_ns = nonzero_elapsed_ns(pre_release_quiesce_started);
+
+    // The mounted engine contains transient buffers and references to pooled
+    // parameters.  It must disappear before the pool can prove exclusive
+    // ownership of every permanent allocation.
+    let role_release_started = Instant::now();
+    drop(reusable_role.take());
+    let role_release_duration_ns = nonzero_elapsed_ns(role_release_started);
+
+    let mut pool = devices
+        .take()
+        .expect("validated shutdown device pool exists");
+    let mut device_releases = Vec::with_capacity(physical_device_ids.len());
+    for physical_device_id in &physical_device_ids {
+        let release_started = Instant::now();
+        let logical_device_id = pool
+            .physical_to_logical
+            .remove(physical_device_id)
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost physical device {physical_device_id:?}"
+                ))
+            })?;
+        let device = pool
+            .devices
+            .get(&logical_device_id)
+            .cloned()
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost logical device {logical_device_id:?}"
+                ))
+            })?;
+        device.quiesce()?;
+        let released = pool.parameter_pool.release_device(&logical_device_id)?;
+        device.quiesce()?;
+        let owned_device = pool
+            .devices
+            .remove(&logical_device_id)
+            .expect("validated logical validation device remains present");
+        drop(owned_device);
+        drop(device);
+        device_releases.push(json!({
+            "physical_device_id": physical_device_id,
+            "logical_device_id": logical_device_id,
+            "released_buffer_count": released.resident_buffer_count,
+            "released_buffer_bytes": released.resident_bytes,
+            "quiesced": true,
+            "device_context_destroyed": true,
+            "release_duration_ns": nonzero_elapsed_ns(release_started),
+        }));
+    }
+    let residual_pool = pool.parameter_pool.stats();
+    if !pool.devices.is_empty()
+        || !pool.physical_to_logical.is_empty()
+        || pool.parameter_pool.registered_device_count() != 0
+        || residual_pool.resident_buffer_count != 0
+        || residual_pool.resident_bytes != 0
+    {
+        return Err(invalid_input(
+            "validation executor serialized shutdown left resident device resources",
+        )
+        .into());
+    }
+    drop(pool);
+    Ok(json!({
+        "released": true,
+        "physical_device_ids": physical_device_ids,
+        "pre_release_quiesce_duration_ns": pre_release_quiesce_duration_ns,
+        "role_release_duration_ns": role_release_duration_ns,
+        "device_releases": device_releases,
+        "shutdown_duration_ns": nonzero_elapsed_ns(shutdown_started),
+    }))
 }
 
 fn mount(
@@ -1216,9 +1348,19 @@ fn bound_amd_devices(
         ));
     }
     let (devices, physical_to_logical) = open_amd_devices(physical_device_ids)?;
+    let parameter_pool = VulkanResidentBufferPool::default();
+    for (physical_device_id, logical_device_id) in &physical_to_logical {
+        let device = devices.get(logical_device_id).ok_or_else(|| {
+            invalid_input(format!(
+                "opened physical device {physical_device_id:?} has no \
+                 logical validation binding"
+            ))
+        })?;
+        parameter_pool.register_device(logical_device_id, device.clone())?;
+    }
     *pool = Some(ValidationDevicePool {
         physical_device_ids: physical_device_ids.to_vec(),
-        parameter_pool: VulkanResidentBufferPool::default(),
+        parameter_pool,
         devices: devices.clone(),
         physical_to_logical: physical_to_logical.clone(),
     });

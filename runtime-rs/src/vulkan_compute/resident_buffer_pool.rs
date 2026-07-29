@@ -50,6 +50,12 @@ pub struct VulkanResidentBufferPoolStats {
     pub eviction_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VulkanResidentBufferPoolDeviceRelease {
+    pub resident_buffer_count: usize,
+    pub resident_bytes: usize,
+}
+
 #[derive(Default)]
 struct VulkanResidentBufferPoolState {
     buffers: BTreeMap<
@@ -188,6 +194,99 @@ impl VulkanResidentBufferPool {
         state.eviction_bytes =
             state.eviction_bytes.saturating_add(evicted_bytes);
         evicted.len()
+    }
+
+    /// Release one device's pooled allocations and its lifetime guard.
+    ///
+    /// This is intentionally stricter than ordinary cache eviction: shutdown
+    /// is invalid while any mounted package still owns one of these buffers.
+    /// Removing the guard only after all buffers are destroyed keeps the
+    /// Vulkan device alive for every `vkFreeMemory` call.
+    pub fn release_device(
+        &self,
+        device_id: &str,
+    ) -> Result<VulkanResidentBufferPoolDeviceRelease, VulkanError> {
+        if device_id.is_empty() {
+            return Err(VulkanError(
+                "resident buffer pool release device id is empty".to_string(),
+            ));
+        }
+        if !self
+            .device_lifetime_guards
+            .borrow()
+            .contains_key(device_id)
+        {
+            return Err(VulkanError(format!(
+                "resident buffer pool has no registered device {device_id:?}"
+            )));
+        }
+        let mut state = self.state.borrow_mut();
+        let keys = state
+            .buffers
+            .iter()
+            .filter(|(key, _)| key.device_id == device_id)
+            .map(|(key, buffer)| (key.clone(), Arc::as_ptr(buffer) as usize))
+            .collect::<Vec<_>>();
+        let mut pool_owners_by_buffer = BTreeMap::<usize, usize>::new();
+        for (_, buffer_address) in &keys {
+            *pool_owners_by_buffer.entry(*buffer_address).or_default() += 1;
+        }
+        if let Some((key, buffer_address)) = keys.iter().find(|(key, address)| {
+            let buffer = state
+                .buffers
+                .get(key)
+                .expect("enumerated resident buffer remains present");
+            Arc::strong_count(buffer)
+                != pool_owners_by_buffer
+                    .get(address)
+                    .copied()
+                    .unwrap_or_default()
+        }) {
+            let buffer = state
+                .buffers
+                .get(key)
+                .expect("enumerated resident buffer remains present");
+            let owner_count = Arc::strong_count(buffer);
+            let pool_owner_count = pool_owners_by_buffer
+                .get(buffer_address)
+                .copied()
+                .unwrap_or_default();
+            return Err(VulkanError(format!(
+                "resident buffer pool cannot release device {device_id:?}: \
+                 buffer {:?} has {owner_count} owners but only \
+                 {pool_owner_count} belong to this device's pool",
+                key.resource_id
+            )));
+        }
+        let mut release = VulkanResidentBufferPoolDeviceRelease::default();
+        for (key, _) in keys {
+            let buffer = state
+                .buffers
+                .remove(&key)
+                .expect("enumerated resident buffer remains present");
+            release.resident_buffer_count =
+                release.resident_buffer_count.saturating_add(1);
+            release.resident_bytes = release
+                .resident_bytes
+                .saturating_add(buffer.byte_capacity());
+            drop(buffer);
+        }
+        state.eviction_count = state
+            .eviction_count
+            .saturating_add(release.resident_buffer_count as u64);
+        state.eviction_bytes = state
+            .eviction_bytes
+            .saturating_add(release.resident_bytes as u64);
+        drop(state);
+        self.device_lifetime_guards
+            .borrow_mut()
+            .remove(device_id)
+            .expect("validated resident buffer pool device guard exists");
+        Ok(release)
+    }
+
+    pub fn registered_device_count(&self) -> usize {
+        self.device_lifetime_guards.borrow().len()
     }
 
     pub fn stats(&self) -> VulkanResidentBufferPoolStats {

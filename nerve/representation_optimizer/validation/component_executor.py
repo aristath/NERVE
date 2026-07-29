@@ -50,6 +50,7 @@ class ResidentComponentValidationBackend:
         self._stage_active = False
         self._stage_transport: ExecutorTransport | None = None
         self._stage_cancel_requested: Callable[[], bool] | None = None
+        self._stage_physical_device_ids: set[str] = set()
 
     @contextmanager
     def validation_stage(
@@ -76,12 +77,14 @@ class ResidentComponentValidationBackend:
             raise
         else:
             if self._stage_transport is not None:
-                self._stage_transport.close(
-                    cancel_requested=cancel_requested,
+                self.executor_client.shutdown_transport(
+                    self._stage_transport,
+                    tuple(sorted(self._stage_physical_device_ids)),
                 )
         finally:
             self._stage_transport = None
             self._stage_cancel_requested = None
+            self._stage_physical_device_ids.clear()
             self._stage_active = False
 
     def open_session(
@@ -110,6 +113,8 @@ class ResidentComponentValidationBackend:
             request.matched_conditions,
             component_id,
         )
+        if self._stage_active:
+            self._stage_physical_device_ids.add(physical_device_id)
         maximum_wait_ns = _positive_integer(
             request.matched_conditions.get("controls", {}).get(
                 "maximum_quantum_wait_ns"

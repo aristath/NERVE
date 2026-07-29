@@ -7,7 +7,11 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
-from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
+from nerve.compilation import (
+    Json,
+    ModelCompileError,
+    check_compile_cancelled,
+)
 from nerve.representation_optimizer.benchmarking.executor_artifacts import (
     StagedCandidateLoader,
     resolve_candidate_mount,
@@ -20,6 +24,7 @@ from nerve.representation_optimizer.benchmarking.executor_protocol import (
     required_device_state_digest,
     required_object,
     required_text,
+    validate_executor_shutdown_payload,
     validated_response,
     validated_windows,
 )
@@ -118,10 +123,7 @@ class ResidentExecutorClient:
             package_dir=self.package_dir,
             loader=self.staged_candidate_loader,
         )
-        logical_device_id = (
-            "optimizer:"
-            + sha256(spec.physical_device_id.encode("utf-8")).hexdigest()[:16]
-        )
+        logical_device_id = _logical_device_id(spec.physical_device_id)
         command = {
             "schema": EXECUTOR_COMMAND_SCHEMA,
             "command": "mount",
@@ -144,11 +146,13 @@ class ResidentExecutorClient:
         }
         started = time.monotonic_ns()
         try:
+            # An accelerator command is one bounded cancellation quantum.
+            # Reject before submission; once submitted, let the executor
+            # return to its protocol boundary so residency can be released
+            # explicitly instead of killing a process with live GPU state.
+            check_compile_cancelled(spec.cancel_requested)
             response = validated_response(
-                transport.request(
-                    command,
-                    cancel_requested=spec.cancel_requested,
-                ),
+                transport.request(command),
                 expected_request_id=command["request_id"],
                 expected_status="mounted",
             )
@@ -171,6 +175,13 @@ class ResidentExecutorClient:
         except BaseException:
             transport.abort()
             raise
+
+    def shutdown_transport(
+        self,
+        transport: ExecutorTransport,
+        physical_device_ids: tuple[str, ...],
+    ) -> None:
+        _shutdown_transport(transport, physical_device_ids)
 
 
 def _validate_mount_spec(spec: ResidentExecutorMountSpec) -> None:
@@ -228,11 +239,9 @@ class ResidentExecutorSession:
             "seed": seed,
         }
         started = time.monotonic_ns()
+        check_compile_cancelled(self.spec.cancel_requested)
         response = validated_response(
-            self.transport.request(
-                command,
-                cancel_requested=self.spec.cancel_requested,
-            ),
+            self.transport.request(command),
             expected_request_id=command["request_id"],
             expected_status="completed",
         )
@@ -257,11 +266,6 @@ class ResidentExecutorSession:
         if self.closed:
             raise ModelCompileError("resident executor session closed twice")
         self.closed = True
-        try:
-            check_compile_cancelled(self.spec.cancel_requested)
-        except BaseException:
-            self.transport.abort()
-            raise
         command = {
             "schema": EXECUTOR_COMMAND_SCHEMA,
             "command": "close",
@@ -270,10 +274,7 @@ class ResidentExecutorSession:
         started = time.monotonic_ns()
         try:
             response = validated_response(
-                self.transport.request(
-                    command,
-                    cancel_requested=self.spec.cancel_requested,
-                ),
+                self.transport.request(command),
                 expected_request_id=command["request_id"],
                 expected_status="released",
             )
@@ -287,8 +288,9 @@ class ResidentExecutorSession:
                     "resident executor did not prove release of its mounted state"
                 )
             if self.close_transport_on_release:
-                self.transport.close(
-                    cancel_requested=self.spec.cancel_requested,
+                _shutdown_transport(
+                    self.transport,
+                    (self.spec.physical_device_id,),
                 )
         except BaseException:
             self.transport.abort()
@@ -297,6 +299,45 @@ class ResidentExecutorSession:
             payload=payload,
             host_release_ns=max(1, time.monotonic_ns() - started),
         )
+
+
+def _shutdown_transport(
+    transport: ExecutorTransport,
+    physical_device_ids: tuple[str, ...],
+) -> None:
+    logical_by_physical = {
+        physical_device_id: _logical_device_id(physical_device_id)
+        for physical_device_id in sorted(set(physical_device_ids))
+    }
+    if not logical_by_physical:
+        raise ModelCompileError(
+            "resident executor shutdown requires mounted devices"
+        )
+    command = {
+        "schema": EXECUTOR_COMMAND_SCHEMA,
+        "command": "shutdown",
+        "request_id": request_id(
+            "shutdown",
+            {"physical_device_ids": list(logical_by_physical)},
+        ),
+    }
+    response = validated_response(
+        transport.request(command),
+        expected_request_id=command["request_id"],
+        expected_status="shutdown_complete",
+    )
+    validate_executor_shutdown_payload(
+        required_object(response, "payload"),
+        logical_by_physical=logical_by_physical,
+    )
+    transport.close()
+
+
+def _logical_device_id(physical_device_id: str) -> str:
+    return (
+        "optimizer:"
+        + sha256(physical_device_id.encode("utf-8")).hexdigest()[:16]
+    )
 
 
 def _validate_mount_payload(

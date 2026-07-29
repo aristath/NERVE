@@ -28,6 +28,7 @@ from nerve.representation_optimizer.validation.contracts import (
 from nerve.representation_optimizer.validation.executor_protocol import (
     VALIDATION_EXECUTOR_RESPONSE_SCHEMA,
     validate_validation_execution_payload,
+    validate_validation_shutdown_payload,
 )
 from nerve.representation_optimizer.validation.planning import (
     create_validation_check,
@@ -44,6 +45,7 @@ from nerve.representation_optimizer.validation.whole_model_executor import (
 class FixtureWholeModelExecutor:
     def __init__(self) -> None:
         self.commands: list[Json] = []
+        self.request_cancellation_callbacks: list[object | None] = []
         self.closed = False
         self.aborted = False
 
@@ -55,6 +57,7 @@ class FixtureWholeModelExecutor:
         progress_received=None,
     ) -> Json:
         assert cancel_requested is None or not cancel_requested()
+        self.request_cancellation_callbacks.append(cancel_requested)
         self.commands.append(document)
         if document["command"] == "mount":
             capacity = document["context_capacity"]
@@ -140,6 +143,33 @@ class FixtureWholeModelExecutor:
                 "state_proof_duration_ns": 3,
             }
             status = "released"
+        elif document["command"] == "shutdown":
+            physical_device_ids = [
+                "vulkan-uuid:" + "1" * 32,
+                "vulkan-uuid:" + "2" * 32,
+            ]
+            payload = {
+                "released": True,
+                "physical_device_ids": physical_device_ids,
+                "pre_release_quiesce_duration_ns": 5,
+                "role_release_duration_ns": 6,
+                "device_releases": [
+                    {
+                        "physical_device_id": physical_device_id,
+                        "logical_device_id": f"optimizer:device:{index}",
+                        "released_buffer_count": 7 + index,
+                        "released_buffer_bytes": 1024 * (index + 1),
+                        "quiesced": True,
+                        "device_context_destroyed": True,
+                        "release_duration_ns": 8 + index,
+                    }
+                    for index, physical_device_id in enumerate(
+                        physical_device_ids
+                    )
+                ],
+                "shutdown_duration_ns": 10,
+            }
+            status = "shutdown_complete"
         else:
             raise AssertionError(
                 f"unexpected command {document['command']!r}"
@@ -189,6 +219,43 @@ def test_validation_execution_requires_every_requested_turn() -> None:
             payload,
             expected_step_unit="component_activations",
             expected_turns=("first", "second"),
+        )
+
+
+def test_validation_shutdown_requires_ordered_destroyed_device_proof() -> None:
+    physical_device_ids = (
+        "vulkan-uuid:" + "1" * 32,
+        "vulkan-uuid:" + "2" * 32,
+    )
+    payload = {
+        "released": True,
+        "physical_device_ids": list(physical_device_ids),
+        "pre_release_quiesce_duration_ns": 1,
+        "role_release_duration_ns": 2,
+        "device_releases": [
+            {
+                "physical_device_id": physical_device_id,
+                "logical_device_id": f"optimizer:device:{index}",
+                "released_buffer_count": 1,
+                "released_buffer_bytes": 1024,
+                "quiesced": True,
+                "device_context_destroyed": True,
+                "release_duration_ns": 3,
+            }
+            for index, physical_device_id in enumerate(
+                reversed(physical_device_ids)
+            )
+        ],
+        "shutdown_duration_ns": 4,
+    }
+
+    with pytest.raises(
+        ModelCompileError,
+        match="device shutdown proof is invalid",
+    ):
+        validate_validation_shutdown_payload(
+            payload,
+            physical_device_ids=physical_device_ids,
         )
 
 
@@ -334,8 +401,12 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         staged_candidate_loader=loader,  # type: ignore[arg-type]
         run_nonce="fixture",
     )
+    cancel_stage = False
 
-    with backend.validation_stage("full_local"):
+    with backend.validation_stage(
+        "full_local",
+        cancel_requested=lambda: cancel_stage,
+    ):
         session = backend.open_session(mount_request)
         mount = ValidationResidencyEvent.from_json(
             session.mount_event
@@ -351,6 +422,9 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         second_session.execute(execution_request)
         second_session.close()
         assert executor.closed is False
+        # Once release begins, an expired optimization deadline must not turn
+        # orderly accelerator teardown into a process kill.
+        cancel_stage = True
     comparison = backend.compare_results(
         {
             "check": check,
@@ -388,7 +462,8 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     ] == ["A model.", "Athens."]
     assert [
         command["command"] for command in executor.commands
-    ] == ["mount", "execute", "close"] * 2
+    ] == [*(["mount", "execute", "close"] * 2), "shutdown"]
+    assert executor.request_cancellation_callbacks == [None] * 7
     # Fixture completion is semantic: a short but complete conversation must
     # not be rejected because it did not cross an unrelated activation count.
     assert result["steps"] == 360

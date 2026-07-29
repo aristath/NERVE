@@ -14,10 +14,10 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
 
 
 VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v3"
+    "nerve.optimizer.validation_executor_command.v4"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v3"
+    "nerve.optimizer.validation_executor_response.v4"
 )
 
 _PROGRESS_FIELDS = {
@@ -260,3 +260,86 @@ def validate_validation_release_payload(
         payload.get("release_duration_ns"),
         "validation executor release duration",
     )
+
+
+def validate_validation_shutdown_payload(
+    payload: Json,
+    *,
+    physical_device_ids: tuple[str, ...],
+) -> None:
+    if set(payload) != {
+        "released",
+        "physical_device_ids",
+        "pre_release_quiesce_duration_ns",
+        "role_release_duration_ns",
+        "device_releases",
+        "shutdown_duration_ns",
+    }:
+        raise ModelCompileError(
+            "validation executor shutdown fields are invalid"
+        )
+    if (
+        payload["released"] is not True
+        or payload["physical_device_ids"] != list(physical_device_ids)
+    ):
+        raise ModelCompileError(
+            "validation executor shut down a different device topology"
+        )
+    for field in (
+        "pre_release_quiesce_duration_ns",
+        "role_release_duration_ns",
+        "shutdown_duration_ns",
+    ):
+        positive_integer(
+            payload[field],
+            f"validation executor {field}",
+        )
+    releases = payload["device_releases"]
+    if (
+        not isinstance(releases, list)
+        or len(releases) != len(physical_device_ids)
+    ):
+        raise ModelCompileError(
+            "validation executor did not release every physical device"
+        )
+    for index, (release, physical_device_id) in enumerate(
+        zip(releases, physical_device_ids, strict=True)
+    ):
+        if (
+            not isinstance(release, dict)
+            or set(release)
+            != {
+                "physical_device_id",
+                "logical_device_id",
+                "released_buffer_count",
+                "released_buffer_bytes",
+                "quiesced",
+                "device_context_destroyed",
+                "release_duration_ns",
+            }
+            or release["physical_device_id"] != physical_device_id
+            or release["logical_device_id"]
+            != f"optimizer:device:{index}"
+            or release["quiesced"] is not True
+            or release["device_context_destroyed"] is not True
+        ):
+            raise ModelCompileError(
+                "validation executor device shutdown proof is invalid"
+            )
+        for field in (
+            "released_buffer_count",
+            "released_buffer_bytes",
+        ):
+            value = release[field]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ModelCompileError(
+                    f"validation executor shutdown {field} is invalid"
+                )
+        positive_integer(
+            release["release_duration_ns"],
+            "validation executor device release duration",
+        )

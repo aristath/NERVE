@@ -1,3 +1,22 @@
+impl VulkanComputeDevice {
+    /// Establish that every queue operation submitted through this logical
+    /// device is complete before resident resources are released.
+    ///
+    /// Callers which own several physical devices must invoke this and release
+    /// the corresponding resources one device at a time.  Process-exit field
+    /// drop order is not an accelerator residency protocol.
+    pub fn quiesce(&self) -> Result<(), VulkanError> {
+        unsafe {
+            self.device.device_wait_idle().map_err(|error| {
+                VulkanError(format!(
+                    "failed to quiesce Vulkan device {:?}: {error:?}",
+                    self.device_name
+                ))
+            })
+        }
+    }
+}
+
 impl Drop for VulkanComputeDevice {
     fn drop(&mut self) {
         unsafe {

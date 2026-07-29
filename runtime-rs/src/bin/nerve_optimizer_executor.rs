@@ -14,8 +14,8 @@ use nerve_runtime::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v1";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v2";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v2";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v3";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
 
@@ -47,6 +47,10 @@ enum ExecutorCommand {
         schema: String,
         request_id: String,
     },
+    Shutdown {
+        schema: String,
+        request_id: String,
+    },
 }
 
 struct MountCommand {
@@ -67,6 +71,7 @@ struct MountCommand {
 struct ExecutorHost {
     manifests: BTreeMap<PathBuf, VulkanResidentModelPackageManifest>,
     devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
+    logical_by_physical: BTreeMap<String, String>,
     parameter_pool: VulkanResidentBufferPool,
 }
 
@@ -90,9 +95,30 @@ fn run() -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
     let mut host = ExecutorHost::default();
+    let mut shutdown_completed = false;
     while let Some(command) = read_command(&mut input)? {
-        let mount = MountCommand::from_command(command)?;
-        execute_session(&mut host, &mut input, &mut output, mount)?;
+        match command {
+            ExecutorCommand::Shutdown { schema, request_id } => {
+                require_schema(&schema)?;
+                let report = host.shutdown()?;
+                write_response(&mut output, &request_id, "shutdown_complete", report)?;
+                shutdown_completed = true;
+                break;
+            }
+            command @ ExecutorCommand::Mount { .. } => {
+                let mount = MountCommand::from_command(command)?;
+                execute_session(&mut host, &mut input, &mut output, mount)?;
+            }
+            ExecutorCommand::Execute { .. } | ExecutorCommand::Close { .. } => {
+                return Err(invalid_input(
+                    "executor command outside a mounted session must be mount or shutdown",
+                )
+                .into());
+            }
+        }
+    }
+    if !shutdown_completed {
+        return Err(invalid_input("executor input ended without an acknowledged shutdown").into());
     }
     Ok(())
 }
@@ -224,6 +250,11 @@ fn execute_session(
                     invalid_input("executor cannot mount another session before close").into(),
                 );
             }
+            ExecutorCommand::Shutdown { .. } => {
+                return Err(
+                    invalid_input("executor cannot shut down before closing its session").into(),
+                );
+            }
         }
     };
     let release_started = Instant::now();
@@ -247,6 +278,79 @@ fn execute_session(
 }
 
 impl ExecutorHost {
+    fn shutdown(&mut self) -> Result<Value, Box<dyn Error>> {
+        if self.devices.is_empty() {
+            return Err(invalid_input("executor cannot shut down before mounting a device").into());
+        }
+        let shutdown_started = Instant::now();
+        let physical_device_ids = self.devices.keys().cloned().collect::<Vec<_>>();
+        let pre_release_quiesce_started = Instant::now();
+        for physical_device_id in &physical_device_ids {
+            self.devices
+                .get(physical_device_id)
+                .expect("enumerated executor device remains present")
+                .quiesce()?;
+        }
+        let pre_release_quiesce_duration_ns = nonzero_elapsed_ns(pre_release_quiesce_started);
+        let mut device_releases = Vec::with_capacity(physical_device_ids.len());
+        for physical_device_id in &physical_device_ids {
+            let release_started = Instant::now();
+            let logical_device_id = self
+                .logical_by_physical
+                .remove(physical_device_id)
+                .ok_or_else(|| {
+                    invalid_input(format!(
+                        "executor lost the logical binding for \
+                         {physical_device_id:?}"
+                    ))
+                })?;
+            let device = self
+                .devices
+                .get(physical_device_id)
+                .cloned()
+                .expect("enumerated executor device remains present");
+            device.quiesce()?;
+            let released = self.parameter_pool.release_device(&logical_device_id)?;
+            device.quiesce()?;
+            let owned_device = self
+                .devices
+                .remove(physical_device_id)
+                .expect("enumerated executor device remains present");
+            drop(owned_device);
+            drop(device);
+            device_releases.push(json!({
+                "physical_device_id": physical_device_id,
+                "logical_device_id": logical_device_id,
+                "released_buffer_count": released.resident_buffer_count,
+                "released_buffer_bytes": released.resident_bytes,
+                "quiesced": true,
+                "device_context_destroyed": true,
+                "release_duration_ns": nonzero_elapsed_ns(release_started),
+            }));
+        }
+        let residual_pool = self.parameter_pool.stats();
+        if !self.devices.is_empty()
+            || !self.logical_by_physical.is_empty()
+            || self.parameter_pool.registered_device_count() != 0
+            || residual_pool.resident_buffer_count != 0
+            || residual_pool.resident_bytes != 0
+        {
+            return Err(invalid_input(
+                "executor serialized shutdown left resident device resources",
+            )
+            .into());
+        }
+        Ok(json!({
+            "released": true,
+            "physical_device_ids": physical_device_ids,
+            "pre_release_quiesce_duration_ns": (
+                pre_release_quiesce_duration_ns
+            ),
+            "device_releases": device_releases,
+            "shutdown_duration_ns": nonzero_elapsed_ns(shutdown_started),
+        }))
+    }
+
     fn manifest(
         &mut self,
         path: &PathBuf,
@@ -296,6 +400,21 @@ impl ExecutorHost {
             .get(physical_device_id)
             .expect("executor device was inserted")
             .clone();
+        if let Some(existing) = self.logical_by_physical.get(physical_device_id) {
+            if existing != logical_device_id {
+                return Err(invalid_input(format!(
+                    "one executor cannot bind physical device \
+                     {physical_device_id:?} to both {existing:?} and \
+                     {logical_device_id:?}"
+                ))
+                .into());
+            }
+        } else {
+            self.logical_by_physical.insert(
+                physical_device_id.to_string(),
+                logical_device_id.to_string(),
+            );
+        }
         self.parameter_pool
             .register_device(logical_device_id, device.clone())?;
         Ok(device)

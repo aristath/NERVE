@@ -51,6 +51,7 @@ from nerve.representation_optimizer.validation.protocols import (
 class FixtureExecutor:
     def __init__(self) -> None:
         self.commands: list[Json] = []
+        self.request_cancellation_callbacks: list[object | None] = []
         self.closed = False
         self.aborted = False
         self.factory_calls = 0
@@ -64,6 +65,7 @@ class FixtureExecutor:
     ) -> Json:
         assert cancel_requested is None or not cancel_requested()
         assert progress_received is None
+        self.request_cancellation_callbacks.append(cancel_requested)
         self.commands.append(document)
         command = document["command"]
         if command == "mount":
@@ -122,6 +124,40 @@ class FixtureExecutor:
                 "mounted_state_digest": _device_digest(b"mounted"),
             }
             status = "released"
+        elif command == "shutdown":
+            mounts = [
+                command
+                for command in self.commands
+                if command["command"] == "mount"
+            ]
+            logical_by_physical = {
+                command["physical_device_id"]: command[
+                    "logical_device_id"
+                ]
+                for command in mounts
+            }
+            physical_device_ids = sorted(logical_by_physical)
+            payload = {
+                "released": True,
+                "physical_device_ids": physical_device_ids,
+                "pre_release_quiesce_duration_ns": 5,
+                "device_releases": [
+                    {
+                        "physical_device_id": physical_device_id,
+                        "logical_device_id": logical_by_physical[
+                            physical_device_id
+                        ],
+                        "released_buffer_count": 1,
+                        "released_buffer_bytes": 4_096,
+                        "quiesced": True,
+                        "device_context_destroyed": True,
+                        "release_duration_ns": 6,
+                    }
+                    for physical_device_id in physical_device_ids
+                ],
+                "shutdown_duration_ns": 7,
+            }
+            status = "shutdown_complete"
         else:
             raise AssertionError(f"unexpected command {command!r}")
         return {
@@ -181,6 +217,12 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert executor.commands[0]["physical_device_id"] == "vulkan:amd-fixture"
     assert executor.commands[0]["maximum_quantum_wait_ns"] == 9_000_000
     assert executor.commands[1]["useful_units"] == 8
+    assert [command["command"] for command in executor.commands] == [
+        "mount",
+        "execute",
+        "close",
+        "shutdown",
+    ]
     assert observation["status"] == "completed"
     assert observation["work"]["useful_units"] == 8
     assert observation["device"]["busy_ns"] == 400
@@ -374,8 +416,19 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         matched_conditions_digest=contract_digest(matched_conditions),
         seed=17,
     )
+    cancel_stage = False
 
-    with backend.validation_stage("sanity"):
+    def cancel_requested() -> bool:
+        return cancel_stage
+
+    mount_request = replace(
+        mount_request,
+        cancel_requested=cancel_requested,
+    )
+    with backend.validation_stage(
+        "sanity",
+        cancel_requested=cancel_requested,
+    ):
         session = backend.open_session(mount_request)
         mount = ValidationResidencyEvent.from_json(session.mount_event).to_json()
         result = ValidationRoleResult.from_json(
@@ -390,6 +443,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         second_execution = replace(execution_request, seed=19)
         second_session = backend.open_session(second_mount)
         second_session.execute(second_execution)
+        cancel_stage = True
         second_session.close()
         assert executor.closed is False
         assert executor.factory_calls == 1
@@ -405,6 +459,10 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
 
     assert executor.commands[0]["phase"] == "decode"
     assert executor.commands[1]["useful_units"] == 8
+    assert [
+        command["command"] for command in executor.commands
+    ] == [*(["mount", "execute", "close"] * 2), "shutdown"]
+    assert executor.request_cancellation_callbacks == [None] * 7
     assert result["steps"] == 8
     assert result["output_digest"] == _artifact_digest(b"output")
     assert result["default_statistics"]["physical_dispatch_count"] == 1

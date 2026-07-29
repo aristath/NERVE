@@ -371,6 +371,20 @@ integrity manifest. Failed mount validation closes the already-open session,
 and every successful mount must prove that unmount returned the device to the
 matched idle state.
 
+Role unmount and executor shutdown are separate protocols. Unmount resets a
+role and may retain immutable residency for the next matched call. Shutdown
+first quiesces every submitted queue, drops the reusable role, then releases
+pooled allocations and destroys Vulkan contexts one physical device at a time.
+The executor acknowledges the ordered release only after no registered device
+or pooled buffer remains; the host performs idle-state attestation only after
+that acknowledgement. Normal completion never treats stdin EOF, process exit,
+destructor order, or an expired experiment deadline as accelerator teardown.
+Mount and execution commands are bounded cancellation quanta: cancellation is
+checked before submission, while a submitted command is allowed to return to
+the protocol boundary before ordered release. A deadline therefore rejects the
+experiment without turning live accelerator state into an asynchronous process
+kill.
+
 ## Proof and behavioral-validation funnel
 
 Validation is an ordered rejection funnel, not one similarity score:

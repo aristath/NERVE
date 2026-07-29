@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from nerve.compilation import (
     Json,
-    ModelCompileCancelled,
     ModelCompileError,
     check_compile_cancelled,
 )
@@ -44,6 +43,7 @@ from nerve.representation_optimizer.validation.executor_protocol import (
     validate_validation_mount_payload,
     validate_validation_progress,
     validate_validation_release_payload,
+    validate_validation_shutdown_payload,
     validated_validation_response,
 )
 from nerve.representation_optimizer.validation.protocols import (
@@ -137,6 +137,7 @@ class ResidentWholeModelValidationBackend:
         self._active_stage: str | None = None
         self._transport: ExecutorTransport | None = None
         self._role_is_mounted = False
+        self._stage_physical_device_ids: tuple[str, ...] | None = None
         self.partial_progress_refs: list[Json] = []
 
     @contextmanager
@@ -155,7 +156,7 @@ class ResidentWholeModelValidationBackend:
             yield
         finally:
             try:
-                self._release_stage_executor(cancel_requested)
+                self._release_stage_executor()
             finally:
                 self._active_stage = None
 
@@ -186,6 +187,13 @@ class ResidentWholeModelValidationBackend:
         physical_device_ids = _physical_device_ids(
             request.matched_conditions
         )
+        if self._stage_physical_device_ids is None:
+            self._stage_physical_device_ids = physical_device_ids
+        elif self._stage_physical_device_ids != physical_device_ids:
+            raise ModelCompileError(
+                "one whole-model validation stage cannot change its "
+                "physical device topology"
+            )
         placement = _role_placement(
             request.matched_conditions,
             check,
@@ -244,11 +252,12 @@ class ResidentWholeModelValidationBackend:
         self._role_is_mounted = True
         started = time.monotonic_ns()
         try:
+            # Accelerator commands are cancellation quanta. Refuse new work
+            # at the boundary, but never SIGKILL an executor after a command
+            # may have submitted Vulkan work.
+            check_compile_cancelled(request.cancel_requested)
             response = validated_validation_response(
-                transport.request(
-                    command,
-                    cancel_requested=request.cancel_requested,
-                ),
+                transport.request(command),
                 expected_request_id=command["request_id"],
                 expected_status="mounted",
             )
@@ -301,10 +310,7 @@ class ResidentWholeModelValidationBackend:
             )
         return self._transport
 
-    def _release_stage_executor(
-        self,
-        cancel_requested: Callable[[], bool] | None,
-    ) -> None:
+    def _release_stage_executor(self) -> None:
         transport = self._transport
         if transport is None:
             return
@@ -313,19 +319,49 @@ class ResidentWholeModelValidationBackend:
             raise ModelCompileError(
                 "whole-model validation stage ended with a mounted role"
             )
-        self._transport = None
+        physical_device_ids = self._stage_physical_device_ids
+        if physical_device_ids is None:
+            self._abort_stage_executor()
+            raise ModelCompileError(
+                "whole-model validation stage has no mounted device topology"
+            )
+        command = {
+            "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
+            "command": "shutdown",
+            "request_id": request_id(
+                "validation-shutdown",
+                {
+                    "run_nonce": self.run_nonce,
+                    "stage": self._active_stage,
+                    "physical_device_ids": list(physical_device_ids),
+                },
+            ),
+        }
         try:
-            transport.close(cancel_requested=cancel_requested)
-        except ModelCompileCancelled:
-            transport.abort()
+            response = validated_validation_response(
+                transport.request(command),
+                expected_request_id=command["request_id"],
+                expected_status="shutdown_complete",
+            )
+            validate_validation_shutdown_payload(
+                response["payload"],
+                physical_device_ids=physical_device_ids,
+            )
+            # Cancellation stops new optimization work.  It must not turn an
+            # acknowledged, serialized accelerator release into SIGKILL.
+            transport.close()
         except BaseException:
             transport.abort()
             raise
+        finally:
+            self._transport = None
+            self._stage_physical_device_ids = None
 
     def _abort_stage_executor(self) -> None:
         transport = self._transport
         self._transport = None
         self._role_is_mounted = False
+        self._stage_physical_device_ids = None
         if transport is not None:
             transport.abort()
 
@@ -528,10 +564,10 @@ class ResidentWholeModelValidationSession:
             progress.append(event)
 
         try:
+            check_compile_cancelled(self.request.cancel_requested)
             response = validated_validation_response(
                 self.transport.request(
                     command,
-                    cancel_requested=self.request.cancel_requested,
                     progress_received=progress_received,
                 ),
                 expected_request_id=command["request_id"],
@@ -678,13 +714,8 @@ class ResidentWholeModelValidationSession:
         if self.closed:
             raise ModelCompileError(
                 "whole-model validation session closed twice"
-        )
+            )
         self.closed = True
-        try:
-            check_compile_cancelled(self.request.cancel_requested)
-        except BaseException:
-            self.backend.role_failed(self.transport)
-            raise
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
             "command": "close",
@@ -702,10 +733,7 @@ class ResidentWholeModelValidationSession:
         started = time.monotonic_ns()
         try:
             response = validated_validation_response(
-                self.transport.request(
-                    command,
-                    cancel_requested=self.request.cancel_requested,
-                ),
+                self.transport.request(command),
                 expected_request_id=command["request_id"],
                 expected_status="released",
             )

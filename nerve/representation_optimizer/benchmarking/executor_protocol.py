@@ -12,8 +12,8 @@ from nerve.representation_optimizer.contracts import (
 )
 
 
-EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v1"
-EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v2"
+EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v2"
+EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v3"
 ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
 
 
@@ -131,6 +131,83 @@ def validated_windows(value: object, useful_units: int) -> list[Json]:
             "resident executor throughput windows do not cover useful work"
         )
     return windows
+
+
+def validate_executor_shutdown_payload(
+    payload: Json,
+    *,
+    logical_by_physical: dict[str, str],
+) -> None:
+    physical_device_ids = sorted(logical_by_physical)
+    if (
+        set(payload)
+        != {
+            "released",
+            "physical_device_ids",
+            "pre_release_quiesce_duration_ns",
+            "device_releases",
+            "shutdown_duration_ns",
+        }
+        or payload["released"] is not True
+        or payload["physical_device_ids"] != physical_device_ids
+    ):
+        raise ModelCompileError(
+            "resident executor shutdown proof is invalid"
+        )
+    positive_integer(
+        payload["pre_release_quiesce_duration_ns"],
+        "executor pre-release quiesce duration",
+    )
+    positive_integer(
+        payload["shutdown_duration_ns"],
+        "executor shutdown duration",
+    )
+    releases = payload["device_releases"]
+    if (
+        not isinstance(releases, list)
+        or len(releases) != len(physical_device_ids)
+    ):
+        raise ModelCompileError(
+            "resident executor did not release every physical device"
+        )
+    for release, physical_device_id in zip(
+        releases,
+        physical_device_ids,
+        strict=True,
+    ):
+        if (
+            not isinstance(release, dict)
+            or set(release)
+            != {
+                "physical_device_id",
+                "logical_device_id",
+                "released_buffer_count",
+                "released_buffer_bytes",
+                "quiesced",
+                "device_context_destroyed",
+                "release_duration_ns",
+            }
+            or release["physical_device_id"] != physical_device_id
+            or release["logical_device_id"]
+            != logical_by_physical[physical_device_id]
+            or release["quiesced"] is not True
+            or release["device_context_destroyed"] is not True
+        ):
+            raise ModelCompileError(
+                "resident executor device shutdown proof is invalid"
+            )
+        for field in (
+            "released_buffer_count",
+            "released_buffer_bytes",
+        ):
+            nonnegative_integer(
+                release[field],
+                f"executor shutdown {field}",
+            )
+        positive_integer(
+            release["release_duration_ns"],
+            "executor device release duration",
+        )
 
 
 def required_object(document: Json, field: str) -> Json:
