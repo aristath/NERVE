@@ -52,11 +52,13 @@ def test_optimizer_command_wires_fresh_default_paths_and_unbounded_budget(
     outcome = optimize_compiled_package(
         package,
         selected_device_ids=("vulkan-uuid:idle",),
+        speculative_draft_tokens=2,
     )
 
     assert outcome.optimization is optimization
     assert captured["prepare"]["package_manifest"] == manifest
     assert captured["prepare"]["run_root"] == (tmp_path / ".compiled-optimizer-run")
+    assert captured["prepare"]["speculative_draft_tokens"] == 2
     assert captured["run"]["package_dir"] == package
     assert captured["run"]["output_package_dir"] == (tmp_path / "compiled-optimized")
     assert captured["run"]["targets"] == ("target",)

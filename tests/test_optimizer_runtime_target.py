@@ -422,6 +422,7 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
         vulkan_driver_files=(driver,),
         idle_probe=probe,
         live_target=_target(pci_addresses[1:], capacity_bytes=1_000),
+        speculative_draft_tokens=2,
     )
 
     assert not run_root.exists()
@@ -434,6 +435,16 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
     assert prepared.excluded_devices[0]["device_id"] == _device_id("0000:03:00.0")
     assert len(prepared.targets) == 1
     optimization_target = prepared.targets[0]
+    assert (
+        optimization_target.qualification_regime.speculative_draft_tokens
+        == 2
+    )
+    assert (
+        optimization_target.matched_conditions["controls"][
+            "speculative_draft_tokens"
+        ]
+        == 2
+    )
     assert len(optimization_target.hardware_profiles) == 2
     placement = optimization_target.matched_conditions["placement"]
     assert set(placement) == {"component_0", "component_1"}

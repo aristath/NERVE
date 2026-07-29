@@ -50,6 +50,7 @@ from nerve.representation_optimizer.providers.codebook.member_paths import (
 from nerve.representation_optimizer.providers.codebook.workloads import (
     bundled_head_norm_validation_requirements,
 )
+from nerve.representation_optimizer.qualification import QualificationRegime
 from nerve.representation_optimizer.staging.artifact_validation import (
     ArtifactValidatorRegistry,
 )
@@ -114,6 +115,7 @@ def _provider_problem(
     values_b: tuple[int, ...] = (2, 3, 2, 3),
     exhaustive: bool = True,
     fused: bool = True,
+    speculative_draft_tokens: int = 0,
 ) -> ProviderProblem:
     package = tmp_path / "package"
     package.mkdir()
@@ -520,6 +522,9 @@ def _provider_problem(
         source_contracts=(contract,),
         evidence=(structure, codebook),
         hardware_profile=hardware_profile_contract(),
+        qualification_regime=QualificationRegime(
+            speculative_draft_tokens=speculative_draft_tokens,
+        ),
         source_artifacts=PackageSourceArtifactResolver(package),
     )
 
@@ -856,6 +861,25 @@ def test_codebook_provider_and_toolchain_are_available_from_builtin_registries(
         assert toolchain.semantic_constructor is not None
         assert toolchain.ordinary_relowerer is not None
         assert toolchain.physical_optimizer is not None
+
+
+def test_builtin_codebook_providers_use_the_requested_qualification_regime(
+    tmp_path: Path,
+) -> None:
+    report = load_builtin_provider_registry().run(
+        _provider_problem(tmp_path, speculative_draft_tokens=2)
+    )
+
+    assert len(report.candidates) == 2
+    for plan in report.candidates:
+        whole_model = plan.validation_requirements.checks_for_stage(
+            "whole_model"
+        )
+        assert whole_model
+        assert all(
+            check["controls"]["speculative_draft_tokens"] == 2
+            for check in whole_model
+        )
 
 
 def test_embedded_parameter_provider_constructs_exact_target_program(

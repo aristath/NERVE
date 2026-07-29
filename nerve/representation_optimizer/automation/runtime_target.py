@@ -42,6 +42,7 @@ from nerve.representation_optimizer.providers.codebook import (
 from nerve.representation_optimizer.providers.source_artifacts import (
     PackageSourceArtifactResolver,
 )
+from nerve.representation_optimizer.qualification import QualificationRegime
 from nerve.representation_optimizer.validation.executor_adapter import (
     ResidentBehavioralValidationAdapter,
 )
@@ -94,6 +95,10 @@ class PreparedOptimizationTargets:
     def to_json(self) -> Json:
         return {
             "target_ids": [target.target_id for target in self.targets],
+            "qualification_regimes": {
+                target.target_id: target.qualification_regime.to_json()
+                for target in self.targets
+            },
             "selected_devices": [dict(item) for item in self.selected_devices],
             "excluded_devices": [dict(item) for item in self.excluded_devices],
             "parameter_bytes": self.parameter_bytes,
@@ -120,6 +125,7 @@ def prepare_runtime_optimization_targets(
     residency_planner_bin: Path | None = None,
     selected_device_ids: Iterable[str] = (),
     vulkan_driver_files: Iterable[Path] = (),
+    speculative_draft_tokens: int = 0,
     idle_probe: LinuxAmdDeviceStateProbe | None = None,
     live_target: CompilerTarget | None = None,
     policy: RuntimeOptimizationPolicy = RuntimeOptimizationPolicy(),
@@ -127,6 +133,9 @@ def prepare_runtime_optimization_targets(
     cancel_requested: Callable[[], bool] | None = None,
 ) -> PreparedOptimizationTargets:
     check_compile_cancelled(cancel_requested)
+    qualification_regime = QualificationRegime(
+        speculative_draft_tokens=speculative_draft_tokens,
+    )
     package_manifest = package_manifest.resolve()
     source_artifacts = PackageSourceArtifactResolver(
         package_manifest.parent
@@ -344,6 +353,7 @@ def prepare_runtime_optimization_targets(
             component_command=component_command,
             validation_command=validation_command,
             runtime_implementation_fingerprint=runtime_fingerprint,
+            qualification_regime=qualification_regime,
             policy=policy,
             lease_root=lease_root or default_device_lease_root(),
             source_artifacts=source_artifacts,
@@ -760,6 +770,7 @@ def _build_target(
     component_command: tuple[str, ...],
     validation_command: tuple[str, ...],
     runtime_implementation_fingerprint: str,
+    qualification_regime: QualificationRegime,
     policy: RuntimeOptimizationPolicy,
     lease_root: Path,
     source_artifacts: PackageSourceArtifactResolver,
@@ -797,6 +808,9 @@ def _build_target(
         "controls": {
             "scheduler": "normal",
             "maximum_quantum_wait_ns": policy.component_quantum_wait_ns,
+            "speculative_draft_tokens": (
+                qualification_regime.speculative_draft_tokens
+            ),
         },
         "environment": {
             "runtime_implementation_fingerprint": (
@@ -830,6 +844,7 @@ def _build_target(
         sorted(capability_classes),
         list(device_ids),
         placement,
+        qualification_regime.to_json(),
     )
     candidate_workspace = run_root / "workspaces" / "candidates"
     benchmark_adapter = ResidentComponentExecutionAdapter(
@@ -852,6 +867,7 @@ def _build_target(
         synthesis_profile=profiles[0],
         hardware_profiles=profiles,
         matched_conditions=matched_conditions,
+        qualification_regime=qualification_regime,
         requires_device_lease=True,
         toolchains=BuiltinCandidateToolchainResolver(),
         benchmark_adapter=benchmark_adapter,

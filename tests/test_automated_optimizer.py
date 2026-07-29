@@ -31,6 +31,7 @@ from nerve.representation_optimizer.providers import ProviderRegistry, StaticEst
 from nerve.representation_optimizer.providers.source_artifacts import (
     PackageSourceArtifactResolver,
 )
+from nerve.representation_optimizer.qualification import QualificationRegime
 from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
 )
@@ -210,7 +211,10 @@ def _target(
             }
         ],
         "placement": {"fixture_scope": "vulkan:fixture"},
-        "controls": {"scheduler": "normal"},
+        "controls": {
+            "scheduler": "normal",
+            "speculative_draft_tokens": 0,
+        },
         "environment": {"power_profile": "matched"},
         "idle_device_state_digest": device_state_digest({"fixture_state": "idle"}),
         "exclusive_residency": True,
@@ -221,6 +225,7 @@ def _target(
             synthesis_profile=profile,
             hardware_profiles=(profile,),
             matched_conditions=conditions,
+            qualification_regime=QualificationRegime(),
             requires_device_lease=True,
             toolchains=toolchains or CompleteToolchains(),
             benchmark_adapter=FixtureExecutionAdapter(benchmark_behavior),

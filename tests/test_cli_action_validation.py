@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,18 @@ def discoverable_source(root: Path) -> None:
         (
             ["--compile-model", "{source}", "--prompt", "ignored"],
             "--prompt is only supported with --run",
+        ),
+        (
+            [
+                "--discover-model",
+                "{source}",
+                "--speculative-draft-tokens",
+                "2",
+            ],
+            (
+                "--speculative-draft-tokens is only supported with --run "
+                "or --optimize-model"
+            ),
         ),
         (
             [
@@ -52,3 +65,45 @@ def test_cli_rejects_options_owned_by_a_different_action_before_running_it(
 
     assert exit_info.value.code == 2
     assert message in capsys.readouterr().err
+
+
+def test_cli_forwards_runtime_regime_to_optimizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def optimize(package: Path, **kwargs: object) -> object:
+        captured["package"] = package
+        captured.update(kwargs)
+        return SimpleNamespace(
+            optimization=SimpleNamespace(
+                report={"status": "completed"},
+                report_path=tmp_path / "run" / "report.json",
+                output_package_dir=tmp_path / "optimized",
+            ),
+            targets=SimpleNamespace(
+                targets=(SimpleNamespace(target_id="target"),),
+            ),
+        )
+
+    monkeypatch.setattr(
+        "nerve.cli.optimize_compiled_package",
+        optimize,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nerve",
+            "--optimize-model",
+            str(tmp_path),
+            "--speculative-draft-tokens",
+            "2",
+        ],
+    )
+
+    main()
+
+    assert captured["package"] == tmp_path
+    assert captured["speculative_draft_tokens"] == 2

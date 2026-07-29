@@ -412,7 +412,7 @@ class ExactEmbeddedHeadNormParameterProgramProvider:
             representation_name="embedded BF16 parameter program",
             execution_phases=("decode",),
             speculative_draft_tokens=(
-                3 if manifest.get("speculative_decoders") else 0
+                context.qualification_regime.speculative_draft_tokens
             ),
         )
 

@@ -19,6 +19,7 @@ from nerve.representation_optimizer.contracts import (
     validate_contract,
 )
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
+from nerve.representation_optimizer.qualification import QualificationRegime
 from nerve.representation_optimizer.staging.artifact_validation import (
     ArtifactValidatorRegistry,
 )
@@ -145,6 +146,7 @@ class OptimizationTarget:
     synthesis_profile: Json
     hardware_profiles: tuple[Json, ...]
     matched_conditions: Json
+    qualification_regime: QualificationRegime
     requires_device_lease: bool
     toolchains: CandidateToolchainResolver
     benchmark_adapter: NormalExecutionAdapter
@@ -197,6 +199,16 @@ class OptimizationTarget:
         if self.matched_conditions.get("exclusive_residency") is not True:
             raise ModelCompileError(
                 "optimization target must require exclusive residency"
+            )
+        controls = self.matched_conditions.get("controls")
+        if (
+            not isinstance(controls, dict)
+            or controls.get("speculative_draft_tokens")
+            != self.qualification_regime.speculative_draft_tokens
+        ):
+            raise ModelCompileError(
+                "optimization target matched controls do not match its "
+                "qualification regime"
             )
         require_device_state_digest(
             self.matched_conditions.get("idle_device_state_digest"),

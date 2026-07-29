@@ -403,7 +403,7 @@ class ExactHeadNormCodebookProvider:
             ),
             representation_name="U8-addressed BF16 codebook",
             speculative_draft_tokens=(
-                3 if manifest.get("speculative_decoders") else 0
+                context.qualification_regime.speculative_draft_tokens
             ),
         )
 

@@ -229,7 +229,10 @@ def main() -> None:
     parser.add_argument(
         "--speculative-draft-tokens",
         type=int,
-        help="MTP draft tokens per verification cycle; 0 disables MTP (default: 0)",
+        help=(
+            "MTP draft tokens per verification cycle for runtime execution "
+            "or optimizer product qualification; 0 disables MTP (default: 0)"
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -360,6 +363,7 @@ def main() -> None:
                 validation_executor_bin=args.validation_executor_bin,
                 selected_device_ids=args.allow_physical_device,
                 vulkan_driver_files=args.vulkan_driver_manifest,
+                speculative_draft_tokens=args.speculative_draft_tokens,
                 cancel_requested=lambda: cancel_requested,
             )
         except ModelCompileCancelled:
@@ -534,7 +538,6 @@ def validate_action_options(
         ("--context-size", args.context_size is not None),
         ("--vulkan-device-index", args.vulkan_device_index is not None),
         ("--max-new-tokens", args.max_new_tokens is not None),
-        ("--speculative-draft-tokens", args.speculative_draft_tokens is not None),
         ("--seed", args.seed is not None),
         ("--temperature", args.temperature is not None),
         ("--top-k", args.top_k is not None),
@@ -550,6 +553,15 @@ def validate_action_options(
         for option, provided in runtime_options:
             if provided:
                 parser.error(f"{option} is only supported with --run")
+    if (
+        args.speculative_draft_tokens is not None
+        and args.run is None
+        and args.optimize_model is None
+    ):
+        parser.error(
+            "--speculative-draft-tokens is only supported with --run or "
+            "--optimize-model"
+        )
     if (
         args.allow_physical_device
         and args.run is None

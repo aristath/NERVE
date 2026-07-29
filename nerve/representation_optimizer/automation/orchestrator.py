@@ -105,6 +105,10 @@ def run_automated_optimizer(
         "requested_output_package": str(output),
         "exact_baseline_digest": stage["exact_baseline"]["contract_digest"],
         "target_ids": [target.target_id for target in targets],
+        "qualification_regimes": {
+            target.target_id: target.qualification_regime.to_json()
+            for target in targets
+        },
         "budget": budget.to_json(),
     }
     write_new_json(run_root / "run.json", run_manifest)
@@ -245,6 +249,7 @@ def run_automated_optimizer(
                 ),
                 evidence=analyzed_evidence,
                 hardware_profile=target.synthesis_profile,
+                qualification_regime=target.qualification_regime,
                 source_artifacts=source_artifacts,
             )
             registry_report = providers.run(

@@ -17,6 +17,7 @@ from nerve.representation_optimizer.automation.storage import (
     read_object,
     replace_json,
 )
+from nerve.representation_optimizer.qualification import QualificationRegime
 from nerve.representation_optimizer.contracts import (
     canonical_json_bytes,
     stable_contract_id,
@@ -206,11 +207,28 @@ def validate_report_directory(run_root: Path) -> Json:
             "requested_output_package",
             "exact_baseline_digest",
             "target_ids",
+            "qualification_regimes",
             "budget",
         }
         or run["schema"] != OPTIMIZER_RUN_SCHEMA
     ):
         raise ModelCompileError("automated optimizer run manifest is invalid")
+    target_ids = run["target_ids"]
+    qualification_regimes = run["qualification_regimes"]
+    if (
+        not isinstance(target_ids, list)
+        or not isinstance(qualification_regimes, dict)
+        or set(qualification_regimes) != set(target_ids)
+    ):
+        raise ModelCompileError(
+            "automated optimizer qualification regimes are invalid"
+        )
+    for regime in qualification_regimes.values():
+        if not isinstance(regime, dict):
+            raise ModelCompileError(
+                "automated optimizer qualification regime is invalid"
+            )
+        QualificationRegime.from_json(regime)
     if (
         run["run_id"] != report["run_id"]
         or run["package_id"] != report["package_id"]

@@ -29,6 +29,7 @@ from nerve.representation_optimizer.validation.contracts import (
 from nerve.representation_optimizer.providers.source_artifacts import (
     SourceArtifactResolver,
 )
+from nerve.representation_optimizer.qualification import QualificationRegime
 
 
 @dataclass(frozen=True, order=True)
@@ -128,6 +129,7 @@ class ProviderContext:
     _source_contracts: tuple[ContractDocument, ...]
     _evidence: tuple[ContractDocument, ...]
     _hardware_profile: ContractDocument
+    _qualification_regime: QualificationRegime
     _descriptor: ContractDocument
     _source_artifacts: SourceArtifactResolver | None
     _shared_cache: dict[str, object]
@@ -148,6 +150,10 @@ class ProviderContext:
     @property
     def hardware_profile(self) -> Json:
         return self._hardware_profile.to_json()
+
+    @property
+    def qualification_regime(self) -> QualificationRegime:
+        return self._qualification_regime
 
     @property
     def descriptor(self) -> Json:
@@ -222,6 +228,7 @@ class ProviderContext:
                 _source_contracts=(contract,),
                 _evidence=tuple(evidence_by_scope[scope_id]),
                 _hardware_profile=self._hardware_profile,
+                _qualification_regime=self._qualification_regime,
                 _descriptor=self._descriptor,
                 _source_artifacts=self._source_artifacts,
                 _shared_cache=self._shared_cache,
@@ -258,6 +265,7 @@ class ProviderProblem:
     _source_contracts: tuple[ContractDocument, ...]
     _evidence: tuple[ContractDocument, ...]
     _hardware_profile: ContractDocument
+    _qualification_regime: QualificationRegime
     _source_artifacts: SourceArtifactResolver | None
     _shared_cache: dict[str, object]
 
@@ -270,6 +278,7 @@ class ProviderProblem:
         source_contracts: Iterable[Json | ContractDocument],
         evidence: Iterable[Json | ContractDocument],
         hardware_profile: Json | ContractDocument,
+        qualification_regime: QualificationRegime = QualificationRegime(),
         source_artifacts: SourceArtifactResolver | None = None,
     ) -> ProviderProblem:
         if not package_id:
@@ -284,6 +293,10 @@ class ProviderProblem:
             hardware_profile,
             HARDWARE_PROCESS_PROFILE_SCHEMA,
         )
+        if not isinstance(qualification_regime, QualificationRegime):
+            raise ContractValidationError(
+                "provider problem requires a qualification regime"
+            )
         scope_json = [item.to_json() for item in parsed_scopes]
         contract_json = [item.to_json() for item in parsed_contracts]
         scope_ids = [str(item["scope_id"]) for item in scope_json]
@@ -344,6 +357,7 @@ class ProviderProblem:
                 )
             ),
             _hardware_profile=parsed_profile,
+            _qualification_regime=qualification_regime,
             _source_artifacts=source_artifacts,
             _shared_cache={},
         )
@@ -364,6 +378,7 @@ class ProviderProblem:
             _source_contracts=self._source_contracts,
             _evidence=self._evidence,
             _hardware_profile=self._hardware_profile,
+            _qualification_regime=self._qualification_regime,
             _descriptor=descriptor,
             _source_artifacts=self._source_artifacts,
             _shared_cache=self._shared_cache,
