@@ -74,24 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 8. Add stable GPU addressing for independently resident resources
-
-- Build device-local immutable arenas or another measured stable-address scheme
-  using current Vulkan capabilities, including buffer device addresses where
-  appropriate.
-- Publish resource addresses and resident bits through GPU-visible tables with
-  narrowly scoped synchronization.
-- Keep already published addresses stable for their full resident lifetime.
-- Avoid allocating virtual or physical storage proportional to maximum model
-  size unless measurements prove it is superior and the device supports it
-  safely.
-- Benchmark monolithic direct addressing against the new indirection so the
-  package can carry materially different verified implementations when useful.
-
-Completion requires address-stability, alignment, visibility, and capacity
-tests, plus a sub-minute hot-path microbenchmark showing whether the chosen
-lookup mechanism adds material overhead.
-
 ### 9. Split selectable execution at a physical residency checkpoint
 
 - Lower routed execution into distinct physical stages: selection, availability
