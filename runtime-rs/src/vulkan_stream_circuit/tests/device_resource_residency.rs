@@ -1,0 +1,640 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc as SyncArc, Barrier};
+use std::thread;
+
+struct TestResidentPayload {
+    bytes: usize,
+    drops: SyncArc<AtomicUsize>,
+}
+
+impl DeviceResidentResourcePayload for TestResidentPayload {
+    fn byte_count(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Drop for TestResidentPayload {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn residency_descriptor(
+    group_digit: char,
+    resource_digit: char,
+    byte_count: usize,
+) -> DeviceResourceGroupDescriptor {
+    let group_id = format!("sha256:{}", group_digit.to_string().repeat(64));
+    let resource_id =
+        format!("sha256:{}", resource_digit.to_string().repeat(64));
+    DeviceResourceGroupDescriptor::new(
+        group_id,
+        vec![resource_id.clone()],
+        Vec::new(),
+        vec![DeviceResourceDescriptor {
+            id: resource_id,
+            byte_count,
+            compatibility: CompiledResourceCompatibility {
+                device_api: "vulkan".to_string(),
+                storage_class: "storage_buffer".to_string(),
+                read_only: true,
+                required_features: Vec::new(),
+            },
+        }],
+    )
+    .unwrap()
+}
+
+fn resident_test_group(
+    descriptor: DeviceResourceGroupDescriptor,
+    drops: SyncArc<AtomicUsize>,
+) -> DeviceResidentResourceGroup<TestResidentPayload> {
+    let resource = descriptor.resources[0].clone();
+    let byte_count = resource.byte_count;
+    DeviceResidentResourceGroup::new(
+        descriptor,
+        vec![
+            DeviceResidentResource::new(
+                resource,
+                TestResidentPayload {
+                    bytes: byte_count,
+                    drops,
+                },
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+fn owner(value: &str) -> DeviceResourceResidencyOwnerId {
+    DeviceResourceResidencyOwnerId::new(value).unwrap()
+}
+
+#[test]
+fn per_device_residency_single_flight_shares_one_atomic_publication() {
+    const CALLER_COUNT: usize = 8;
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let descriptor = residency_descriptor('1', '2', 256);
+    let request_barrier = SyncArc::new(Barrier::new(CALLER_COUNT));
+    let load_count = SyncArc::new(AtomicUsize::new(0));
+    let drops = SyncArc::new(AtomicUsize::new(0));
+
+    let leases = thread::scope(|scope| {
+        let mut callers = Vec::new();
+        for caller_index in 0..CALLER_COUNT {
+            let manager = manager.clone();
+            let descriptor = descriptor.clone();
+            let request_barrier = SyncArc::clone(&request_barrier);
+            let load_count = SyncArc::clone(&load_count);
+            let drops = SyncArc::clone(&drops);
+            callers.push(scope.spawn(move || {
+                let request = manager
+                    .request(
+                        descriptor.clone(),
+                        owner(&format!("graph-{caller_index}")),
+                    )
+                    .unwrap();
+                request_barrier.wait();
+                match request {
+                    DeviceResourceResidencyRequest::LoadRequired(permit) => {
+                        load_count.fetch_add(1, Ordering::Relaxed);
+                        permit
+                            .publish(resident_test_group(descriptor, drops))
+                            .unwrap()
+                    }
+                    DeviceResourceResidencyRequest::Pending(waiter) => {
+                        waiter.wait().unwrap()
+                    }
+                    DeviceResourceResidencyRequest::Resident(lease) => lease,
+                }
+            }));
+        }
+        callers
+            .into_iter()
+            .map(|caller| caller.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(load_count.load(Ordering::Relaxed), 1);
+    assert!(
+        leases
+            .windows(2)
+            .all(|pair| pair[0].shares_publication_with(&pair[1]))
+    );
+    let stats = manager.statistics().unwrap();
+    assert_eq!(stats.resident_group_count, 1);
+    assert_eq!(stats.dynamic_resident_bytes, 256);
+    assert_eq!(stats.single_flight_join_count, CALLER_COUNT as u64 - 1);
+    assert_eq!(manager.directory().unwrap()[0].owner_count, CALLER_COUNT);
+    drop(leases);
+    for caller_index in 0..CALLER_COUNT {
+        manager
+            .unload_owner(&owner(&format!("graph-{caller_index}")))
+            .unwrap();
+    }
+    assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn per_device_residency_shares_parameters_but_not_mutable_stream_state() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let descriptor = residency_descriptor('3', '4', 128);
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let first = match manager
+        .request(descriptor.clone(), owner("rewired-a"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit
+            .publish(resident_test_group(
+                descriptor.clone(),
+                SyncArc::clone(&drops),
+            ))
+            .unwrap(),
+        _ => panic!("first request did not own the load"),
+    };
+    let second = match manager
+        .request(descriptor, owner("rewired-b"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Resident(lease) => lease,
+        _ => panic!("second graph instance did not hit resident parameters"),
+    };
+    let mut first_stream_state = vec![1u32, 2, 3];
+    let second_stream_state = vec![1u32, 2, 3];
+    first_stream_state[0] = 99;
+
+    assert!(first.shares_publication_with(&second));
+    assert_ne!(first_stream_state, second_stream_state);
+    assert_eq!(
+        manager
+            .unload_owner(&owner("rewired-a"))
+            .err()
+            .unwrap()
+            .kind(),
+        DeviceResourceResidencyErrorKind::InUse
+    );
+    drop(first);
+    assert_eq!(manager.unload_owner(&owner("rewired-a")).unwrap().group_count, 0);
+    assert_eq!(manager.statistics().unwrap().resident_group_count, 1);
+    drop(second);
+    assert_eq!(manager.unload_owner(&owner("rewired-b")).unwrap().group_count, 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn per_device_residency_rejects_capacity_before_atomic_loading_and_rolls_back() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 100, 20,
+    )
+    .unwrap();
+    let too_large = residency_descriptor('5', '6', 81);
+    let error = manager.request(too_large, owner("model")).err().unwrap();
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::Capacity);
+    assert_eq!(
+        manager.statistics().unwrap(),
+        DeviceResourceResidencyStatistics {
+            capacity_bytes: 100,
+            always_resident_bytes: 20,
+            ..Default::default()
+        }
+    );
+    let mut tampered = residency_descriptor('6', '7', 80);
+    tampered.byte_count = 1;
+    assert_eq!(
+        manager
+            .request(tampered, owner("model"))
+            .err()
+            .unwrap()
+            .kind(),
+        DeviceResourceResidencyErrorKind::InvalidDescriptor
+    );
+
+    let descriptor = residency_descriptor('7', '8', 80);
+    let permit = match manager
+        .request(descriptor.clone(), owner("model"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("capacity-fitting request did not own the load"),
+    };
+    let wrong_descriptor = residency_descriptor('9', 'a', 80);
+    let error = permit
+        .publish(resident_test_group(
+            wrong_descriptor,
+            SyncArc::new(AtomicUsize::new(0)),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.kind(),
+        DeviceResourceResidencyErrorKind::InvalidPublication
+    );
+    let stats = manager.statistics().unwrap();
+    assert_eq!(stats.reserved_loading_bytes, 0);
+    assert_eq!(stats.dynamic_resident_bytes, 0);
+    assert_eq!(stats.failed_group_count, 1);
+    manager.reset_failed_group(&descriptor.id).unwrap();
+    assert!(manager.directory().unwrap().is_empty());
+}
+
+#[test]
+fn per_device_residency_cancellation_and_failure_wake_waiters_cleanly() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let descriptor = residency_descriptor('b', 'c', 128);
+    let leader = match manager
+        .request(descriptor.clone(), owner("leader"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("first request did not own the load"),
+    };
+    let waiter = match manager
+        .request(descriptor.clone(), owner("follower"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Pending(waiter) => waiter,
+        _ => panic!("second request did not join the load"),
+    };
+    leader.cancel().unwrap();
+    let cancellation = match waiter.wait() {
+        Ok(_) => panic!("cancelled follower received a resident group"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        cancellation.kind(),
+        DeviceResourceResidencyErrorKind::Cancelled
+    );
+    assert!(manager.directory().unwrap().is_empty());
+    assert_eq!(manager.statistics().unwrap().reserved_loading_bytes, 0);
+
+    let leader = match manager
+        .request(descriptor.clone(), owner("leader"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("retry did not own the load"),
+    };
+    let failure = DeviceResourceResidencyError::load_failed("read failed");
+    leader.fail(failure.clone()).unwrap();
+    assert_eq!(
+        manager
+            .request(descriptor.clone(), owner("follower"))
+            .err()
+            .unwrap(),
+        failure
+    );
+    manager.reset_failed_group(&descriptor.id).unwrap();
+    let retry = manager.request(descriptor, owner("leader")).unwrap();
+    assert!(matches!(
+        retry,
+        DeviceResourceResidencyRequest::LoadRequired(_)
+    ));
+    drop(retry);
+    assert_eq!(manager.statistics().unwrap().reserved_loading_bytes, 0);
+}
+
+#[test]
+fn per_device_residency_owner_unload_cancels_only_that_pending_request() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let descriptor = residency_descriptor('a', 'b', 128);
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let leader = match manager
+        .request(descriptor.clone(), owner("leader"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("first request did not own the load"),
+    };
+    let waiter = match manager
+        .request(descriptor.clone(), owner("cancelled-follower"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Pending(waiter) => waiter,
+        _ => panic!("second request did not join the load"),
+    };
+    assert_eq!(
+        manager
+            .unload_owner(&owner("cancelled-follower"))
+            .unwrap()
+            .cancelled_load_count,
+        0
+    );
+    let leader_lease = leader
+        .publish(resident_test_group(
+            descriptor,
+            SyncArc::clone(&drops),
+        ))
+        .unwrap();
+    let error = match waiter.wait() {
+        Ok(_) => panic!("unloaded follower received a residency lease"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::Cancelled);
+    assert_eq!(manager.directory().unwrap()[0].owner_count, 1);
+    drop(leader_lease);
+    assert_eq!(manager.unload_owner(&owner("leader")).unwrap().group_count, 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+    let descriptor = residency_descriptor('c', 'd', 128);
+    let leader = match manager
+        .request(descriptor.clone(), owner("cancelled-leader"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("second leader did not own the load"),
+    };
+    let waiter = match manager
+        .request(descriptor.clone(), owner("surviving-follower"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Pending(waiter) => waiter,
+        _ => panic!("surviving follower did not join the load"),
+    };
+    manager
+        .unload_owner(&owner("cancelled-leader"))
+        .unwrap();
+    let error = leader
+        .publish(resident_test_group(
+            descriptor,
+            SyncArc::clone(&drops),
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::Cancelled);
+    let follower_lease = waiter.wait().unwrap();
+    assert_eq!(manager.directory().unwrap()[0].owner_count, 1);
+    drop(follower_lease);
+    assert_eq!(
+        manager
+            .unload_owner(&owner("surviving-follower"))
+            .unwrap()
+            .group_count,
+        1
+    );
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn per_device_residency_explicit_unload_refuses_live_leases_and_leaks_nothing() {
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let descriptor = residency_descriptor('d', 'e', 256);
+    let lease = match manager
+        .request(descriptor.clone(), owner("slice"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit
+            .publish(resident_test_group(
+                descriptor,
+                SyncArc::clone(&drops),
+            ))
+            .unwrap(),
+        _ => panic!("first request did not own the load"),
+    };
+
+    assert_eq!(
+        manager.unload_owner(&owner("slice")).err().unwrap().kind(),
+        DeviceResourceResidencyErrorKind::InUse
+    );
+    assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 256);
+    drop(lease);
+    let release = manager.unload_owner(&owner("slice")).unwrap();
+    assert_eq!(release.group_count, 1);
+    assert_eq!(release.byte_count, 256);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert!(manager.directory().unwrap().is_empty());
+}
+
+#[test]
+fn per_device_residency_device_unload_releases_resident_and_loading_groups() {
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    for (group_digit, resource_digit) in [('1', '2'), ('3', '4')] {
+        let descriptor =
+            residency_descriptor(group_digit, resource_digit, 128);
+        let lease = match manager
+            .request(
+                descriptor.clone(),
+                owner(&format!("model-{group_digit}")),
+            )
+            .unwrap()
+        {
+            DeviceResourceResidencyRequest::LoadRequired(permit) => permit
+                .publish(resident_test_group(
+                    descriptor,
+                    SyncArc::clone(&drops),
+                ))
+                .unwrap(),
+            _ => panic!("first group request did not own the load"),
+        };
+        drop(lease);
+    }
+    let loading_descriptor = residency_descriptor('5', '6', 128);
+    let loading = match manager
+        .request(loading_descriptor.clone(), owner("loading-owner"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("loading group request did not own the load"),
+    };
+    let waiter = match manager
+        .request(loading_descriptor, owner("loading-follower"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Pending(waiter) => waiter,
+        _ => panic!("loading follower did not join the load"),
+    };
+
+    let release = manager.unload_device().unwrap();
+    assert_eq!(release.group_count, 2);
+    assert_eq!(release.byte_count, 256);
+    assert_eq!(release.cancelled_load_count, 1);
+    let error = match waiter.wait() {
+        Ok(_) => panic!("device-unloaded waiter received a residency lease"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::Cancelled);
+    drop(loading);
+    assert!(manager.directory().unwrap().is_empty());
+    let stats = manager.statistics().unwrap();
+    assert_eq!(stats.dynamic_resident_bytes, 0);
+    assert_eq!(stats.reserved_loading_bytes, 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn per_device_residency_directories_never_alias_physical_devices() {
+    let first = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let second = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu1", 4096, 512,
+    )
+    .unwrap();
+    let descriptor = residency_descriptor('f', '0', 128);
+    let first_request = first
+        .request(descriptor.clone(), owner("model"))
+        .unwrap();
+    let second_request = second
+        .request(descriptor, owner("model"))
+        .unwrap();
+
+    assert!(matches!(
+        first_request,
+        DeviceResourceResidencyRequest::LoadRequired(_)
+    ));
+    assert!(matches!(
+        second_request,
+        DeviceResourceResidencyRequest::LoadRequired(_)
+    ));
+    assert_eq!(
+        first.directory().unwrap()[0].location,
+        DeviceResourceResidencyLocation::Local {
+            device_id: "gpu0".to_string()
+        }
+    );
+    assert_eq!(
+        second.directory().unwrap()[0].location,
+        DeviceResourceResidencyLocation::Local {
+            device_id: "gpu1".to_string()
+        }
+    );
+    drop(first_request);
+    drop(second_request);
+    assert!(first.directory().unwrap().is_empty());
+    assert!(second.directory().unwrap().is_empty());
+}
+
+#[test]
+fn external_compiled_group_has_one_device_load_and_explicit_release() {
+    let package_root = match std::env::var("NERVE_TEST_COMPILED_PACKAGE_ROOT") {
+        Ok(path) => PathBuf::from(path),
+        Err(std::env::VarError::NotPresent) => {
+            eprintln!(
+                "skipping external device residency load: package root is not set"
+            );
+            return;
+        }
+        Err(error) => panic!("could not read external package root: {error}"),
+    };
+    let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+        .parse::<usize>()
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+    let manifest: VulkanResidentModelPackageManifest = serde_json::from_slice(
+        &fs::read(package_root.join("vulkan_resident_package.json")).unwrap(),
+    )
+    .unwrap();
+    let template = &manifest.resource_residency.partition_templates[0];
+    let resolved = resolve_compiled_partition_group(
+        &package_root,
+        &manifest.resource_residency,
+        &template.id,
+        0,
+    )
+    .unwrap();
+    let resolved = ResolvedCompiledResourceGroup::Partition(resolved);
+    let descriptor =
+        DeviceResourceGroupDescriptor::from_resolved(&resolved).unwrap();
+    let store = CompiledResourceBackingStore::new(
+        &package_root,
+        CompiledResourceBackingStoreLimits {
+            maximum_ranges_per_group: 256,
+            maximum_logical_bytes_per_group: 128 * 1024 * 1024,
+            maximum_coalesced_read_bytes: 32 * 1024 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let loaded = store.try_load(resolved).unwrap().wait().unwrap();
+    let device =
+        VulkanComputeDevice::new_for_physical_device_index(device_index)
+            .unwrap();
+    let mut transfer = device
+        .create_resident_transfer_stream(2, loaded.logical_byte_count)
+        .unwrap();
+    let manager =
+        DeviceResourceResidencyManager::<VulkanResidentCompiledResource>::new(
+            "gpu0",
+            loaded.logical_byte_count,
+            0,
+        )
+        .unwrap();
+    let first = match manager
+        .request(descriptor.clone(), owner("model-a"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => {
+            let resident = upload_loaded_compiled_resource_group(
+                &device,
+                &mut transfer,
+                &descriptor,
+                &loaded,
+            )
+            .unwrap();
+            permit.publish(resident).unwrap()
+        }
+        _ => panic!("first external request did not own the physical load"),
+    };
+    let second = match manager
+        .request(descriptor, owner("model-b"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Resident(lease) => lease,
+        _ => panic!("second external request did not reuse residency"),
+    };
+
+    assert!(first.shares_publication_with(&second));
+    for (resident, expected) in
+        first.group().resources().iter().zip(&loaded.resources)
+    {
+        let bytes = resident
+            .payload()
+            .buffer()
+            .read_bytes(resident.payload().byte_count())
+            .unwrap();
+        for (placement, range) in
+            resident.payload().ranges().iter().zip(&expected.ranges)
+        {
+            assert_eq!(
+                &bytes[placement.byte_offset
+                    ..placement.byte_offset + placement.byte_count],
+                &*range.bytes
+            );
+        }
+    }
+    assert_eq!(manager.statistics().unwrap().successful_load_count, 1);
+    assert_eq!(manager.statistics().unwrap().hit_count, 1);
+    drop(first);
+    drop(second);
+    assert_eq!(
+        manager.unload_owner(&owner("model-a")).unwrap().group_count,
+        0
+    );
+    let release = manager.unload_owner(&owner("model-b")).unwrap();
+    assert_eq!(release.group_count, 1);
+    assert_eq!(release.byte_count, loaded.logical_byte_count);
+    assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 0);
+    assert!(manager.directory().unwrap().is_empty());
+}

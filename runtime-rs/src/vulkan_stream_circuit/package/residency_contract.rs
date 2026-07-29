@@ -176,7 +176,8 @@ pub struct CompiledResidencyCheckpoint {
     pub selector_ids: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceResidencyState {
     Absent,
     Requested,
@@ -1131,7 +1132,7 @@ fn scoped_component_node<'a>(
         .find(|(_, node)| node.id == node_id)
 }
 
-fn validate_content_id(label: &str, value: &str) -> io::Result<()> {
+pub(super) fn validate_content_id(label: &str, value: &str) -> io::Result<()> {
     if !value
         .strip_prefix("sha256:")
         .is_some_and(is_lower_hex_sha256)

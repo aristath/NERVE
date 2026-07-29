@@ -55,10 +55,11 @@ use crate::vulkan_compute::{
     VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
-    VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate, VulkanShaderFeature,
-    VulkanSharedResidentBufferRoute, VulkanSubgroupOperation, VulkanTimelineSemaphore,
-    VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
-    record_vulkan_execution_quantum_measurement, vulkan_spirv_requirements,
+    VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate,
+    VulkanResidentTransferStream, VulkanShaderFeature, VulkanSharedResidentBufferRoute,
+    VulkanSubgroupOperation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
+    VulkanTimelineSemaphoreReplayState, record_vulkan_execution_quantum_measurement,
+    vulkan_spirv_requirements,
 };
 #[cfg(test)]
 use crate::vulkan_compute::{
@@ -147,6 +148,8 @@ include!("vulkan_stream_circuit/resident_package_planning.rs");
 include!("vulkan_stream_circuit/compiled_resource_residency_plan.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
+include!("vulkan_stream_circuit/device_resource_residency.rs");
+include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");
 include!("vulkan_stream_circuit/resident_package_resource_loading.rs");
 include!("vulkan_stream_circuit/resident_package_kernel_loading.rs");
 include!("vulkan_stream_circuit/token_engine_codec.rs");
