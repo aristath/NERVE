@@ -74,23 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 9. Split selectable execution at a physical residency checkpoint
-
-- Lower routed execution into distinct physical stages: selection, availability
-  check/request emission, selected computation, and reduction.
-- Keep this a physical schedule concern; do not fragment or weaken the editable
-  semantic component graph.
-- Ensure a missing resource suppresses only work that depends on it and cannot
-  expose partially initialized parameters.
-- Resume the paused activation at the selected-computation stage after the
-  required atomic groups become resident.
-- Generalize the checkpoint ABI so future selectors can request non-expert
-  resources.
-
-Completion requires eager and demand-retained traces to select the same
-resources, execute the same physical responsibilities, and resume without
-whole-token or whole-layer replay.
-
 ### 10. Keep the resident-hit path on the GPU
 
 - Check resident bits and resolve addresses in GPU work.
