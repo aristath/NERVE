@@ -440,6 +440,27 @@ mod tests {
     }
 
     #[test]
+    fn core_vulkan_versions_satisfy_promoted_device_extension_contracts() {
+        assert_eq!(
+            vulkan_core_device_extension_version(
+                "VK_KHR_shader_integer_dot_product"
+            ),
+            Some(vk::API_VERSION_1_3)
+        );
+        assert!(
+            vk::make_api_version(0, 1, 4, 0)
+                >= vulkan_core_device_extension_version(
+                    "VK_KHR_shader_integer_dot_product"
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            vulkan_core_device_extension_version("VK_EXT_shader_float8"),
+            None
+        );
+    }
+
+    #[test]
     fn spirv_contract_rejects_missing_device_features_before_gpu_submission() {
         let words = spirv_test_module(&[1, 5345], 3);
 

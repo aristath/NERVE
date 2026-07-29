@@ -590,6 +590,7 @@ impl VulkanComputeDeviceCatalog {
                 device,
                 queue_family_index,
                 queue,
+                api_version: physical_device_properties.api_version,
                 device_name,
                 pci_address,
                 enabled_device_extensions,

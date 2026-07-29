@@ -39,6 +39,13 @@ const SPIRV_OP_MEMORY_MODEL: u16 = 14;
 const SPIRV_OP_CAPABILITY: u16 = 17;
 const SPIRV_MEMORY_MODEL_VULKAN: u32 = 3;
 
+fn vulkan_core_device_extension_version(extension_name: &str) -> Option<u32> {
+    match extension_name {
+        "VK_KHR_shader_integer_dot_product" => Some(vk::API_VERSION_1_3),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VulkanShaderFeature {

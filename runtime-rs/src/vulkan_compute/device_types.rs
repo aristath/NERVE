@@ -4,6 +4,7 @@ pub struct VulkanComputeDevice {
     device: ash::Device,
     queue_family_index: u32,
     queue: vk::Queue,
+    api_version: u32,
     device_name: String,
     pci_address: Option<String>,
     enabled_device_extensions: BTreeSet<String>,

@@ -37,6 +37,8 @@ impl VulkanComputeDevice {
 
     pub fn has_enabled_device_extension(&self, extension_name: &str) -> bool {
         self.enabled_device_extensions.contains(extension_name)
+            || vulkan_core_device_extension_version(extension_name)
+                .is_some_and(|minimum| self.api_version >= minimum)
     }
 
     pub fn has_enabled_shader_feature(&self, feature: VulkanShaderFeature) -> bool {
