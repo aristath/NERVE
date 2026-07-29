@@ -59,66 +59,71 @@ def qualify_whole_model_product_performance(
             "whole-model product performance has no observations"
         )
     candidate_is_faster = all(
-        comparison["candidate_measured_elapsed_ns"]
-        < comparison["reference_measured_elapsed_ns"]
+        comparison["candidate_normalized_faster"]
         for comparison in comparisons
     )
     amplified = sorted(
         {
             path
             for comparison in comparisons
-            for path, delta in comparison["slow_path_deltas"].items()
-            if delta > 0
+            for path in comparison["amplified_runtime_paths"]
         }
     )
     status = "passed" if candidate_is_faster and not amplified else "failed"
-    reason = None
+    reasons = []
     if not candidate_is_faster:
-        reason = (
-            "candidate was not faster than the exact implementation in "
-            "every warmed whole-model observation"
+        reasons.append(
+            "candidate was not faster than the exact implementation after "
+            "normalizing warmed elapsed time by generated tokens"
         )
-    elif amplified:
-        reason = (
-            "candidate amplified one or more whole-model runtime slow paths: "
+    if amplified:
+        reasons.append(
+            "candidate amplified one or more normalized whole-model runtime "
+            "slow paths: "
             + ", ".join(amplified)
         )
+    reference_elapsed = sum(
+        comparison["reference_measured_elapsed_ns"]
+        for comparison in comparisons
+    )
+    candidate_elapsed = sum(
+        comparison["candidate_measured_elapsed_ns"]
+        for comparison in comparisons
+    )
+    reference_tokens = sum(
+        comparison["reference_generated_tokens"]
+        for comparison in comparisons
+    )
+    candidate_tokens = sum(
+        comparison["candidate_generated_tokens"]
+        for comparison in comparisons
+    )
+    slow_paths = _aggregate_slow_paths(comparisons)
     return {
         "status": status,
-        "reason": reason,
+        "reason": "; ".join(reasons) or None,
         "metrics": {
             "observation_count": len(comparisons),
             "warmup_turns_discarded": len(comparisons),
             "candidate_faster_observation_count": sum(
-                comparison["candidate_measured_elapsed_ns"]
-                < comparison["reference_measured_elapsed_ns"]
+                comparison["candidate_normalized_faster"]
                 for comparison in comparisons
             ),
-            "reference_measured_elapsed_ns": sum(
-                comparison["reference_measured_elapsed_ns"]
-                for comparison in comparisons
+            "reference_measured_elapsed_ns": reference_elapsed,
+            "candidate_measured_elapsed_ns": candidate_elapsed,
+            "host_speedup_ppm": _normalized_speedup_ppm(
+                reference_elapsed_ns=reference_elapsed,
+                reference_tokens=reference_tokens,
+                candidate_elapsed_ns=candidate_elapsed,
+                candidate_tokens=candidate_tokens,
             ),
-            "candidate_measured_elapsed_ns": sum(
-                comparison["candidate_measured_elapsed_ns"]
-                for comparison in comparisons
+            "reference_generated_tokens": reference_tokens,
+            "candidate_generated_tokens": candidate_tokens,
+            "reference_ns_per_generated_token": (
+                reference_elapsed // reference_tokens
             ),
-            "host_speedup_ppm": _speedup_ppm(
-                reference=sum(
-                    comparison["reference_measured_elapsed_ns"]
-                    for comparison in comparisons
-                ),
-                candidate=sum(
-                    comparison["candidate_measured_elapsed_ns"]
-                    for comparison in comparisons
-                ),
-            ),
-            "reference_generated_tokens": sum(
-                comparison["reference_generated_tokens"]
-                for comparison in comparisons
-            ),
-            "candidate_generated_tokens": sum(
-                comparison["candidate_generated_tokens"]
-                for comparison in comparisons
+            "candidate_ns_per_generated_token": (
+                candidate_elapsed // candidate_tokens
             ),
             "reference_speculative_acceptance_ppm": _acceptance_ppm(
                 proposed=sum(
@@ -141,7 +146,10 @@ def qualify_whole_model_product_performance(
                 ),
             ),
             "amplified_slow_paths": amplified,
-            "slow_path_deltas": _sum_deltas(comparisons),
+            "slow_path_count_deltas": slow_paths["count_deltas"],
+            "slow_path_rate_deltas_per_million_tokens": slow_paths[
+                "rate_deltas_per_million_tokens"
+            ],
             "observations": list(comparisons),
         },
     }
@@ -157,13 +165,7 @@ def _observation_comparison(observation: Json) -> Json:
         role: _role_measurement(statistics.get(role), role=role)
         for role in ("reference", "candidate")
     }
-    if roles["reference"]["generated_tokens"] != roles["candidate"][
-        "generated_tokens"
-    ]:
-        raise ModelCompileError(
-            "whole-model product timing compared different generated work"
-        )
-    slow_path_deltas = {
+    slow_path_count_deltas = {
         path: roles["candidate"]["slow_paths"].get(path, 0)
         - roles["reference"]["slow_paths"].get(path, 0)
         for path in sorted(
@@ -171,16 +173,69 @@ def _observation_comparison(observation: Json) -> Json:
             | set(roles["candidate"]["slow_paths"])
         )
     }
+    slow_path_rate_deltas = {
+        path: _rate_per_million(
+            roles["candidate"]["slow_paths"].get(path, 0),
+            roles["candidate"]["generated_tokens"],
+        )
+        - _rate_per_million(
+            roles["reference"]["slow_paths"].get(path, 0),
+            roles["reference"]["generated_tokens"],
+        )
+        for path in slow_path_count_deltas
+    }
+    amplified_runtime_paths = {
+        path
+        for path in slow_path_count_deltas
+        if _rate_is_greater(
+            candidate_count=roles["candidate"]["slow_paths"].get(path, 0),
+            candidate_tokens=roles["candidate"]["generated_tokens"],
+            reference_count=roles["reference"]["slow_paths"].get(path, 0),
+            reference_tokens=roles["reference"]["generated_tokens"],
+        )
+    }
+    reference_acceptance = _acceptance_ppm(
+        proposed=roles["reference"]["speculative_proposed"],
+        accepted=roles["reference"]["speculative_accepted"],
+    )
+    candidate_acceptance = _acceptance_ppm(
+        proposed=roles["candidate"]["speculative_proposed"],
+        accepted=roles["candidate"]["speculative_accepted"],
+    )
+    if (
+        reference_acceptance is not None
+        and (
+            candidate_acceptance is None
+            or candidate_acceptance < reference_acceptance
+        )
+    ):
+        amplified_runtime_paths.add("speculative.acceptance")
     return {
         "observation_id": observation["observation_id"],
         "reference_measured_elapsed_ns": roles["reference"]["elapsed_ns"],
         "candidate_measured_elapsed_ns": roles["candidate"]["elapsed_ns"],
-        "host_speedup_ppm": _speedup_ppm(
-            reference=roles["reference"]["elapsed_ns"],
-            candidate=roles["candidate"]["elapsed_ns"],
+        "candidate_normalized_faster": _normalized_faster(
+            reference_elapsed_ns=roles["reference"]["elapsed_ns"],
+            reference_tokens=roles["reference"]["generated_tokens"],
+            candidate_elapsed_ns=roles["candidate"]["elapsed_ns"],
+            candidate_tokens=roles["candidate"]["generated_tokens"],
+        ),
+        "host_speedup_ppm": _normalized_speedup_ppm(
+            reference_elapsed_ns=roles["reference"]["elapsed_ns"],
+            reference_tokens=roles["reference"]["generated_tokens"],
+            candidate_elapsed_ns=roles["candidate"]["elapsed_ns"],
+            candidate_tokens=roles["candidate"]["generated_tokens"],
         ),
         "reference_generated_tokens": roles["reference"]["generated_tokens"],
         "candidate_generated_tokens": roles["candidate"]["generated_tokens"],
+        "reference_ns_per_generated_token": (
+            roles["reference"]["elapsed_ns"]
+            // roles["reference"]["generated_tokens"]
+        ),
+        "candidate_ns_per_generated_token": (
+            roles["candidate"]["elapsed_ns"]
+            // roles["candidate"]["generated_tokens"]
+        ),
         "reference_speculative_proposed": roles["reference"][
             "speculative_proposed"
         ],
@@ -193,7 +248,15 @@ def _observation_comparison(observation: Json) -> Json:
         "candidate_speculative_accepted": roles["candidate"][
             "speculative_accepted"
         ],
-        "slow_path_deltas": slow_path_deltas,
+        "reference_speculative_acceptance_ppm": reference_acceptance,
+        "candidate_speculative_acceptance_ppm": candidate_acceptance,
+        "reference_slow_paths": roles["reference"]["slow_paths"],
+        "candidate_slow_paths": roles["candidate"]["slow_paths"],
+        "slow_path_count_deltas": slow_path_count_deltas,
+        "slow_path_rate_deltas_per_million_tokens": (
+            slow_path_rate_deltas
+        ),
+        "amplified_runtime_paths": sorted(amplified_runtime_paths),
     }
 
 
@@ -288,25 +351,102 @@ def _role_measurement(value: object, *, role: str) -> Json:
     }
 
 
-def _sum_deltas(comparisons: tuple[Json, ...]) -> Json:
+def _aggregate_slow_paths(comparisons: tuple[Json, ...]) -> Json:
     paths = sorted(
         {
             path
             for comparison in comparisons
-            for path in comparison["slow_path_deltas"]
+            for role in ("reference", "candidate")
+            for path in comparison[f"{role}_slow_paths"]
         }
     )
-    return {
+    reference_tokens = sum(
+        comparison["reference_generated_tokens"]
+        for comparison in comparisons
+    )
+    candidate_tokens = sum(
+        comparison["candidate_generated_tokens"]
+        for comparison in comparisons
+    )
+    reference_counts = {
         path: sum(
-            comparison["slow_path_deltas"].get(path, 0)
+            comparison["reference_slow_paths"].get(path, 0)
             for comparison in comparisons
         )
         for path in paths
     }
+    candidate_counts = {
+        path: sum(
+            comparison["candidate_slow_paths"].get(path, 0)
+            for comparison in comparisons
+        )
+        for path in paths
+    }
+    return {
+        "count_deltas": {
+            path: candidate_counts[path] - reference_counts[path]
+            for path in paths
+        },
+        "rate_deltas_per_million_tokens": {
+            path: (
+                _rate_per_million(
+                    candidate_counts[path],
+                    candidate_tokens,
+                )
+                - _rate_per_million(
+                    reference_counts[path],
+                    reference_tokens,
+                )
+            )
+            for path in paths
+        },
+    }
 
 
-def _speedup_ppm(*, reference: int, candidate: int) -> int:
-    return (reference - candidate) * 1_000_000 // reference
+def _normalized_faster(
+    *,
+    reference_elapsed_ns: int,
+    reference_tokens: int,
+    candidate_elapsed_ns: int,
+    candidate_tokens: int,
+) -> bool:
+    return (
+        candidate_elapsed_ns * reference_tokens
+        < reference_elapsed_ns * candidate_tokens
+    )
+
+
+def _normalized_speedup_ppm(
+    *,
+    reference_elapsed_ns: int,
+    reference_tokens: int,
+    candidate_elapsed_ns: int,
+    candidate_tokens: int,
+) -> int:
+    reference_scaled = reference_elapsed_ns * candidate_tokens
+    candidate_scaled = candidate_elapsed_ns * reference_tokens
+    return (
+        (reference_scaled - candidate_scaled)
+        * 1_000_000
+        // reference_scaled
+    )
+
+
+def _rate_per_million(count: int, tokens: int) -> int:
+    return count * 1_000_000 // tokens
+
+
+def _rate_is_greater(
+    *,
+    candidate_count: int,
+    candidate_tokens: int,
+    reference_count: int,
+    reference_tokens: int,
+) -> bool:
+    return (
+        candidate_count * reference_tokens
+        > reference_count * candidate_tokens
+    )
 
 
 def _acceptance_ppm(*, proposed: int, accepted: int) -> int | None:

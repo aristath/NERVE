@@ -234,6 +234,10 @@ class ValidationBehavior:
     candidate_measured_elapsed_ns: int = 90
     candidate_measured_generated_tokens: int = 8
     candidate_bounded_wait_timeout_count: int = 0
+    reference_speculative_proposed: int = 0
+    reference_speculative_accepted: int = 0
+    candidate_speculative_proposed: int = 0
+    candidate_speculative_accepted: int = 0
 
 
 class FixtureValidationAdapter:
@@ -503,6 +507,16 @@ class FixtureValidationRoleSession:
                             if request.role == "reference"
                             else behavior.candidate_measured_generated_tokens
                         ),
+                        speculative_proposed=(
+                            behavior.reference_speculative_proposed
+                            if request.role == "reference"
+                            else behavior.candidate_speculative_proposed
+                        ),
+                        speculative_accepted=(
+                            behavior.reference_speculative_accepted
+                            if request.role == "reference"
+                            else behavior.candidate_speculative_accepted
+                        ),
                     ),
                 ],
             },
@@ -568,6 +582,8 @@ def _fixture_turn_statistics(
     elapsed_ns: int,
     generated_tokens: int = 8,
     bounded_wait_timeout_count: int = 0,
+    speculative_proposed: int = 0,
+    speculative_accepted: int = 0,
 ) -> dict:
     return {
         "turn_index": turn_index,
@@ -580,8 +596,8 @@ def _fixture_turn_statistics(
             "resident_sequence_fence_waits": 0,
         },
         "speculative": {
-            "proposed_draft_tokens": 0,
-            "accepted_draft_tokens": 0,
+            "proposed_draft_tokens": speculative_proposed,
+            "accepted_draft_tokens": speculative_accepted,
         },
         "resident_feedback": {
             "bounded_wait_count": 0,
@@ -947,6 +963,16 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
             ),
             "amplified",
         ),
+        (
+            ValidationBehavior(
+                candidate_measured_elapsed_ns=90,
+                reference_speculative_proposed=8,
+                reference_speculative_accepted=8,
+                candidate_speculative_proposed=8,
+                candidate_speculative_accepted=4,
+            ),
+            "speculative.acceptance",
+        ),
     ),
 )
 def test_locally_faster_candidate_is_rejected_when_warmed_product_run_regresses(
@@ -1041,12 +1067,15 @@ def test_product_performance_discards_the_first_conversation_as_warmup(
     assert stage["metrics"]["warmup_turns_discarded"] == 2
 
 
-def test_product_performance_refuses_timings_for_different_generated_work(
+def test_product_performance_normalizes_different_generated_work(
     tmp_path: Path,
 ) -> None:
     fixture = _staged_fixture(tmp_path)
     adapter = FixtureValidationAdapter(
-        ValidationBehavior(candidate_measured_generated_tokens=7)
+        ValidationBehavior(
+            candidate_measured_elapsed_ns=80,
+            candidate_measured_generated_tokens=7,
+        )
     )
     pre, adapter, _ = _prevalidate(
         tmp_path,
@@ -1070,14 +1099,58 @@ def test_product_performance_refuses_timings_for_different_generated_work(
         workspace_root=tmp_path / "validation-workspace",
     )
 
-    assert final.status == CandidateState.FAILED.value
+    assert final.status == "passed"
+    stage = next(
+        stage
+        for stage in final.record.to_json()["stages"]
+        if stage["name"] == "whole_model_product_performance"
+    )
+    assert stage["status"] == "passed"
+    assert stage["metrics"]["reference_generated_tokens"] == 16
+    assert stage["metrics"]["candidate_generated_tokens"] == 14
+    assert stage["metrics"]["host_speedup_ppm"] > 0
+
+
+def test_product_performance_rejects_slower_normalized_decode(
+    tmp_path: Path,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    adapter = FixtureValidationAdapter(
+        ValidationBehavior(
+            candidate_measured_elapsed_ns=90,
+            candidate_measured_generated_tokens=7,
+        )
+    )
+    pre, adapter, _ = _prevalidate(
+        tmp_path,
+        fixture,
+        adapter=adapter,
+    )
+    benchmark = benchmark_candidate(
+        plan=fixture[4],
+        construction_record=fixture[3].record,
+        session=pre.session,
+        adapter=FixtureExecutionAdapter(),
+        workspace_root=tmp_path / "benchmark-workspace",
+    )
+
+    final = validate_benchmarked_candidate(
+        plan=fixture[5],
+        prebenchmark_record=pre.record,
+        benchmark_record=benchmark.record,
+        session=benchmark.session,
+        adapter=adapter,
+        workspace_root=tmp_path / "validation-workspace",
+    )
+
+    assert final.status == CandidateState.REJECTED.value
     stage = next(
         stage
         for stage in final.record.to_json()["stages"]
         if stage["name"] == "whole_model_product_performance"
     )
     assert stage["status"] == "failed"
-    assert "different generated work" in stage["reason"]
+    assert "normalizing" in stage["reason"]
 
 
 def test_faster_but_behaviorally_invalid_approximation_is_rejected(
