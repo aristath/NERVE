@@ -13,6 +13,7 @@ pub(super) fn maximum_cpu_temperature_millidegrees() -> Option<u64> {
         .max()
 }
 
+#[cfg(feature = "vulkan")]
 pub(super) fn maximum_pci_temperature_millidegrees(pci_address: Option<&str>) -> Option<u64> {
     let pci_address = pci_address?;
     let entries = std::fs::read_dir(format!("/sys/bus/pci/devices/{pci_address}/hwmon")).ok()?;
