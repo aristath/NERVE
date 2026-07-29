@@ -1,6 +1,8 @@
 pub struct VulkanResidentTransferStream {
     device: ash::Device,
     queue: vk::Queue,
+    consumer_queue: vk::Queue,
+    queue_is_distinct_from_consumer: bool,
     command_pool: vk::CommandPool,
     slots: Vec<VulkanResidentTransferSlot>,
     timeline: VulkanTimelineSemaphore,
@@ -13,6 +15,11 @@ struct VulkanResidentTransferSlot {
     staging: VulkanResidentBuffer,
     command_buffer: vk::CommandBuffer,
     pending_timeline_value: u64,
+}
+
+struct VulkanResidentConsumerWriteFailure {
+    error: VulkanError,
+    submission_accepted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +121,9 @@ impl VulkanComputeDevice {
             Ok(VulkanResidentTransferStream {
                 device: self.device.clone(),
                 queue: self.transfer_queue,
+                consumer_queue: self.queue,
+                queue_is_distinct_from_consumer:
+                    self.transfer_queue_is_distinct,
                 command_pool,
                 slots,
                 timeline,
@@ -225,6 +235,13 @@ impl VulkanResidentTransferStream {
                     }],
                 );
             }
+            let visibility_barriers =
+                resident_transfer_visibility_barriers(writes);
+            self.device.cmd_pipeline_barrier2(
+                slot.command_buffer,
+                &vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&visibility_barriers),
+            );
             self.device
                 .end_command_buffer(slot.command_buffer)
                 .map_err(|error| {
@@ -237,7 +254,7 @@ impl VulkanResidentTransferStream {
             let signal_infos = [vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.timeline.semaphore)
                 .value(timeline_value)
-                .stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)];
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
             self.device
                 .queue_submit2(
                     self.queue,
@@ -264,6 +281,192 @@ impl VulkanResidentTransferStream {
         })
     }
 
+    fn submit_consumer_serialized(
+        &mut self,
+        writes: &[VulkanResidentBufferWriteRange<'_>],
+    ) -> Result<(), VulkanResidentConsumerWriteFailure> {
+        let result = self.submit_consumer_serialized_inner(writes);
+        result.map_err(|(error, submission_accepted)| {
+            VulkanResidentConsumerWriteFailure {
+                error,
+                submission_accepted,
+            }
+        })
+    }
+
+    fn submit_consumer_serialized_inner(
+        &mut self,
+        writes: &[VulkanResidentBufferWriteRange<'_>],
+    ) -> Result<(), (VulkanError, bool)> {
+        if writes.is_empty() {
+            return Err((
+                VulkanError(
+                    "consumer-serialized transfer must contain at least one write"
+                        .to_string(),
+                ),
+                false,
+            ));
+        }
+        let mut packed_offsets = Vec::with_capacity(writes.len());
+        let packed_byte_count = writes.iter().try_fold(
+            0usize,
+            |offset, write| -> Result<usize, VulkanError> {
+                if write.destination.device.handle() != self.device.handle() {
+                    return Err(VulkanError(
+                        "consumer-serialized transfer destination belongs to another logical device"
+                            .to_string(),
+                    ));
+                }
+                validate_resident_transfer_range(
+                    write.destination_offset,
+                    write.bytes.len(),
+                )?;
+                write.destination.byte_range(
+                    write.destination_offset,
+                    write.bytes.len(),
+                )?;
+                let end = offset.checked_add(write.bytes.len()).ok_or_else(|| {
+                    VulkanError(
+                        "consumer-serialized transfer byte count overflowed"
+                            .to_string(),
+                    )
+                })?;
+                packed_offsets.push(offset);
+                Ok(end)
+            },
+        )
+        .map_err(|error| (error, false))?;
+        if packed_byte_count > self.staging_byte_capacity {
+            return Err((
+                VulkanError(format!(
+                    "consumer-serialized transfer needs {packed_byte_count} staging bytes but the bounded slot capacity is {}",
+                    self.staging_byte_capacity
+                )),
+                false,
+            ));
+        }
+
+        let slot_index = self.next_slot_index;
+        let pending_value = self.slots[slot_index].pending_timeline_value;
+        if pending_value != 0 {
+            self.wait_timeline_value(pending_value)
+                .map_err(|error| (error, false))?;
+        }
+        let slot = &mut self.slots[slot_index];
+        for (write, source_offset) in writes.iter().zip(&packed_offsets) {
+            slot.staging
+                .write_bytes_at(*source_offset, write.bytes)
+                .map_err(|error| (error, false))?;
+        }
+
+        unsafe {
+            self.device
+                .reset_command_buffer(
+                    slot.command_buffer,
+                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                )
+                .map_err(|error| {
+                    (
+                        VulkanError(format!(
+                            "failed to reset consumer-serialized transfer command buffer: {error:?}"
+                        )),
+                        false,
+                    )
+                })?;
+            self.device
+                .begin_command_buffer(
+                    slot.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|error| {
+                    (
+                        VulkanError(format!(
+                            "failed to begin consumer-serialized transfer command buffer: {error:?}"
+                        )),
+                        false,
+                    )
+                })?;
+            for (write, source_offset) in writes.iter().zip(&packed_offsets) {
+                self.device.cmd_copy_buffer(
+                    slot.command_buffer,
+                    slot.staging.buffer,
+                    write.destination.buffer,
+                    &[vk::BufferCopy {
+                        src_offset: *source_offset as vk::DeviceSize,
+                        dst_offset: write.destination_offset as vk::DeviceSize,
+                        size: write.bytes.len() as vk::DeviceSize,
+                    }],
+                );
+            }
+            let visibility_barriers =
+                resident_transfer_visibility_barriers(writes);
+            self.device.cmd_pipeline_barrier2(
+                slot.command_buffer,
+                &vk::DependencyInfo::default()
+                    .buffer_memory_barriers(&visibility_barriers),
+            );
+            self.device
+                .end_command_buffer(slot.command_buffer)
+                .map_err(|error| {
+                    (
+                        VulkanError(format!(
+                            "failed to end consumer-serialized transfer command buffer: {error:?}"
+                        )),
+                        false,
+                    )
+                })?;
+            let fence = self
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(|error| {
+                    (
+                        VulkanError(format!(
+                            "failed to create consumer-serialized transfer fence: {error:?}"
+                        )),
+                        false,
+                    )
+                })?;
+            let command_infos = [vk::CommandBufferSubmitInfo::default()
+                .command_buffer(slot.command_buffer)];
+            if let Err(error) = self.device.queue_submit2(
+                self.consumer_queue,
+                &[vk::SubmitInfo2::default()
+                    .command_buffer_infos(&command_infos)],
+                fence,
+            ) {
+                self.device.destroy_fence(fence, None);
+                return Err((
+                    VulkanError(format!(
+                        "failed to submit consumer-serialized transfer: {error:?}"
+                    )),
+                    false,
+                ));
+            }
+            let mut wait_result =
+                self.device.wait_for_fences(&[fence], true, u64::MAX);
+            if wait_result.is_err()
+                && self.device.queue_wait_idle(self.consumer_queue).is_ok()
+            {
+                wait_result = Ok(());
+            }
+            self.device.destroy_fence(fence, None);
+            if let Err(error) = wait_result {
+                return Err((
+                    VulkanError(format!(
+                        "failed waiting for consumer-serialized transfer: {error:?}"
+                    )),
+                    true,
+                ));
+            }
+        }
+        RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+        RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
+        slot.pending_timeline_value = 0;
+        self.next_slot_index = (slot_index + 1) % self.slots.len();
+        Ok(())
+    }
+
     pub fn completion_point<'a>(
         &'a self,
         ticket: &VulkanResidentTransferTicket,
@@ -288,7 +491,11 @@ impl VulkanResidentTransferStream {
         ticket: &VulkanResidentTransferTicket,
     ) -> Result<(), VulkanError> {
         self.validate_ticket(ticket)?;
-        self.wait_timeline_value(ticket.timeline_value)
+        if self.queue_is_distinct_from_consumer {
+            self.wait_timeline_value_on_consumer_queue(ticket.timeline_value)
+        } else {
+            self.wait_timeline_value(ticket.timeline_value)
+        }
     }
 
     fn validate_ticket(
@@ -333,6 +540,81 @@ impl VulkanResidentTransferStream {
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+
+    fn wait_timeline_value_on_consumer_queue(
+        &self,
+        value: u64,
+    ) -> Result<(), VulkanError> {
+        unsafe {
+            let fence = self
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to create resident transfer consumer fence: {error:?}"
+                    ))
+                })?;
+            let wait_infos = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.timeline.semaphore)
+                .value(value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let submit_result = self.device.queue_submit2(
+                self.consumer_queue,
+                &[vk::SubmitInfo2::default()
+                    .wait_semaphore_infos(&wait_infos)],
+                fence,
+            );
+            if let Err(error) = submit_result {
+                self.device.destroy_fence(fence, None);
+                return Err(VulkanError(format!(
+                    "failed to bridge resident transfer timeline value {value} to the compute queue: {error:?}"
+                )));
+            }
+            let wait_result =
+                self.device.wait_for_fences(&[fence], true, u64::MAX);
+            if wait_result.is_err() {
+                let _ = self.device.queue_wait_idle(self.consumer_queue);
+            }
+            self.device.destroy_fence(fence, None);
+            wait_result.map_err(|error| {
+                VulkanError(format!(
+                    "failed waiting for resident transfer timeline value {value} on the compute queue: {error:?}"
+                ))
+            })?;
+        }
+        RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+fn resident_transfer_visibility_barriers(
+    writes: &[VulkanResidentBufferWriteRange<'_>],
+) -> Vec<vk::BufferMemoryBarrier2<'static>> {
+    writes
+        .iter()
+        .map(|write| {
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER
+                        | vk::PipelineStageFlags2::COPY
+                        | vk::PipelineStageFlags2::DRAW_INDIRECT,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags2::SHADER_READ
+                        | vk::AccessFlags2::SHADER_WRITE
+                        | vk::AccessFlags2::TRANSFER_READ
+                        | vk::AccessFlags2::TRANSFER_WRITE
+                        | vk::AccessFlags2::INDIRECT_COMMAND_READ,
+                )
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(write.destination.buffer)
+                .offset(write.destination_offset as vk::DeviceSize)
+                .size(write.bytes.len() as vk::DeviceSize)
+        })
+        .collect()
 }
 
 impl Drop for VulkanResidentTransferStream {

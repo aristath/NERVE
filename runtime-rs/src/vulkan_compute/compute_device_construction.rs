@@ -131,4 +131,8 @@ impl VulkanComputeDevice {
     pub fn has_distinct_transfer_queue(&self) -> bool {
         self.transfer_queue_is_distinct
     }
+
+    pub fn supports_buffer_device_address(&self) -> bool {
+        self.buffer_device_address_supported
+    }
 }

@@ -373,6 +373,8 @@ impl VulkanComputeDeviceCatalog {
                 && physical_device_supports_opaque_fd_timeline_semaphore(instance, physical_device);
             let (timeline_semaphore_supported, synchronization2_supported) =
                 physical_device_supports_modern_submission(instance, physical_device);
+            let buffer_device_address_supported = enabled_shader_features
+                .contains(&VulkanShaderFeature::BufferDeviceAddress);
             if !timeline_semaphore_supported || !synchronization2_supported {
                 return Err(VulkanError(format!(
                     "Vulkan device {device_name:?} does not support the required timeline-semaphore and synchronization2 execution contract"
@@ -454,6 +456,9 @@ impl VulkanComputeDeviceCatalog {
                 vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
             let mut synchronization2_features =
                 vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
+            let mut buffer_device_address_features =
+                vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
+                    .buffer_device_address(buffer_device_address_supported);
             let mut extension_names = Vec::new();
             let mut enabled_device_extensions = BTreeSet::new();
             let mut device_info = vk::DeviceCreateInfo::default()
@@ -461,6 +466,7 @@ impl VulkanComputeDeviceCatalog {
                 .enabled_features(&enabled_core_features)
                 .push_next(&mut timeline_semaphore_features)
                 .push_next(&mut synchronization2_features)
+                .push_next(&mut buffer_device_address_features)
                 .push_next(&mut shader_float16_int8_features)
                 .push_next(&mut storage16_features)
                 .push_next(&mut storage8_features)
@@ -610,6 +616,7 @@ impl VulkanComputeDeviceCatalog {
                 queue,
                 transfer_queue,
                 transfer_queue_is_distinct,
+                buffer_device_address_supported,
                 api_version: physical_device_properties.api_version,
                 device_name,
                 pci_address,

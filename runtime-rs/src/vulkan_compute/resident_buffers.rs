@@ -31,6 +31,19 @@ impl VulkanResidentBuffer {
         self.byte_capacity as usize
     }
 
+    pub fn device_address(&self) -> Result<vk::DeviceAddress, VulkanError> {
+        self.device_address.ok_or_else(|| {
+            VulkanError(
+                "resident buffer was not created with device-address support"
+                    .to_string(),
+            )
+        })
+    }
+
+    pub fn is_device_addressable(&self) -> bool {
+        self.device_address.is_some()
+    }
+
     pub fn is_shared_host_backed(&self) -> bool {
         self._shared_host_allocation.is_some()
     }

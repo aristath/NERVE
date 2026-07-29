@@ -638,3 +638,121 @@ fn external_compiled_group_has_one_device_load_and_explicit_release() {
     assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 0);
     assert!(manager.directory().unwrap().is_empty());
 }
+
+#[test]
+fn external_compiled_group_uses_stable_address_slots_and_explicit_retirement() {
+    let package_root = match std::env::var("NERVE_TEST_COMPILED_PACKAGE_ROOT") {
+        Ok(path) => PathBuf::from(path),
+        Err(std::env::VarError::NotPresent) => {
+            eprintln!(
+                "skipping stable external device residency load: package root is not set"
+            );
+            return;
+        }
+        Err(error) => panic!("could not read external package root: {error}"),
+    };
+    let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+        .parse::<usize>()
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+    let manifest: VulkanResidentModelPackageManifest = serde_json::from_slice(
+        &fs::read(package_root.join("vulkan_resident_package.json")).unwrap(),
+    )
+    .unwrap();
+    let template = &manifest.resource_residency.partition_templates[0];
+    let resolved = ResolvedCompiledResourceGroup::Partition(
+        resolve_compiled_partition_group(
+            &package_root,
+            &manifest.resource_residency,
+            &template.id,
+            0,
+        )
+        .unwrap(),
+    );
+    let descriptor =
+        DeviceResourceGroupDescriptor::from_resolved(&resolved).unwrap();
+    let store = CompiledResourceBackingStore::new(
+        &package_root,
+        CompiledResourceBackingStoreLimits {
+            maximum_ranges_per_group: 256,
+            maximum_logical_bytes_per_group: 128 * 1024 * 1024,
+            maximum_coalesced_read_bytes: 32 * 1024 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let loaded = store.try_load(resolved).unwrap().wait().unwrap();
+    let device =
+        VulkanComputeDevice::new_for_physical_device_index(device_index)
+            .unwrap();
+    let mut transfer = device
+        .create_resident_transfer_stream(2, loaded.logical_byte_count)
+        .unwrap();
+    let alignment = 256usize;
+    let capacity = loaded
+        .logical_byte_count
+        .checked_add(
+            descriptor
+                .resources
+                .len()
+                .checked_mul(alignment - 1)
+                .unwrap(),
+        )
+        .unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(capacity, capacity, alignment)
+            .unwrap(),
+    )
+    .unwrap();
+    let mut table = VulkanStableResourceAddressTable::new(
+        &device,
+        &mut transfer,
+        descriptor.resources.len(),
+    )
+    .unwrap();
+    let slots = (0..descriptor.resources.len()).collect::<Vec<_>>();
+
+    let upload = upload_loaded_compiled_resource_group_to_stable_address_space(
+        &device,
+        &mut transfer,
+        &arena,
+        &mut table,
+        &descriptor,
+        &loaded,
+        &slots,
+        alignment,
+    )
+    .unwrap();
+
+    assert_eq!(upload.resident_group().descriptor(), &descriptor);
+    assert_eq!(upload.publications().len(), descriptor.resources.len());
+    for (slot, resident) in upload
+        .resident_group()
+        .resources()
+        .iter()
+        .enumerate()
+    {
+        let address = resident.payload().stable_device_address().unwrap();
+        assert_eq!(address % alignment as u64, 0);
+        assert_eq!(table.record(slot).unwrap().device_address, address);
+        assert_eq!(table.record(slot).unwrap().resident, 1);
+        let buffer_address =
+            resident.payload().buffer().device_address().unwrap();
+        assert_eq!(
+            resident.payload().ranges()[0].byte_offset as u64,
+            address - buffer_address
+        );
+    }
+    assert_eq!(
+        arena.stats().unwrap().active_allocation_count,
+        descriptor.resources.len()
+    );
+
+    upload.retire(&mut transfer, &mut table).unwrap();
+    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+    assert!(
+        (0..table.slot_count())
+            .all(|slot| table.record(slot).unwrap().resident == 0)
+    );
+}

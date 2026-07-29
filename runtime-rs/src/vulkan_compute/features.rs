@@ -73,6 +73,7 @@ pub enum VulkanShaderFeature {
     ShaderMixedFloatDotProductFloat8AccFloat32,
     VulkanMemoryModel,
     VulkanMemoryModelDeviceScope,
+    BufferDeviceAddress,
     CooperativeMatrix,
 }
 
@@ -152,6 +153,7 @@ impl VulkanShaderFeature {
             }
             Self::VulkanMemoryModel => "vulkan_memory_model",
             Self::VulkanMemoryModelDeviceScope => "vulkan_memory_model_device_scope",
+            Self::BufferDeviceAddress => "buffer_device_address",
             Self::CooperativeMatrix => "cooperative_matrix",
         }
     }

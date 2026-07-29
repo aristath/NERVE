@@ -32,7 +32,7 @@ void main() {
 
 #[cfg(test)]
 pub(crate) fn compile_shader_words_from_source_path(shader: &Path) -> Option<Vec<u32>> {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COMPILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -56,8 +56,6 @@ pub(crate) fn compile_shader_words_from_source_path(shader: &Path) -> Option<Vec
             .arg(shader)
             .arg("-o")
             .arg(&output)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .status()
             .ok()?
             .success()
@@ -67,8 +65,6 @@ pub(crate) fn compile_shader_words_from_source_path(shader: &Path) -> Option<Vec
             .arg(shader)
             .arg("-o")
             .arg(&output)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .status()
             .ok()?
             .success()
@@ -435,6 +431,21 @@ mod tests {
             BTreeSet::from([
                 VulkanShaderFeature::ShaderInt8,
                 VulkanShaderFeature::ShaderIntegerDotProduct,
+            ])
+        );
+    }
+
+    #[test]
+    fn spirv_contract_extracts_buffer_device_address_feature() {
+        let words = spirv_test_module(&[1, 11, 5347], 1);
+
+        let requirements = vulkan_spirv_requirements(&words).unwrap();
+
+        assert_eq!(
+            requirements.shader_features,
+            BTreeSet::from([
+                VulkanShaderFeature::ShaderInt64,
+                VulkanShaderFeature::BufferDeviceAddress,
             ])
         );
     }

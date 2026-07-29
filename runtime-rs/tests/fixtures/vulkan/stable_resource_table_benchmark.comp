@@ -1,0 +1,43 @@
+#version 460
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Resource {
+    uint values[];
+};
+
+struct ResourceRecord {
+    uint64_t device_address;
+    uint64_t byte_count;
+    uint64_t generation;
+    uint resident;
+    uint reserved;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer AddressTable {
+    ResourceRecord records[];
+} table;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Output {
+    uint values[];
+} output_data;
+
+layout(push_constant) uniform Parameters {
+    uint element_count;
+} parameters;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= parameters.element_count) {
+        return;
+    }
+    ResourceRecord record = table.records[0];
+    Resource source = Resource(record.device_address);
+    uint value = source.values[index];
+    for (uint iteration = 0; iteration < 8; ++iteration) {
+        value = value * 1664525u + 1013904223u;
+    }
+    output_data.values[index] = value;
+}

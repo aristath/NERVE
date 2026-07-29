@@ -57,12 +57,14 @@ use crate::vulkan_compute::{
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate,
     VulkanResidentTransferStream, VulkanShaderFeature, VulkanSharedResidentBufferRoute,
-    VulkanSubgroupOperation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
-    VulkanTimelineSemaphoreReplayState, record_vulkan_execution_quantum_measurement,
-    vulkan_spirv_requirements,
+    VulkanStableResourceAddressPublication, VulkanStableResourceAddressTable,
+    VulkanStableResourceAllocation, VulkanStableResourceArena, VulkanSubgroupOperation,
+    VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
+    record_vulkan_execution_quantum_measurement, vulkan_spirv_requirements,
 };
 #[cfg(test)]
 use crate::vulkan_compute::{
+    VulkanStableResourceArenaConfig, VulkanStableResourceArenaStats,
     reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 use crate::vulkan_distributed::{

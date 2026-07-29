@@ -248,6 +248,7 @@ fn vulkan_shader_feature_for_spirv_capability(capability: u32) -> Option<VulkanS
         6915 => VulkanShaderFeature::ShaderMixedFloatDotProductFloat8AccFloat32,
         5345 => VulkanShaderFeature::VulkanMemoryModel,
         5346 => VulkanShaderFeature::VulkanMemoryModelDeviceScope,
+        5347 => VulkanShaderFeature::BufferDeviceAddress,
         6022 => VulkanShaderFeature::CooperativeMatrix,
         _ => return None,
     })
@@ -422,12 +423,15 @@ fn physical_device_standard_shader_features(
     let mut storage8 = vk::PhysicalDevice8BitStorageFeatures::default();
     let mut integer_dot_product = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
     let mut memory_model = vk::PhysicalDeviceVulkanMemoryModelFeatures::default();
+    let mut buffer_device_address =
+        vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
     let mut features = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut float16_int8)
         .push_next(&mut storage16)
         .push_next(&mut storage8)
         .push_next(&mut integer_dot_product)
-        .push_next(&mut memory_model);
+        .push_next(&mut memory_model)
+        .push_next(&mut buffer_device_address);
     unsafe {
         instance.get_physical_device_features2(physical_device, &mut features);
     }
@@ -488,6 +492,10 @@ fn physical_device_standard_shader_features(
             VulkanShaderFeature::VulkanMemoryModelDeviceScope,
         );
     }
+    insert(
+        buffer_device_address.buffer_device_address,
+        VulkanShaderFeature::BufferDeviceAddress,
+    );
     supported
 }
 
