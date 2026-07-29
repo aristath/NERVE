@@ -108,6 +108,36 @@ def conversation_fixture() -> Json:
             "My knowledge cutoff depends on the model release.",
             "You asked about Greece.",
         ],
+        "semantic_expectations": {
+            "require_thinking": True,
+            "forbid_repeated_suffix": True,
+            "turns": [
+                {
+                    "required_terms": [],
+                    "conversation_memory": False,
+                },
+                {
+                    "required_terms": ["language model"],
+                    "conversation_memory": False,
+                },
+                {
+                    "required_terms": ["athens"],
+                    "conversation_memory": False,
+                },
+                {
+                    "required_terms": ["corinth"],
+                    "conversation_memory": False,
+                },
+                {
+                    "required_terms": ["cutoff"],
+                    "conversation_memory": False,
+                },
+                {
+                    "required_terms": ["greece"],
+                    "conversation_memory": True,
+                },
+            ],
+        },
     }
 
 

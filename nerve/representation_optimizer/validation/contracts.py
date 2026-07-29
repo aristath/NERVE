@@ -797,6 +797,7 @@ def validate_validation_check(document: Json) -> None:
             "controls",
             "seeds",
             "horizon",
+            "comparison",
             "metrics",
         },
         "validation check",
@@ -963,7 +964,50 @@ def validate_validation_check(document: Json) -> None:
             "semantic horizon completion requires a declared output "
             "allowance"
         )
-    _sorted_unique_strings(document["metrics"], "metrics", nonempty=True)
+    comparison = _object(document["comparison"], "comparison")
+    _fields(
+        comparison,
+        {"output_mode", "state_mode"},
+        "comparison",
+    )
+    output_mode = comparison["output_mode"]
+    state_mode = comparison["state_mode"]
+    if output_mode not in {"exact_digest", "fixture_semantics"}:
+        raise ValidationContractError(
+            "comparison.output_mode is unsupported"
+        )
+    if state_mode not in {"exact_digest", "trajectory_local"}:
+        raise ValidationContractError(
+            "comparison.state_mode is unsupported"
+        )
+    semantic_comparison = (
+        output_mode == "fixture_semantics"
+        or state_mode == "trajectory_local"
+    )
+    if semantic_comparison and (
+        output_mode != "fixture_semantics"
+        or state_mode != "trajectory_local"
+        or completion_condition
+        != "semantic_stop_or_allowance_per_turn"
+        or regime["execution_scope"] != "whole_model"
+        or document["kind"] not in {
+            "free_running",
+            "reasoning_conversation",
+        }
+    ):
+        raise ValidationContractError(
+            "trajectory-local fixture semantics are valid only for "
+            "free-running whole-model conversations"
+        )
+    metrics = _sorted_unique_strings(
+        document["metrics"],
+        "metrics",
+        nonempty=True,
+    )
+    if semantic_comparison and "semantic_consistency" not in metrics:
+        raise ValidationContractError(
+            "fixture-semantic comparison requires semantic_consistency"
+        )
     expected = validation_check_id(document)
     if document["check_id"] != expected:
         raise ValidationContractError(

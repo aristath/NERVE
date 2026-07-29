@@ -37,6 +37,10 @@ from nerve.representation_optimizer.validation.contracts import (
 from nerve.representation_optimizer.validation.comparison import (
     compare_exact_role_results,
 )
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    compare_semantic_conversations,
+    validate_semantic_expectations,
+)
 from nerve.representation_optimizer.validation.executor_protocol import (
     VALIDATION_EXECUTOR_COMMAND_SCHEMA,
     validate_validation_execution_payload,
@@ -390,6 +394,35 @@ class ResidentWholeModelValidationBackend:
                 "approximate whole-model validation requires a declared "
                 "metric comparator"
             )
+        comparison = request["check"]["comparison"]
+        if comparison == {
+            "output_mode": "fixture_semantics",
+            "state_mode": "trajectory_local",
+        }:
+            fixture = self._conversation_fixture_document(
+                request["candidate_id"],
+                request["check"]["input"]["path"],
+            )
+            return compare_semantic_conversations(
+                request,
+                fixture,
+                self._trace_document(
+                    reference_result,
+                    "conversation.json",
+                ),
+                self._trace_document(
+                    candidate_result,
+                    "conversation.json",
+                ),
+            )
+        if comparison != {
+            "output_mode": "exact_digest",
+            "state_mode": "exact_digest",
+        }:
+            raise ModelCompileError(
+                "whole-model validation received an unsupported comparison "
+                "contract"
+            )
         return compare_exact_role_results(
             request,
             reference_result,
@@ -413,6 +446,20 @@ class ResidentWholeModelValidationBackend:
         candidate_id: str,
         relative_path: str,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        document = self._conversation_fixture_document(
+            candidate_id,
+            relative_path,
+        )
+        return (
+            tuple(document["turns"]),
+            tuple(document["teacher_forced_assistant_turns"]),
+        )
+
+    def _conversation_fixture_document(
+        self,
+        candidate_id: str,
+        relative_path: str,
+    ) -> Json:
         candidate = self.staged_candidate_loader(
             self.candidate_workspace,
             candidate_id,
@@ -462,10 +509,46 @@ class ResidentWholeModelValidationBackend:
             raise ModelCompileError(
                 "conversation validation fixture is invalid"
             )
-        return (
-            tuple(document["turns"]),
-            tuple(document["teacher_forced_assistant_turns"]),
-        )
+        if document.get("semantic_expectations") is not None:
+            validate_semantic_expectations(
+                document,
+                turn_count=len(document["turns"]),
+            )
+        return document
+
+    def _trace_document(
+        self,
+        result: Json,
+        filename: str,
+    ) -> Json:
+        matches = [
+            trace["path"]
+            for trace in result["traces"]
+            if trace["path"].endswith(f"/{filename}")
+        ]
+        if len(matches) != 1:
+            raise ModelCompileError(
+                f"whole-model validation result does not contain one "
+                f"{filename!r} trace"
+            )
+        captured = bytearray()
+        for chunk in self.trace_store.iter_file(matches[0]):
+            captured.extend(chunk)
+            if len(captured) > 16 * 1024 * 1024:
+                raise ModelCompileError(
+                    "whole-model validation trace exceeds 16 MiB"
+                )
+        try:
+            document = json.loads(captured)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ModelCompileError(
+                "whole-model validation trace is not JSON"
+            ) from error
+        if not isinstance(document, dict):
+            raise ModelCompileError(
+                "whole-model validation trace is not an object"
+            )
+        return document
 
 
 class ResidentWholeModelValidationSession:

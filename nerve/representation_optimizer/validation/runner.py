@@ -304,7 +304,13 @@ def _behavioral_rejection(
         )
     behavioral = plan.behavioral_contract
     if behavioral["mode"] == "exact":
-        for field in ("output_digest", "state_digest"):
+        comparison = check["comparison"]
+        digest_fields = []
+        if comparison["output_mode"] == "exact_digest":
+            digest_fields.append("output_digest")
+        if comparison["state_mode"] == "exact_digest":
+            digest_fields.append("state_digest")
+        for field in digest_fields:
             if (
                 observation["reference"][field]
                 != observation["candidate"][field]

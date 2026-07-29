@@ -456,8 +456,11 @@ def head_norm_validation_requirements(
             minimum_steps=None,
             output_allowance=65_536,
             output_allowance_basis=output_basis,
+            comparison={
+                "output_mode": "fixture_semantics",
+                "state_mode": "trajectory_local",
+            },
             metrics=(
-                "token_exact_match",
                 "semantic_consistency",
                 "conversation_memory",
             ),

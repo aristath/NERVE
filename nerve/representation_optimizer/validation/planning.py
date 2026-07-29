@@ -81,6 +81,7 @@ def create_validation_check(
     output_allowance: int | None,
     output_allowance_basis: Json,
     metrics: Iterable[str],
+    comparison: Json | None = None,
 ) -> Json:
     document = {
         "check_id": "",
@@ -111,6 +112,14 @@ def create_validation_check(
             "output_allowance": output_allowance,
             "output_allowance_basis": dict(output_allowance_basis),
         },
+        "comparison": (
+            {
+                "output_mode": "exact_digest",
+                "state_mode": "exact_digest",
+            }
+            if comparison is None
+            else dict(comparison)
+        ),
         "metrics": sorted(set(metrics)),
     }
     document["check_id"] = validation_check_id(document)

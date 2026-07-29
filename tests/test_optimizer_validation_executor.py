@@ -544,6 +544,132 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     assert "VK_ICD_FILENAMES" not in captured_environment
 
 
+def test_whole_model_validation_compares_free_running_traces_semantically(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    manifest = package / "manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    candidate = tmp_path / "candidate"
+    fixtures = candidate / "fixtures"
+    fixtures.mkdir(parents=True)
+    fixture = {
+        "schema": "nerve.optimizer.validation_conversation.v1",
+        "turns": [
+            "what is the capital of Greece?",
+            "Which country did I ask about?",
+        ],
+        "teacher_forced_assistant_turns": [
+            "Athens.",
+            "Greece.",
+        ],
+        "semantic_expectations": {
+            "require_thinking": True,
+            "forbid_repeated_suffix": True,
+            "turns": [
+                {
+                    "required_terms": ["athens"],
+                    "conversation_memory": False,
+                },
+                {
+                    "required_terms": ["greece"],
+                    "conversation_memory": True,
+                },
+            ],
+        },
+    }
+    (fixtures / "conversation.json").write_text(
+        json.dumps(fixture),
+        encoding="utf-8",
+    )
+    candidate_id = "candidate_" + "b" * 32
+
+    def loader(
+        workspace_root: Path,
+        requested_candidate_id: str,
+        package_dir: Path,
+    ) -> object:
+        assert requested_candidate_id == candidate_id
+        return SimpleNamespace(path=candidate.resolve())
+
+    trace_store = ExecutorArtifactStore(
+        tmp_path / "traces",
+        label="validation trace",
+        create=True,
+    )
+    reference_trace = {
+        "turns": [
+            {
+                "user": fixture["turns"][0],
+                "assistant": "reasoning</think>\n\nAthens is the capital.",
+            },
+            {
+                "user": fixture["turns"][1],
+                "assistant": "reasoning</think>\n\nYou asked about Greece.",
+            },
+        ]
+    }
+    candidate_trace = {
+        "turns": [
+            {
+                "user": fixture["turns"][0],
+                "assistant": "different reasoning</think>\n\nThe answer is Athens.",
+            },
+            {
+                "user": fixture["turns"][1],
+                "assistant": "different reasoning</think>\n\nThe country was Greece.",
+            },
+        ]
+    }
+    reference = trace_store.publish(
+        "reference/conversation.json",
+        json.dumps(reference_trace).encode(),
+    )
+    candidate_result = trace_store.publish(
+        "candidate/conversation.json",
+        json.dumps(candidate_trace).encode(),
+    )
+    backend = ResidentWholeModelValidationBackend(
+        package_manifest=manifest,
+        candidate_workspace=tmp_path / "workspace",
+        trace_store=trace_store,
+        executor_command=("unused",),
+        vulkan_driver_files=(),
+        executor_factory=lambda command, environment: (
+            FixtureWholeModelExecutor()
+        ),
+        staged_candidate_loader=loader,  # type: ignore[arg-type]
+        run_nonce="fixture",
+    )
+
+    comparison = backend.compare_results(
+        {
+            "candidate_id": candidate_id,
+            "check": {
+                "input": {"path": "fixtures/conversation.json"},
+                "comparison": {
+                    "output_mode": "fixture_semantics",
+                    "state_mode": "trajectory_local",
+                },
+                "metrics": [
+                    "conversation_memory",
+                    "semantic_consistency",
+                ],
+            },
+            "behavioral_contract": {"mode": "exact"},
+        },
+        {"traces": [reference]},
+        {"traces": [candidate_result]},
+    )
+
+    assert comparison["diagnostics"] == []
+    assert all(
+        metric["error"] == 0.0
+        for metric in comparison["metrics"]
+    )
+
+
 def _digest(payload: bytes) -> str:
     return staged_artifact_digest(payload)
 
