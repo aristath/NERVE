@@ -1,0 +1,347 @@
+pub struct VulkanResidentTransferStream {
+    device: ash::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    slots: Vec<VulkanResidentTransferSlot>,
+    timeline: VulkanTimelineSemaphore,
+    next_timeline_value: u64,
+    next_slot_index: usize,
+    staging_byte_capacity: usize,
+}
+
+struct VulkanResidentTransferSlot {
+    staging: VulkanResidentBuffer,
+    command_buffer: vk::CommandBuffer,
+    pending_timeline_value: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanResidentTransferTicket {
+    timeline_identity: u64,
+    timeline_value: u64,
+    uploaded_bytes: usize,
+    copy_count: usize,
+}
+
+impl VulkanResidentTransferTicket {
+    pub fn timeline_value(&self) -> u64 {
+        self.timeline_value
+    }
+
+    pub fn uploaded_bytes(&self) -> usize {
+        self.uploaded_bytes
+    }
+
+    pub fn copy_count(&self) -> usize {
+        self.copy_count
+    }
+}
+
+impl VulkanComputeDevice {
+    pub fn create_resident_transfer_stream(
+        &self,
+        staging_slot_count: usize,
+        staging_byte_capacity: usize,
+    ) -> Result<VulkanResidentTransferStream, VulkanError> {
+        if staging_slot_count == 0 {
+            return Err(VulkanError(
+                "resident transfer stream must have at least one staging slot".to_string(),
+            ));
+        }
+        if staging_byte_capacity == 0 {
+            return Err(VulkanError(
+                "resident transfer staging capacity must not be zero".to_string(),
+            ));
+        }
+        let command_buffer_count = u32::try_from(staging_slot_count).map_err(|_| {
+            VulkanError("resident transfer staging slot count exceeds u32".to_string())
+        })?;
+        unsafe {
+            let command_pool = self
+                .device
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default()
+                        .queue_family_index(self.queue_family_index)
+                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                    None,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to create resident transfer command pool: {error:?}"
+                    ))
+                })?;
+            let command_buffers = match self.device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(command_buffer_count),
+            ) {
+                Ok(command_buffers) => command_buffers,
+                Err(error) => {
+                    self.device.destroy_command_pool(command_pool, None);
+                    return Err(VulkanError(format!(
+                        "failed to allocate resident transfer command buffers: {error:?}"
+                    )));
+                }
+            };
+            let timeline = match self.create_timeline_semaphore(0) {
+                Ok(timeline) => timeline,
+                Err(error) => {
+                    self.device.destroy_command_pool(command_pool, None);
+                    return Err(error);
+                }
+            };
+            let mut slots = Vec::with_capacity(staging_slot_count);
+            for command_buffer in command_buffers {
+                let mut staging =
+                    match self.create_host_visible_resident_buffer(staging_byte_capacity) {
+                        Ok(staging) => staging,
+                        Err(error) => {
+                            self.device.destroy_command_pool(command_pool, None);
+                            return Err(error);
+                        }
+                    };
+                if let Err(error) = staging.persistently_map() {
+                    self.device.destroy_command_pool(command_pool, None);
+                    return Err(error);
+                }
+                slots.push(VulkanResidentTransferSlot {
+                    staging,
+                    command_buffer,
+                    pending_timeline_value: 0,
+                });
+            }
+            Ok(VulkanResidentTransferStream {
+                device: self.device.clone(),
+                queue: self.transfer_queue,
+                command_pool,
+                slots,
+                timeline,
+                next_timeline_value: 0,
+                next_slot_index: 0,
+                staging_byte_capacity,
+            })
+        }
+    }
+}
+
+impl VulkanResidentTransferStream {
+    pub fn staging_slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn staging_byte_capacity(&self) -> usize {
+        self.staging_byte_capacity
+    }
+
+    pub fn outstanding_transfer_count(&self) -> Result<usize, VulkanError> {
+        let completed = self.timeline_value()?;
+        Ok(self
+            .slots
+            .iter()
+            .filter(|slot| slot.pending_timeline_value > completed)
+            .count())
+    }
+
+    pub fn submit(
+        &mut self,
+        writes: &[VulkanResidentBufferWriteRange<'_>],
+    ) -> Result<VulkanResidentTransferTicket, VulkanError> {
+        if writes.is_empty() {
+            return Err(VulkanError(
+                "resident transfer submission must contain at least one write".to_string(),
+            ));
+        }
+        let mut packed_offsets = Vec::with_capacity(writes.len());
+        let packed_byte_count = writes.iter().try_fold(0usize, |offset, write| {
+            if write.destination.device.handle() != self.device.handle() {
+                return Err(VulkanError(
+                    "resident transfer destination belongs to another logical device".to_string(),
+                ));
+            }
+            validate_resident_transfer_range(write.destination_offset, write.bytes.len())?;
+            write
+                .destination
+                .byte_range(write.destination_offset, write.bytes.len())?;
+            let end = offset.checked_add(write.bytes.len()).ok_or_else(|| {
+                VulkanError("resident transfer packed byte count overflowed".to_string())
+            })?;
+            packed_offsets.push(offset);
+            Ok(end)
+        })?;
+        if packed_byte_count > self.staging_byte_capacity {
+            return Err(VulkanError(format!(
+                "resident transfer needs {packed_byte_count} staging bytes but the bounded slot capacity is {}",
+                self.staging_byte_capacity
+            )));
+        }
+
+        let slot_index = self.next_slot_index;
+        let pending_value = self.slots[slot_index].pending_timeline_value;
+        if pending_value != 0 {
+            self.wait_timeline_value(pending_value)?;
+        }
+        let timeline_value = self
+            .next_timeline_value
+            .checked_add(1)
+            .ok_or_else(|| VulkanError("resident transfer timeline exhausted".to_string()))?;
+
+        let slot = &mut self.slots[slot_index];
+        for (write, source_offset) in writes.iter().zip(&packed_offsets) {
+            slot.staging.write_bytes_at(*source_offset, write.bytes)?;
+        }
+
+        unsafe {
+            self.device
+                .reset_command_buffer(
+                    slot.command_buffer,
+                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to reset resident transfer command buffer: {error:?}"
+                    ))
+                })?;
+            self.device
+                .begin_command_buffer(
+                    slot.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to begin resident transfer command buffer: {error:?}"
+                    ))
+                })?;
+            for (write, source_offset) in writes.iter().zip(&packed_offsets) {
+                self.device.cmd_copy_buffer(
+                    slot.command_buffer,
+                    slot.staging.buffer,
+                    write.destination.buffer,
+                    &[vk::BufferCopy {
+                        src_offset: *source_offset as vk::DeviceSize,
+                        dst_offset: write.destination_offset as vk::DeviceSize,
+                        size: write.bytes.len() as vk::DeviceSize,
+                    }],
+                );
+            }
+            self.device
+                .end_command_buffer(slot.command_buffer)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to end resident transfer command buffer: {error:?}"
+                    ))
+                })?;
+            let command_infos = [vk::CommandBufferSubmitInfo::default()
+                .command_buffer(slot.command_buffer)];
+            let signal_infos = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.timeline.semaphore)
+                .value(timeline_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)];
+            self.device
+                .queue_submit2(
+                    self.queue,
+                    &[vk::SubmitInfo2::default()
+                        .command_buffer_infos(&command_infos)
+                        .signal_semaphore_infos(&signal_infos)],
+                    vk::Fence::null(),
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to submit resident transfer: {error:?}"
+                    ))
+                })?;
+        }
+        RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
+        slot.pending_timeline_value = timeline_value;
+        self.next_timeline_value = timeline_value;
+        self.next_slot_index = (slot_index + 1) % self.slots.len();
+        Ok(VulkanResidentTransferTicket {
+            timeline_identity: self.timeline.semaphore.as_raw(),
+            timeline_value,
+            uploaded_bytes: packed_byte_count,
+            copy_count: writes.len(),
+        })
+    }
+
+    pub fn completion_point<'a>(
+        &'a self,
+        ticket: &VulkanResidentTransferTicket,
+    ) -> Result<VulkanTimelineSemaphorePoint<'a>, VulkanError> {
+        self.validate_ticket(ticket)?;
+        Ok(VulkanTimelineSemaphorePoint::new(
+            &self.timeline,
+            ticket.timeline_value,
+        ))
+    }
+
+    pub fn is_complete(
+        &self,
+        ticket: &VulkanResidentTransferTicket,
+    ) -> Result<bool, VulkanError> {
+        self.validate_ticket(ticket)?;
+        Ok(self.timeline_value()? >= ticket.timeline_value)
+    }
+
+    pub fn wait(
+        &self,
+        ticket: &VulkanResidentTransferTicket,
+    ) -> Result<(), VulkanError> {
+        self.validate_ticket(ticket)?;
+        self.wait_timeline_value(ticket.timeline_value)
+    }
+
+    fn validate_ticket(
+        &self,
+        ticket: &VulkanResidentTransferTicket,
+    ) -> Result<(), VulkanError> {
+        if ticket.timeline_identity != self.timeline.semaphore.as_raw()
+            || ticket.timeline_value == 0
+            || ticket.timeline_value > self.next_timeline_value
+        {
+            return Err(VulkanError(
+                "resident transfer ticket does not belong to this stream".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn timeline_value(&self) -> Result<u64, VulkanError> {
+        unsafe { self.device.get_semaphore_counter_value(self.timeline.semaphore) }.map_err(
+            |error| {
+                VulkanError(format!(
+                    "failed to read resident transfer timeline: {error:?}"
+                ))
+            },
+        )
+    }
+
+    fn wait_timeline_value(&self, value: u64) -> Result<(), VulkanError> {
+        unsafe {
+            self.device.wait_semaphores(
+                &vk::SemaphoreWaitInfo::default()
+                    .semaphores(&[self.timeline.semaphore])
+                    .values(&[value]),
+                u64::MAX,
+            )
+        }
+        .map_err(|error| {
+            VulkanError(format!(
+                "failed waiting for resident transfer timeline value {value}: {error:?}"
+            ))
+        })?;
+        RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl Drop for VulkanResidentTransferStream {
+    fn drop(&mut self) {
+        if self.next_timeline_value != 0 {
+            let _ = self.wait_timeline_value(self.next_timeline_value);
+        }
+        unsafe {
+            self.device.destroy_command_pool(self.command_pool, None);
+        }
+    }
+}

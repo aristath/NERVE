@@ -255,7 +255,20 @@ impl VulkanComputeDeviceCatalog {
                     permitted_device.physical_device_index,
                 )?;
 
-            let queue_priorities = [1.0_f32];
+            let queue_family = instance
+                .get_physical_device_queue_family_properties(physical_device)
+                .get(queue_family_index as usize)
+                .copied()
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "selected compute queue family {queue_family_index} disappeared"
+                    ))
+                })?;
+            let queue_priorities = if queue_family.queue_count >= 2 {
+                vec![1.0_f32, 1.0_f32]
+            } else {
+                vec![1.0_f32]
+            };
             let queue_info = [vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(queue_family_index)
                 .queue_priorities(&queue_priorities)];
@@ -572,6 +585,11 @@ impl VulkanComputeDeviceCatalog {
                     VulkanError(format!("failed to create Vulkan device: {error:?}"))
                 })?;
             let queue = device.get_device_queue(queue_family_index, 0);
+            let transfer_queue_is_distinct = queue_priorities.len() >= 2;
+            let transfer_queue = device.get_device_queue(
+                queue_family_index,
+                u32::from(transfer_queue_is_distinct),
+            );
             let physical_device_properties =
                 instance.get_physical_device_properties(physical_device);
             let limits = physical_device_properties.limits;
@@ -590,6 +608,8 @@ impl VulkanComputeDeviceCatalog {
                 device,
                 queue_family_index,
                 queue,
+                transfer_queue,
+                transfer_queue_is_distinct,
                 api_version: physical_device_properties.api_version,
                 device_name,
                 pci_address,

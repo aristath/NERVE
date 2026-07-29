@@ -127,4 +127,8 @@ impl VulkanComputeDevice {
     pub fn shares_logical_device_with(&self, other: &Self) -> bool {
         self.device.handle() == other.device.handle()
     }
+
+    pub fn has_distinct_transfer_queue(&self) -> bool {
+        self.transfer_queue_is_distinct
+    }
 }

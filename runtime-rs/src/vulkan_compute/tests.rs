@@ -1493,6 +1493,87 @@ mod tests {
     }
 
     #[test]
+    fn resident_transfer_stream_bounds_staging_and_completes_with_a_timeline() {
+        let device = match selected_test_vulkan_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping Vulkan smoke: {error}");
+                return;
+            }
+        };
+        const ROUTER_BYTES: usize = 256;
+        const SCALE_BYTES: usize = 128;
+        const UP_BYTES: usize = 2 * 1024 * 1024;
+        const DOWN_BYTES: usize = 1024 * 1024;
+        const GROUP_BYTES: usize = ROUTER_BYTES + SCALE_BYTES + UP_BYTES + DOWN_BYTES;
+        let router = device.create_resident_buffer(ROUTER_BYTES).unwrap();
+        let scale = device.create_resident_buffer(SCALE_BYTES).unwrap();
+        let up = device.create_resident_buffer(UP_BYTES).unwrap();
+        let down = device.create_resident_buffer(DOWN_BYTES).unwrap();
+        let first_router = vec![1u8; ROUTER_BYTES];
+        let first_scale = vec![2u8; SCALE_BYTES];
+        let first_up = vec![3u8; UP_BYTES];
+        let first_down = vec![4u8; DOWN_BYTES];
+        let second_router = vec![5u8; ROUTER_BYTES];
+        let second_scale = vec![6u8; SCALE_BYTES];
+        let second_up = vec![7u8; UP_BYTES];
+        let second_down = vec![8u8; DOWN_BYTES];
+        let first = [
+            VulkanResidentBufferWriteRange::new(&router, 0, &first_router).unwrap(),
+            VulkanResidentBufferWriteRange::new(&scale, 0, &first_scale).unwrap(),
+            VulkanResidentBufferWriteRange::new(&up, 0, &first_up).unwrap(),
+            VulkanResidentBufferWriteRange::new(&down, 0, &first_down).unwrap(),
+        ];
+        let second = [
+            VulkanResidentBufferWriteRange::new(&router, 0, &second_router).unwrap(),
+            VulkanResidentBufferWriteRange::new(&scale, 0, &second_scale).unwrap(),
+            VulkanResidentBufferWriteRange::new(&up, 0, &second_up).unwrap(),
+            VulkanResidentBufferWriteRange::new(&down, 0, &second_down).unwrap(),
+        ];
+        let mut undersized = device
+            .create_resident_transfer_stream(1, GROUP_BYTES - 4)
+            .unwrap();
+        assert!(
+            undersized
+                .submit(&first)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded slot capacity")
+        );
+        drop(undersized);
+        let mut stream = device
+            .create_resident_transfer_stream(2, GROUP_BYTES)
+            .unwrap();
+        reset_vulkan_resident_execution_counters();
+
+        let first_ticket = stream.submit(&first).unwrap();
+        let second_ticket = stream.submit(&second).unwrap();
+        let third_ticket = stream.submit(&first).unwrap();
+
+        assert_eq!(first_ticket.uploaded_bytes(), GROUP_BYTES);
+        assert_eq!(first_ticket.copy_count(), 4);
+        assert_eq!(second_ticket.timeline_value(), 2);
+        assert_eq!(third_ticket.timeline_value(), 3);
+        assert!(stream.outstanding_transfer_count().unwrap() <= 2);
+        assert_eq!(
+            stream
+                .completion_point(&third_ticket)
+                .unwrap()
+                .value,
+            third_ticket.timeline_value()
+        );
+        stream.wait(&third_ticket).unwrap();
+        assert!(stream.is_complete(&third_ticket).unwrap());
+        assert_eq!(router.read_bytes(ROUTER_BYTES).unwrap(), first_router);
+        assert_eq!(scale.read_bytes(SCALE_BYTES).unwrap(), first_scale);
+        assert_eq!(up.read_bytes(UP_BYTES).unwrap(), first_up);
+        assert_eq!(down.read_bytes(DOWN_BYTES).unwrap(), first_down);
+        let counters = vulkan_resident_execution_counters();
+        assert_eq!(counters.resident_copy_queue_submits, 3);
+        assert!(counters.resident_copy_waits >= 2);
+    }
+
+    #[test]
     fn resident_byte_copy_binding_can_be_reused() {
         let device = match selected_test_vulkan_device() {
             Ok(device) => device,

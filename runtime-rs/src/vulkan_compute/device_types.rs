@@ -4,6 +4,8 @@ pub struct VulkanComputeDevice {
     device: ash::Device,
     queue_family_index: u32,
     queue: vk::Queue,
+    transfer_queue: vk::Queue,
+    transfer_queue_is_distinct: bool,
     api_version: u32,
     device_name: String,
     pci_address: Option<String>,
