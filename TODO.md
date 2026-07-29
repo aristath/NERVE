@@ -74,22 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 4. Make compiled packages range-addressable and independently verifiable
-
-- Preserve efficient large backing files; do not create thousands of tiny
-  expert files.
-- Record exact byte ranges and alignment for every residency unit and atomic
-  group.
-- Add per-range or per-chunk integrity evidence so one unit can be verified
-  without reading or hashing an entire tensor bank.
-- Extend package validation to prove bounds, non-overlap rules, complete atomic
-  membership, digest coverage, and relocatability.
-- Ensure eager execution can consume the new package contract without a legacy
-  fallback.
-
-Completion requires corruption, truncation, relocation, and malformed-layout
-tests plus successful eager inference from a newly compiled package.
-
 ### 5. Separate initial, current, and maximum residency planning
 
 - Replace the assumption that every permanent parameter buffer is allocated and
