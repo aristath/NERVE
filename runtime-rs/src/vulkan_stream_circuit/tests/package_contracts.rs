@@ -1,4 +1,126 @@
 #[test]
+fn resource_residency_state_machine_requires_explicit_terminal_clear() {
+    assert!(
+        ResourceResidencyState::Absent
+            .can_transition_to(ResourceResidencyState::Requested, false)
+    );
+    assert!(
+        ResourceResidencyState::Requested
+            .can_transition_to(ResourceResidencyState::Loading, false)
+    );
+    assert!(
+        ResourceResidencyState::Loading
+            .can_transition_to(ResourceResidencyState::Resident, false)
+    );
+    assert!(
+        ResourceResidencyState::Loading
+            .can_transition_to(ResourceResidencyState::Failed, false)
+    );
+    assert!(
+        !ResourceResidencyState::Failed
+            .can_transition_to(ResourceResidencyState::Absent, false)
+    );
+    assert!(
+        ResourceResidencyState::Failed
+            .can_transition_to(ResourceResidencyState::Absent, true)
+    );
+    assert!(
+        !ResourceResidencyState::Resident
+            .can_transition_to(ResourceResidencyState::Absent, false)
+    );
+    assert!(
+        ResourceResidencyState::Resident
+            .can_transition_to(ResourceResidencyState::Absent, true)
+    );
+}
+
+#[test]
+fn partition_resource_identity_matches_the_compiler_contract() {
+    let seed =
+        "sha256:97ff4476ecb38b87d8028c78176dca9717daa887124aa1f3fed3af874fc69014";
+
+    assert_eq!(
+        derived_partition_resource_id(seed, 42).unwrap(),
+        "sha256:1d832ad1c8d623ce5d095228b4e1ada1b5e4e578fdf5b37815c61a59e3c1af2f",
+    );
+}
+
+#[test]
+fn concrete_resource_identity_does_not_depend_on_package_paths() {
+    let manifest = fixture_model_package_manifest();
+    let resource = manifest.resource_residency.resources[0].clone();
+    let mut relocated = resource.clone();
+    relocated.ranges[0].artifact_path =
+        "relocated/renamed-immutable-artifact.bin".to_string();
+    relocated.ranges[0].byte_offset += relocated.ranges[0].alignment_bytes;
+
+    assert_eq!(
+        compiled_resource_identity(&resource).unwrap(),
+        compiled_resource_identity(&relocated).unwrap(),
+    );
+}
+
+#[test]
+fn package_loader_rejects_unknown_resource_residency_contracts() {
+    let source_manifest_path = fixture_model_package_manifest_path();
+    let source_manifest = fixture_model_package_manifest();
+    let source_root = source_manifest_path.parent().unwrap();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nerve-resource-contract-version-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    copy_package_integrity_artifacts(source_root, &root, &source_manifest);
+    let raw_manifest: Value =
+        serde_json::from_slice(&std::fs::read(source_manifest_path).unwrap()).unwrap();
+    let manifest_path = root.join("vulkan_resident_package.json");
+
+    let mut unknown_schema = raw_manifest.clone();
+    unknown_schema["resource_residency"]["schema"] =
+        Value::from("nerve.compiled_resource_residency.v99");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&unknown_schema).unwrap(),
+    )
+    .unwrap();
+    let error = VulkanResidentModelPackageManifest::from_json_file(&manifest_path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("resource residency header"));
+
+    let mut unknown_nested_field = raw_manifest.clone();
+    unknown_nested_field["resource_residency"]["resources"][0]["unknown"] =
+        Value::from(true);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&unknown_nested_field).unwrap(),
+    )
+    .unwrap();
+    let error = VulkanResidentModelPackageManifest::from_json_file(&manifest_path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown field"));
+
+    let mut unknown_field = raw_manifest;
+    unknown_field["resource_residency"]["unknown"] = Value::from(true);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&unknown_field).unwrap(),
+    )
+    .unwrap();
+    let error = VulkanResidentModelPackageManifest::from_json_file(&manifest_path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown field"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn package_loader_rejects_shallow_and_stale_behavioral_evidence() {
     let source_manifest_path = fixture_model_package_manifest_path();
     let source_manifest = fixture_model_package_manifest();

@@ -23,6 +23,13 @@ from nerve.model_package import (
 )
 from nerve.model_package_validation import valid_batch_stage
 from nerve.representation_optimizer.stage import initialize_optimizer_stage
+from nerve.resource_residency import (
+    RESOURCE_IDENTITY_ALGORITHM,
+    RESOURCE_RESIDENCY_SCHEMA,
+    RESOURCE_STATE_MACHINE_SCHEMA,
+    atomic_group_identity,
+    resource_identity,
+)
 
 
 def minimal_package(root: Path) -> dict[str, object]:
@@ -433,6 +440,69 @@ def minimal_package(root: Path) -> dict[str, object]:
             }
         ],
     }
+    resource = {
+        "id": "",
+        "lifetime": "always_resident",
+        "ranges": [
+            {
+                "artifact_path": "weights/model.safetensors",
+                "byte_offset": 0,
+                "byte_count": 7,
+                "alignment_bytes": 1,
+                "integrity": {
+                    "algorithm": "sha256",
+                    "digest": sha256(b"weights").hexdigest(),
+                },
+            }
+        ],
+        "dependencies": [],
+        "compatibility": {
+            "device_api": "vulkan",
+            "storage_class": "storage_buffer",
+            "read_only": True,
+            "required_features": [],
+        },
+    }
+    resource["id"] = resource_identity(resource)
+    atomic_group = {
+        "id": "",
+        "lifetime": "always_resident",
+        "resource_ids": [resource["id"]],
+        "dependencies": [],
+    }
+    atomic_group["id"] = atomic_group_identity(atomic_group)
+    manifest["resource_residency"] = {
+        "schema": RESOURCE_RESIDENCY_SCHEMA,
+        "identity_algorithm": RESOURCE_IDENTITY_ALGORITHM,
+        "state_machine_schema": RESOURCE_STATE_MACHINE_SCHEMA,
+        "supported_policies": ["demand_retained", "eager"],
+        "resources": [resource],
+        "atomic_groups": [atomic_group],
+        "partition_templates": [],
+        "bindings": [
+            {
+                "execution_scope": "target",
+                "component_id": component_id,
+                "node_id": node["id"],
+                "parameter_id": parameter_id,
+                "atomic_group_id": atomic_group["id"],
+            }
+            for component_id, candidate in circuits.items()
+            for node in candidate["nodes"]
+            for parameter_id in node.get("params", [])
+        ],
+        "selectors": [],
+        "checkpoints": [],
+    }
+    manifest["resource_residency"]["bindings"].sort(
+        key=lambda binding: (
+            binding["execution_scope"],
+            binding["component_id"],
+            binding["node_id"],
+            binding["parameter_id"],
+            binding["atomic_group_id"],
+        )
+    )
     lowered_index_path = root / "lowered" / "execution_graph.circuits.json"
     lowered_index_path.parent.mkdir(parents=True)
     lowered_circuits = []
@@ -485,7 +555,7 @@ def test_package_integrity_accepts_a_complete_compiler_boundary(tmp_path: Path) 
         ("config", "missing required artifact"),
         ("behavioral", "missing behavioral validation artifact"),
         ("tokenizer", "missing tokenizer artifact"),
-        ("tensor", "references missing artifact"),
+        ("tensor", "cannot be inspected"),
         ("tensor_digest", "has no valid data SHA-256"),
         ("shader", "not valid SPIR-V"),
         ("shader_digest", "does not match its integrity contract"),

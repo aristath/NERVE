@@ -31,9 +31,10 @@ impl VulkanResidentModelPackageManifest {
         let manifest: Self = serde_json::from_value(raw_manifest.clone())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         validate_resident_package_paths(&manifest)?;
+        let package_root = path.parent().unwrap_or_else(|| Path::new("."));
+        validate_compiled_resource_residency(package_root, &manifest)?;
         validate_behavioral_validation_artifact(path, &manifest, &raw_manifest)?;
         validate_resident_package_artifact_integrity(path, &manifest)?;
-        let package_root = path.parent().unwrap_or_else(|| Path::new("."));
         validate_resident_package_spirv_requirements(package_root, &manifest)?;
         manifest
             .implementation_catalog(package_root)

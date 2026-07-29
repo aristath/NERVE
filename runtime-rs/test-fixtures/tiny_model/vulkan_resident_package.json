@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v4",
+  "schema": "nerve.vulkan_resident_model_package.v5",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
@@ -1660,9 +1660,9 @@
   "tokenizer": {
     "path": "tokenizer",
     "files": [
-      "chat_template.jinja",
       "tokenizer.json",
-      "tokenizer_config.json"
+      "tokenizer_config.json",
+      "chat_template.jinja"
     ]
   },
   "activation_element_bytes": 2,
@@ -2939,6 +2939,355 @@
     }
   ],
   "speculative_decoders": [],
+  "resource_residency": {
+    "schema": "nerve.compiled_resource_residency.v1",
+    "identity_algorithm": "nerve.resource_identity_sha256.v1",
+    "state_machine_schema": "nerve.resource_residency_state_machine.v1",
+    "supported_policies": [
+      "demand_retained",
+      "eager"
+    ],
+    "resources": [
+      {
+        "id": "sha256:08b60245a66a9f83a73ac2289bd1fcb16e0ccad05883152f5bde134d7d650b2b",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_fa1fdc5e3fc3f0ff.safetensors",
+            "byte_offset": 160,
+            "byte_count": 1024,
+            "alignment_bytes": 32,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "d2eb40a7a757bc8f911247d93c50ad60e4c6b50dc94189f7eea0624ee1c76f55"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_0096122738da5577.safetensors",
+            "byte_offset": 168,
+            "byte_count": 32,
+            "alignment_bytes": 8,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "a214ae5c03e0c56b5540a2f2e924a30f3a059d4d38c2b8c62b9182a78e8afb24"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:40dafeef4d9829a0e6325d3d5057f7bba7b04d9bf45f560c7df84071adf3a614",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_28ad2efe9634c02a.safetensors",
+            "byte_offset": 168,
+            "byte_count": 512,
+            "alignment_bytes": 8,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "59bae099aa5a74a8db89ee2183b75ecff83ed06c424240b99970a600e6de5a55"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:4591336179dc76ab2a9490844577cbc43d1652361257569fe28891de25106d00",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_0951c6e9b5e5bcb3.safetensors",
+            "byte_offset": 160,
+            "byte_count": 1024,
+            "alignment_bytes": 32,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "1ee1319f10203ee91cb6a21eae03cbdd29696323db49f09f890f17259a196cd7"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:4a197b5dd8da61db455ec1b968f14c5c27f6a852cbfa811031cc3be201a2051e",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_407e2a3a0399d043.safetensors",
+            "byte_offset": 160,
+            "byte_count": 256,
+            "alignment_bytes": 32,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "0866abdf72a34d84f4b1c32002b30f8e4b4e3dca6e22c788f0b079dc1c45b432"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:4f9374da773ab08c5cd129685801d1258d2c04166dd8d3f7495f6fc142345bca",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_308a709a8ae7ddb2.safetensors",
+            "byte_offset": 160,
+            "byte_count": 32,
+            "alignment_bytes": 32,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "a214ae5c03e0c56b5540a2f2e924a30f3a059d4d38c2b8c62b9182a78e8afb24"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_60800b5c9d5cc40f.safetensors",
+            "byte_offset": 152,
+            "byte_count": 1024,
+            "alignment_bytes": 8,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "355249d7232b4e6ef8fa7bb9d5f4ca8ef057e9b69bd5526758c763be006927c3"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:de5166097d7fccf0e0a1cb78108128371e3ac4865e0c223bc32b9a5e08e01f2e",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_7de186429d1774aa.safetensors",
+            "byte_offset": 160,
+            "byte_count": 1024,
+            "alignment_bytes": 32,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "ef375c3406f567b86f95c94f6338283ce3c8c987bd4714badcd2b93b4069576d"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:f2ecc615c26894b6d24a4678035ee31f706f3f4f7cdf41500890ad58784c2704",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_9a45043a6625d9b5.safetensors",
+            "byte_offset": 160,
+            "byte_count": 256,
+            "alignment_bytes": 32,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "3180b7a73a4802b2596ca3265b433ffb8dde5a18ae14c0292def57dbb2e025bb"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:f8e6368d1caad174d020c80dfaa4147e898617dee10cf54abeb24a9809d9a708",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/tensor_b9045f5429005d09.safetensors",
+            "byte_offset": 168,
+            "byte_count": 512,
+            "alignment_bytes": 8,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "803be95acff5a379b460490e836ed53d84fc073988d309a9444770ea7e06d99a"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      }
+    ],
+    "atomic_groups": [
+      {
+        "id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+        "lifetime": "always_resident",
+        "resource_ids": [
+          "sha256:08b60245a66a9f83a73ac2289bd1fcb16e0ccad05883152f5bde134d7d650b2b",
+          "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e",
+          "sha256:40dafeef4d9829a0e6325d3d5057f7bba7b04d9bf45f560c7df84071adf3a614",
+          "sha256:4591336179dc76ab2a9490844577cbc43d1652361257569fe28891de25106d00",
+          "sha256:4a197b5dd8da61db455ec1b968f14c5c27f6a852cbfa811031cc3be201a2051e",
+          "sha256:4f9374da773ab08c5cd129685801d1258d2c04166dd8d3f7495f6fc142345bca",
+          "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519",
+          "sha256:de5166097d7fccf0e0a1cb78108128371e3ac4865e0c223bc32b9a5e08e01f2e",
+          "sha256:f2ecc615c26894b6d24a4678035ee31f706f3f4f7cdf41500890ad58784c2704",
+          "sha256:f8e6368d1caad174d020c80dfaa4147e898617dee10cf54abeb24a9809d9a708"
+        ],
+        "dependencies": []
+      }
+    ],
+    "partition_templates": [],
+    "bindings": [
+      {
+        "execution_scope": "target",
+        "component_id": "input_transducer",
+        "node_id": "token_embedding",
+        "parameter_id": "weight",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "attention_out_projection__operator_residual",
+        "parameter_id": "attention_out_projection",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "ffn_down_projection__ffn_residual",
+        "parameter_id": "ffn_down",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+        "parameter_id": "ffn_gate",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+        "parameter_id": "ffn_up",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "ffn_norm",
+        "parameter_id": "ffn_norm",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "operator_norm",
+        "parameter_id": "operator_norm",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "q_projection__k_projection__v_projection",
+        "parameter_id": "k_projection",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "q_projection__k_projection__v_projection",
+        "parameter_id": "q_projection",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "q_projection__k_projection__v_projection",
+        "parameter_id": "v_projection",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "output_transducer",
+        "node_id": "output_norm",
+        "parameter_id": "output_norm.weight",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      },
+      {
+        "execution_scope": "target",
+        "component_id": "output_transducer",
+        "node_id": "output_projection",
+        "parameter_id": "output_projection.weight",
+        "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+      }
+    ],
+    "selectors": [],
+    "checkpoints": []
+  },
   "representation_optimization_path": "optimization/stage.json",
   "artifact_integrity": {
     "schema": "nerve.package_artifact_integrity.v1",
@@ -3017,8 +3366,8 @@
         "sha256": "6a1bdec19f2645e74e3b44d819e9caf1229241a5d3924bdf27c794406b821322"
       },
       "optimization/stage.json": {
-        "byte_count": 2968,
-        "sha256": "8de71d9a7536a03d9cb0c8962bb7fef299da1b356ee90b6b470ca232ff428a08"
+        "byte_count": 3017,
+        "sha256": "a70aa64a45ae0786e6c2c81662dd5e9f5c6951979d5949f4b4549f4e48077b59"
       },
       "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv": {
         "byte_count": 23748,

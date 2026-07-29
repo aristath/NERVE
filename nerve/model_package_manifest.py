@@ -16,6 +16,7 @@ from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
 )
+from nerve.resource_residency import build_eager_resource_residency_contract
 
 
 def can_emit_physical_representation_from_producer(
@@ -626,7 +627,7 @@ def build_vulkan_resident_package_manifest(
                 )
                 for stage in implementation["stages"]:
                     stage["shader_path"] = compiled_shader_path(stage["shader_path"])
-    return {
+    manifest = {
         "schema": PACKAGE_SCHEMA,
         "package_id": package_id,
         "compiler_target": compiler_target,
@@ -736,6 +737,12 @@ def build_vulkan_resident_package_manifest(
         "component_executions": component_executions,
         "speculative_decoders": speculative_decoders,
     }
+    manifest["resource_residency"] = build_eager_resource_residency_contract(
+        package_dir=package_dir,
+        tensor_index=tensor_index,
+        manifest=manifest,
+    )
+    return manifest
 
 
 def package_circuit_graph(

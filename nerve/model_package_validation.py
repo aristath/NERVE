@@ -1,5 +1,6 @@
 from nerve.model_package_integrity import *
 from nerve.model_package_common import *
+from nerve.resource_residency import validate_resource_residency_contract
 from nerve.model_package_assets import *
 from nerve.model_package_shaders import *
 from nerve.model_package_tensors import *
@@ -917,6 +918,11 @@ def validate_compiled_package(package_dir: Path, manifest: Json) -> None:
         )
     if not isinstance(manifest.get("package_id"), str) or not manifest["package_id"]:
         raise ModelCompileError("compiled package has no package id")
+    validate_resource_residency_contract(
+        package_dir,
+        manifest.get("resource_residency"),
+        manifest,
+    )
     if (
         not isinstance(manifest.get("max_context_activations"), int)
         or isinstance(manifest.get("max_context_activations"), bool)

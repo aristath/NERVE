@@ -850,7 +850,38 @@ fn copy_package_integrity_artifacts(
     destination_root: &Path,
     manifest: &VulkanResidentModelPackageManifest,
 ) {
-    for relative_path in manifest.artifact_integrity.files.keys() {
+    let residency_artifacts = manifest
+        .resource_residency
+        .resources
+        .iter()
+        .flat_map(|resource| {
+            resource
+                .ranges
+                .iter()
+                .map(|range| range.artifact_path.as_str())
+        })
+        .chain(
+            manifest
+                .resource_residency
+                .partition_templates
+                .iter()
+                .flat_map(|template| template.member_templates.iter())
+                .flat_map(|member| member.range_templates.iter())
+                .flat_map(|range| {
+                    [
+                        range.artifact_path.as_str(),
+                        range.integrity.digest_table_path.as_str(),
+                    ]
+                }),
+        );
+    let paths = manifest
+        .artifact_integrity
+        .files
+        .keys()
+        .map(String::as_str)
+        .chain(residency_artifacts)
+        .collect::<BTreeSet<_>>();
+    for relative_path in paths {
         let destination = destination_root.join(relative_path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::copy(source_root.join(relative_path), destination).unwrap();

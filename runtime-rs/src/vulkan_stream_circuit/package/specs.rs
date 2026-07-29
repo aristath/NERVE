@@ -2,6 +2,7 @@
 pub struct VulkanResidentModelPackageManifest {
     pub schema: String,
     pub package_id: String,
+    pub resource_residency: CompiledResourceResidencyContract,
     pub circuit_graph: VulkanResidentPackageCircuitGraph,
     pub tensor_index_path: String,
     pub behavioral_validation_path: String,

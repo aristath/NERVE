@@ -829,7 +829,7 @@ def _package(
         for index in range(len(tensor_sizes))
     ]
     manifest = {
-        "schema": "nerve.vulkan_resident_model_package.v4",
+        "schema": "nerve.vulkan_resident_model_package.v5",
         "package_id": "fixture-package",
         "tensor_index_path": "tensors.json",
         "compiler_target": target.to_json(),
