@@ -3018,7 +3018,7 @@
       },
       "optimization/stage.json": {
         "byte_count": 2968,
-        "sha256": "0dc5639c163276f4bd5264b7d7b5148b31efecba34ce0fdff504bf9f41811fd6"
+        "sha256": "8de71d9a7536a03d9cb0c8962bb7fef299da1b356ee90b6b470ca232ff428a08"
       },
       "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv": {
         "byte_count": 23748,

@@ -28,30 +28,8 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
         device_id: &str,
         context: &VulkanResidentSpeculativeDecoderLoadContext<'_>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let mut circuit_graph = decoder.circuit_graph.clone();
-        for component in &mut circuit_graph.components {
-            if matches!(
-                component.runtime_role,
-                CircuitRuntimeRole::DraftInputAdapter | CircuitRuntimeRole::DraftProcessor
-            ) {
-                component.runtime_role = CircuitRuntimeRole::SignalProcessor;
-                component.circuit.runtime_role = CircuitRuntimeRole::SignalProcessor;
-            }
-        }
-        let mut package = context.runtime_model.package.clone();
-        package.package_id = format!("{}::{}", package.package_id, decoder.id);
-        package.circuit_graph = circuit_graph.clone();
-        package.component_executions = decoder.component_executions.clone();
-        package.speculative_decoders.clear();
-        let draft_runtime_model = VulkanResidentRuntimeModel {
-            package,
-            runtime_graph: context.runtime_model.runtime_graph.clone(),
-            placement: StreamCircuitPlacementSpec::new(device_id),
-            circuit_graph,
-            component_executions: decoder.component_executions.clone(),
-            tensor_index_fragments: Vec::new(),
-            implementation_selection: None,
-        };
+        let draft_runtime_model =
+            speculative_decoder_runtime_model(context.runtime_model, decoder, device_id);
         let device_slice = Arc::new(
             VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
                 device,
@@ -63,24 +41,16 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
         );
 
-        let additional_tensors = [
-            context.input_embedding_spec.parameter_tensor.as_str(),
-            decoder.output_transducer.norm_parameter_tensor.as_str(),
-            decoder
-                .output_transducer
-                .projection_parameter_tensor
-                .as_str(),
-        ]
-        .into_iter()
-        .filter(|tensor| {
-            context
-                .target_output_parameters
-                .parameter_buffer(tensor)
-                .is_none()
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+        let additional_tensors = speculative_decoder_additional_parameter_tensors(
+            context.input_embedding_spec,
+            decoder,
+            |tensor| {
+                context
+                    .target_output_parameters
+                    .parameter_buffer(tensor)
+                    .is_some()
+            },
+        );
         let additional_parameter_buffers = if additional_tensors.is_empty() {
             None
         } else {

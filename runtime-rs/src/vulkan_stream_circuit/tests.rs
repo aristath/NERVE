@@ -23,3 +23,4 @@ include!("tests/kernel_abi.rs");
 include!("tests/descriptor_plan_tests.rs");
 include!("tests/reusable_kernel_plan_tests.rs");
 include!("tests/prepared_dispatch_plan_tests.rs");
+include!("tests/runtime_residency_plan.rs");

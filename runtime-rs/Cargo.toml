@@ -33,6 +33,11 @@ name = "nerve-validation-executor"
 path = "src/bin/nerve_validation_executor.rs"
 required-features = ["vulkan", "tokenizers"]
 
+[[bin]]
+name = "nerve-residency-planner"
+path = "src/bin/nerve_residency_planner.rs"
+required-features = ["vulkan"]
+
 [features]
 default = []
 vulkan = ["dep:ash"]

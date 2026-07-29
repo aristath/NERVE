@@ -141,6 +141,7 @@ include!("vulkan_stream_circuit/placed_runtime_error.rs");
 include!("vulkan_stream_circuit/resident_model_package.rs");
 include!("vulkan_stream_circuit/resident_package_execution_contract.rs");
 include!("vulkan_stream_circuit/resident_package_planning.rs");
+include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/resident_package_resource_loading.rs");
 include!("vulkan_stream_circuit/resident_package_kernel_loading.rs");
 include!("vulkan_stream_circuit/token_engine_codec.rs");
