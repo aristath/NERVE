@@ -62,33 +62,6 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 16. Run end-to-end model and hardware qualification
-
-- Run the optimizer over the compiled Qwen Safetensors model used by the
-  established performance baseline. Laguna is explicitly out of scope.
-- Exercise CPU capability discovery and the idle AMD GPU capability class used
-  by the Qwen package; do not force CPU model execution when the compiled
-  implementation is Vulkan-only.
-- Re-run complete package validation and real resident multi-turn conversations
-  after every promoted compiler transformation.
-- Re-run the canonical warmed benchmark conditions and compare against the
-  exact NERVE implementation and an equivalent mature-engine reference where
-  available.
-- Confirm graph editing, component duplication, bypass, rewiring, transient
-  state, runtime placement, and multi-device execution still work.
-- Confirm no analyzer or provider introduces model-family facts into the core
-  runtime.
-- Record whole-model improvements and any component-level win hidden by
-  conversion or downstream costs.
-- Use default sustained-decode windows and execution counters to distinguish
-  exact-runtime effects—such as changing speculative acceptance, bounded
-  completion waits, and cross-device transfers—from representation-candidate
-  costs, and reject candidates that amplify those slow paths.
-
-Completion requires a correct real Qwen conversation, no regression in the
-established Qwen performance baseline, clean device release after every run,
-and independently loadable optimized Qwen packages.
-
 ### 17. Update project documentation and remove stale design-status claims
 
 - Update `EXPERIMENTS.md` to distinguish the implemented semantic-module
