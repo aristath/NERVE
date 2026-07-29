@@ -74,21 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 5. Separate initial, current, and maximum residency planning
-
-- Replace the assumption that every permanent parameter buffer is allocated and
-  loaded at mount time.
-- Plan and report always-resident bytes, initial dynamic bytes, current resident
-  bytes, maximum addressable bytes, staging headroom, transient state, and
-  activation headroom separately.
-- Admit a model in demand-retained mode from its initial requirement, while
-  retaining deterministic checks for each later growth operation.
-- Ensure a large maximum address space does not itself require a same-sized
-  device allocation.
-
-Completion requires admission tests showing that a package can mount when its
-maximum parameter size exceeds free VRAM but its initial resident set fits.
-
 ### 6. Implement the asynchronous backing-store path
 
 - Add bounded range reads using the best measured host mechanism for the target
