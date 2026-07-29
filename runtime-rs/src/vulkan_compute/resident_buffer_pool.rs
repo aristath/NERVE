@@ -196,6 +196,73 @@ impl VulkanResidentBufferPool {
         evicted.len()
     }
 
+    /// Evict idle pooled allocations for one still-registered device.
+    ///
+    /// Validation uses this before replacing a package whose placement moves
+    /// parameters between devices. Keeping the device registered preserves
+    /// its context while removing the previous placement before any
+    /// replacement allocation can transiently overcommit VRAM.
+    pub fn evict_unreferenced_device(
+        &self,
+        device_id: &str,
+    ) -> Result<VulkanResidentBufferPoolDeviceRelease, VulkanError> {
+        if device_id.is_empty() {
+            return Err(VulkanError(
+                "resident buffer pool eviction device id is empty".to_string(),
+            ));
+        }
+        if !self
+            .device_lifetime_guards
+            .borrow()
+            .contains_key(device_id)
+        {
+            return Err(VulkanError(format!(
+                "resident buffer pool has no registered device {device_id:?}"
+            )));
+        }
+        let mut state = self.state.borrow_mut();
+        let pool_owners_by_buffer = state.buffers.values().fold(
+            BTreeMap::<usize, usize>::new(),
+            |mut owners, buffer| {
+                *owners.entry(Arc::as_ptr(buffer) as usize).or_default() += 1;
+                owners
+            },
+        );
+        let keys = state
+            .buffers
+            .iter()
+            .filter(|(key, buffer)| {
+                key.device_id == device_id
+                    && Arc::strong_count(buffer)
+                        == pool_owners_by_buffer
+                            .get(&(Arc::as_ptr(buffer) as usize))
+                            .copied()
+                            .unwrap_or_default()
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut eviction = VulkanResidentBufferPoolDeviceRelease::default();
+        for key in keys {
+            let buffer = state
+                .buffers
+                .remove(&key)
+                .expect("enumerated idle resident buffer remains present");
+            eviction.resident_buffer_count =
+                eviction.resident_buffer_count.saturating_add(1);
+            eviction.resident_bytes = eviction
+                .resident_bytes
+                .saturating_add(buffer.byte_capacity());
+            drop(buffer);
+        }
+        state.eviction_count = state
+            .eviction_count
+            .saturating_add(eviction.resident_buffer_count as u64);
+        state.eviction_bytes = state
+            .eviction_bytes
+            .saturating_add(eviction.resident_bytes as u64);
+        Ok(eviction)
+    }
+
     /// Release one device's pooled allocations and its lifetime guard.
     ///
     /// This is intentionally stricter than ordinary cache eviction: shutdown

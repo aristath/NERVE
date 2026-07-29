@@ -506,7 +506,16 @@ fn mount(
         role.executed = false;
         return Ok((request_id, role, true));
     }
-    *reusable_role = None;
+    let placement_moves_parameters = reusable_role
+        .as_ref()
+        .is_some_and(|role| replacement_moves_parameter_residency(&role.package_key, &package_key));
+    retire_reusable_role(
+        reusable_role,
+        devices
+            .as_ref()
+            .expect("bound validation device pool exists"),
+        placement_moves_parameters,
+    )?;
     let parameter_pool = &devices
         .as_ref()
         .expect("bound validation device pool exists")
@@ -527,7 +536,11 @@ fn mount(
     // placement variant so validation cannot accumulate one model copy per
     // variant. Buffers shared with the new package remain referenced and are
     // therefore retained.
-    parameter_pool.evict_unreferenced();
+    evict_idle_validation_parameters(
+        devices
+            .as_ref()
+            .expect("bound validation device pool exists"),
+    )?;
     let stream =
         VulkanResidentInProcessPlacedPromptStream::new(package, bound_devices, random_seed)?;
     let package_id = stream.package().package_id.clone();
@@ -553,6 +566,81 @@ fn mount(
         },
         false,
     ))
+}
+
+fn replacement_moves_parameter_residency(
+    previous: &ValidationPackageKey,
+    next: &ValidationPackageKey,
+) -> bool {
+    previous.physical_device_ids != next.physical_device_ids
+        || previous.component_placement != next.component_placement
+}
+
+fn retire_reusable_role(
+    reusable_role: &mut Option<MountedValidation>,
+    devices: &ValidationDevicePool,
+    evict_before_replacement: bool,
+) -> Result<(), Box<dyn Error>> {
+    let Some(role) = reusable_role.take() else {
+        return Ok(());
+    };
+    quiesce_validation_devices(devices)?;
+    drop(role);
+    if evict_before_replacement {
+        evict_idle_validation_parameters(devices)?;
+    }
+    Ok(())
+}
+
+fn quiesce_validation_devices(devices: &ValidationDevicePool) -> Result<(), Box<dyn Error>> {
+    for physical_device_id in &devices.physical_device_ids {
+        let logical_device_id = devices
+            .physical_to_logical
+            .get(physical_device_id)
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost physical device \
+                     {physical_device_id:?}"
+                ))
+            })?;
+        devices
+            .devices
+            .get(logical_device_id)
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost logical device \
+                     {logical_device_id:?}"
+                ))
+            })?
+            .quiesce()?;
+    }
+    Ok(())
+}
+
+fn evict_idle_validation_parameters(devices: &ValidationDevicePool) -> Result<(), Box<dyn Error>> {
+    for physical_device_id in &devices.physical_device_ids {
+        let logical_device_id = devices
+            .physical_to_logical
+            .get(physical_device_id)
+            .ok_or_else(|| {
+                invalid_input(format!(
+                    "validation device pool lost physical device \
+                     {physical_device_id:?}"
+                ))
+            })?;
+        let device = devices.devices.get(logical_device_id).ok_or_else(|| {
+            invalid_input(format!(
+                "validation device pool lost logical device \
+                     {logical_device_id:?}"
+            ))
+        })?;
+        device.quiesce()?;
+        devices
+            .parameter_pool
+            .evict_unreferenced_device(logical_device_id)?;
+        device.quiesce()?;
+    }
+    Ok(())
 }
 
 fn resolve_context_capacity(
@@ -1754,5 +1842,46 @@ mod tests {
                 ..key.clone()
             }
         );
+    }
+
+    #[test]
+    fn validation_role_replacement_pre_evicts_only_moved_parameter_residency() {
+        let key = ValidationPackageKey {
+            package_manifest: PathBuf::from("/package/manifest.json"),
+            candidate_id: Some("candidate-a".to_string()),
+            physical_device_ids: vec!["device-a".to_string(), "device-b".to_string()],
+            component_placement: BTreeMap::from([
+                ("component-a".to_string(), "device-a".to_string()),
+                ("component-b".to_string(), "device-b".to_string()),
+            ]),
+            context_capacity: 131_072,
+            graph_operation: "none".to_string(),
+            graph_target_component_id: None,
+        };
+        assert!(!replacement_moves_parameter_residency(
+            &key,
+            &ValidationPackageKey {
+                candidate_id: Some("candidate-b".to_string()),
+                ..key.clone()
+            },
+        ));
+        assert!(!replacement_moves_parameter_residency(
+            &key,
+            &ValidationPackageKey {
+                context_capacity: 65_536,
+                graph_operation: "duplicate".to_string(),
+                ..key.clone()
+            },
+        ));
+        assert!(replacement_moves_parameter_residency(
+            &key,
+            &ValidationPackageKey {
+                component_placement: BTreeMap::from([
+                    ("component-a".to_string(), "device-b".to_string(),),
+                    ("component-b".to_string(), "device-a".to_string(),),
+                ]),
+                ..key.clone()
+            },
+        ));
     }
 }

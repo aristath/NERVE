@@ -385,6 +385,15 @@ the protocol boundary before ordered release. A deadline therefore rejects the
 experiment without turning live accelerator state into an asynchronous process
 kill.
 
+Changing a mounted validation role is also an accelerator residency
+transaction. The executor quiesces every participating device before dropping
+an incompatible role. If the next role moves parameters between devices, idle
+pooled allocations are evicted one physical device at a time before any
+replacement allocation; same-placement reference/candidate transitions may
+retain shared immutable buffers. This ordering prevents a placement check from
+temporarily materializing two complete model copies and forcing driver-managed
+VRAM eviction.
+
 ## Proof and behavioral-validation funnel
 
 Validation is an ordered rejection funnel, not one similarity score:
