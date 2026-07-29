@@ -43,6 +43,7 @@ from nerve.representation_optimizer.validation.planning import (
     create_validation_check,
 )
 from nerve.representation_optimizer.validation.protocols import (
+    ValidationComparisonRequest,
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
 )
@@ -449,10 +450,13 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         assert executor.factory_calls == 1
     assert executor.closed is True
     comparison = backend.compare_results(
-        {
-            "check": check,
-            "behavioral_contract": {"mode": "exact"},
-        },
+        ValidationComparisonRequest(
+            plan_id=plan_id,
+            candidate_id=candidate_id,
+            check=check,
+            seed=17,
+            behavioral_contract={"mode": "exact"},
+        ),
         result,
         result,
     )

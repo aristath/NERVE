@@ -258,6 +258,7 @@ class FixtureValidationAdapter:
         self.closed_sessions: list[tuple[str, str, int]] = []
         self.fixture_candidate_ids: list[str] = []
         self.validation_stages: list[tuple[str, str]] = []
+        self.comparison_requests = []
 
     @contextmanager
     def validation_stage(
@@ -298,7 +299,8 @@ class FixtureValidationAdapter:
         return FixtureValidationRoleSession(self, request)
 
     def compare_results(self, request, reference_result, candidate_result):
-        invalid = self.behavior.invalid_stage == request["check"]["stage"]
+        self.comparison_requests.append(request)
+        invalid = self.behavior.invalid_stage == request.check["stage"]
         error = self.behavior.invalid_error if invalid else 0.0
         return {
             "metrics": [
@@ -309,7 +311,7 @@ class FixtureValidationAdapter:
                     "error": error,
                     "unit": "normalized_error",
                 }
-                for name in request["check"]["metrics"]
+                for name in request.check["metrics"]
             ],
             "diagnostics": [],
         }
@@ -898,6 +900,10 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
             for role in ("reference", "candidate")
         ]
     assert set(adapter.fixture_candidate_ids) == {fixture[2].candidate_id}
+    assert {
+        request.candidate_id
+        for request in adapter.comparison_requests
+    } == {fixture[2].candidate_id}
     assert len(
         {
             request.seed

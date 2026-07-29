@@ -51,6 +51,7 @@ from nerve.representation_optimizer.validation.executor_protocol import (
     validated_validation_response,
 )
 from nerve.representation_optimizer.validation.protocols import (
+    ValidationComparisonRequest,
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
 )
@@ -385,26 +386,26 @@ class ResidentWholeModelValidationBackend:
 
     def compare_results(
         self,
-        request: Json,
+        request: ValidationComparisonRequest,
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:
-        if request["behavioral_contract"]["mode"] != "exact":
+        if request.behavioral_contract["mode"] != "exact":
             raise ModelCompileError(
                 "approximate whole-model validation requires a declared "
                 "metric comparator"
             )
-        comparison = request["check"]["comparison"]
+        comparison = request.check["comparison"]
         if comparison == {
             "output_mode": "fixture_semantics",
             "state_mode": "trajectory_local",
         }:
             fixture = self._conversation_fixture_document(
-                request["candidate_id"],
-                request["check"]["input"]["path"],
+                request.candidate_id,
+                request.check["input"]["path"],
             )
             return compare_semantic_conversations(
-                request,
+                request.to_json(),
                 fixture,
                 self._trace_document(
                     reference_result,
@@ -424,7 +425,7 @@ class ResidentWholeModelValidationBackend:
                 "contract"
             )
         return compare_exact_role_results(
-            request,
+            request.to_json(),
             reference_result,
             candidate_result,
             divergence_diagnostic=(

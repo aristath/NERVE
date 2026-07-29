@@ -23,6 +23,7 @@ from nerve.representation_optimizer.validation.component_executor import (
     ResidentComponentValidationBackend,
 )
 from nerve.representation_optimizer.validation.protocols import (
+    ValidationComparisonRequest,
     ValidationRoleMountRequest,
 )
 from nerve.representation_optimizer.validation.whole_model_executor import (
@@ -137,11 +138,11 @@ class ResidentBehavioralValidationAdapter:
 
     def compare_results(
         self,
-        request: Json,
+        request: ValidationComparisonRequest,
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:
-        scope = request["check"]["regime"]["execution_scope"]
+        scope = request.check["regime"]["execution_scope"]
         if scope == "component":
             return self.component.compare_results(
                 request,

@@ -115,6 +115,26 @@ class ValidationRoleExecutionRequest:
         }
 
 
+@dataclass(frozen=True)
+class ValidationComparisonRequest:
+    plan_id: str
+    candidate_id: str
+    check: Json
+    seed: int
+    behavioral_contract: Json
+
+    def to_json(self) -> Json:
+        return {
+            "plan_id": self.plan_id,
+            "candidate_id": self.candidate_id,
+            "check": deepcopy(self.check),
+            "seed": self.seed,
+            "behavioral_contract": deepcopy(
+                self.behavioral_contract
+            ),
+        }
+
+
 class ValidationRoleExecutionSession(Protocol):
     """One role mounted through the ordinary runtime execution path."""
 
@@ -158,7 +178,7 @@ class BehavioralValidationAdapter(Protocol):
 
     def compare_results(
         self,
-        request: Json,
+        request: ValidationComparisonRequest,
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:

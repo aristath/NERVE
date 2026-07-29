@@ -34,6 +34,7 @@ from nerve.representation_optimizer.validation.planning import (
     create_validation_check,
 )
 from nerve.representation_optimizer.validation.protocols import (
+    ValidationComparisonRequest,
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
 )
@@ -462,10 +463,13 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         # orderly accelerator teardown into a process kill.
         cancel_stage = True
     comparison = backend.compare_results(
-        {
-            "check": check,
-            "behavioral_contract": {"mode": "exact"},
-        },
+        ValidationComparisonRequest(
+            plan_id=plan_id,
+            candidate_id=candidate_id,
+            check=check,
+            seed=17,
+            behavioral_contract={"mode": "exact"},
+        ),
         result,
         result,
     )
@@ -644,9 +648,10 @@ def test_whole_model_validation_compares_free_running_traces_semantically(
     )
 
     comparison = backend.compare_results(
-        {
-            "candidate_id": candidate_id,
-            "check": {
+        ValidationComparisonRequest(
+            plan_id="validation-plan",
+            candidate_id=candidate_id,
+            check={
                 "input": {"path": "fixtures/conversation.json"},
                 "comparison": {
                     "output_mode": "fixture_semantics",
@@ -657,8 +662,9 @@ def test_whole_model_validation_compares_free_running_traces_semantically(
                     "semantic_consistency",
                 ],
             },
-            "behavioral_contract": {"mode": "exact"},
-        },
+            seed=1,
+            behavioral_contract={"mode": "exact"},
+        ),
         {"traces": [reference]},
         {"traces": [candidate_result]},
     )

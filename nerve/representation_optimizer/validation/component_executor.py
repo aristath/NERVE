@@ -29,6 +29,7 @@ from nerve.representation_optimizer.validation.comparison import (
     compare_exact_role_results,
 )
 from nerve.representation_optimizer.validation.protocols import (
+    ValidationComparisonRequest,
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
 )
@@ -164,17 +165,17 @@ class ResidentComponentValidationBackend:
 
     def compare_results(
         self,
-        request: Json,
+        request: ValidationComparisonRequest,
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:
-        if request["behavioral_contract"]["mode"] != "exact":
+        if request.behavioral_contract["mode"] != "exact":
             raise ModelCompileError(
                 "approximate component validation requires a declared "
                 "metric comparator"
             )
         return compare_exact_role_results(
-            request,
+            request.to_json(),
             reference_result,
             candidate_result,
             divergence_diagnostic=(

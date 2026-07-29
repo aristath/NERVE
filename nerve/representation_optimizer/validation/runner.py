@@ -28,6 +28,7 @@ from nerve.representation_optimizer.validation.contracts import (
 )
 from nerve.representation_optimizer.validation.protocols import (
     BehavioralValidationAdapter,
+    ValidationComparisonRequest,
     ValidationRoleExecutionRequest,
     ValidationRoleMountRequest,
 )
@@ -129,12 +130,15 @@ def _execute_validation_stage(
                         role_elapsed_ns[key] += duration_ns
                         block_index += 1
                     comparison = adapter.compare_results(
-                        {
-                            "plan_id": plan.plan_id,
-                            "check": check,
-                            "seed": seed,
-                            "behavioral_contract": plan.behavioral_contract,
-                        },
+                        ValidationComparisonRequest(
+                            plan_id=plan.plan_id,
+                            candidate_id=plan.candidate_id,
+                            check=check,
+                            seed=seed,
+                            behavioral_contract=(
+                                plan.behavioral_contract
+                            ),
+                        ),
                         results[key]["reference"],
                         results[key]["candidate"],
                     )
