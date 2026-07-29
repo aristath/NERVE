@@ -244,6 +244,7 @@ impl DeviceResourceResidencyOwnerId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceResourceResidencyErrorKind {
+    Backpressure,
     Cancelled,
     Capacity,
     Failed,
@@ -382,6 +383,18 @@ impl DeviceResourceLoadOutcome {
             })?;
         }
     }
+
+    fn try_result(
+        &self,
+    ) -> Result<Option<Result<(), DeviceResourceResidencyError>>, DeviceResourceResidencyError>
+    {
+        self.value.lock().map(|outcome| outcome.clone()).map_err(|_| {
+            DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Stopped,
+                "device residency load outcome was poisoned",
+            )
+        })
+    }
 }
 
 enum DeviceResourceResidencyEntry<P: DeviceResidentResourcePayload> {
@@ -491,14 +504,77 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<DeviceResourceResidencyRequest<P>, DeviceResourceResidencyError>
     {
-        descriptor.validate_integrity()?;
+        let mut requests = self.request_batch([descriptor], owner)?;
+        Ok(requests
+            .pop()
+            .expect("a one-element residency batch returns one request"))
+    }
+
+    pub fn request_batch<I>(
+        &self,
+        descriptors: I,
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<Vec<DeviceResourceResidencyRequest<P>>, DeviceResourceResidencyError>
+    where
+        I: IntoIterator<Item = DeviceResourceGroupDescriptor>,
+    {
+        self.request_batch_with_new_load_limit(descriptors, owner, usize::MAX)
+    }
+
+    pub fn request_batch_with_new_load_limit<I>(
+        &self,
+        descriptors: I,
+        owner: DeviceResourceResidencyOwnerId,
+        maximum_new_loads: usize,
+    ) -> Result<Vec<DeviceResourceResidencyRequest<P>>, DeviceResourceResidencyError>
+    where
+        I: IntoIterator<Item = DeviceResourceGroupDescriptor>,
+    {
+        let descriptors = descriptors.into_iter().collect::<Vec<_>>();
+        if descriptors.is_empty() {
+            return Err(DeviceResourceResidencyError::invalid_descriptor(
+                "device residency request batch is empty",
+            ));
+        }
+        for descriptor in &descriptors {
+            descriptor.validate_integrity()?;
+        }
+        if descriptors
+            .windows(2)
+            .any(|pair| pair[0].id >= pair[1].id)
+        {
+            return Err(DeviceResourceResidencyError::invalid_descriptor(
+                "device residency request batch groups must be unique and strictly sorted",
+            ));
+        }
+
         let mut state = self.inner.state.lock().map_err(|_| {
             DeviceResourceResidencyError::new(
                 DeviceResourceResidencyErrorKind::Stopped,
                 "per-device residency manager was poisoned",
             )
         })?;
-        if let Some(entry) = state.entries.get_mut(&descriptor.id) {
+
+        let mut new_group_bytes = 0usize;
+        let mut new_group_count = 0usize;
+        for descriptor in &descriptors {
+            let Some(entry) = state.entries.get(&descriptor.id) else {
+                new_group_bytes = new_group_bytes
+                    .checked_add(descriptor.byte_count)
+                    .ok_or_else(|| {
+                        DeviceResourceResidencyError::new(
+                            DeviceResourceResidencyErrorKind::Capacity,
+                            "per-device residency request batch byte count overflowed",
+                        )
+                    })?;
+                new_group_count = new_group_count.checked_add(1).ok_or_else(|| {
+                    DeviceResourceResidencyError::new(
+                        DeviceResourceResidencyErrorKind::Stopped,
+                        "per-device residency operation count overflowed",
+                    )
+                })?;
+                continue;
+            };
             let actual_descriptor = match entry {
                 DeviceResourceResidencyEntry::Loading {
                     descriptor, ..
@@ -510,52 +586,24 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
                     descriptor, ..
                 } => descriptor,
             };
-            if *actual_descriptor != descriptor {
+            if *actual_descriptor != *descriptor {
                 return Err(DeviceResourceResidencyError::new(
                     DeviceResourceResidencyErrorKind::IdentityConflict,
                     "compiled group identity was reused with different physical resources",
                 ));
             }
-            return match entry {
-                DeviceResourceResidencyEntry::Loading {
-                    owners, outcome, ..
-                } => {
-                    owners.insert(owner.clone());
-                    let outcome = Arc::clone(outcome);
-                    state.single_flight_join_count =
-                        state.single_flight_join_count.saturating_add(1);
-                    Ok(DeviceResourceResidencyRequest::Pending(
-                        DeviceResourceResidencyWaiter {
-                            manager: Arc::downgrade(&self.inner),
-                            group_id: descriptor.id.clone(),
-                            owner,
-                            outcome,
-                        },
-                    ))
-                }
-                DeviceResourceResidencyEntry::Resident {
-                    owners,
-                    active_leases,
-                    group,
-                    ..
-                } => {
-                    owners.insert(owner.clone());
-                    *active_leases.entry(owner.clone()).or_default() += 1;
-                    let group = Arc::clone(group);
-                    state.hit_count = state.hit_count.saturating_add(1);
-                    Ok(DeviceResourceResidencyRequest::Resident(
-                        DeviceResourceResidencyLease {
-                            manager: Arc::downgrade(&self.inner),
-                            group_id: descriptor.id.clone(),
-                            owner,
-                            group,
-                        },
-                    ))
-                }
-                DeviceResourceResidencyEntry::Failed { error, .. } => {
-                    Err(error.clone())
-                }
-            };
+            if let DeviceResourceResidencyEntry::Failed { error, .. } = entry {
+                return Err(error.clone());
+            }
+        }
+        if new_group_count > maximum_new_loads {
+            return Err(DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Backpressure,
+                format!(
+                    "device {:?} residency batch needs {new_group_count} new loads but the scheduler has capacity for {maximum_new_loads}",
+                    self.inner.device_id
+                ),
+            ));
         }
 
         let used_bytes = self
@@ -569,8 +617,7 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
                     "per-device residency accounting overflowed",
                 )
             })?;
-        let required_bytes =
-            used_bytes.checked_add(descriptor.byte_count).ok_or_else(|| {
+        let required_bytes = used_bytes.checked_add(new_group_bytes).ok_or_else(|| {
                 DeviceResourceResidencyError::new(
                     DeviceResourceResidencyErrorKind::Capacity,
                     "per-device residency request byte count overflowed",
@@ -580,54 +627,110 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
             return Err(DeviceResourceResidencyError::new(
                 DeviceResourceResidencyErrorKind::Capacity,
                 format!(
-                    "device {:?} needs {} bytes for atomic group {:?}, but capacity is {} bytes",
+                    "device {:?} needs {} bytes for residency batch, but capacity is {} bytes",
                     self.inner.device_id,
                     required_bytes,
-                    descriptor.id,
                     self.inner.capacity_bytes
                 ),
             ));
         }
-        debug_assert!(
-            ResourceResidencyState::Absent
-                .can_transition_to(ResourceResidencyState::Requested, false)
-        );
-        debug_assert!(
-            ResourceResidencyState::Requested
-                .can_transition_to(ResourceResidencyState::Loading, false)
-        );
-        state.next_operation_id =
-            state.next_operation_id.checked_add(1).ok_or_else(|| {
+        state
+            .next_operation_id
+            .checked_add(u64::try_from(new_group_count).map_err(|_| {
+                DeviceResourceResidencyError::new(
+                    DeviceResourceResidencyErrorKind::Stopped,
+                    "per-device residency operation count does not fit u64",
+                )
+            })?)
+            .ok_or_else(|| {
                 DeviceResourceResidencyError::new(
                     DeviceResourceResidencyErrorKind::Stopped,
                     "per-device residency operation identity exhausted",
                 )
             })?;
-        let operation_id = state.next_operation_id;
-        state.reserved_loading_bytes += descriptor.byte_count;
-        state.miss_count = state.miss_count.saturating_add(1);
-        let outcome = Arc::new(DeviceResourceLoadOutcome::new());
-        let mut owners = BTreeSet::new();
-        owners.insert(owner.clone());
-        state.entries.insert(
-            descriptor.id.clone(),
-            DeviceResourceResidencyEntry::Loading {
-                descriptor: descriptor.clone(),
-                operation_id,
-                owners,
-                outcome: Arc::clone(&outcome),
-            },
-        );
-        Ok(DeviceResourceResidencyRequest::LoadRequired(
-            DeviceResourceLoadPermit {
-                manager: Arc::downgrade(&self.inner),
-                descriptor,
-                operation_id,
-                owner,
-                outcome,
-                finished: false,
-            },
-        ))
+
+        let mut requests = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            if let Some(entry) = state.entries.get_mut(&descriptor.id) {
+                match entry {
+                    DeviceResourceResidencyEntry::Loading {
+                        owners, outcome, ..
+                    } => {
+                        owners.insert(owner.clone());
+                        let outcome = Arc::clone(outcome);
+                        state.single_flight_join_count =
+                            state.single_flight_join_count.saturating_add(1);
+                        requests.push(DeviceResourceResidencyRequest::Pending(
+                            DeviceResourceResidencyWaiter {
+                                manager: Arc::downgrade(&self.inner),
+                                group_id: descriptor.id,
+                                owner: owner.clone(),
+                                outcome,
+                            },
+                        ));
+                    }
+                    DeviceResourceResidencyEntry::Resident {
+                        owners,
+                        active_leases,
+                        group,
+                        ..
+                    } => {
+                        owners.insert(owner.clone());
+                        *active_leases.entry(owner.clone()).or_default() += 1;
+                        let group = Arc::clone(group);
+                        state.hit_count = state.hit_count.saturating_add(1);
+                        requests.push(DeviceResourceResidencyRequest::Resident(
+                            DeviceResourceResidencyLease {
+                                manager: Arc::downgrade(&self.inner),
+                                group_id: descriptor.id,
+                                owner: owner.clone(),
+                                group,
+                            },
+                        ));
+                    }
+                    DeviceResourceResidencyEntry::Failed { .. } => {
+                        unreachable!("failed entries were rejected before batch mutation")
+                    }
+                }
+                continue;
+            }
+
+            debug_assert!(
+                ResourceResidencyState::Absent
+                    .can_transition_to(ResourceResidencyState::Requested, false)
+            );
+            debug_assert!(
+                ResourceResidencyState::Requested
+                    .can_transition_to(ResourceResidencyState::Loading, false)
+            );
+            state.next_operation_id += 1;
+            let operation_id = state.next_operation_id;
+            state.reserved_loading_bytes += descriptor.byte_count;
+            state.miss_count = state.miss_count.saturating_add(1);
+            let outcome = Arc::new(DeviceResourceLoadOutcome::new());
+            let mut owners = BTreeSet::new();
+            owners.insert(owner.clone());
+            state.entries.insert(
+                descriptor.id.clone(),
+                DeviceResourceResidencyEntry::Loading {
+                    descriptor: descriptor.clone(),
+                    operation_id,
+                    owners,
+                    outcome: Arc::clone(&outcome),
+                },
+            );
+            requests.push(DeviceResourceResidencyRequest::LoadRequired(
+                DeviceResourceLoadPermit {
+                    manager: Arc::downgrade(&self.inner),
+                    descriptor,
+                    operation_id,
+                    owner: owner.clone(),
+                    outcome,
+                    finished: false,
+                },
+            ));
+        }
+        Ok(requests)
     }
 
     pub fn reset_failed_group(
@@ -791,6 +894,22 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyWaiter<P> {
             )
         })?;
         acquire_published_lease(&manager, &self.group_id, &self.owner)
+    }
+
+    pub fn try_wait(
+        &mut self,
+    ) -> Result<Option<DeviceResourceResidencyLease<P>>, DeviceResourceResidencyError> {
+        let Some(outcome) = self.outcome.try_result()? else {
+            return Ok(None);
+        };
+        outcome?;
+        let manager = self.manager.upgrade().ok_or_else(|| {
+            DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Cancelled,
+                "per-device residency manager was dropped before a waiter resumed",
+            )
+        })?;
+        acquire_published_lease(&manager, &self.group_id, &self.owner).map(Some)
     }
 }
 

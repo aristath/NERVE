@@ -149,6 +149,7 @@ include!("vulkan_stream_circuit/resident_package_execution_contract.rs");
 include!("vulkan_stream_circuit/resident_package_planning.rs");
 include!("vulkan_stream_circuit/compiled_resource_residency_plan.rs");
 include!("vulkan_stream_circuit/physical_residency_checkpoint.rs");
+include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
