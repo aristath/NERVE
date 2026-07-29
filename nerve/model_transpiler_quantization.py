@@ -1,5 +1,6 @@
 from nerve.model_transpiler_types import *
 from nerve.quantized_layouts import (
+    AUTO_GPTQ_FIXED_ZERO_8,
     AUTO_GPTQ_INPUT_MAJOR_PACKING,
     AUTO_GPTQ_PER_GROUP_ZERO,
 )
@@ -287,6 +288,13 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
         )
     pack_factor = 32 // bits
     configured_group_size = int(quantization.get("group_size") or 0)
+    raw_symmetric = quantization.get("sym", True)
+    if not isinstance(raw_symmetric, bool):
+        raise ModelTranspileError(
+            f"packed linear format {packing_format!r} has invalid sym value "
+            f"{raw_symmetric!r}"
+        )
+    symmetric = raw_symmetric
 
     for name, info in tuple(tensors.items()):
         if not name.endswith(".qweight"):
@@ -296,23 +304,34 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
         scales_name = f"{base}.scales"
         qzeros = tensors.get(qzeros_name)
         scales = tensors.get(scales_name)
-        if qzeros is None or scales is None:
+        if scales is None or (not symmetric and qzeros is None):
             raise ModelTranspileError(
-                f"packed linear tensor {name!r} is missing qzeros or scales"
+                f"packed linear tensor {name!r} is missing required quantization "
+                "auxiliaries"
             )
         packed_shape = [int(value) for value in info.get("shape", [])]
-        zero_shape = [int(value) for value in qzeros.get("shape", [])]
         scale_shape = [int(value) for value in scales.get("shape", [])]
-        if info.get("dtype") != "I32" or qzeros.get("dtype") != "I32":
+        if info.get("dtype") != "I32":
             raise ModelTranspileError(
-                f"packed linear tensor {name!r} requires I32 qweight and qzeros"
+                f"packed linear tensor {name!r} requires I32 qweight storage"
             )
+        zero_shape: list[int] | None = None
+        if qzeros is not None:
+            if qzeros.get("dtype") != "I32":
+                raise ModelTranspileError(
+                    f"packed linear tensor {name!r} requires I32 qzero storage"
+                )
+            zero_shape = [int(value) for value in qzeros.get("shape", [])]
         if scales.get("dtype") not in {"F16", "BF16"}:
             raise ModelTranspileError(
                 f"packed linear tensor {name!r} has unsupported scale dtype "
                 f"{scales.get('dtype')!r}"
             )
-        if len(packed_shape) != 2 or len(scale_shape) != 2 or len(zero_shape) != 2:
+        if (
+            len(packed_shape) != 2
+            or len(scale_shape) != 2
+            or (not symmetric and (zero_shape is None or len(zero_shape) != 2))
+        ):
             raise ModelTranspileError(
                 f"packed linear tensor {name!r} has invalid qweight/qzeros/scales shapes"
             )
@@ -328,7 +347,9 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
             group_count,
             (output_features + pack_factor - 1) // pack_factor,
         ]
-        if scale_shape[1] != output_features or zero_shape != expected_zero_shape:
+        if scale_shape[1] != output_features or (
+            not symmetric and zero_shape != expected_zero_shape
+        ):
             raise ModelTranspileError(
                 f"packed linear tensor {name!r} has incompatible qzeros {zero_shape} "
                 f"or scales {scale_shape}"
@@ -343,13 +364,23 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
             "format": "auto_gptq",
             "bits": bits,
             "group_size": group_size,
-            "symmetric": bool(quantization.get("sym", True)),
-            "zero_point_add": 1,
+            "symmetric": symmetric,
             "packing_layout": AUTO_GPTQ_INPUT_MAJOR_PACKING,
-            "zero_point_encoding": AUTO_GPTQ_PER_GROUP_ZERO,
-            "qzeros": qzeros_name,
+            "zero_point_encoding": (
+                AUTO_GPTQ_FIXED_ZERO_8
+                if symmetric
+                else AUTO_GPTQ_PER_GROUP_ZERO
+            ),
+            "execution_zero_point_encoding": AUTO_GPTQ_FIXED_ZERO_8,
             "scales": scales_name,
         }
+        if not symmetric:
+            info["quantization"].update(
+                {
+                    "zero_point_add": 1,
+                    "qzeros": qzeros_name,
+                }
+            )
 
 
 def annotate_compressed_tensors_packed_linears(
@@ -432,7 +463,16 @@ def attach_packed_linear_quantization(
         quantization = tensors[tensor_name].get("quantization")
         if not isinstance(quantization, dict):
             continue
-        if "qzeros" in quantization:
+        execution_zero_encoding = str(
+            quantization.get(
+                "execution_zero_point_encoding",
+                quantization.get("zero_point_encoding", ""),
+            )
+        )
+        if (
+            execution_zero_encoding != AUTO_GPTQ_FIXED_ZERO_8
+            and "qzeros" in quantization
+        ):
             additions[f"{parameter_id}_qzeros"] = str(quantization["qzeros"])
         additions[f"{parameter_id}_scales"] = str(quantization["scales"])
     layer_tensors.update(additions)

@@ -78,17 +78,34 @@ def referenced_tensor_index(
     lowered_index: Json,
     lowered_dir: Path,
 ) -> Json:
-    referenced = {
+    runtime_referenced = {
         model_graph["graph"]["input_transducer"]["params"]["weight"]["tensor"]
     }
     for component in model_graph["graph"]["output_transducer"]["components"]:
-        referenced.update(ref["tensor"] for ref in component.get("params", {}).values())
+        runtime_referenced.update(
+            ref["tensor"] for ref in component.get("params", {}).values()
+        )
     for circuit_ref in all_lowered_circuit_refs(lowered_index):
         circuit = read_json(lowered_dir / circuit_ref["circuit"])
-        referenced.update(
+        runtime_referenced.update(
             ref["tensor"] for ref in circuit["parameters"]["refs"].values()
         )
 
+    compile_dependencies: set[str] = set()
+    for tensor_name in runtime_referenced:
+        info = tensor_index["tensors"].get(tensor_name)
+        quantization = info.get("quantization") if isinstance(info, dict) else None
+        if not isinstance(quantization, dict):
+            continue
+        if (
+            quantization.get("format") == "auto_gptq"
+            and auto_gptq_zero_encoding(info) == AUTO_GPTQ_PER_GROUP_ZERO
+        ):
+            qzeros = quantization.get("qzeros")
+            if isinstance(qzeros, str) and qzeros:
+                compile_dependencies.add(qzeros)
+
+    referenced = runtime_referenced | compile_dependencies
     missing = sorted(referenced - set(tensor_index["tensors"]))
     if missing:
         raise ModelCompileError(
@@ -98,6 +115,8 @@ def referenced_tensor_index(
     selected["tensors"] = {
         name: deepcopy(tensor_index["tensors"][name]) for name in sorted(referenced)
     }
+    for tensor_name in compile_dependencies - runtime_referenced:
+        selected["tensors"][tensor_name]["compile_only"] = True
     selected["totals"] = {
         "tensor_count": len(selected["tensors"]),
         "parameter_count": sum(
@@ -147,6 +166,8 @@ def copy_tensor_package(
             continue
         if progress is not None:
             progress(index, total, tensor_name)
+        if info.get("compile_only") is True:
+            continue
         layout = ROW_MAJOR_LAYOUT
         digest = blake2s(tensor_name.encode("utf-8"), digest_size=8).hexdigest()
         destination = weights_dir / f"tensor_{digest}.safetensors"
@@ -301,6 +322,9 @@ def copy_tensor_package(
                 )
             )
             quantization["zero_point_encoding"] = AUTO_GPTQ_FIXED_ZERO_8
+            quantization.pop("execution_zero_point_encoding", None)
+            quantization.pop("zero_point_add", None)
+            quantization.pop("qzeros", None)
         elif info.get("source_parts"):
             header_bytes, data_sha256 = write_compiled_composite_tensor(
                 tensor_name=tensor_name,
@@ -319,6 +343,8 @@ def copy_tensor_package(
                 destination=destination,
                 layout=layout,
             )
+        if isinstance(quantization, dict):
+            quantization.pop("execution_zero_point_encoding", None)
         relative_destination = relative_json_path(package_dir, destination)
         info["source_file"] = relative_destination
         info["data_offsets"] = [0, int(info["byte_count"])]
@@ -345,6 +371,20 @@ def copy_tensor_package(
             }
         )
 
+    packaged["tensors"] = {
+        name: info
+        for name, info in packaged["tensors"].items()
+        if info.get("compile_only") is not True
+    }
+    packaged["totals"] = {
+        "tensor_count": len(packaged["tensors"]),
+        "parameter_count": sum(
+            int(info["parameter_count"]) for info in packaged["tensors"].values()
+        ),
+        "byte_count": sum(
+            int(info["byte_count"]) for info in packaged["tensors"].values()
+        ),
+    }
     packaged["source"] = {
         "packaged": True,
         "compiled": True,

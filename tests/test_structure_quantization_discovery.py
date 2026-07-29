@@ -1,5 +1,9 @@
 from model_structure_common import *
 from model_structure_common import _tensor
+from nerve.model_transpiler_types import ModelTranspileError
+
+import pytest
+
 
 def test_compiles_exact_yarn_frequency_and_attention_scaling() -> None:
     scaling = compile_rope_scaling(
@@ -156,17 +160,79 @@ def test_annotates_auto_gptq_storage_as_logical_packed_linear(
         "bits": 4,
         "group_size": 128,
         "symmetric": True,
+        "packing_layout": "input_major_packed_columns",
+        "zero_point_encoding": "fixed_8",
+        "execution_zero_point_encoding": "fixed_8",
+        "scales": "projection.scales",
+    }
+    assert parameters == {
+        "projection": "projection.qweight",
+        "projection_scales": "projection.scales",
+    }
+
+
+def test_annotates_asymmetric_auto_gptq_zero_points_as_compile_only_source_data(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.json").write_text(
+        """{
+          "quantization_config": {
+            "packing_format": "auto_round:auto_gptq",
+            "bits": 4,
+            "group_size": 128,
+            "sym": false
+          }
+        }"""
+    )
+    tensors = {
+        "projection.qweight": _tensor([64, 768], "I32"),
+        "projection.qzeros": _tensor([4, 96], "I32"),
+        "projection.scales": _tensor([4, 768], "F16"),
+    }
+
+    annotate_packed_linear_tensors(tmp_path, tensors)
+    parameters = {"projection": "projection.qweight"}
+    attach_packed_linear_quantization(tensors, parameters)
+
+    assert tensors["projection.qweight"]["quantization"] == {
+        "format": "auto_gptq",
+        "bits": 4,
+        "group_size": 128,
+        "symmetric": False,
         "zero_point_add": 1,
         "packing_layout": "input_major_packed_columns",
         "zero_point_encoding": "packed_per_group_output",
+        "execution_zero_point_encoding": "fixed_8",
         "qzeros": "projection.qzeros",
         "scales": "projection.scales",
     }
     assert parameters == {
         "projection": "projection.qweight",
-        "projection_qzeros": "projection.qzeros",
         "projection_scales": "projection.scales",
     }
+
+
+def test_rejects_non_boolean_auto_gptq_symmetry_metadata(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        """{
+          "quantization_config": {
+            "packing_format": "auto_round:auto_gptq",
+            "bits": 4,
+            "group_size": 128,
+            "sym": "false"
+          }
+        }"""
+    )
+
+    with pytest.raises(ModelTranspileError, match="invalid sym value"):
+        annotate_packed_linear_tensors(
+            tmp_path,
+            {
+                "projection.qweight": _tensor([64, 768], "I32"),
+                "projection.qzeros": _tensor([4, 96], "I32"),
+                "projection.scales": _tensor([4, 768], "F16"),
+            },
+        )
 
 
 def test_annotates_compressed_tensors_int4_storage_by_structure(

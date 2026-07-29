@@ -1224,11 +1224,10 @@ def packed_int4_linear_group_size_for_node(
     circuit: Json, node: Json, tensor_index: Json
 ) -> int:
     weight_id = str(node["params"][0])
-    qzeros_id = f"{weight_id}_qzeros"
     scales_id = f"{weight_id}_scales"
-    expected_params = [weight_id, qzeros_id, scales_id]
+    expected_params = [weight_id, scales_id]
     actual_params = list(node.get("params", []))
-    if len(actual_params) == 4:
+    if len(actual_params) == 3:
         expected_params.append(f"{weight_id}_bias")
     if actual_params != expected_params:
         raise ModelCompileError(
@@ -1245,7 +1244,6 @@ def packed_int4_linear_group_size_for_node(
     if (
         quantization.get("format") != "auto_gptq"
         or int(quantization.get("bits") or 0) != 4
-        or int(quantization.get("zero_point_add") or 0) != 1
     ):
         raise ModelCompileError(
             f"packed INT4 linear node {node['id']!r} has unsupported quantization "
@@ -1253,7 +1251,6 @@ def packed_int4_linear_group_size_for_node(
         )
     out_features, in_features = parameter_shape_for_id(circuit, weight_id, tensor_index)
     packed_shape = [int(value) for value in weight_info.get("shape", [])]
-    qzeros_shape = parameter_shape_for_id(circuit, qzeros_id, tensor_index)
     scales_shape = parameter_shape_for_id(circuit, scales_id, tensor_index)
     group_size = int(quantization.get("group_size") or 0)
     group_count = (in_features + group_size - 1) // group_size if group_size else 0
@@ -1267,28 +1264,21 @@ def packed_int4_linear_group_size_for_node(
             f"with zero encoding {auto_gptq_zero_encoding(weight_info)!r} and "
             f"shape {packed_shape} does not encode {[out_features, in_features]}"
         )
-    if qzeros_shape != [group_count, (out_features + 7) // 8]:
-        raise ModelCompileError(
-            f"packed INT4 zero-point shape {qzeros_shape} is incompatible with "
-            f"{[out_features, in_features]}"
-        )
     if scales_shape != [group_count, out_features]:
         raise ModelCompileError(
             f"packed INT4 scale shape {scales_shape} is incompatible with "
             f"{[out_features, in_features]}"
         )
-    if parameter_dtype_for_id(circuit, qzeros_id, tensor_index) != "I32":
-        raise ModelCompileError("packed INT4 zero points must use I32 storage")
     if parameter_dtype_for_id(circuit, scales_id, tensor_index) != "F16":
         raise ModelCompileError("packed INT4 scales must use F16 storage")
     if any(
         parameter_layout_for_id(circuit, parameter_id, tensor_index) != ROW_MAJOR_LAYOUT
-        for parameter_id in (weight_id, qzeros_id, scales_id)
+        for parameter_id in (weight_id, scales_id)
     ):
         raise ModelCompileError("packed INT4 parameters must use row-major storage")
     if (
-        len(actual_params) == 4
-        and parameter_dtype_for_id(circuit, actual_params[3], tensor_index) != "BF16"
+        len(actual_params) == 3
+        and parameter_dtype_for_id(circuit, actual_params[2], tensor_index) != "BF16"
     ):
         raise ModelCompileError("packed INT4 linear bias must use BF16 storage")
     return group_size

@@ -9,7 +9,6 @@ layout(set = 0, binding = 0) readonly buffer QuantizedInputs { uint words[]; } q
 layout(set = 0, binding = 1) readonly buffer InputScales { float values[]; } input_scales;
 layout(set = 0, binding = {{OUTPUT_BINDING}}) buffer OutputFrames { uint words[]; } output_frames;
 layout(set = 0, binding = {{QWEIGHT_BINDING}}) readonly buffer QWeight { uint words[]; } qweight;
-layout(set = 0, binding = {{QZEROS_BINDING}}) readonly buffer QZeros { uint words[]; } qzeros;
 layout(set = 0, binding = {{SCALES_BINDING}}) readonly buffer Scales { uint words[]; } scales;
 {{AUXILIARY_BUFFER}}
 
@@ -21,7 +20,6 @@ const uint INPUT_SIZE = {{INPUT_SIZE}}u;
 const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
 const uint OUTPUT_TILE_ROWS = {{OUTPUT_TILE_ROWS}}u;
 const uint OUTPUT_WORDS = OUTPUT_SIZE / 2u;
-const uint ZERO_WORDS = (OUTPUT_SIZE + 7u) / 8u;
 const uint WEIGHT_GROUPS = INPUT_SIZE / GROUP_SIZE;
 const uint PACKED_COLUMNS_PER_GROUP = GROUP_SIZE / 8u;
 const uint INT8_BLOCK_COLUMNS = 32u;

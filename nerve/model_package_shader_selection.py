@@ -73,7 +73,7 @@ def shader_file_for_node(
                     circuit, node, tensor_index
                 )
                 format_token = "gptq"
-                has_bias = len(node.get("params", [])) == 4
+                has_bias = len(node.get("params", [])) == 3
             elif quantization_format == "compressed_tensors_pack_quantized":
                 group_size = compressed_tensors_int4_group_size_for_node(
                     circuit, node, tensor_index
@@ -1211,10 +1211,7 @@ def int4_shader_replacements(
     input_binding_count = 2 if prequantized_input else 1
     output_binding = input_binding_count + (1 if has_residual else 0)
     qweight_binding = output_binding + 1
-    qzeros_binding = qweight_binding + 1 if quantization_format == "gptq" else None
-    scales_binding = (
-        (qzeros_binding + 1) if qzeros_binding is not None else qweight_binding + 1
-    )
+    scales_binding = qweight_binding + 1
     auxiliary_binding = scales_binding + 1 if has_bias else None
 
     if has_residual:
@@ -1272,8 +1269,6 @@ def int4_shader_replacements(
         "BATCH_WIDTH": batch_width,
         "READ_SCALE_BODY": read_scale_body,
     }
-    if qzeros_binding is not None:
-        replacements["QZEROS_BINDING"] = str(qzeros_binding)
     return replacements
 
 

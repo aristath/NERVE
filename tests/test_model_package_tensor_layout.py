@@ -18,8 +18,95 @@ from nerve.model_package_tensors import (
 from nerve.model_package_packed_tensors import (
     write_compiled_auto_gptq_fixed_zero_8,
 )
+from nerve.model_package_assets import referenced_tensor_index
 
 import numpy as np
+
+
+def test_asymmetric_auto_gptq_zero_points_are_compile_dependencies_only(
+    tmp_path: Path,
+) -> None:
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "linear.json").write_text(
+        json.dumps(
+            {
+                "parameters": {
+                    "refs": {
+                        "weight": {"tensor": "projection.qweight"},
+                        "weight_scales": {"tensor": "projection.scales"},
+                    }
+                }
+            }
+        )
+    )
+    tensor_index = {
+        "tensors": {
+            "embedding.weight": {
+                "dtype": "BF16",
+                "shape": [16, 8],
+                "parameter_count": 128,
+                "byte_count": 256,
+            },
+            "projection.qweight": {
+                "dtype": "I32",
+                "shape": [1, 8],
+                "logical_shape": [8, 8],
+                "parameter_count": 64,
+                "byte_count": 32,
+                "quantization": {
+                    "format": "auto_gptq",
+                    "bits": 4,
+                    "group_size": 8,
+                    "symmetric": False,
+                    "zero_point_add": 1,
+                    "packing_layout": "input_major_packed_columns",
+                    "zero_point_encoding": "packed_per_group_output",
+                    "execution_zero_point_encoding": "fixed_8",
+                    "qzeros": "projection.qzeros",
+                    "scales": "projection.scales",
+                },
+            },
+            "projection.qzeros": {
+                "dtype": "I32",
+                "shape": [1, 1],
+                "parameter_count": 1,
+                "byte_count": 4,
+            },
+            "projection.scales": {
+                "dtype": "F16",
+                "shape": [1, 8],
+                "parameter_count": 8,
+                "byte_count": 16,
+            },
+        }
+    }
+
+    selected = referenced_tensor_index(
+        tensor_index,
+        model_graph={
+            "graph": {
+                "input_transducer": {
+                    "params": {"weight": {"tensor": "embedding.weight"}}
+                },
+                "output_transducer": {"components": []},
+            }
+        },
+        lowered_index={
+            "graph": {"circuits": [{"circuit": "linear.json"}]},
+            "draft_execution_graphs": [],
+        },
+        lowered_dir=lowered_dir,
+    )
+
+    assert set(selected["tensors"]) == {
+        "embedding.weight",
+        "projection.qweight",
+        "projection.qzeros",
+        "projection.scales",
+    }
+    assert selected["tensors"]["projection.qzeros"]["compile_only"] is True
+    assert "compile_only" not in selected["tensors"]["projection.qweight"]
 
 
 def test_write_compiled_tensor_preserves_canonical_row_major_order(
@@ -112,6 +199,7 @@ def test_compiler_canonicalizes_auto_gptq_weights_to_fixed_zero_8_exactly(
                     "format": "auto_gptq",
                     "bits": 4,
                     "group_size": 8,
+                    "symmetric": False,
                     "zero_point_add": 1,
                     "packing_layout": "input_major_packed_columns",
                     "zero_point_encoding": "packed_per_group_output",
@@ -171,6 +259,7 @@ def test_compiler_canonicalizes_auto_gptq_weights_to_fixed_zero_8_exactly(
                     "format": "auto_gptq",
                     "bits": 4,
                     "group_size": 8,
+                    "symmetric": False,
                     "zero_point_add": 1,
                     "packing_layout": "input_major_packed_columns",
                     "zero_point_encoding": "packed_per_group_output",

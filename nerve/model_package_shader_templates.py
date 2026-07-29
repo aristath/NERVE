@@ -1729,16 +1729,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
         if quantization_format == "gptq":
             replacements |= {
-                "QZEROS_BUFFER": (
-                    f"layout(set = 0, binding = "
-                    f"{replacements['QZEROS_BINDING']}) "
-                    "readonly buffer QZeros {\n"
-                    "    uint words[];\n"
-                    "} qzeros;"
-                ),
-                "FORMAT_CONSTANTS": (
-                    "const uint ZERO_WORDS = (OUTPUT_SIZE + 7u) / 8u;"
-                ),
+                "QZEROS_BUFFER": "",
+                "FORMAT_CONSTANTS": "",
                 "READ_SCALE_BODY": (
                     "    uint index = group * OUTPUT_SIZE + row;\n"
                     + replacements["READ_SCALE_BODY"]
@@ -1748,13 +1740,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                     "    uint packed = qweight.words[\n"
                     "        packed_column * OUTPUT_SIZE + row\n"
                     "    ];\n"
-                    "    uint packed_zero = qzeros.words[\n"
-                    "        group * ZERO_WORDS + (row >> 3u)\n"
-                    "    ];\n"
-                    "    int zero = int((packed_zero >> "
-                    "((row & 7u) * 4u)) & 15u) + 1;\n"
                     "    return int((packed >> "
-                    "((input_index & 7u) * 4u)) & 15u) - zero;"
+                    "((input_index & 7u) * 4u)) & 15u) - 8;"
                 ),
             }
         else:

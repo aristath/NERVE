@@ -429,13 +429,12 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
         "op": "linear",
         "inputs": ["normalized"],
         "outputs": ["projected"],
-        "params": ["weight", "weight_qzeros", "weight_scales"],
+        "params": ["weight", "weight_scales"],
     }
     circuit = {
         "parameters": {
             "refs": {
                 "weight": {"tensor": "weight"},
-                "weight_qzeros": {"tensor": "qzeros"},
                 "weight_scales": {"tensor": "scales"},
             }
         }
@@ -451,15 +450,9 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
                     "format": "auto_gptq",
                     "bits": 4,
                     "group_size": 128,
-                    "zero_point_add": 1,
                     "packing_layout": "input_major_packed_columns",
                     "zero_point_encoding": "fixed_8",
                 },
-            },
-            "qzeros": {
-                "dtype": "I32",
-                "shape": [4, 96],
-                "layout": ROW_MAJOR_LAYOUT,
             },
             "scales": {
                 "dtype": "F16",

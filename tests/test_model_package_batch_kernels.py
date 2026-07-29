@@ -852,11 +852,12 @@ def test_compiler_renders_cooperative_int4_prefill_shaders(tmp_path: Path) -> No
 
     gptq_source = (tmp_path / gptq).read_text()
     assert "binding = 2) readonly buffer QWeight" in gptq_source
-    assert "binding = 3) readonly buffer QZeros" in gptq_source
-    assert "binding = 4) readonly buffer Scales" in gptq_source
-    assert "binding = 5) readonly buffer Bias" in gptq_source
+    assert "binding = 3) readonly buffer Scales" in gptq_source
+    assert "binding = 4) readonly buffer Bias" in gptq_source
     assert "uint index = group * OUTPUT_SIZE + row;" in gptq_source
-    assert "int zero =" in gptq_source
+    assert "QZeros" not in gptq_source
+    assert "int zero =" not in gptq_source
+    assert "& 15u) - 8;" in gptq_source
     assert "coopmat<bfloat16_t" in gptq_source
     assert "{{" not in gptq_source
 

@@ -34,6 +34,8 @@ def write_compiled_auto_gptq_fixed_zero_8(
         not isinstance(quantization, dict)
         or quantization.get("format") != "auto_gptq"
         or int(quantization.get("bits") or 0) != 4
+        or quantization.get("symmetric") is not False
+        or int(quantization.get("zero_point_add") or 0) != 1
         or auto_gptq_packing(info) != AUTO_GPTQ_INPUT_MAJOR_PACKING
         or auto_gptq_zero_encoding(info) != AUTO_GPTQ_PER_GROUP_ZERO
     ):

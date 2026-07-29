@@ -424,25 +424,38 @@ class PackageTensorRepository:
         group_count = (input_features + group_size - 1) // group_size
         qzeros_name = quantization.get("qzeros")
         scales_name = quantization.get("scales")
+        zero_encoding = auto_gptq_zero_encoding(info)
+        if not isinstance(scales_name, str) or scales_name not in self._tensors:
+            raise ModelCompileError(
+                "AutoGPTQ INT4 analysis requires a scale tensor"
+            )
+        qzeros_info = (
+            self._tensors.get(qzeros_name)
+            if isinstance(qzeros_name, str)
+            else None
+        )
         if (
-            not isinstance(qzeros_name, str)
-            or qzeros_name not in self._tensors
-            or not isinstance(scales_name, str)
-            or scales_name not in self._tensors
+            zero_encoding == AUTO_GPTQ_PER_GROUP_ZERO
+            and not isinstance(qzeros_info, dict)
         ):
             raise ModelCompileError(
-                "AutoGPTQ INT4 analysis requires zero-point and scale tensors"
+                "per-group AutoGPTQ INT4 analysis requires a zero-point tensor"
             )
-        qzeros_info = self._tensors[qzeros_name]
         scales_info = self._tensors[scales_name]
-        qzeros_shape = tuple(int(value) for value in qzeros_info["shape"])
         scales_shape = tuple(int(value) for value in scales_info["shape"])
         expected_qzeros_shape = (group_count, (output_features + 7) // 8)
         expected_scales_shape = (group_count, output_features)
-        if (
-            str(qzeros_info.get("dtype")) != "I32"
-            or qzeros_shape != expected_qzeros_shape
-            or scales_shape != expected_scales_shape
+        qzeros_shape = (
+            tuple(int(value) for value in qzeros_info["shape"])
+            if isinstance(qzeros_info, dict)
+            else None
+        )
+        if scales_shape != expected_scales_shape or (
+            zero_encoding == AUTO_GPTQ_PER_GROUP_ZERO
+            and (
+                str(qzeros_info.get("dtype")) != "I32"
+                or qzeros_shape != expected_qzeros_shape
+            )
         ):
             raise ModelCompileError(
                 "AutoGPTQ INT4 auxiliary tensors are incompatible with logical "
@@ -460,7 +473,6 @@ class PackageTensorRepository:
         weight_shifts = ((input_indices % 8) * np.uint32(4))[None, :]
         quantized = ((packed >> weight_shifts) & np.uint32(0x0F)).astype(np.int16)
 
-        zero_encoding = auto_gptq_zero_encoding(info)
         if zero_encoding == AUTO_GPTQ_FIXED_ZERO_8:
             zero_points = np.full(
                 (len(output_indices), len(input_indices)),
@@ -468,6 +480,7 @@ class PackageTensorRepository:
                 dtype=np.int16,
             )
         elif zero_encoding == AUTO_GPTQ_PER_GROUP_ZERO:
+            assert isinstance(qzeros_info, dict)
             qzeros = np.asarray(
                 self._memmap(qzeros_info, "I32", qzeros_shape)[
                     np.ix_(input_groups, output_indices // 8)
