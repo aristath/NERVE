@@ -8,10 +8,12 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
     COMPONENT_FIXTURE_PATH,
     CONVERSATION_FIXTURE_PATH,
     MODEL_LIMITS_PATH,
+    PRODUCT_CONVERSATION_FIXTURE_PATH,
     component_fixture,
     conversation_fixture,
     fixture_reference,
     model_limits_fixture,
+    product_conversation_fixture,
 )
 from nerve.representation_optimizer.providers.codebook.discovery import (
     HeadNormCodebookOpportunity,
@@ -135,6 +137,10 @@ def head_norm_validation_requirements(
     conversation_ref = fixture_reference(
         path(CONVERSATION_FIXTURE_PATH),
         conversation_fixture(),
+    )
+    product_conversation_ref = fixture_reference(
+        path(PRODUCT_CONVERSATION_FIXTURE_PATH),
+        product_conversation_fixture(),
     )
     limits = model_limits_fixture(max_context_activations)
     limits_ref = fixture_reference(path(MODEL_LIMITS_PATH), limits)
@@ -489,7 +495,7 @@ def head_norm_validation_requirements(
             context_size_basis=context_basis,
             state_size=0,
             boundary_mode="local",
-            input_artifact=conversation_ref,
+            input_artifact=product_conversation_ref,
             initial_state_artifact=None,
             controls={
                 "execution": "ordinary",

@@ -16,6 +16,7 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
     MODEL_LIMITS_PATH,
     OVERLAY_PATH,
     PREFILL_SHADER_PATH,
+    PRODUCT_CONVERSATION_FIXTURE_PATH,
     PROOF_PATH,
     TENSOR_FRAGMENT_PATH,
     artifact_paths,
@@ -512,6 +513,9 @@ def _member_lowering(
             "proof_path": PROOF_PATH,
             "component_fixture_path": COMPONENT_FIXTURE_PATH,
             "conversation_fixture_path": CONVERSATION_FIXTURE_PATH,
+            "product_conversation_fixture_path": (
+                PRODUCT_CONVERSATION_FIXTURE_PATH
+            ),
             "model_limits_path": MODEL_LIMITS_PATH,
         },
         "runtime": {
@@ -610,6 +614,16 @@ def _build_plan(
         ),
         _output(
             prefix(CONVERSATION_FIXTURE_PATH),
+            "validation_fixture",
+            "compile",
+            "semantic_construction",
+            0,
+            json_contract(
+                "nerve.optimizer.validation_conversation.v1"
+            ),
+        ),
+        _output(
+            prefix(PRODUCT_CONVERSATION_FIXTURE_PATH),
             "validation_fixture",
             "compile",
             "semantic_construction",

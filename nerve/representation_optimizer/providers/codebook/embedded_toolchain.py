@@ -10,6 +10,7 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
     component_fixture_from_geometry,
     conversation_fixture,
     model_limits_fixture,
+    product_conversation_fixture,
 )
 from nerve.representation_optimizer.providers.codebook.embedded_artifacts import (
     COMPONENT_FIXTURE_PATH,
@@ -17,6 +18,7 @@ from nerve.representation_optimizer.providers.codebook.embedded_artifacts import
     DECODE_SHADER_PATH,
     MODEL_LIMITS_PATH,
     OVERLAY_PATH,
+    PRODUCT_CONVERSATION_FIXTURE_PATH,
     PROOF_PATH,
 )
 from nerve.representation_optimizer.providers.codebook.embedded_contracts import (
@@ -112,6 +114,10 @@ class EmbeddedParameterProgramSemanticConstructor:
         context.write_json_artifact(
             CONVERSATION_FIXTURE_PATH,
             conversation_fixture(),
+        )
+        context.write_json_artifact(
+            PRODUCT_CONVERSATION_FIXTURE_PATH,
+            product_conversation_fixture(),
         )
         context.write_json_artifact(
             MODEL_LIMITS_PATH,

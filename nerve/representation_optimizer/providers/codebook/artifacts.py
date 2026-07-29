@@ -20,6 +20,7 @@ PREFILL_SHADER_PATH = "kernels/head_norm_rope_codebook_u8_temporal.spv"
 PROOF_PATH = "proofs/codebook_equivalence.json"
 COMPONENT_FIXTURE_PATH = "fixtures/head_norm_inputs.json"
 CONVERSATION_FIXTURE_PATH = "fixtures/conversation.json"
+PRODUCT_CONVERSATION_FIXTURE_PATH = "fixtures/product_conversation.json"
 MODEL_LIMITS_PATH = "fixtures/model_limits.json"
 
 
@@ -46,6 +47,7 @@ def artifact_paths() -> tuple[str, ...]:
                 MODEL_LIMITS_PATH,
                 OVERLAY_PATH,
                 PREFILL_SHADER_PATH,
+                PRODUCT_CONVERSATION_FIXTURE_PATH,
                 PROOF_PATH,
                 TENSOR_FRAGMENT_PATH,
             )
@@ -138,6 +140,28 @@ def conversation_fixture() -> Json:
                 },
             ],
         },
+    }
+
+
+def product_conversation_fixture() -> Json:
+    return {
+        "schema": "nerve.optimizer.validation_conversation.v1",
+        "enable_thinking": True,
+        "turns": [
+            "hi",
+            "Who are you?",
+            "what is the capital of Greece?",
+            (
+                "I asked you earlier for the capital of a country. "
+                "Which country was it?"
+            ),
+        ],
+        "teacher_forced_assistant_turns": [
+            "Hello!",
+            "I am a language model.",
+            "The capital of Greece is Athens.",
+            "You asked about Greece.",
+        ],
     }
 
 

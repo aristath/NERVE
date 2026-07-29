@@ -15,11 +15,13 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
     MODEL_LIMITS_PATH,
     OVERLAY_PATH,
     PREFILL_SHADER_PATH,
+    PRODUCT_CONVERSATION_FIXTURE_PATH,
     PROOF_PATH,
     TENSOR_FRAGMENT_PATH,
     component_fixture_from_geometry,
     conversation_fixture,
     model_limits_fixture,
+    product_conversation_fixture,
 )
 from nerve.representation_optimizer.providers.codebook.contracts import (
     CODEBOOK_PROOF_SCHEMA,
@@ -200,6 +202,10 @@ class CodebookSemanticConstructor:
         context.write_json_artifact(
             CONVERSATION_FIXTURE_PATH,
             conversation_fixture(),
+        )
+        context.write_json_artifact(
+            PRODUCT_CONVERSATION_FIXTURE_PATH,
+            product_conversation_fixture(),
         )
         context.write_json_artifact(
             MODEL_LIMITS_PATH,

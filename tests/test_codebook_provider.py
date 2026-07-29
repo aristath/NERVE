@@ -718,6 +718,10 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
     assert semantic_check["seeds"] == [1]
     assert product_check["kind"] == "free_running"
     assert product_check["controls"]["sampler"] == {"top_k": 1}
+    assert product_check["input"] != semantic_check["input"]
+    assert product_check["input"]["path"].endswith(
+        "/fixtures/product_conversation.json"
+    )
     assert product_check["comparison"] == {
         "output_mode": "exact_digest",
         "state_mode": "exact_digest",
