@@ -74,25 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 2. Define the versioned generic residency contract
-
-- Define package-level types for resources, atomic residency groups, compact
-  partition templates, byte ranges, alignment, integrity evidence, selectors,
-  dependencies, compatibility, and always-resident versus dynamic lifetimes.
-- Define runtime policies for `eager` and `demand-retained`; reserve an
-  extensible policy boundary for future bounded residency without implementing
-  eviction now.
-- Define the per-device state machine:
-  `absent -> requested -> loading -> resident`, with a terminal `failed` result
-  that can be cleared only through an explicit lifecycle operation.
-- Define stable identities from package content and compiled semantics rather
-  than paths, tensor names, or runtime placement.
-- Specify how a physical execution checkpoint declares the resources needed to
-  continue an activation.
-
-Completion requires contract validation tests, format-version tests, and an
-adversarial review proving the contract does not encode Qwen or MoE assumptions.
-
 ### 3. Add compiler residency analysis and planning
 
 - Discover independently selected parameter regions from the semantic graph,
