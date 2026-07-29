@@ -74,21 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 11. Add scheduler backpressure and checkpoint resume
-
-- Represent an activation blocked on one or more residency groups without
-  blocking unrelated ready streams or devices.
-- Deduplicate and batch missing groups, launch their load once, and wake all
-  dependent activations after atomic publication.
-- Preserve stream ordering, recurrent state, transient attention state, random
-  state, and cancellation semantics across a pause.
-- Resume from the residency checkpoint rather than restarting inference work.
-- Expose bounded queues and fair scheduling so cold streams cannot starve warm
-  work.
-
-Completion requires deterministic interleaved-stream tests covering hits,
-misses, shared misses, cancellation, load failure, and resume ordering.
-
 ### 12. Prove the Qwen routed-expert implementation without Qwen special cases
 
 - Compile each main routed expert as one generic atomic group containing every
