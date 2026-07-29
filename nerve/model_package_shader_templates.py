@@ -438,6 +438,43 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    pairpacked_int8_quantizer = re.fullmatch(
+        r"quantize(?:_batch(\d+))?_int8_symmetric_pairpacked_"
+        r"b(\d+)_h(\d+)\.comp",
+        shader_file,
+    )
+    if pairpacked_int8_quantizer is not None:
+        batch_tile_width = (
+            int(pairpacked_int8_quantizer.group(1))
+            if pairpacked_int8_quantizer.group(1) is not None
+            else None
+        )
+        block_columns = int(pairpacked_int8_quantizer.group(2))
+        element_count = int(pairpacked_int8_quantizer.group(3))
+        if (
+            (batch_tile_width is not None and batch_tile_width <= 0)
+            or block_columns != Q8_0_GROUP_SIZE
+            or element_count <= 0
+            or element_count % block_columns
+        ):
+            raise ModelCompileError(
+                f"invalid pair-packed INT8 activation-quantizer shader shape "
+                f"{shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "quantize_batch_int8_symmetric_pairpacked.comp.template"
+                if batch_tile_width is not None
+                else "quantize_int8_symmetric_pairpacked.comp.template"
+            ),
+            {
+                "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
+                "BLOCK_COLUMNS": str(block_columns),
+                "ELEMENT_COUNT": str(element_count),
+            },
+        )
+
     int8_quantizer = re.fullmatch(
         r"quantize(?:_batch(\d+))?_int8_symmetric_b(\d+)_h(\d+)\.comp",
         shader_file,
@@ -1773,15 +1810,22 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     native_int4_linear = re.fullmatch(
-        r"(linear|linear_bias|linear_residual)(_prequant)?_int4_"
+        r"(linear|linear_bias|linear_residual)"
+        r"(_prequant|_prequant_pairpacked)?_int4_"
         r"(gptq|ct)_s(f16|bf16)_"
         r"g(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if native_int4_linear is not None:
         operation = native_int4_linear.group(1)
-        prequantized_input = native_int4_linear.group(2) is not None
+        input_variant = native_int4_linear.group(2)
+        prequantized_input = input_variant is not None
+        pairpacked_input = input_variant == "_prequant_pairpacked"
         quantization_format = native_int4_linear.group(3)
+        if pairpacked_input and quantization_format != "gptq":
+            raise ModelCompileError(
+                f"pair-packed INT8 input requires GPTQ weights in {shader_file!r}"
+            )
         scale_dtype = native_int4_linear.group(4)
         group_size, input_size, output_size = map(
             int, native_int4_linear.groups()[4:]
@@ -1797,7 +1841,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return render_shader_template(
             source_dir,
             (
-                f"linear_prequant_int4_{quantization_format}.comp.template"
+                "linear_prequant_pairpacked_int4_gptq.comp.template"
+                if pairpacked_input
+                else f"linear_prequant_int4_{quantization_format}.comp.template"
                 if prequantized_input
                 else f"linear_int4_{quantization_format}.comp.template"
             ),
@@ -1807,6 +1853,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 scale_dtype=scale_dtype,
                 batch_tile_width=None,
                 prequantized_input=prequantized_input,
+                pairpacked_input=pairpacked_input,
             )
             | {
                 "GROUP_SIZE": str(group_size),
@@ -1817,17 +1864,23 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     native_int4_batch_linear = re.fullmatch(
-        r"(linear|linear_bias|linear_residual)(_prequant)?_batch(\d+)_"
-        r"int4_(gptq|ct)_"
+        r"(linear|linear_bias|linear_residual)"
+        r"(_prequant|_prequant_pairpacked)?_batch(\d+)_int4_(gptq|ct)_"
         r"s(f16|bf16)_"
         r"g(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if native_int4_batch_linear is not None:
         operation = native_int4_batch_linear.group(1)
-        prequantized_input = native_int4_batch_linear.group(2) is not None
+        input_variant = native_int4_batch_linear.group(2)
+        prequantized_input = input_variant is not None
+        pairpacked_input = input_variant == "_prequant_pairpacked"
         batch_tile_width = int(native_int4_batch_linear.group(3))
         quantization_format = native_int4_batch_linear.group(4)
+        if pairpacked_input and quantization_format != "gptq":
+            raise ModelCompileError(
+                f"pair-packed INT8 input requires GPTQ weights in {shader_file!r}"
+            )
         scale_dtype = native_int4_batch_linear.group(5)
         group_size, input_size, output_size = map(
             int, native_int4_batch_linear.groups()[5:]
@@ -1847,7 +1900,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return render_shader_template(
             source_dir,
             (
-                f"linear_prequant_int4_{quantization_format}.comp.template"
+                "linear_prequant_pairpacked_int4_gptq.comp.template"
+                if pairpacked_input
+                else f"linear_prequant_int4_{quantization_format}.comp.template"
                 if prequantized_input
                 else f"linear_int4_{quantization_format}.comp.template"
             ),
@@ -1857,6 +1912,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 scale_dtype=scale_dtype,
                 batch_tile_width=batch_tile_width,
                 prequantized_input=prequantized_input,
+                pairpacked_input=pairpacked_input,
             )
             | {
                 "GROUP_SIZE": str(group_size),

@@ -542,6 +542,14 @@ def weight_shared_batch_shader_file(
             f"quantize_batch{tile}_int8_symmetric_",
             1,
         )
+    if re.fullmatch(
+        r"quantize_int8_symmetric_pairpacked_b32_h\d+\.comp", shader_file
+    ):
+        return shader_file.replace(
+            "quantize_int8_symmetric_pairpacked_",
+            f"quantize_batch{tile}_int8_symmetric_pairpacked_",
+            1,
+        )
     if re.fullmatch(r"quantize_fp8_e4m3_b128_h\d+\.comp", shader_file):
         return shader_file.replace(
             "quantize_fp8_e4m3_",
@@ -609,6 +617,17 @@ def weight_shared_batch_shader_file(
         return shader_file.replace(
             "_prequant_int4_",
             f"_prequant_batch{tile}_int4_",
+            1,
+        )
+    pairpacked_int4 = re.fullmatch(
+        r"(linear|linear_bias|linear_residual)_prequant_pairpacked_int4_"
+        r"gptq_s(?:f16|bf16)_g\d+_\d+x\d+\.comp",
+        shader_file,
+    )
+    if pairpacked_int4 is not None:
+        return shader_file.replace(
+            "_prequant_pairpacked_int4_",
+            f"_prequant_pairpacked_batch{tile}_int4_",
             1,
         )
     if re.fullmatch(r"split_bf16_2x\d+x\d+_head_interleaved\.comp", shader_file):

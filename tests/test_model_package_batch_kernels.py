@@ -43,6 +43,21 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     )
     assert (
         weight_shared_batch_shader_file(
+            "quantize_int8_symmetric_pairpacked_b32_h5120.comp"
+        )
+        == "quantize_batch16_int8_symmetric_pairpacked_b32_h5120.comp"
+    )
+    assert (
+        weight_shared_batch_shader_file(
+            "linear_prequant_pairpacked_int4_gptq_sf16_g128_5120x17408.comp"
+        )
+        == (
+            "linear_prequant_pairpacked_batch16_int4_gptq_"
+            "sf16_g128_5120x17408.comp"
+        )
+    )
+    assert (
+        weight_shared_batch_shader_file(
             "linear_residual_int4_ct_sbf16_g32_16384x5376.comp"
         )
         == "linear_residual_batch16_int4_ct_sbf16_g32_16384x5376.comp"

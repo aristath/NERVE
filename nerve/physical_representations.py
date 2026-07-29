@@ -7,6 +7,9 @@ from nerve.compilation import Json, ModelCompileError
 
 FP8_PREQUANTIZATION_CONTRACT = "bf16_blockwise_fp8_e4m3_f32_scale.v1"
 INT8_PREQUANTIZATION_CONTRACT = "bf16_blockwise_symmetric_int8_f32_scale.v1"
+PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT = (
+    "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1"
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,12 @@ _CONTRACTS = {
             helper_op="quantize_int8_symmetric",
             output_signal_suffixes=("int8", "scale_f32"),
             output_element_bytes=(1, 4),
+        ),
+        PhysicalRepresentationContract(
+            id=PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+            helper_op="quantize_int8_symmetric_pairpacked",
+            output_signal_suffixes=("int8_pairpacked", "scale_f32", "sum_i32"),
+            output_element_bytes=(1, 4, 4),
         ),
     )
 }

@@ -32,6 +32,12 @@ def shader_file_for_node(
             f"quantize_int8_symmetric_b{int(node['attrs']['block_columns'])}"
             f"_h{int(node['attrs']['element_count'])}.comp"
         )
+    if op == "quantize_int8_symmetric_pairpacked":
+        return (
+            "quantize_int8_symmetric_pairpacked_"
+            f"b{int(node['attrs']['block_columns'])}"
+            f"_h{int(node['attrs']['element_count'])}.comp"
+        )
     if op == "rms_norm":
         representations = node.get("attrs", {}).get(
             "physical_output_representations"
@@ -89,7 +95,9 @@ def shader_file_for_node(
                 circuit, node, tensor_index
             ).lower()
             prefix = "linear_bias" if has_bias else "linear"
-            if uses_prequantized_int8_input(node):
+            if uses_pairpacked_int8_input(node):
+                prefix += "_prequant_pairpacked"
+            elif uses_prequantized_int8_input(node):
                 prefix += "_prequant"
             return (
                 f"{prefix}_int4_{format_token}_s{scale_dtype}_g{group_size}_"
@@ -915,7 +923,11 @@ def shader_file_for_node(
 
 
 def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
-    if node["op"] in {"quantize_fp8_e4m3", "quantize_int8_symmetric"}:
+    if node["op"] in {
+        "quantize_fp8_e4m3",
+        "quantize_int8_symmetric",
+        "quantize_int8_symmetric_pairpacked",
+    }:
         return int(node["attrs"]["element_count"]) // int(
             node["attrs"]["block_columns"]
         )
@@ -1129,7 +1141,11 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
     ):
         return 1024
     if shader_file.startswith(
-        ("quantize_fp8_e4m3_", "quantize_int8_symmetric_")
+        (
+            "quantize_fp8_e4m3_",
+            "quantize_int8_symmetric_",
+            "quantize_int8_symmetric_pairpacked_",
+        )
     ):
         return 32
     if "_prequant_fp8_e4m3_" in shader_file:
@@ -1153,9 +1169,16 @@ def uses_prequantized_fp8_input(node: Json) -> bool:
 
 
 def uses_prequantized_int8_input(node: Json) -> bool:
+    return node.get("attrs", {}).get("physical_input_contract") in {
+        INT8_PREQUANTIZATION_CONTRACT,
+        PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+    }
+
+
+def uses_pairpacked_int8_input(node: Json) -> bool:
     return (
         node.get("attrs", {}).get("physical_input_contract")
-        == INT8_PREQUANTIZATION_CONTRACT
+        == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
     )
 
 
@@ -1189,6 +1212,7 @@ def int4_shader_replacements(
     scale_dtype: str,
     batch_tile_width: int | None,
     prequantized_input: bool = False,
+    pairpacked_input: bool = False,
 ) -> dict[str, str]:
     if operation not in {"linear", "linear_bias", "linear_residual"}:
         raise ModelCompileError(f"unsupported native INT4 operation {operation!r}")
@@ -1208,7 +1232,9 @@ def int4_shader_replacements(
 
     has_residual = operation == "linear_residual"
     has_bias = operation == "linear_bias"
-    input_binding_count = 2 if prequantized_input else 1
+    if pairpacked_input and not prequantized_input:
+        raise ModelCompileError("pair-packed INT8 input must be prequantized")
+    input_binding_count = 3 if pairpacked_input else 2 if prequantized_input else 1
     output_binding = input_binding_count + (1 if has_residual else 0)
     qweight_binding = output_binding + 1
     scales_binding = qweight_binding + 1

@@ -385,34 +385,44 @@ def test_compiler_renders_shared_int8_activation_int4_kernel_family(
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
-        "quantize_int8_symmetric_b32_h512.comp",
-        "quantize_batch16_int8_symmetric_b32_h512.comp",
-        "linear_prequant_int4_gptq_sf16_g128_512x768.comp",
-        "linear_prequant_batch16_int4_gptq_sf16_g128_512x768.comp",
+        "quantize_int8_symmetric_pairpacked_b32_h512.comp",
+        "quantize_batch16_int8_symmetric_pairpacked_b32_h512.comp",
+        "linear_prequant_pairpacked_int4_gptq_sf16_g128_512x768.comp",
+        "linear_prequant_pairpacked_batch16_int4_gptq_sf16_g128_512x768.comp",
         "linear_residual_prequant_int4_ct_sbf16_g32_512x768.comp",
         "linear_residual_prequant_batch16_int4_ct_sbf16_g32_512x768.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
 
-    quantize = (tmp_path / "quantize_int8_symmetric_b32_h512.comp").read_text()
+    quantize = (
+        tmp_path / "quantize_int8_symmetric_pairpacked_b32_h512.comp"
+    ).read_text()
     gptq = (
-        tmp_path / "linear_prequant_int4_gptq_sf16_g128_512x768.comp"
+        tmp_path
+        / "linear_prequant_pairpacked_int4_gptq_sf16_g128_512x768.comp"
     ).read_text()
     residual = (
         tmp_path / "linear_residual_prequant_int4_ct_sbf16_g32_512x768.comp"
     ).read_text()
     batch = (
-        tmp_path / "linear_prequant_batch16_int4_gptq_sf16_g128_512x768.comp"
+        tmp_path
+        / "linear_prequant_pairpacked_batch16_int4_gptq_sf16_g128_512x768.comp"
     ).read_text()
 
     assert "const uint BLOCK_COLUMNS = 32u;" in quantize
     assert "block_max / 127.0" in quantize
+    assert "buffer BlockSum" in quantize
+    assert "subgroupAdd(lane_sum)" in quantize
     assert "#extension GL_EXT_integer_dot_product : require" in gptq
     assert "dotPacked4x8EXT" in gptq
+    assert "pack_weight_i8x4" not in gptq
+    assert "packed & 0x0f0f0f0fu" in gptq
+    assert "-8 * input_sums.values" in gptq
     assert "binding = 0) readonly buffer QuantizedInputs" in gptq
     assert "binding = 1) readonly buffer InputScales" in gptq
-    assert "binding = 2) buffer OutputFrames" in gptq
+    assert "binding = 2) readonly buffer InputSums" in gptq
+    assert "binding = 3) buffer OutputFrames" in gptq
     assert "binding = 2) readonly buffer ResidualFrames" in residual
     assert "binding = 3) buffer OutputFrames" in residual
     assert "const uint BATCH_TILE_WIDTH = 16u;" in batch
@@ -421,6 +431,95 @@ def test_compiler_renders_shared_int8_activation_int4_kernel_family(
         for shader_file in shader_files
     )
     compile_shader_artifacts(tmp_path)
+
+
+def test_pairpacked_int8_dot_is_exactly_equivalent_to_signed_int4_dot() -> None:
+    activations = [
+        -127,
+        126,
+        -103,
+        87,
+        -64,
+        63,
+        -31,
+        30,
+        -17,
+        16,
+        -9,
+        8,
+        -3,
+        2,
+        -1,
+        0,
+        1,
+        -2,
+        3,
+        -8,
+        9,
+        -16,
+        17,
+        -30,
+        31,
+        -63,
+        64,
+        -87,
+        103,
+        -126,
+        127,
+        11,
+    ]
+    raw_nibbles = [
+        0,
+        15,
+        1,
+        14,
+        2,
+        13,
+        3,
+        12,
+        4,
+        11,
+        5,
+        10,
+        6,
+        9,
+        7,
+        8,
+        8,
+        7,
+        9,
+        6,
+        10,
+        5,
+        11,
+        4,
+        12,
+        3,
+        13,
+        2,
+        14,
+        1,
+        15,
+        0,
+    ]
+
+    signed_dot = sum(
+        activation * (nibble - 8)
+        for activation, nibble in zip(activations, raw_nibbles, strict=True)
+    )
+    pairpacked_raw_dot = 0
+    for offset in range(0, len(activations), 8):
+        values = activations[offset : offset + 8]
+        nibbles = raw_nibbles[offset : offset + 8]
+        pairpacked_raw_dot += sum(
+            values[index] * nibbles[index] for index in (0, 2, 4, 6)
+        )
+        pairpacked_raw_dot += sum(
+            values[index] * nibbles[index] for index in (1, 3, 5, 7)
+        )
+    corrected_dot = pairpacked_raw_dot - 8 * sum(activations)
+
+    assert corrected_dot == signed_dot
 
 
 def test_packed_int4_projection_requests_reusable_int8_input_representation() -> None:
@@ -463,7 +562,9 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
     }
 
     assert physical_input_prequantization_spec(circuit, node, tensor_index) == {
-        "contract": "bf16_blockwise_symmetric_int8_f32_scale.v1",
+        "contract": (
+            "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1"
+        ),
         "input_size": 512,
         "block_columns": 32,
     }
@@ -486,10 +587,14 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
     )
     lowered = {
         **node,
-        "inputs": ["normalized_int8", "normalized_scale"],
+        "inputs": [
+            "normalized_int8_pairpacked",
+            "normalized_scale",
+            "normalized_sum",
+        ],
         "attrs": {
             "physical_input_contract": (
-                "bf16_blockwise_symmetric_int8_f32_scale.v1"
+                "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1"
             )
         },
     }
@@ -498,7 +603,7 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
         lowered,
         tensor_index,
         {"hidden_size": 512, "intermediate_size": 2048},
-    ) == "linear_prequant_int4_gptq_sf16_g128_512x768.comp"
+    ) == "linear_prequant_pairpacked_int4_gptq_sf16_g128_512x768.comp"
 
 
 def test_compiler_renders_native_compressed_tensors_int4_linear_variants(

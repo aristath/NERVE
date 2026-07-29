@@ -793,6 +793,46 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
         )
         self.assertEqual(quantize["outputs"], projection["inputs"])
 
+    def test_lowers_declared_pairpacked_int8_representation_with_block_sums(
+        self,
+    ) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["projected"],
+                    "params": ["weight", "weight_scales"],
+                }
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            prequantization_spec=lambda _node: {
+                "contract": (
+                    "bf16_blockwise_symmetric_int8_pairpacked_"
+                    "f32_scale_i32_sum.v1"
+                ),
+                "input_size": 5120,
+                "block_columns": 32,
+            },
+        )
+
+        quantize, projection = optimized["nodes"]
+        self.assertEqual("quantize_int8_symmetric_pairpacked", quantize["op"])
+        self.assertEqual(
+            [
+                "projection__input_int8_pairpacked",
+                "projection__input_scale_f32",
+                "projection__input_sum_i32",
+            ],
+            quantize["outputs"],
+        )
+        self.assertEqual([1, 4, 4], quantize["attrs"]["output_element_bytes"])
+        self.assertEqual(quantize["outputs"], projection["inputs"])
+
     def test_fuses_reusable_fp8_representation_into_eligible_producer(self) -> None:
         circuit = {
             "nodes": [

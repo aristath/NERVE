@@ -36,6 +36,35 @@ fn infer_node_output_shapes(
                 Some(vec![element_count / block_columns]),
             ])
         }
+        "quantize_int8_symmetric_pairpacked" => {
+            let element_count = attr_usize(node, "element_count");
+            let block_columns = attr_usize(node, "block_columns");
+            if node.inputs.len() != 1
+                || node.outputs.len() != 3
+                || element_count.is_none()
+                || block_columns.is_none()
+                || element_count.unwrap() % block_columns.unwrap() != 0
+            {
+                return Err(CircuitPlanError(format!(
+                    "{} node {} has invalid pair-packed blockwise quantization geometry",
+                    component_id, node.id
+                )));
+            }
+            let element_count = element_count.unwrap();
+            let block_columns = block_columns.unwrap();
+            if first_input_shape(node, signals) != Some(vec![element_count]) {
+                return Err(CircuitPlanError(format!(
+                    "{} node {} quantization input shape does not match {} elements",
+                    component_id, node.id, element_count
+                )));
+            }
+            let block_count = element_count / block_columns;
+            Ok(vec![
+                Some(vec![element_count]),
+                Some(vec![block_count]),
+                Some(vec![block_count]),
+            ])
+        }
         "rms_norm"
         | "rms_norm_per_head"
         | "rms_norm_per_head_unscaled"
@@ -251,14 +280,18 @@ fn apply_physical_output_representation_shapes(
                 node.id
             )));
         };
-        if !matches!(
-            contract,
+        let expected_outputs = match contract {
             Some(
                 "bf16_blockwise_fp8_e4m3_f32_scale.v1"
-                    | "bf16_blockwise_symmetric_int8_f32_scale.v1"
-            )
-        )
-            || outputs.len() != 2
+                | "bf16_blockwise_symmetric_int8_f32_scale.v1",
+            ) => 2,
+            Some(
+                "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1",
+            ) => 3,
+            _ => 0,
+        };
+        if outputs.len() != expected_outputs
+            || expected_outputs == 0
             || element_count == 0
             || block_columns == 0
             || element_count % block_columns != 0
@@ -288,7 +321,16 @@ fn apply_physical_output_representation_shapes(
                 node.id, shapes[logical_index]
             )));
         }
-        let physical_shapes = [vec![element_count], vec![element_count / block_columns]];
+        let block_count = element_count / block_columns;
+        let physical_shapes = if expected_outputs == 3 {
+            vec![
+                vec![element_count],
+                vec![block_count],
+                vec![block_count],
+            ]
+        } else {
+            vec![vec![element_count], vec![block_count]]
+        };
         for (output, shape) in outputs.iter().zip(physical_shapes) {
             let output = output.as_str().ok_or_else(|| {
                 CircuitPlanError(format!(

@@ -2,6 +2,7 @@ from nerve.model_package_common import *
 from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     INT8_PREQUANTIZATION_CONTRACT,
+    PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
     prequantization_spec,
 )
 from nerve.quantized_layouts import (
@@ -720,10 +721,12 @@ def physical_input_prequantization_spec(
             weight_group_size = packed_int4_linear_group_size_for_node(
                 circuit, node, tensor_index
             )
+            contract = PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
         elif quantization_format == "compressed_tensors_pack_quantized":
             weight_group_size = compressed_tensors_int4_group_size_for_node(
                 circuit, node, tensor_index
             )
+            contract = INT8_PREQUANTIZATION_CONTRACT
         else:
             return None
     except (KeyError, ModelCompileError):
@@ -737,7 +740,7 @@ def physical_input_prequantization_spec(
     ):
         return None
     return prequantization_spec(
-        INT8_PREQUANTIZATION_CONTRACT,
+        contract,
         input_size=input_size,
         block_columns=Q8_0_GROUP_SIZE,
     )
