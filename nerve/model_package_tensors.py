@@ -1,4 +1,9 @@
 from nerve.model_package_common import *
+from nerve.physical_representations import (
+    FP8_PREQUANTIZATION_CONTRACT,
+    INT8_PREQUANTIZATION_CONTRACT,
+    prequantization_spec,
+)
 
 import numpy as np
 
@@ -670,7 +675,56 @@ def can_fuse_native_parallel_linears(
     )
 
 
-def fp8_prequantization_spec(
+def physical_input_prequantization_spec(
+    circuit: Json, node: Json, tensor_index: Json
+) -> Json | None:
+    fp8_spec = _fp8_prequantization_spec(circuit, node, tensor_index)
+    if fp8_spec is not None:
+        return prequantization_spec(
+            FP8_PREQUANTIZATION_CONTRACT,
+            input_size=int(fp8_spec["input_size"]),
+            block_columns=int(fp8_spec["block_columns"]),
+        )
+    if node.get("op") not in {"linear", "linear_residual"}:
+        return None
+    params = node.get("params", [])
+    if not params:
+        return None
+    try:
+        if parameter_dtype_for_id(circuit, params[0], tensor_index) != "I32":
+            return None
+        shape = parameter_shape_for_id(circuit, params[0], tensor_index)
+        quantization_format = packed_linear_quantization_format_for_node(
+            circuit, node, tensor_index
+        )
+        if quantization_format == "auto_gptq":
+            weight_group_size = packed_int4_linear_group_size_for_node(
+                circuit, node, tensor_index
+            )
+        elif quantization_format == "compressed_tensors_pack_quantized":
+            weight_group_size = compressed_tensors_int4_group_size_for_node(
+                circuit, node, tensor_index
+            )
+        else:
+            return None
+    except (KeyError, ModelCompileError):
+        return None
+    input_size = int(shape[1]) if len(shape) == 2 else 0
+    if (
+        input_size <= 0
+        or input_size % Q8_0_GROUP_SIZE
+        or weight_group_size <= 0
+        or weight_group_size % Q8_0_GROUP_SIZE
+    ):
+        return None
+    return prequantization_spec(
+        INT8_PREQUANTIZATION_CONTRACT,
+        input_size=input_size,
+        block_columns=Q8_0_GROUP_SIZE,
+    )
+
+
+def _fp8_prequantization_spec(
     circuit: Json, node: Json, tensor_index: Json
 ) -> Json | None:
     if node.get("op") == "sparse_moe_gate_up":

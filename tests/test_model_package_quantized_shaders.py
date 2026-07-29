@@ -1,6 +1,9 @@
 from model_package_layout_common import *
 from nerve.model_package_shader_compiler import compile_shader_artifacts
-from nerve.model_package_tensors import can_fuse_native_parallel_linears
+from nerve.model_package_tensors import (
+    can_fuse_native_parallel_linears,
+    physical_input_prequantization_spec,
+)
 
 
 def test_parallel_linear_shader_selector_rejects_invalid_metadata_and_layout() -> None:
@@ -374,6 +377,115 @@ def test_compiler_renders_native_auto_gptq_int4_linear_variants(
     assert "const uint BATCH_TILE_WIDTH = 16u;" in batch
     assert "batch_control.batch_width" in batch
     assert all("{{" not in source for source in (linear, bias, residual, batch))
+
+
+def test_compiler_renders_shared_int8_activation_int4_kernel_family(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "quantize_int8_symmetric_b32_h512.comp",
+        "quantize_batch16_int8_symmetric_b32_h512.comp",
+        "linear_prequant_int4_gptq_sf16_g128_512x768.comp",
+        "linear_prequant_batch16_int4_gptq_sf16_g128_512x768.comp",
+        "linear_residual_prequant_int4_ct_sbf16_g32_512x768.comp",
+        "linear_residual_prequant_batch16_int4_ct_sbf16_g32_512x768.comp",
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    quantize = (tmp_path / "quantize_int8_symmetric_b32_h512.comp").read_text()
+    gptq = (
+        tmp_path / "linear_prequant_int4_gptq_sf16_g128_512x768.comp"
+    ).read_text()
+    residual = (
+        tmp_path / "linear_residual_prequant_int4_ct_sbf16_g32_512x768.comp"
+    ).read_text()
+    batch = (
+        tmp_path / "linear_prequant_batch16_int4_gptq_sf16_g128_512x768.comp"
+    ).read_text()
+
+    assert "const uint BLOCK_COLUMNS = 32u;" in quantize
+    assert "block_max / 127.0" in quantize
+    assert "#extension GL_EXT_integer_dot_product : require" in gptq
+    assert "dotPacked4x8EXT" in gptq
+    assert "binding = 0) readonly buffer QuantizedInputs" in gptq
+    assert "binding = 1) readonly buffer InputScales" in gptq
+    assert "binding = 2) buffer OutputFrames" in gptq
+    assert "binding = 2) readonly buffer ResidualFrames" in residual
+    assert "binding = 3) buffer OutputFrames" in residual
+    assert "const uint BATCH_TILE_WIDTH = 16u;" in batch
+    assert all(
+        "{{" not in (tmp_path / shader_file).read_text()
+        for shader_file in shader_files
+    )
+    compile_shader_artifacts(tmp_path)
+
+
+def test_packed_int4_projection_requests_reusable_int8_input_representation() -> None:
+    node = {
+        "id": "projection",
+        "op": "linear",
+        "inputs": ["normalized"],
+        "outputs": ["projected"],
+        "params": ["weight", "weight_qzeros", "weight_scales"],
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "weight": {"tensor": "weight"},
+                "weight_qzeros": {"tensor": "qzeros"},
+                "weight_scales": {"tensor": "scales"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "weight": {
+                "dtype": "I32",
+                "shape": [64, 768],
+                "logical_shape": [768, 512],
+                "layout": ROW_MAJOR_LAYOUT,
+                "quantization": {
+                    "format": "auto_gptq",
+                    "bits": 4,
+                    "group_size": 128,
+                    "zero_point_add": 1,
+                },
+            },
+            "qzeros": {
+                "dtype": "I32",
+                "shape": [4, 96],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "scales": {
+                "dtype": "F16",
+                "shape": [4, 768],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+
+    assert physical_input_prequantization_spec(circuit, node, tensor_index) == {
+        "contract": "bf16_blockwise_symmetric_int8_f32_scale.v1",
+        "input_size": 512,
+        "block_columns": 32,
+    }
+    lowered = {
+        **node,
+        "inputs": ["normalized_int8", "normalized_scale"],
+        "attrs": {
+            "physical_input_contract": (
+                "bf16_blockwise_symmetric_int8_f32_scale.v1"
+            )
+        },
+    }
+    assert shader_file_for_node(
+        circuit,
+        lowered,
+        tensor_index,
+        {"hidden_size": 512, "intermediate_size": 2048},
+    ) == "linear_prequant_int4_gptq_sf16_g128_512x768.comp"
 
 
 def test_compiler_renders_native_compressed_tensors_int4_linear_variants(

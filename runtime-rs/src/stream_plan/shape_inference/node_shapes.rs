@@ -9,7 +9,7 @@ fn infer_node_output_shapes(
     let unknown = || Ok(vec![None; outputs]);
 
     let inferred = match node.op.as_str() {
-        "quantize_fp8_e4m3" => {
+        "quantize_fp8_e4m3" | "quantize_int8_symmetric" => {
             let element_count = attr_usize(node, "element_count");
             let block_columns = attr_usize(node, "block_columns");
             if node.inputs.len() != 1
@@ -19,7 +19,7 @@ fn infer_node_output_shapes(
                 || element_count.unwrap() % block_columns.unwrap() != 0
             {
                 return Err(CircuitPlanError(format!(
-                    "{} node {} has invalid FP8 quantization geometry",
+                    "{} node {} has invalid blockwise quantization geometry",
                     component_id, node.id
                 )));
             }
@@ -27,7 +27,7 @@ fn infer_node_output_shapes(
             let block_columns = block_columns.unwrap();
             if first_input_shape(node, signals) != Some(vec![element_count]) {
                 return Err(CircuitPlanError(format!(
-                    "{} node {} FP8 quantization input shape does not match {} elements",
+                    "{} node {} quantization input shape does not match {} elements",
                     component_id, node.id, element_count
                 )));
             }
@@ -251,14 +251,20 @@ fn apply_physical_output_representation_shapes(
                 node.id
             )));
         };
-        if contract != Some("bf16_blockwise_fp8_e4m3_f32_scale.v1")
+        if !matches!(
+            contract,
+            Some(
+                "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+                    | "bf16_blockwise_symmetric_int8_f32_scale.v1"
+            )
+        )
             || outputs.len() != 2
             || element_count == 0
             || block_columns == 0
             || element_count % block_columns != 0
         {
             return Err(CircuitPlanError(format!(
-                "{component_id} node {} has invalid blockwise FP8 output geometry",
+                "{component_id} node {} has invalid blockwise physical output geometry",
                 node.id
             )));
         }

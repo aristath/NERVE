@@ -27,6 +27,11 @@ def shader_file_for_node(
             f"quantize_fp8_e4m3_b{int(node['attrs']['block_columns'])}"
             f"_h{int(node['attrs']['element_count'])}.comp"
         )
+    if op == "quantize_int8_symmetric":
+        return (
+            f"quantize_int8_symmetric_b{int(node['attrs']['block_columns'])}"
+            f"_h{int(node['attrs']['element_count'])}.comp"
+        )
     if op == "rms_norm":
         representations = node.get("attrs", {}).get(
             "physical_output_representations"
@@ -84,6 +89,8 @@ def shader_file_for_node(
                 circuit, node, tensor_index
             ).lower()
             prefix = "linear_bias" if has_bias else "linear"
+            if uses_prequantized_int8_input(node):
+                prefix += "_prequant"
             return (
                 f"{prefix}_int4_{format_token}_s{scale_dtype}_g{group_size}_"
                 f"{in_features}x{out_features}.comp"
@@ -396,8 +403,13 @@ def shader_file_for_node(
             scale_dtype = packed_int4_scale_dtype_for_node(
                 circuit, node, tensor_index
             ).lower()
+            prefix = (
+                "linear_residual_prequant"
+                if uses_prequantized_int8_input(node)
+                else "linear_residual"
+            )
             return (
-                f"linear_residual_int4_{format_token}_s{scale_dtype}_g{group_size}_"
+                f"{prefix}_int4_{format_token}_s{scale_dtype}_g{group_size}_"
                 f"{in_features}x{out_features}.comp"
             )
         if parameter_dtype == "F8_E4M3":
@@ -903,7 +915,7 @@ def shader_file_for_node(
 
 
 def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
-    if node["op"] == "quantize_fp8_e4m3":
+    if node["op"] in {"quantize_fp8_e4m3", "quantize_int8_symmetric"}:
         return int(node["attrs"]["element_count"]) // int(
             node["attrs"]["block_columns"]
         )
@@ -1116,7 +1128,9 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
         ("rms_norm_quantize_", "sigmoid_multiply_quantize_")
     ):
         return 1024
-    if shader_file.startswith("quantize_fp8_e4m3_"):
+    if shader_file.startswith(
+        ("quantize_fp8_e4m3_", "quantize_int8_symmetric_")
+    ):
         return 32
     if "_prequant_fp8_e4m3_" in shader_file:
         return 1024
@@ -1135,6 +1149,13 @@ def uses_prequantized_fp8_input(node: Json) -> bool:
     return (
         node.get("attrs", {}).get("physical_input_contract")
         == "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+    )
+
+
+def uses_prequantized_int8_input(node: Json) -> bool:
+    return (
+        node.get("attrs", {}).get("physical_input_contract")
+        == INT8_PREQUANTIZATION_CONTRACT
     )
 
 
@@ -1167,6 +1188,7 @@ def int4_shader_replacements(
     quantization_format: str,
     scale_dtype: str,
     batch_tile_width: int | None,
+    prequantized_input: bool = False,
 ) -> dict[str, str]:
     if operation not in {"linear", "linear_bias", "linear_residual"}:
         raise ModelCompileError(f"unsupported native INT4 operation {operation!r}")
@@ -1186,7 +1208,8 @@ def int4_shader_replacements(
 
     has_residual = operation == "linear_residual"
     has_bias = operation == "linear_bias"
-    output_binding = 2 if has_residual else 1
+    input_binding_count = 2 if prequantized_input else 1
+    output_binding = input_binding_count + (1 if has_residual else 0)
     qweight_binding = output_binding + 1
     qzeros_binding = qweight_binding + 1 if quantization_format == "gptq" else None
     scales_binding = (
@@ -1196,7 +1219,8 @@ def int4_shader_replacements(
 
     if has_residual:
         auxiliary_buffer = (
-            "layout(set = 0, binding = 1) readonly buffer ResidualFrames { "
+            f"layout(set = 0, binding = {input_binding_count}) "
+            "readonly buffer ResidualFrames { "
             "uint words[]; } residual_frames;"
         )
         finalize_output = (

@@ -12,15 +12,18 @@ from nerve.model_package_shader_compiler import (
 )
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_tensors import *
+from nerve.physical_representations import FP8_PREQUANTIZATION_CONTRACT
 
 
-def can_emit_fp8_representation_from_producer(
+def can_emit_physical_representation_from_producer(
     producer: Json,
     scope: Json,
     *,
     hidden_size: int,
     compiler_target: Json,
 ) -> bool:
+    if scope.get("contract") != FP8_PREQUANTIZATION_CONTRACT:
+        return False
     operation = producer.get("op")
     operation_shape_supported = (
         (operation == "rms_norm" and int(scope["input_size"]) == hidden_size)
@@ -432,11 +435,11 @@ def build_vulkan_resident_package_manifest(
             can_fuse_append_attention=lambda append, attention, circuit=circuit: (
                 can_fuse_bf16_append_attention(circuit, append, attention, tensor_index)
             ),
-            fp8_prequantization_spec=lambda node, circuit=circuit: (
-                fp8_prequantization_spec(circuit, node, tensor_index)
+            prequantization_spec=lambda node, circuit=circuit: (
+                physical_input_prequantization_spec(circuit, node, tensor_index)
             ),
-            can_emit_fp8_representation=lambda producer, scope: (
-                can_emit_fp8_representation_from_producer(
+            can_emit_representation=lambda producer, scope: (
+                can_emit_physical_representation_from_producer(
                     producer,
                     scope,
                     hidden_size=hidden_size,

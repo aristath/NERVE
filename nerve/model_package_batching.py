@@ -536,6 +536,12 @@ def weight_shared_batch_shader_file(
     if tile_width <= 0:
         raise ValueError("batch tile width must be positive")
     tile = tile_width
+    if re.fullmatch(r"quantize_int8_symmetric_b32_h\d+\.comp", shader_file):
+        return shader_file.replace(
+            "quantize_int8_symmetric_",
+            f"quantize_batch{tile}_int8_symmetric_",
+            1,
+        )
     if re.fullmatch(r"quantize_fp8_e4m3_b128_h\d+\.comp", shader_file):
         return shader_file.replace(
             "quantize_fp8_e4m3_",
@@ -592,6 +598,17 @@ def weight_shared_batch_shader_file(
         return shader_file.replace(
             "_prequant_fp8_e4m3_",
             f"_prequant_batch{tile}_fp8_e4m3_",
+            1,
+        )
+    prequant_int4 = re.fullmatch(
+        r"(linear|linear_bias|linear_residual)_prequant_int4_"
+        r"(?:gptq|ct)_s(?:f16|bf16)_g\d+_\d+x\d+\.comp",
+        shader_file,
+    )
+    if prequant_int4 is not None:
+        return shader_file.replace(
+            "_prequant_int4_",
+            f"_prequant_batch{tile}_int4_",
             1,
         )
     if re.fullmatch(r"split_bf16_2x\d+x\d+_head_interleaved\.comp", shader_file):

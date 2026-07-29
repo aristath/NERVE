@@ -438,6 +438,41 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    int8_quantizer = re.fullmatch(
+        r"quantize(?:_batch(\d+))?_int8_symmetric_b(\d+)_h(\d+)\.comp",
+        shader_file,
+    )
+    if int8_quantizer is not None:
+        batch_tile_width = (
+            int(int8_quantizer.group(1))
+            if int8_quantizer.group(1) is not None
+            else None
+        )
+        block_columns = int(int8_quantizer.group(2))
+        element_count = int(int8_quantizer.group(3))
+        if (
+            (batch_tile_width is not None and batch_tile_width <= 0)
+            or block_columns != Q8_0_GROUP_SIZE
+            or element_count <= 0
+            or element_count % block_columns
+        ):
+            raise ModelCompileError(
+                f"invalid INT8 activation-quantizer shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "quantize_batch_int8_symmetric.comp.template"
+                if batch_tile_width is not None
+                else "quantize_int8_symmetric.comp.template"
+            ),
+            {
+                "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
+                "BLOCK_COLUMNS": str(block_columns),
+                "ELEMENT_COUNT": str(element_count),
+            },
+        )
+
     fp8_quantizer = re.fullmatch(
         r"quantize(?:_batch(\d+))?_fp8_e4m3_b(\d+)_h(\d+)\.comp",
         shader_file,
@@ -1751,13 +1786,19 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     native_int4_linear = re.fullmatch(
-        r"(linear|linear_bias|linear_residual)_int4_(gptq|ct)_s(f16|bf16)_"
+        r"(linear|linear_bias|linear_residual)(_prequant)?_int4_"
+        r"(gptq|ct)_s(f16|bf16)_"
         r"g(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if native_int4_linear is not None:
-        operation, quantization_format, scale_dtype = native_int4_linear.groups()[:3]
-        group_size, input_size, output_size = map(int, native_int4_linear.groups()[3:])
+        operation = native_int4_linear.group(1)
+        prequantized_input = native_int4_linear.group(2) is not None
+        quantization_format = native_int4_linear.group(3)
+        scale_dtype = native_int4_linear.group(4)
+        group_size, input_size, output_size = map(
+            int, native_int4_linear.groups()[4:]
+        )
         output_tile_rows = (
             INT4_GPTQ_OUTPUT_TILE_ROWS
             if quantization_format == "gptq"
@@ -1768,12 +1809,17 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
         return render_shader_template(
             source_dir,
-            f"linear_int4_{quantization_format}.comp.template",
+            (
+                f"linear_prequant_int4_{quantization_format}.comp.template"
+                if prequantized_input
+                else f"linear_int4_{quantization_format}.comp.template"
+            ),
             int4_shader_replacements(
                 operation=operation,
                 quantization_format=quantization_format,
                 scale_dtype=scale_dtype,
                 batch_tile_width=None,
+                prequantized_input=prequantized_input,
             )
             | {
                 "GROUP_SIZE": str(group_size),
@@ -1784,18 +1830,20 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     native_int4_batch_linear = re.fullmatch(
-        r"(linear|linear_bias|linear_residual)_batch(\d+)_int4_(gptq|ct)_"
+        r"(linear|linear_bias|linear_residual)(_prequant)?_batch(\d+)_"
+        r"int4_(gptq|ct)_"
         r"s(f16|bf16)_"
         r"g(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if native_int4_batch_linear is not None:
         operation = native_int4_batch_linear.group(1)
-        batch_tile_width = int(native_int4_batch_linear.group(2))
-        quantization_format = native_int4_batch_linear.group(3)
-        scale_dtype = native_int4_batch_linear.group(4)
+        prequantized_input = native_int4_batch_linear.group(2) is not None
+        batch_tile_width = int(native_int4_batch_linear.group(3))
+        quantization_format = native_int4_batch_linear.group(4)
+        scale_dtype = native_int4_batch_linear.group(5)
         group_size, input_size, output_size = map(
-            int, native_int4_batch_linear.groups()[4:]
+            int, native_int4_batch_linear.groups()[5:]
         )
         if batch_tile_width <= 0:
             raise ModelCompileError(
@@ -1811,12 +1859,17 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
         return render_shader_template(
             source_dir,
-            f"linear_int4_{quantization_format}.comp.template",
+            (
+                f"linear_prequant_int4_{quantization_format}.comp.template"
+                if prequantized_input
+                else f"linear_int4_{quantization_format}.comp.template"
+            ),
             int4_shader_replacements(
                 operation=operation,
                 quantization_format=quantization_format,
                 scale_dtype=scale_dtype,
                 batch_tile_width=batch_tile_width,
+                prequantized_input=prequantized_input,
             )
             | {
                 "GROUP_SIZE": str(group_size),

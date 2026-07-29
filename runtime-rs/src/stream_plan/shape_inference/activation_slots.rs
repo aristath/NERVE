@@ -222,6 +222,48 @@ mod tests {
     }
 
     #[test]
+    fn infers_int8_quantization_representation_shapes() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "quantize".to_string(),
+            op: "quantize_int8_symmetric".to_string(),
+            inputs: vec!["hidden".to_string()],
+            outputs: vec!["hidden_int8".to_string(), "hidden_scale".to_string()],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "element_count": 5120,
+                "block_columns": 32,
+                "output_element_bytes": [1, 4]
+            }),
+        };
+        let signals = BTreeMap::from([(
+            "hidden".to_string(),
+            PlannedSignal {
+                id: "hidden".to_string(),
+                producer: SignalProducer::BoundaryInput,
+                consumers: vec!["quantize".to_string()],
+                shape: Some(vec![5120]),
+                element_bytes: Some(2),
+                storage: SignalStorage::Boundary,
+                is_boundary_output: false,
+            },
+        )]);
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![5120]), Some(vec![160])]
+        );
+    }
+
+    #[test]
     fn infers_compact_scale_shape_for_fused_fp8_output_representations() {
         let node = crate::stream_circuit::CircuitNode {
             id: "normalization".to_string(),

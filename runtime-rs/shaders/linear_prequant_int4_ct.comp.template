@@ -1,0 +1,144 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QuantizedInputs { uint words[]; } quantized_inputs;
+layout(set = 0, binding = 1) readonly buffer InputScales { float values[]; } input_scales;
+layout(set = 0, binding = {{OUTPUT_BINDING}}) buffer OutputFrames { uint words[]; } output_frames;
+layout(set = 0, binding = {{QWEIGHT_BINDING}}) readonly buffer QWeight { uint words[]; } qweight;
+layout(set = 0, binding = {{SCALES_BINDING}}) readonly buffer Scales { uint words[]; } scales;
+{{AUXILIARY_BUFFER}}
+
+{{BATCH_CONTROL}}
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint GROUP_SIZE = {{GROUP_SIZE}}u;
+const uint INPUT_SIZE = {{INPUT_SIZE}}u;
+const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
+const uint OUTPUT_TILE_ROWS = {{OUTPUT_TILE_ROWS}}u;
+const uint OUTPUT_WORDS = OUTPUT_SIZE / 2u;
+const uint PACKED_COLUMNS = INPUT_SIZE / 8u;
+const uint SCALE_COLUMNS = INPUT_SIZE / GROUP_SIZE;
+const uint INT8_BLOCK_COLUMNS = 32u;
+const uint INT8_WORDS = INPUT_SIZE / 4u;
+const uint INT8_BLOCKS = INPUT_SIZE / INT8_BLOCK_COLUMNS;
+
+shared float subgroup_sum[OUTPUT_TILE_ROWS][64];
+shared float output_rows[OUTPUT_TILE_ROWS];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+float read_bf16_word(uint packed, uint index) {
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+
+float read_weight_scale(uint row, uint group) {
+    uint index = row * SCALE_COLUMNS + group;
+{{READ_SCALE_BODY}}
+}
+
+uint pack_weight_i8x4(uint packed, uint nibble_offset) {
+    int a = int((packed >> ((nibble_offset + 0u) * 4u)) & 15u) - 8;
+    int b = int((packed >> ((nibble_offset + 1u) * 4u)) & 15u) - 8;
+    int c = int((packed >> ((nibble_offset + 2u) * 4u)) & 15u) - 8;
+    int d = int((packed >> ((nibble_offset + 3u) * 4u)) & 15u) - 8;
+    return (uint(a) & 255u)
+        | ((uint(b) & 255u) << 8u)
+        | ((uint(c) & 255u) << 16u)
+        | ((uint(d) & 255u) << 24u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+{{FINALIZE_OUTPUT_FUNCTION}}
+
+void project_rows(uint batch_index, uint first_row, uint lane) {
+    uint input_word_base = batch_index * INT8_WORDS;
+    uint input_scale_base = batch_index * INT8_BLOCKS;
+    for (uint local_row = 0u; local_row < OUTPUT_TILE_ROWS; local_row++) {
+        uint row = first_row + local_row;
+        float sum = 0.0;
+        if (row < OUTPUT_SIZE) {
+            for (
+                uint packed_column = lane;
+                packed_column < PACKED_COLUMNS;
+                packed_column += 64u
+            ) {
+                uint packed = qweight.words[row * PACKED_COLUMNS + packed_column];
+                uint group = (packed_column * 8u) / GROUP_SIZE;
+                uint input_block = (packed_column * 8u) / INT8_BLOCK_COLUMNS;
+                uint activation_word = input_word_base + packed_column * 2u;
+                int packed_dot =
+                    dotPacked4x8EXT(
+                        int32_t(quantized_inputs.words[activation_word]),
+                        int32_t(pack_weight_i8x4(packed, 0u))
+                    )
+                    + dotPacked4x8EXT(
+                        int32_t(quantized_inputs.words[activation_word + 1u]),
+                        int32_t(pack_weight_i8x4(packed, 4u))
+                    );
+                sum = fma(
+                    float(packed_dot),
+                    input_scales.values[input_scale_base + input_block]
+                        * read_weight_scale(row, group),
+                    sum
+                );
+            }
+        }
+        sum = subgroupAdd(sum);
+        if (gl_SubgroupInvocationID == 0u) {
+            subgroup_sum[local_row][gl_SubgroupID] = sum;
+        }
+    }
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
+    uint batch_start = {{BATCH_START}};
+    uint batch_width = {{BATCH_WIDTH}};
+
+    for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; batch_lane++) {
+        uint batch_index = batch_start + batch_lane;
+        if (batch_index >= batch_width) {
+            break;
+        }
+        project_rows(batch_index, first_row, lane);
+        barrier();
+
+        if (lane < OUTPUT_TILE_ROWS) {
+            uint row = first_row + lane;
+            float sum = 0.0;
+            for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                sum += subgroup_sum[lane][subgroup];
+            }
+            output_rows[lane] = row < OUTPUT_SIZE
+                ? finalize_output(batch_index, row, sum)
+                : 0.0;
+        }
+        barrier();
+
+        if (lane < OUTPUT_TILE_ROWS / 2u) {
+            uint row = first_row + lane * 2u;
+            if (row < OUTPUT_SIZE) {
+                uint hi = row + 1u < OUTPUT_SIZE
+                    ? f32_to_bf16(output_rows[lane * 2u + 1u])
+                    : 0u;
+                output_frames.words[batch_index * OUTPUT_WORDS + row / 2u] =
+                    (hi << 16u) | f32_to_bf16(output_rows[lane * 2u]);
+            }
+        }
+        barrier();
+    }
+}

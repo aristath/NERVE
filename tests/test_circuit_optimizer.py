@@ -684,7 +684,8 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
 
         optimized = optimize_circuit_for_vulkan(
             circuit,
-            fp8_prequantization_spec=lambda _node: {
+            prequantization_spec=lambda _node: {
+                "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
                 "input_size": 5120,
                 "block_rows": 128,
                 "block_columns": 128,
@@ -735,7 +736,8 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
 
         optimized = optimize_circuit_for_vulkan(
             circuit,
-            fp8_prequantization_spec=lambda _node: {
+            prequantization_spec=lambda _node: {
+                "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
                 "input_size": 5120,
                 "block_rows": 128,
                 "block_columns": 128,
@@ -754,6 +756,42 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             wide["attrs"]["physical_input_provider_id"],
             narrow["attrs"]["physical_input_provider_id"],
         )
+
+    def test_lowers_declared_int8_representation_without_format_specific_logic(
+        self,
+    ) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["projected"],
+                    "params": ["weight", "weight_qzeros", "weight_scales"],
+                }
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            prequantization_spec=lambda _node: {
+                "contract": "bf16_blockwise_symmetric_int8_f32_scale.v1",
+                "input_size": 5120,
+                "block_columns": 32,
+            },
+        )
+
+        quantize, projection = optimized["nodes"]
+        self.assertEqual("quantize_int8_symmetric", quantize["op"])
+        self.assertEqual(
+            ["projection__input_int8", "projection__input_scale_f32"],
+            quantize["outputs"],
+        )
+        self.assertEqual(
+            "bf16_blockwise_symmetric_int8_f32_scale.v1",
+            projection["attrs"]["physical_input_contract"],
+        )
+        self.assertEqual(quantize["outputs"], projection["inputs"])
 
     def test_fuses_reusable_fp8_representation_into_eligible_producer(self) -> None:
         circuit = {
@@ -778,8 +816,9 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
 
         optimized = optimize_circuit_for_vulkan(
             circuit,
-            fp8_prequantization_spec=lambda node: (
+            prequantization_spec=lambda node: (
                 {
+                    "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
                     "input_size": 5120,
                     "block_rows": 128,
                     "block_columns": 128,
@@ -787,7 +826,7 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
                 if node["id"] == "projection"
                 else None
             ),
-            can_emit_fp8_representation=lambda producer, _scope: (
+            can_emit_representation=lambda producer, _scope: (
                 producer["op"] == "rms_norm"
             ),
         )

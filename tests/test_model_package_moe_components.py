@@ -2,7 +2,7 @@ from model_package_layout_common import *
 from nerve.model_package_batching import sparse_moe_route_scheduling_shader_file
 from nerve.model_package_shader_selection import local_size_x_for_shader_file
 from nerve.model_package_shader_compiler import compile_shader_artifacts
-from nerve.model_package_tensors import fp8_prequantization_spec
+from nerve.model_package_tensors import physical_input_prequantization_spec
 
 def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
@@ -118,9 +118,9 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
         "b128x128_h2048_i512_e256_k8.comp"
     )
 
-    assert fp8_prequantization_spec(circuit, node, tensor_index) == {
+    assert physical_input_prequantization_spec(circuit, node, tensor_index) == {
+        "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
         "input_size": 2048,
-        "block_rows": 128,
         "block_columns": 128,
     }
     assert shader_file_for_node(

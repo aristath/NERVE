@@ -9,6 +9,10 @@ from copy import deepcopy
 from typing import Any
 
 from nerve.compilation import Json, ModelCompileError
+from nerve.physical_representations import (
+    physical_representation_contract,
+    physical_representation_contract_for_helper,
+)
 
 
 BEHAVIORAL_VALIDATION_SCHEMA = "nerve.behavioral_validation.v1"
@@ -69,9 +73,6 @@ PHYSICAL_NODE_ATTRS = {
     "physical_logical_inputs",
     "physical_output_representations",
 }
-FP8_PREQUANTIZATION_CONTRACT = "bf16_blockwise_fp8_e4m3_f32_scale.v1"
-
-
 def build_behavioral_validation(
     *,
     model_graph: Json,
@@ -334,9 +335,13 @@ def _validate_physical_representation_providers(
     target_ids: set[str] = set()
 
     for helper in nodes:
-        if helper.get("op") != "quantize_fp8_e4m3":
+        contract = physical_representation_contract_for_helper(
+            str(helper.get("op", ""))
+        )
+        if contract is None:
             continue
         attrs = helper.get("attrs", {})
+        contract_id = attrs.get("physical_representation_contract")
         helper_id = helper["id"]
         consumer_node_ids = attrs.get("consumer_node_ids")
         outputs = helper.get("outputs", [])
@@ -350,14 +355,14 @@ def _validate_physical_representation_providers(
                 "block_columns",
                 "output_element_bytes",
             }
-            or attrs.get("physical_representation_contract")
-            != FP8_PREQUANTIZATION_CONTRACT
+            or contract_id != contract.id
             or not isinstance(consumer_node_ids, list)
             or not consumer_node_ids
             or len(set(consumer_node_ids)) != len(consumer_node_ids)
             or any(not isinstance(target_id, str) for target_id in consumer_node_ids)
-            or len(outputs) != 2
-            or attrs.get("output_element_bytes") != [1, 4]
+            or len(outputs) != len(contract.output_element_bytes)
+            or attrs.get("output_element_bytes")
+            != list(contract.output_element_bytes)
             or helper.get("params")
             or helper.get("state_reads")
             or helper.get("state_writes")
@@ -370,7 +375,7 @@ def _validate_physical_representation_providers(
             or any(consumers.get(output) != set(consumer_node_ids) for output in outputs)
         ):
             raise ModelCompileError(
-                f"candidate circuit {component_id!r} has an invalid FP8 "
+                f"candidate circuit {component_id!r} has an invalid physical "
                 f"representation helper {helper_id!r}"
             )
         semantic_source_ids: list[str] = []
@@ -390,13 +395,13 @@ def _validate_physical_representation_providers(
                 or helper.get("inputs") != [logical_inputs[0]]
                 or target.get("inputs") != [*outputs, *logical_inputs[1:]]
                 or target_attrs.get("physical_input_contract")
-                != FP8_PREQUANTIZATION_CONTRACT
+                != contract_id
                 or target_attrs.get("physical_input_provider_id") != helper_id
                 or target_attrs.get("output_element_bytes")
                 != [2] * len(target.get("outputs", []))
             ):
                 raise ModelCompileError(
-                    f"candidate circuit {component_id!r} has an invalid FP8 "
+                    f"candidate circuit {component_id!r} has an invalid physical "
                     f"representation helper {helper_id!r}"
                 )
             target_ids.add(target_id)
@@ -404,7 +409,7 @@ def _validate_physical_representation_providers(
             dict.fromkeys(semantic_source_ids)
         ):
             raise ModelCompileError(
-                f"candidate circuit {component_id!r} has an invalid FP8 "
+                f"candidate circuit {component_id!r} has an invalid physical "
                 f"representation helper {helper_id!r}"
             )
         helper_ids.add(helper_id)
@@ -431,8 +436,25 @@ def _validate_physical_representation_providers(
             for output in provider.get("outputs", [])
             if output not in set(representation_outputs)
         ]
+        representation_contracts = [
+            physical_representation_contract(str(representation.get("contract", "")))
+            if isinstance(representation, dict)
+            else None
+            for representation in representations
+        ]
+        expected_representation_bytes = [
+            byte_count
+            for contract in representation_contracts
+            if contract is not None
+            for byte_count in contract.output_element_bytes
+        ]
         if (
-            len(representation_outputs) != 2 * len(representations)
+            len(representation_outputs)
+            != sum(
+                len(contract.output_element_bytes)
+                for contract in representation_contracts
+                if contract is not None
+            )
             or len(set(representation_outputs)) != len(representation_outputs)
             or provider.get("outputs")
             != [
@@ -442,7 +464,7 @@ def _validate_physical_representation_providers(
             or attrs.get("output_element_bytes")
             != [
                 *([2] * len(logical_outputs)),
-                *([1, 4] * len(representations)),
+                *expected_representation_bytes,
             ]
         ):
             raise ModelCompileError(
@@ -458,6 +480,9 @@ def _validate_physical_representation_providers(
             consumer_node_ids = representation.get("consumer_node_ids")
             outputs = representation.get("outputs")
             logical_signal = representation.get("logical_signal")
+            contract = physical_representation_contract(
+                str(representation.get("contract", ""))
+            )
             if (
                 set(representation)
                 != {
@@ -468,10 +493,9 @@ def _validate_physical_representation_providers(
                     "element_count",
                     "block_columns",
                 }
-                or representation.get("contract") != FP8_PREQUANTIZATION_CONTRACT
                 or logical_signal not in logical_outputs
                 or not isinstance(outputs, list)
-                or len(outputs) != 2
+                or len(outputs) != len(contract.output_element_bytes)
                 or not isinstance(consumer_node_ids, list)
                 or not consumer_node_ids
                 or len(set(consumer_node_ids)) != len(consumer_node_ids)
@@ -500,7 +524,7 @@ def _validate_physical_representation_providers(
                     or logical_inputs[0] != logical_signal
                     or target.get("inputs") != [*outputs, *logical_inputs[1:]]
                     or target_attrs.get("physical_input_contract")
-                    != FP8_PREQUANTIZATION_CONTRACT
+                    != contract.id
                     or target_attrs.get("physical_input_provider_id") != provider["id"]
                     or target_attrs.get("output_element_bytes")
                     != [2] * len(target.get("outputs", []))
