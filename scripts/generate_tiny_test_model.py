@@ -108,7 +108,10 @@ def write_source_model(source: Path) -> None:
     }
     tokenizer = Tokenizer(WordLevel(vocabulary, unk_token="[UNK]"))
     tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.save(str(source / "tokenizer.json"))
+    tokenizer.add_special_tokens(["[PAD]", "[BOS]", "[EOS]", "[UNK]"])
+    tokenizer_path = source / "tokenizer.json"
+    tokenizer.save(str(tokenizer_path))
+    tokenizer_path.write_text(tokenizer_path.read_text() + "\n")
     (source / "tokenizer_config.json").write_text(
         json.dumps(
             {
@@ -120,6 +123,14 @@ def write_source_model(source: Path) -> None:
             indent=2,
         )
         + "\n"
+    )
+    (source / "chat_template.jinja").write_text(
+        '{% for message in messages %}\n'
+        '{{ message["role"] }}: {{ message["content"] }}\n'
+        "{% endfor %}\n"
+        "{% if add_generation_prompt %}\n"
+        "assistant:\n"
+        "{% endif %}\n"
     )
 
 
