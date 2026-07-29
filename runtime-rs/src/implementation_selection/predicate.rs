@@ -107,6 +107,18 @@ impl RuntimeImplementationPredicate {
         if self.execution.activation_batch.minimum == 0 {
             return Err("runtime activation batch must be positive".to_string());
         }
+        if self.execution.speculative_draft_token_counts.is_empty()
+            || !self
+                .execution
+                .speculative_draft_token_counts
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        {
+            return Err(
+                "runtime speculative draft-token counts must be nonempty, sorted, and unique"
+                    .to_string(),
+            );
+        }
         match self.placement.mode.as_str() {
             "local" if measured_device_count == 1 => {}
             "distributed" if measured_device_count >= 2 => {}
@@ -151,6 +163,16 @@ impl RuntimeImplementationPredicate {
             .any(|phase| self.execution.alternative_phases.contains(phase))
         {
             reasons.push("runtime request does not execute an alternative phase".to_string());
+        }
+        if !self
+            .execution
+            .speculative_draft_token_counts
+            .contains(&execution.speculative_draft_tokens)
+        {
+            reasons.push(format!(
+                "speculative draft-token count {} is outside {:?}",
+                execution.speculative_draft_tokens, self.execution.speculative_draft_token_counts
+            ));
         }
         for (label, predicate_range, requested_range) in [
             (

@@ -212,6 +212,19 @@ class ResidentWholeModelValidationBackend:
             "execution_mode",
             "conversation",
         )
+        speculative_draft_tokens = check["controls"].get(
+            "speculative_draft_tokens",
+            0,
+        )
+        if (
+            isinstance(speculative_draft_tokens, bool)
+            or not isinstance(speculative_draft_tokens, int)
+            or speculative_draft_tokens < 0
+        ):
+            raise ModelCompileError(
+                "whole-model validation speculative draft tokens must be "
+                "a non-negative integer"
+            )
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
             "command": "mount",
@@ -236,6 +249,7 @@ class ResidentWholeModelValidationBackend:
                 teacher_forced_assistant_turns
             ),
             "execution_mode": execution_mode,
+            "speculative_draft_tokens": speculative_draft_tokens,
             "random_seed": request.seed,
             "enable_thinking": (
                 check["controls"].get("enable_thinking") is True
@@ -656,6 +670,25 @@ class ResidentWholeModelValidationSession:
                 "execution_counters": report[
                     "execution_counters"
                 ],
+                "turn_statistics": [
+                    {
+                        "turn_index": turn["turn_index"],
+                        "generated_tokens": len(
+                            turn["generated_token_ids"]
+                        ),
+                        "elapsed_ns": turn["elapsed_ns"],
+                        "scheduler_steps": turn["scheduler_steps"],
+                        "execution_counters": dict(
+                            turn["execution_counters"]
+                        ),
+                        "speculative": dict(turn["speculative"]),
+                        "resident_feedback": dict(
+                            turn["resident_feedback"]
+                        ),
+                        "transport": dict(turn["transport"]),
+                    }
+                    for turn in report["turns"]
+                ],
             },
         }
         traces = sorted(
@@ -703,6 +736,9 @@ class ResidentWholeModelValidationSession:
                 "scheduler_steps": report["scheduler_steps"],
                 "execution_counters": report[
                     "execution_counters"
+                ],
+                "turn_statistics": trace_payloads["schedule"][
+                    "turn_statistics"
                 ],
             },
             "diagnostics": [],

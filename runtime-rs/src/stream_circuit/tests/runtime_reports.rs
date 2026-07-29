@@ -645,6 +645,7 @@
                                 minimum: 0,
                                 maximum: 16,
                             },
+                        speculative_draft_tokens: 0,
                     },
                     selected: Vec::new(),
                     exact_instance_ids: Vec::new(),

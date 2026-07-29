@@ -264,6 +264,7 @@ fn runtime_implementation_test_predicate(
                 minimum: 0,
                 maximum: 65_536,
             },
+            speculative_draft_token_counts: vec![0],
         },
         placement: crate::RuntimePlacementPredicate {
             mode: "local".to_string(),
@@ -473,6 +474,7 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
                 minimum: 0,
                 maximum: 65_536,
             },
+            speculative_draft_tokens: 0,
         },
         selected: vec![selected],
         exact_instance_ids: Vec::new(),

@@ -122,6 +122,7 @@ fn predicate(profiles: &[&HardwareProcessProfile], mode: &str) -> RuntimeImpleme
                 minimum: 0,
                 maximum: 65_536,
             },
+            speculative_draft_token_counts: vec![3],
         },
         placement: RuntimePlacementPredicate {
             mode: mode.to_string(),
@@ -282,6 +283,7 @@ fn request(
                 minimum: 4096,
                 maximum: 4096,
             },
+            speculative_draft_tokens: 3,
         },
         devices,
         instances,
@@ -508,6 +510,7 @@ fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
             minimum: 4096,
             maximum: 4096,
         },
+        speculative_draft_tokens: 3,
     };
 
     assert!(
@@ -535,6 +538,14 @@ fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
             .mismatch_reasons(&execution, &[&gpu_a_device, &gpu_b_device],)
             .iter()
             .any(|reason| reason.contains("multiplicities"))
+    );
+    let mut different_speculative_mode = execution.clone();
+    different_speculative_mode.speculative_draft_tokens = 0;
+    assert!(
+        predicate(&[&gpu_a], "local")
+            .mismatch_reasons(&different_speculative_mode, &[&gpu_a_device],)
+            .iter()
+            .any(|reason| reason.contains("speculative draft-token count"))
     );
 }
 

@@ -58,8 +58,8 @@
     "nerve.optimizer.validation_run.v1",
     "nerve.optimizer.prebenchmark_record.v1",
     "nerve.optimizer.validation_evidence_integrity.v1",
-    "nerve.optimizer.validation_record.v1",
-    "nerve.optimizer.runtime_implementation_predicate.v3",
+    "nerve.optimizer.validation_record.v2",
+    "nerve.optimizer.runtime_implementation_predicate.v4",
     "nerve.optimizer.promotion_decision.v2",
     "nerve.optimizer.implementation_registry.v1",
     "nerve.optimizer.relowering_request.v1"

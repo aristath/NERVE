@@ -465,6 +465,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         context_activations_maximum=4096,
         state_activations_minimum=4096,
         state_activations_maximum=4096,
+        speculative_draft_token_counts=(0,),
         placement_mode="local",
         minimum_device_count=1,
         maximum_device_count=1,

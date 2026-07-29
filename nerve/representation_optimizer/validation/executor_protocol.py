@@ -14,10 +14,10 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
 
 
 VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v4"
+    "nerve.optimizer.validation_executor_command.v5"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v4"
+    "nerve.optimizer.validation_executor_response.v5"
 )
 
 _PROGRESS_FIELDS = {
@@ -226,6 +226,89 @@ def validate_validation_execution_payload(
                 "validation executor returned malformed conversation trace"
             )
         required_digest(turn, "state_digest")
+        positive_integer(
+            turn.get("elapsed_ns"),
+            "validation executor turn elapsed time",
+        )
+        positive_integer(
+            turn.get("scheduler_steps"),
+            "validation executor turn scheduler steps",
+        )
+        required_object(turn, "execution_counters")
+        speculative = required_object(turn, "speculative")
+        feedback = required_object(turn, "resident_feedback")
+        transport = required_object(turn, "transport")
+        for path, document, fields in (
+            (
+                "speculative",
+                speculative,
+                (
+                    "cycle_count",
+                    "rollback_cycle_count",
+                    "proposed_draft_tokens",
+                    "accepted_draft_tokens",
+                    "emitted_tokens",
+                    "draft_time_ns",
+                    "target_verification_time_ns",
+                    "draft_catch_up_time_ns",
+                    "total_time_ns",
+                ),
+            ),
+            (
+                "resident_feedback",
+                feedback,
+                (
+                    "window_count",
+                    "planned_tick_count",
+                    "submitted_tick_count",
+                    "executed_tick_count",
+                    "retained_tick_count",
+                    "sampled_tick_count",
+                    "discarded_tick_count",
+                    "template_record_count",
+                    "template_replay_count",
+                    "asynchronous_submission_count",
+                    "completion_poll_count",
+                    "bounded_wait_count",
+                    "bounded_wait_timeout_count",
+                ),
+            ),
+            (
+                "transport",
+                transport,
+                (
+                    "published_packet_count",
+                    "published_byte_count",
+                    "received_packet_count",
+                    "received_byte_count",
+                    "direct_copy_count",
+                    "direct_copy_byte_count",
+                    "direct_receive_count",
+                    "direct_receive_byte_count",
+                ),
+            ),
+        ):
+            if set(document) != set(fields):
+                raise ModelCompileError(
+                    f"validation executor turn {path} fields are invalid"
+                )
+            for field in fields:
+                value = document[field]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    raise ModelCompileError(
+                        f"validation executor turn {path}.{field} is invalid"
+                    )
+        if (
+            speculative["accepted_draft_tokens"]
+            > speculative["proposed_draft_tokens"]
+        ):
+            raise ModelCompileError(
+                "validation executor accepted more draft tokens than proposed"
+            )
     required_object(payload, "execution_counters")
 
 

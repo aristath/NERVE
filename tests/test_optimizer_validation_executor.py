@@ -114,6 +114,42 @@ class FixtureWholeModelExecutor:
                     "execution_counters": {
                         "execution_quantum_dispatch_count": 32,
                     },
+                    "speculative": {
+                        "cycle_count": 0,
+                        "rollback_cycle_count": 0,
+                        "proposed_draft_tokens": 0,
+                        "accepted_draft_tokens": 0,
+                        "emitted_tokens": 0,
+                        "draft_time_ns": 0,
+                        "target_verification_time_ns": 0,
+                        "draft_catch_up_time_ns": 0,
+                        "total_time_ns": 0,
+                    },
+                    "resident_feedback": {
+                        "window_count": 0,
+                        "planned_tick_count": 0,
+                        "submitted_tick_count": 0,
+                        "executed_tick_count": 0,
+                        "retained_tick_count": 0,
+                        "sampled_tick_count": 0,
+                        "discarded_tick_count": 0,
+                        "template_record_count": 0,
+                        "template_replay_count": 0,
+                        "asynchronous_submission_count": 0,
+                        "completion_poll_count": 0,
+                        "bounded_wait_count": 0,
+                        "bounded_wait_timeout_count": 0,
+                    },
+                    "transport": {
+                        "published_packet_count": 0,
+                        "published_byte_count": 0,
+                        "received_packet_count": 0,
+                        "received_byte_count": 0,
+                        "direct_copy_count": 0,
+                        "direct_copy_byte_count": 0,
+                        "direct_receive_count": 0,
+                        "direct_receive_byte_count": 0,
+                    },
                 }
                 for index, user in enumerate(document["turns"])
             ]
@@ -454,6 +490,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         "Athens.",
     ]
     assert mount_command["execution_mode"] == "teacher_forced"
+    assert mount_command["speculative_draft_tokens"] == 0
     assert executor.commands[1]["max_output_tokens"] is None
     assert executor.commands[1]["execution_mode"] == "teacher_forced"
     assert executor.commands[1]["step_unit"] == "component_activations"

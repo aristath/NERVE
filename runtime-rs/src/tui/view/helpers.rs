@@ -251,7 +251,8 @@ mod tests {
                             "state_activations": {
                                 "minimum": 0,
                                 "maximum": 65536
-                            }
+                            },
+                            "speculative_draft_token_counts": [0]
                         },
                         "placement": {
                             "mode": "local",

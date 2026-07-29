@@ -230,6 +230,10 @@ class ValidationBehavior:
     incomplete_steps: bool = False
     fail_execution_stage: str | None = None
     leak_residency: bool = False
+    candidate_warmup_elapsed_ns: int = 100
+    candidate_measured_elapsed_ns: int = 90
+    candidate_measured_generated_tokens: int = 8
+    candidate_bounded_wait_timeout_count: int = 0
 
 
 class FixtureValidationAdapter:
@@ -448,6 +452,57 @@ class FixtureValidationRoleSession:
             "default_statistics": {
                 "execution_path": "normal_fixture_runtime",
                 "role": request.role,
+                "host_execution_ns": (
+                    200
+                    if request.role == "reference"
+                    else (
+                        100
+                        + behavior.candidate_measured_elapsed_ns
+                    )
+                ),
+                "device_execution_ns": (
+                    200
+                    if request.role == "reference"
+                    else (
+                        100
+                        + behavior.candidate_measured_elapsed_ns
+                    )
+                ),
+                "transport_bytes": 0,
+                "scheduler_steps": 2,
+                "execution_counters": {
+                    "execution_quantum_forced_yield_count": 0,
+                    "resident_copy_waits": 0,
+                    "resident_sequence_fence_waits": 0,
+                },
+                "turn_statistics": [
+                    _fixture_turn_statistics(
+                        turn_index=0,
+                        elapsed_ns=(
+                            100
+                            if request.role == "reference"
+                            else behavior.candidate_warmup_elapsed_ns
+                        ),
+                    ),
+                    _fixture_turn_statistics(
+                        turn_index=1,
+                        elapsed_ns=(
+                            100
+                            if request.role == "reference"
+                            else behavior.candidate_measured_elapsed_ns
+                        ),
+                        bounded_wait_timeout_count=(
+                            0
+                            if request.role == "reference"
+                            else behavior.candidate_bounded_wait_timeout_count
+                        ),
+                        generated_tokens=(
+                            8
+                            if request.role == "reference"
+                            else behavior.candidate_measured_generated_tokens
+                        ),
+                    ),
+                ],
             },
             "diagnostics": [],
         }
@@ -503,6 +558,42 @@ class FixtureValidationRoleSession:
         }
         document["event_id"] = validation_residency_event_id(document)
         return document
+
+
+def _fixture_turn_statistics(
+    *,
+    turn_index: int,
+    elapsed_ns: int,
+    generated_tokens: int = 8,
+    bounded_wait_timeout_count: int = 0,
+) -> dict:
+    return {
+        "turn_index": turn_index,
+        "generated_tokens": generated_tokens,
+        "elapsed_ns": elapsed_ns,
+        "scheduler_steps": 1,
+        "execution_counters": {
+            "execution_quantum_forced_yield_count": 0,
+            "resident_copy_waits": 0,
+            "resident_sequence_fence_waits": 0,
+        },
+        "speculative": {
+            "proposed_draft_tokens": 0,
+            "accepted_draft_tokens": 0,
+        },
+        "resident_feedback": {
+            "bounded_wait_count": 0,
+            "bounded_wait_timeout_count": bounded_wait_timeout_count,
+        },
+        "transport": {
+            "published_packet_count": 0,
+            "published_byte_count": 0,
+            "received_packet_count": 0,
+            "received_byte_count": 0,
+            "direct_copy_count": 0,
+            "direct_copy_byte_count": 0,
+        },
+    }
 
 
 def _staged_fixture(tmp_path: Path, *, approximate: bool = False):
@@ -836,6 +927,153 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
     )
 
 
+@pytest.mark.parametrize(
+    ("behavior", "reason"),
+    (
+        (
+            ValidationBehavior(candidate_measured_elapsed_ns=110),
+            "not faster",
+        ),
+        (
+            ValidationBehavior(
+                candidate_measured_elapsed_ns=90,
+                candidate_bounded_wait_timeout_count=1,
+            ),
+            "amplified",
+        ),
+    ),
+)
+def test_locally_faster_candidate_is_rejected_when_warmed_product_run_regresses(
+    tmp_path: Path,
+    behavior: ValidationBehavior,
+    reason: str,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    adapter = FixtureValidationAdapter(behavior)
+    pre, adapter, _ = _prevalidate(
+        tmp_path,
+        fixture,
+        adapter=adapter,
+    )
+    benchmark = benchmark_candidate(
+        plan=fixture[4],
+        construction_record=fixture[3].record,
+        session=pre.session,
+        adapter=FixtureExecutionAdapter(),
+        workspace_root=tmp_path / "benchmark-workspace",
+    )
+
+    final = validate_benchmarked_candidate(
+        plan=fixture[5],
+        prebenchmark_record=pre.record,
+        benchmark_record=benchmark.record,
+        session=benchmark.session,
+        adapter=adapter,
+        workspace_root=tmp_path / "validation-workspace",
+    )
+
+    assert final.status == CandidateState.REJECTED.value
+    record = final.record.to_json()
+    stage = next(
+        stage
+        for stage in record["stages"]
+        if stage["name"] == "whole_model_product_performance"
+    )
+    assert stage["status"] == "failed"
+    assert reason in stage["reason"]
+    assert stage["metrics"]["warmup_turns_discarded"] >= 1
+    assert record["status"] == "failed"
+    lifecycle = next(
+        candidate
+        for candidate in final.session.candidates
+        if candidate.candidate_id == fixture[2].candidate_id
+    )
+    assert lifecycle.state == CandidateState.REJECTED
+
+
+def test_product_performance_discards_the_first_conversation_as_warmup(
+    tmp_path: Path,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    adapter = FixtureValidationAdapter(
+        ValidationBehavior(
+            candidate_warmup_elapsed_ns=10_000,
+            candidate_measured_elapsed_ns=90,
+        )
+    )
+    pre, adapter, _ = _prevalidate(
+        tmp_path,
+        fixture,
+        adapter=adapter,
+    )
+    benchmark = benchmark_candidate(
+        plan=fixture[4],
+        construction_record=fixture[3].record,
+        session=pre.session,
+        adapter=FixtureExecutionAdapter(),
+        workspace_root=tmp_path / "benchmark-workspace",
+    )
+
+    final = validate_benchmarked_candidate(
+        plan=fixture[5],
+        prebenchmark_record=pre.record,
+        benchmark_record=benchmark.record,
+        session=benchmark.session,
+        adapter=adapter,
+        workspace_root=tmp_path / "validation-workspace",
+    )
+
+    assert final.status == "passed"
+    stage = next(
+        stage
+        for stage in final.record.to_json()["stages"]
+        if stage["name"] == "whole_model_product_performance"
+    )
+    assert stage["status"] == "passed"
+    assert stage["metrics"]["reference_measured_elapsed_ns"] == 200
+    assert stage["metrics"]["candidate_measured_elapsed_ns"] == 180
+    assert stage["metrics"]["warmup_turns_discarded"] == 2
+
+
+def test_product_performance_refuses_timings_for_different_generated_work(
+    tmp_path: Path,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    adapter = FixtureValidationAdapter(
+        ValidationBehavior(candidate_measured_generated_tokens=7)
+    )
+    pre, adapter, _ = _prevalidate(
+        tmp_path,
+        fixture,
+        adapter=adapter,
+    )
+    benchmark = benchmark_candidate(
+        plan=fixture[4],
+        construction_record=fixture[3].record,
+        session=pre.session,
+        adapter=FixtureExecutionAdapter(),
+        workspace_root=tmp_path / "benchmark-workspace",
+    )
+
+    final = validate_benchmarked_candidate(
+        plan=fixture[5],
+        prebenchmark_record=pre.record,
+        benchmark_record=benchmark.record,
+        session=benchmark.session,
+        adapter=adapter,
+        workspace_root=tmp_path / "validation-workspace",
+    )
+
+    assert final.status == CandidateState.FAILED.value
+    stage = next(
+        stage
+        for stage in final.record.to_json()["stages"]
+        if stage["name"] == "whole_model_product_performance"
+    )
+    assert stage["status"] == "failed"
+    assert "different generated work" in stage["reason"]
+
+
 def test_faster_but_behaviorally_invalid_approximation_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -877,6 +1115,7 @@ def test_faster_but_behaviorally_invalid_approximation_is_rejected(
     assert stages["matched_performance"]["status"] == "passed"
     assert stages["full_local_behavior"]["status"] == "failed"
     assert stages["whole_model_free_running"]["status"] == "not_run"
+    assert stages["whole_model_product_performance"]["status"] == "not_run"
     assert final.record.to_json()["counterexamples"] == [
         {
             "path": "fixtures/prefill-input.bin",

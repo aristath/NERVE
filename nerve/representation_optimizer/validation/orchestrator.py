@@ -40,6 +40,9 @@ from nerve.representation_optimizer.validation.evaluation import (
 from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
 )
+from nerve.representation_optimizer.validation.product_performance import (
+    qualify_whole_model_product_performance,
+)
 from nerve.representation_optimizer.validation.protocols import (
     BehavioralValidationAdapter,
 )
@@ -254,6 +257,7 @@ def validate_benchmarked_candidate(
             "full validation evidence does not match a prevalidated candidate"
         )
     runs: list[ValidationRun] = []
+    product_performance = None
     failure_reason: str | None = None
     terminal_state = CandidateState.REJECTED
     benchmark = benchmark_record.to_json()
@@ -291,6 +295,14 @@ def validate_benchmarked_candidate(
                     )
                     if whole.status == "cancelled":
                         terminal_state = CandidateState.CANCELLED
+                else:
+                    product_performance = (
+                        qualify_whole_model_product_performance(whole)
+                    )
+                    if product_performance["status"] != "passed":
+                        failure_reason = str(
+                            product_performance["reason"]
+                        )
     except ModelCompileCancelled as error:
         failure_reason = str(error)
         terminal_state = CandidateState.CANCELLED
@@ -298,11 +310,34 @@ def validate_benchmarked_candidate(
         failure_reason = str(error)
         terminal_state = CandidateState.FAILED
 
+    if product_performance is None:
+        whole = next(
+            (
+                run
+                for run in runs
+                if run.to_json()["stage"] == "whole_model"
+            ),
+            None,
+        )
+        if whole is None or whole.status != "completed":
+            product_performance = (
+                qualify_whole_model_product_performance(whole)
+            )
+        else:
+            product_performance = {
+                "status": "failed",
+                "reason": (
+                    failure_reason
+                    or "whole-model product performance evidence is invalid"
+                ),
+                "metrics": {},
+            }
     record = build_validation_record(
         plan=plan,
         prebenchmark_record=prebenchmark_record,
         benchmark_record=benchmark_record,
         runs=tuple(runs),
+        product_performance=product_performance,
         failure_reason=failure_reason,
     )
     evidence_path = publish_validation_evidence(
@@ -320,8 +355,8 @@ def validate_benchmarked_candidate(
     if record.to_json()["status"] == "passed":
         next_state = CandidateState.BEHAVIORALLY_VALIDATED
         reason = (
-            "material speedup, full local checks, and whole-model "
-            "free-running validation all passed"
+            "material local speedup, full local checks, whole-model "
+            "free-running validation, and warmed product performance all passed"
         )
         status = "passed"
     else:

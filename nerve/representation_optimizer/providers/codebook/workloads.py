@@ -118,6 +118,7 @@ def head_norm_validation_requirements(
     representation_name: str,
     artifact_scope_id: str | None = None,
     execution_phases: tuple[str, ...] = ("decode", "prefill"),
+    speculative_draft_tokens: int = 0,
 ) -> Json:
     _validate_execution_phases(execution_phases)
     def path(value: str) -> str:
@@ -447,6 +448,7 @@ def head_norm_validation_requirements(
                 "execution_mode": "conversation",
                 "enable_thinking": True,
                 "max_output_tokens": 65_536,
+                "speculative_draft_tokens": speculative_draft_tokens,
             },
             seeds=(1,),
             step_unit="component_activations",
@@ -493,6 +495,7 @@ def bundled_head_norm_validation_requirements(
     proof_verifier_id: str,
     representation_name: str,
     execution_phases: tuple[str, ...] = ("decode", "prefill"),
+    speculative_draft_tokens: int = 0,
 ) -> Json:
     """Validate every member locally and the mounted set globally once."""
 
@@ -512,6 +515,7 @@ def bundled_head_norm_validation_requirements(
             ),
             artifact_scope_id=opportunity.scope_id,
             execution_phases=execution_phases,
+            speculative_draft_tokens=speculative_draft_tokens,
         )
         for opportunity in opportunities
     ]

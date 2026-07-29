@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v4";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v4";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v5";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v5";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
@@ -42,6 +42,7 @@ enum ExecutorCommand {
         validation_turns: Vec<String>,
         teacher_forced_assistant_turns: Vec<String>,
         execution_mode: String,
+        speculative_draft_tokens: usize,
         random_seed: u32,
         enable_thinking: bool,
         graph_operation: String,
@@ -104,6 +105,7 @@ struct ValidationPackageKey {
     physical_device_ids: Vec<String>,
     component_placement: BTreeMap<String, String>,
     context_capacity: usize,
+    speculative_draft_tokens: usize,
     graph_operation: String,
     graph_target_component_id: Option<String>,
 }
@@ -391,6 +393,7 @@ fn mount(
         validation_turns,
         teacher_forced_assistant_turns,
         execution_mode,
+        speculative_draft_tokens,
         random_seed,
         enable_thinking,
         graph_operation,
@@ -488,6 +491,7 @@ fn mount(
         physical_device_ids: physical_device_ids.clone(),
         component_placement,
         context_capacity,
+        speculative_draft_tokens,
         graph_operation,
         graph_target_component_id,
     };
@@ -527,7 +531,7 @@ fn mount(
                 &package_root,
                 runtime_model,
                 Some(context_capacity),
-                false,
+                speculative_draft_tokens > 0,
                 parameter_pool,
             )?,
     );
@@ -542,7 +546,8 @@ fn mount(
             .expect("bound validation device pool exists"),
     )?;
     let stream =
-        VulkanResidentInProcessPlacedPromptStream::new(package, bound_devices, random_seed)?;
+        VulkanResidentInProcessPlacedPromptStream::new(package, bound_devices, random_seed)?
+            .with_speculative_draft_tokens(speculative_draft_tokens)?;
     let package_id = stream.package().package_id.clone();
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     engine.add_stream(STREAM_ID, stream)?;
@@ -890,6 +895,24 @@ impl MountedValidation {
                 &mut total_execution_counters,
                 transaction.execution_counters,
             );
+            let generation = &transaction
+                .generation_run
+                .engine_run
+                .input_runs
+                .iter()
+                .find(|input_run| {
+                    input_run.stream_id == STREAM_ID
+                        && input_run.submitted_run.input_event.id == transaction.generation_event_id
+                })
+                .ok_or_else(|| {
+                    invalid_input("validation engine did not return the generation event run")
+                })?
+                .submitted_run
+                .session_run
+                .run;
+            let speculative = &generation.speculative_decode;
+            let feedback = generation.resident_feedback;
+            let transport = &generation.transport_stats;
             let turn_state_digest =
                 validation_state_digest(&self.engine.stream_resident_state_digest(STREAM_ID)?);
             let stop_reason = validation_conversation_stop_reason(
@@ -910,6 +933,42 @@ impl MountedValidation {
                 "scheduler_steps": scheduler_steps,
                 "elapsed_ns": transaction.elapsed_ns,
                 "execution_counters": transaction.execution_counters,
+                "speculative": {
+                    "cycle_count": speculative.cycle_count,
+                    "rollback_cycle_count": speculative.rollback_cycle_count,
+                    "proposed_draft_tokens": speculative.proposed_draft_token_count,
+                    "accepted_draft_tokens": speculative.accepted_draft_token_count,
+                    "emitted_tokens": speculative.emitted_token_count,
+                    "draft_time_ns": speculative.draft_time_ns,
+                    "target_verification_time_ns": speculative.target_verification_time_ns,
+                    "draft_catch_up_time_ns": speculative.draft_catch_up_time_ns,
+                    "total_time_ns": speculative.total_time_ns,
+                },
+                "resident_feedback": {
+                    "window_count": feedback.window_count,
+                    "planned_tick_count": feedback.planned_tick_count,
+                    "submitted_tick_count": feedback.submitted_tick_count,
+                    "executed_tick_count": feedback.executed_tick_count,
+                    "retained_tick_count": feedback.retained_tick_count,
+                    "sampled_tick_count": feedback.sampled_tick_count,
+                    "discarded_tick_count": feedback.discarded_tick_count,
+                    "template_record_count": feedback.template_record_count,
+                    "template_replay_count": feedback.template_replay_count,
+                    "asynchronous_submission_count": feedback.asynchronous_submission_count,
+                    "completion_poll_count": feedback.completion_poll_count,
+                    "bounded_wait_count": feedback.bounded_wait_count,
+                    "bounded_wait_timeout_count": feedback.bounded_wait_timeout_count,
+                },
+                "transport": {
+                    "published_packet_count": transport.published_packet_count,
+                    "published_byte_count": transport.published_byte_count,
+                    "received_packet_count": transport.received_packet_count,
+                    "received_byte_count": transport.received_byte_count,
+                    "direct_copy_count": transport.direct_copy_count,
+                    "direct_copy_byte_count": transport.direct_copy_byte_count,
+                    "direct_receive_count": transport.direct_receive_count,
+                    "direct_receive_byte_count": transport.direct_receive_byte_count,
+                },
             }));
             behavioral_outputs.push(json!({
                 "generated_token_ids": transaction.generated_token_ids,
@@ -1040,6 +1099,9 @@ impl MountedValidation {
                 "scheduler_steps": scheduler_steps,
                 "elapsed_ns": nonzero_elapsed_ns(turn_started),
                 "execution_counters": counters,
+                "speculative": zero_speculative_statistics(),
+                "resident_feedback": zero_resident_feedback_statistics(),
+                "transport": zero_transport_statistics(),
                 "teacher_forced": true,
             }));
             behavioral_outputs.push(json!({
@@ -1502,6 +1564,51 @@ fn component_activation_count(
         .ok_or_else(|| invalid_input("component activation count overflowed"))
 }
 
+fn zero_speculative_statistics() -> Value {
+    json!({
+        "cycle_count": 0,
+        "rollback_cycle_count": 0,
+        "proposed_draft_tokens": 0,
+        "accepted_draft_tokens": 0,
+        "emitted_tokens": 0,
+        "draft_time_ns": 0,
+        "target_verification_time_ns": 0,
+        "draft_catch_up_time_ns": 0,
+        "total_time_ns": 0,
+    })
+}
+
+fn zero_resident_feedback_statistics() -> Value {
+    json!({
+        "window_count": 0,
+        "planned_tick_count": 0,
+        "submitted_tick_count": 0,
+        "executed_tick_count": 0,
+        "retained_tick_count": 0,
+        "sampled_tick_count": 0,
+        "discarded_tick_count": 0,
+        "template_record_count": 0,
+        "template_replay_count": 0,
+        "asynchronous_submission_count": 0,
+        "completion_poll_count": 0,
+        "bounded_wait_count": 0,
+        "bounded_wait_timeout_count": 0,
+    })
+}
+
+fn zero_transport_statistics() -> Value {
+    json!({
+        "published_packet_count": 0,
+        "published_byte_count": 0,
+        "received_packet_count": 0,
+        "received_byte_count": 0,
+        "direct_copy_count": 0,
+        "direct_copy_byte_count": 0,
+        "direct_receive_count": 0,
+        "direct_receive_byte_count": 0,
+    })
+}
+
 fn add_counters(
     total: &mut VulkanResidentExecutionCounters,
     value: VulkanResidentExecutionCounters,
@@ -1814,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_package_identity_excludes_transient_stream_state() {
+    fn validation_package_identity_includes_residency_affecting_stream_configuration() {
         let key = ValidationPackageKey {
             package_manifest: PathBuf::from("/package/manifest.json"),
             candidate_id: Some("candidate".to_string()),
@@ -1824,6 +1931,7 @@ mod tests {
                 "device-a".to_string(),
             )]),
             context_capacity: 131_072,
+            speculative_draft_tokens: 3,
             graph_operation: "none".to_string(),
             graph_target_component_id: None,
         };
@@ -1842,6 +1950,13 @@ mod tests {
                 ..key.clone()
             }
         );
+        assert_ne!(
+            key,
+            ValidationPackageKey {
+                speculative_draft_tokens: 0,
+                ..key.clone()
+            }
+        );
     }
 
     #[test]
@@ -1855,6 +1970,7 @@ mod tests {
                 ("component-b".to_string(), "device-b".to_string()),
             ]),
             context_capacity: 131_072,
+            speculative_draft_tokens: 3,
             graph_operation: "none".to_string(),
             graph_target_component_id: None,
         };

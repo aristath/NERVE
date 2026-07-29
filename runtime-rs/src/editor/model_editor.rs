@@ -169,6 +169,7 @@ impl RuntimeModelEditor {
                                 .manifest
                                 .max_context_activations,
                         },
+                    speculative_draft_tokens: 0,
                 },
                 true,
             )

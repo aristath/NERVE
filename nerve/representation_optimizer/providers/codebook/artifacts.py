@@ -90,18 +90,22 @@ def conversation_fixture() -> Json:
         "schema": "nerve.optimizer.validation_conversation.v1",
         "enable_thinking": True,
         "turns": [
+            "hi",
             "Who are you?",
-            "What is the capital of Greece?",
-            "Explain why RMS normalization is useful in one concise paragraph.",
+            "what is the capital of Greece?",
+            'How many cities named "Corinth" are there?',
+            "What is your knowledge cutoff date?",
             ("I asked you earlier for the capital of a country. Which country was it?"),
         ],
         "teacher_forced_assistant_turns": [
+            "Hello!",
             "I am a language model.",
             "The capital of Greece is Athens.",
             (
-                "RMS normalization stabilizes activation scale while avoiding "
-                "mean subtraction, which makes it simple and efficient."
+                "Several places have been named Corinth, including the ancient "
+                "and modern Greek cities and cities in the United States."
             ),
+            "My knowledge cutoff depends on the model release.",
             "You asked about Greece.",
         ],
     }

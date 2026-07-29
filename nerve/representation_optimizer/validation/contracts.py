@@ -81,6 +81,7 @@ VALIDATION_FUNNEL_STAGE_NAMES = (
     "matched_performance",
     "full_local_behavior",
     "whole_model_free_running",
+    "whole_model_product_performance",
 )
 
 _ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"

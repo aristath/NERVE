@@ -172,6 +172,7 @@ def build_validation_record(
     prebenchmark_record: ContractDocument,
     benchmark_record: ContractDocument,
     runs: tuple[ValidationRun, ...],
+    product_performance: Json,
     failure_reason: str | None,
 ) -> ContractDocument:
     prebenchmark = prebenchmark_record.to_json()
@@ -203,6 +204,7 @@ def build_validation_record(
         if whole is None
         else ("passed" if whole.status == "completed" else "failed")
     )
+    product_status = str(product_performance["status"])
     status = (
         "passed"
         if (
@@ -210,6 +212,7 @@ def build_validation_record(
             and benchmark_status == "passed"
             and local_status == "passed"
             and whole_status == "passed"
+            and product_status == "passed"
         )
         else "failed"
     )
@@ -276,6 +279,17 @@ def build_validation_record(
                     "error contract"
                 )
             ),
+        ),
+        _stage(
+            VALIDATION_FUNNEL_STAGE_NAMES[6],
+            product_status,
+            evidence_digests=(
+                ()
+                if whole is None
+                else (contract_digest(whole.to_json()),)
+            ),
+            metrics=dict(product_performance["metrics"]),
+            reason=product_performance["reason"],
         ),
     ]
     plan_document = plan.to_json()

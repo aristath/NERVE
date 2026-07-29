@@ -27,6 +27,19 @@ impl VulkanResidentInProcessPlacedPromptStream {
         Self::from_package_devices_and_session(package, devices, random_seed, 0)
     }
 
+    pub fn with_speculative_draft_tokens(
+        mut self,
+        speculative_draft_tokens: usize,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        if speculative_draft_tokens > 0 && self.processor.speculative_decoder_count() == 0 {
+            return Err(placed_scheduler_divergence(
+                "speculative draft tokens require a mounted speculative decoder",
+            ));
+        }
+        self.speculative_draft_tokens = speculative_draft_tokens;
+        Ok(self)
+    }
+
     pub fn from_runtime_model_for_bound_devices(
         devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
         manifest_dir: impl AsRef<Path>,

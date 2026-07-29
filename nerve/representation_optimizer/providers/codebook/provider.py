@@ -401,6 +401,9 @@ class ExactHeadNormCodebookProvider:
                 "nerve.exact_codebook_reconstruction.v1"
             ),
             representation_name="U8-addressed BF16 codebook",
+            speculative_draft_tokens=(
+                3 if manifest.get("speculative_decoders") else 0
+            ),
         )
 
 

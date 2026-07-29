@@ -419,6 +419,7 @@ fn inspect_placement(
                     minimum: 0,
                     maximum: capacity,
                 },
+                speculative_draft_tokens: args.speculative_draft_tokens,
             },
         )?;
     let placement = runtime_model_placement(

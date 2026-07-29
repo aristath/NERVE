@@ -209,6 +209,7 @@ def prepare_candidate_promotion(
     )
     runtime_predicate = _derive_runtime_predicate(
         benchmark_plan=benchmark_plan,
+        validation_plan=validation_plan,
         hardware_profiles=profiles,
         candidate=candidate_plan.candidate.to_json(),
     )
@@ -491,6 +492,7 @@ def _prepare_analysis_runs(
 def _derive_runtime_predicate(
     *,
     benchmark_plan,
+    validation_plan,
     hardware_profiles: tuple[Json, ...],
     candidate: Json,
 ) -> RuntimeImplementationPredicate:
@@ -623,11 +625,38 @@ def _derive_runtime_predicate(
         context_activations_maximum=context_activations_maximum,
         state_activations_minimum=state_activations_minimum,
         state_activations_maximum=state_activations_maximum,
+        speculative_draft_token_counts=(
+            _validated_speculative_draft_token_counts(validation_plan)
+        ),
         placement_mode=placement_mode,
         minimum_device_count=device_count,
         maximum_device_count=device_count,
         required_interconnects=required_interconnects,
     )
+
+
+def _validated_speculative_draft_token_counts(
+    validation_plan,
+) -> tuple[int, ...]:
+    whole_model_checks = validation_plan.checks_for_stage("whole_model")
+    if not whole_model_checks:
+        raise ModelCompileError(
+            "promotion requires whole-model product qualification"
+        )
+    counts: set[int] = set()
+    for check in whole_model_checks:
+        value = check["controls"].get("speculative_draft_tokens", 0)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+        ):
+            raise ModelCompileError(
+                "whole-model validation speculative draft tokens must be "
+                "a non-negative integer"
+            )
+        counts.add(value)
+    return tuple(sorted(counts))
 
 
 def _require_runtime_hardware_capabilities(

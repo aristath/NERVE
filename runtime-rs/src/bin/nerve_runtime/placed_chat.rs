@@ -41,6 +41,7 @@ fn run_placed_chat(
                     minimum: 0,
                     maximum: capacity,
                 },
+                speculative_draft_tokens: args.speculative_draft_tokens,
             },
         )?;
     let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(

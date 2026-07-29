@@ -711,6 +711,10 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
         "semantic_stop_or_allowance_per_turn"
     )
     assert free_running_checks[0]["horizon"]["minimum_steps"] is None
+    assert (
+        free_running_checks[0]["controls"]["speculative_draft_tokens"]
+        == 0
+    )
     structural_checks = [
         check
         for check in whole_model_checks
@@ -775,6 +779,7 @@ def test_bundled_candidate_runs_cheap_sanity_only_on_one_representative(
         max_context_activations=131_072,
         proof_verifier_id="fixture.proof",
         representation_name="fixture",
+        speculative_draft_tokens=3,
     )
     sanity = [
         check for check in requirements["checks"] if check["stage"] == "sanity"
@@ -794,6 +799,13 @@ def test_bundled_candidate_runs_cheap_sanity_only_on_one_representative(
         "arbitrary_component",
         "second_component",
     }
+    whole_model = [
+        check
+        for check in requirements["checks"]
+        if check["stage"] == "whole_model"
+    ]
+    assert len(whole_model) == 1
+    assert whole_model[0]["controls"]["speculative_draft_tokens"] == 3
 
 
 def test_codebook_provider_and_toolchain_are_available_from_builtin_registries(

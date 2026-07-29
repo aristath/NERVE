@@ -631,6 +631,7 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
             "minimum": 4096,
             "maximum": 8192,
         },
+        "speculative_draft_token_counts": [0],
     }
     assert predicate["placement"] == {
         "mode": "either",
@@ -655,6 +656,7 @@ def test_promotion_rejects_unmountable_hardware_process_names(
     ):
         _derive_runtime_predicate(
             benchmark_plan=qualified.benchmark.plan,
+            validation_plan=qualified.validation.plan,
             hardware_profiles=(qualified.profile,),
             candidate=candidate,
         )
@@ -859,6 +861,7 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
         context_activations_maximum=16_384,
         state_activations_minimum=0,
         state_activations_maximum=16_384,
+        speculative_draft_token_counts=(3,),
         placement_mode="local",
         minimum_device_count=1,
         maximum_device_count=1,

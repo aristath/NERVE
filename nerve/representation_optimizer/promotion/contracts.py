@@ -14,7 +14,7 @@ from nerve.representation_optimizer.contracts import (
 
 
 RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA = (
-    "nerve.optimizer.runtime_implementation_predicate.v3"
+    "nerve.optimizer.runtime_implementation_predicate.v4"
 )
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
 IMPLEMENTATION_REGISTRY_SCHEMA = (
@@ -153,6 +153,7 @@ def create_runtime_implementation_predicate(
     context_activations_maximum: int,
     state_activations_minimum: int,
     state_activations_maximum: int,
+    speculative_draft_token_counts: Iterable[int],
     placement_mode: str,
     minimum_device_count: int,
     maximum_device_count: int,
@@ -197,6 +198,9 @@ def create_runtime_implementation_predicate(
                 "minimum": state_activations_minimum,
                 "maximum": state_activations_maximum,
             },
+            "speculative_draft_token_counts": sorted(
+                set(speculative_draft_token_counts)
+            ),
         },
         "placement": {
             "mode": placement_mode,
@@ -335,6 +339,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
             "activation_batch",
             "context_activations",
             "state_activations",
+            "speculative_draft_token_counts",
         },
         "execution",
     )
@@ -376,6 +381,25 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         "execution.state_activations",
         positive=False,
     )
+    speculative_draft_token_counts = _list(
+        execution["speculative_draft_token_counts"],
+        "execution.speculative_draft_token_counts",
+    )
+    if (
+        not speculative_draft_token_counts
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in speculative_draft_token_counts
+        )
+        or speculative_draft_token_counts
+        != sorted(set(speculative_draft_token_counts))
+    ):
+        raise PromotionContractError(
+            "execution.speculative_draft_token_counts must contain sorted, "
+            "unique non-negative integers"
+        )
 
     placement = _object(document["placement"], "placement")
     _fields(

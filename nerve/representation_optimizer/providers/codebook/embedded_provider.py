@@ -410,6 +410,9 @@ class ExactEmbeddedHeadNormParameterProgramProvider:
             proof_verifier_id=EMBEDDED_PARAMETER_PROGRAM_PROOF_VERIFIER_ID,
             representation_name="embedded BF16 parameter program",
             execution_phases=("decode",),
+            speculative_draft_tokens=(
+                3 if manifest.get("speculative_decoders") else 0
+            ),
         )
 
 
