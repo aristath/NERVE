@@ -74,24 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 1. Establish the eager proof-workload baseline and access evidence
-
-- Recompile Qwen3.6-35B-A3B with the current compiler and record a reproducible
-  eager-residency baseline: package bytes, per-device permanent bytes, startup
-  time, prefill throughput, decode throughput, output behavior, and teardown.
-- Instrument normal eager execution to report routed-resource selections without
-  changing execution or synchronizing the hot path.
-- Run a real thinking-enabled multi-turn conversation and record, per layer and
-  turn, unique expert bundles selected, first-token growth, prefill union,
-  reuse, hotness, and the cumulative residency curve.
-- Measure MTP-enabled and MTP-disabled selection separately.
-- Use the evidence to confirm that one complete routed expert bundle is the
-  smallest useful atomic unit for this proof workload.
-
-Completion requires a checked-in, reproducible baseline and route-coverage
-evidence with no correctness or material performance regression from the
-instrumentation.
-
 ### 2. Define the versioned generic residency contract
 
 - Define package-level types for resources, atomic residency groups, compact
@@ -282,9 +264,14 @@ enabled.
   silently duplicate resources now.
 - Preserve sharing and correct ownership when components are moved, duplicated,
   bypassed, or rewired.
+- Make placement and device-slice inspection derive internal shard-worker
+  ownership correctly. Inspection must neither reject a logical shard device
+  merely because no whole component is assigned to it nor mount every component
+  when asked to inspect one internal shard.
 
 Completion requires sequential one-AMD and multi-AMD tests of placement changes,
-duplicated components, graph rewiring, residency reuse, and clean teardown.
+duplicated components, graph rewiring, internal shard inspection, residency
+reuse, and clean teardown.
 
 ### 14. Expose policy, state, and normal-operation metrics
 
@@ -297,6 +284,8 @@ duplicated components, graph rewiring, residency reuse, and clean teardown.
 - Report MTP residency separately when it exists.
 - Include the statistics in ordinary chat and benchmark summaries; do not add a
   profiling-only execution path.
+- Keep normal human-readable output bounded. Full per-resource counter arrays
+  belong in explicit machine-readable artifacts, not an unbounded chat dump.
 
 Completion requires consistent CLI/TUI behavior and counters reconciled against
 the runtime residency directory and device allocations.
