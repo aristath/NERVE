@@ -74,20 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 10. Keep the resident-hit path on the GPU
-
-- Check resident bits and resolve addresses in GPU work.
-- Dispatch resident selected work directly or indirectly without copying route
-  decisions to the host.
-- Append compact missing-resource requests only on actual misses.
-- Notify the scheduler only when a miss queue is non-empty.
-- Prove that a fully warm turn has no per-token host residency decision or
-  device-wide synchronization.
-
-Completion requires trace-based proof of the fast path and matched eager versus
-fully warm demand-retained microbenchmarks. A material warm-path regression must
-be fixed before continuing.
-
 ### 11. Add scheduler backpressure and checkpoint resume
 
 - Represent an activation blocked on one or more residency groups without
