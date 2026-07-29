@@ -64,8 +64,11 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ### 16. Run end-to-end model and hardware qualification
 
-- Run the optimizer over every supported compiled Safetensors model.
-- Exercise every available compatible CPU and idle AMD GPU capability class.
+- Run the optimizer over the compiled Qwen Safetensors model used by the
+  established performance baseline. Laguna is explicitly out of scope.
+- Exercise CPU capability discovery and the idle AMD GPU capability class used
+  by the Qwen package; do not force CPU model execution when the compiled
+  implementation is Vulkan-only.
 - Re-run complete package validation and real resident multi-turn conversations
   after every promoted compiler transformation.
 - Re-run the canonical warmed benchmark conditions and compare against the
@@ -82,9 +85,9 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
   completion waits, and cross-device transfers—from representation-candidate
   costs, and reject candidates that amplify those slow paths.
 
-Completion requires correct real conversations for the complete supported model
-set, no regression in existing explicit performance floors, clean device
-release after every run, and independently loadable optimized packages.
+Completion requires a correct real Qwen conversation, no regression in the
+established Qwen performance baseline, clean device release after every run,
+and independently loadable optimized Qwen packages.
 
 ### 17. Update project documentation and remove stale design-status claims
 
@@ -118,7 +121,7 @@ This goal is complete only when:
 - promoted implementations are target-guarded and selected from runtime
   conditions rather than compiler-owned placement;
 - optimized compiled models remain self-contained and relocatable;
-- all supported models continue to produce correct real conversations;
+- Qwen continues to produce correct real conversations;
 - existing graph, state, placement, multi-device, and performance guarantees
   remain intact; and
 - this TODO file contains no remaining work items.
