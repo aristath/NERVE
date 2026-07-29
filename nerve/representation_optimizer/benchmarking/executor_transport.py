@@ -61,6 +61,7 @@ class SubprocessExecutorTransport:
                 stderr=subprocess.PIPE,
                 bufsize=0,
                 env=dict(environment),
+                start_new_session=True,
             )
         except OSError as error:
             raise ModelCompileError(

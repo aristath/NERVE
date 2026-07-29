@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import sys
 
@@ -63,6 +64,8 @@ def test_subprocess_transport_preserves_line_framing() -> None:
     assert transport.request({"command": "echo"}) == {
         "command": "echo"
     }
+    assert os.getpgid(transport.process.pid) == transport.process.pid
+    assert os.getpgid(transport.process.pid) != os.getpgrp()
     transport.close()
     assert transport.process.returncode == 0
 
