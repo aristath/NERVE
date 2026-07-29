@@ -1,0 +1,151 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrame { uint words[]; } input_frame;
+layout(set = 0, binding = 1) buffer OutputFrame { uint words[]; } output_frame;
+layout(set = 0, binding = 2) buffer QuantizedFrame { uint words[]; } quantized_frame;
+layout(set = 0, binding = 3) buffer Scale { float values[]; } scale;
+layout(set = 0, binding = 4) buffer BlockSum { int values[]; } block_sum;
+layout(set = 0, binding = 5) readonly buffer Weight { uint words[]; } weight;
+
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
+const uint BLOCK_COUNT = HIDDEN_SIZE / BLOCK_COLUMNS;
+const uint PAIRS_PER_BLOCK = BLOCK_COLUMNS / 8u;
+const uint BF16_WORDS_PER_BLOCK = BLOCK_COLUMNS / 2u;
+const uint INT8_WORDS_PER_BLOCK = BLOCK_COLUMNS / 4u;
+const float NORM_EPS = {{NORM_EPS}};
+const float WEIGHT_OFFSET = {{WEIGHT_OFFSET}};
+
+shared float reduction[64];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float read_bf16(uint packed, uint index) {
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+
+float read_input(uint index) {
+    return read_bf16(input_frame.words[index >> 1u], index);
+}
+
+float read_weight(uint index) {
+    return read_bf16(weight.words[index >> 1u], index);
+}
+
+uint pack_i8x4(ivec4 value) {
+    return (uint(value.x) & 255u)
+        | ((uint(value.y) & 255u) << 8u)
+        | ((uint(value.z) & 255u) << 16u)
+        | ((uint(value.w) & 255u) << 24u);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint subgroup_lane = gl_SubgroupInvocationID;
+
+    if (lane < 64u) {
+        float sum_squares = 0.0;
+        for (uint index = lane; index < HIDDEN_SIZE; index += 64u) {
+            float value = read_input(index);
+            sum_squares = fma(value, value, sum_squares);
+        }
+        sum_squares = subgroupAdd(sum_squares);
+        if (subgroup_lane == 0u) {
+            reduction[gl_SubgroupID] = sum_squares;
+        }
+    }
+    barrier();
+
+    float sum_squares = 0.0;
+    uint reduction_subgroup_count =
+        (64u + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+    for (
+        uint subgroup = 0u;
+        subgroup < reduction_subgroup_count;
+        subgroup++
+    ) {
+        sum_squares += reduction[subgroup];
+    }
+    float inv_rms = inversesqrt(
+        (sum_squares / float(HIDDEN_SIZE)) + NORM_EPS
+    );
+
+    for (
+        uint block = gl_SubgroupID;
+        block < BLOCK_COUNT;
+        block += gl_NumSubgroups
+    ) {
+        float rounded[8];
+        uint rounded_bits[8];
+        for (uint element = 0u; element < 8u; element++) {
+            rounded[element] = 0.0;
+            rounded_bits[element] = 0u;
+        }
+        if (subgroup_lane < PAIRS_PER_BLOCK) {
+            uint column = block * BLOCK_COLUMNS + subgroup_lane * 8u;
+            for (uint element = 0u; element < 8u; element++) {
+                uint index = column + element;
+                float normalized = read_input(index)
+                    * inv_rms
+                    * (read_weight(index) + WEIGHT_OFFSET);
+                rounded_bits[element] = f32_to_bf16(normalized);
+                rounded[element] = bf16_to_f32(rounded_bits[element]);
+            }
+        }
+        float lane_max = 0.0;
+        for (uint element = 0u; element < 8u; element++) {
+            lane_max = max(lane_max, abs(rounded[element]));
+        }
+        float block_max = subgroupMax(lane_max);
+        float block_scale = block_max > 0.0 ? block_max / 127.0 : 1.0;
+        ivec4 quantized_even = ivec4(round(clamp(
+            vec4(rounded[0], rounded[2], rounded[4], rounded[6])
+                / block_scale,
+            -127.0,
+            127.0
+        )));
+        ivec4 quantized_odd = ivec4(round(clamp(
+            vec4(rounded[1], rounded[3], rounded[5], rounded[7])
+                / block_scale,
+            -127.0,
+            127.0
+        )));
+        int lane_sum = quantized_even.x + quantized_even.y
+            + quantized_even.z + quantized_even.w
+            + quantized_odd.x + quantized_odd.y
+            + quantized_odd.z + quantized_odd.w;
+        int sum = subgroupAdd(lane_sum);
+
+        if (subgroup_lane == 0u) {
+            scale.values[block] = block_scale;
+            block_sum.values[block] = sum;
+        }
+        if (subgroup_lane < PAIRS_PER_BLOCK) {
+            uint output_word = block * BF16_WORDS_PER_BLOCK
+                + subgroup_lane * 4u;
+            for (uint word = 0u; word < 4u; word++) {
+                output_frame.words[output_word + word] =
+                    rounded_bits[word * 2u]
+                    | (rounded_bits[word * 2u + 1u] << 16u);
+            }
+            uint quantized_word = block * INT8_WORDS_PER_BLOCK
+                + subgroup_lane * 2u;
+            quantized_frame.words[quantized_word] = pack_i8x4(quantized_even);
+            quantized_frame.words[quantized_word + 1u] =
+                pack_i8x4(quantized_odd);
+        }
+    }
+}

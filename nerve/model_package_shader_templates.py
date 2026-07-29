@@ -1951,6 +1951,35 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
 
     shaped_templates = (
         (
+            r"rms_norm_quantize_int8_pairpacked_b(\d+)_h(\d+)_"
+            r"eps([0-9eE+.-]+)_offset([0-9eE+.-]+)\.comp",
+            "rms_norm_quantize_int8_pairpacked.comp.template",
+            ("BLOCK_COLUMNS", "HIDDEN_SIZE", "NORM_EPS", "WEIGHT_OFFSET"),
+        ),
+        (
+            r"rms_norm_quantize_batch(\d+)_int8_pairpacked_b(\d+)_h(\d+)_"
+            r"eps([0-9eE+.-]+)_offset([0-9eE+.-]+)\.comp",
+            "rms_norm_quantize_batch_int8_pairpacked.comp.template",
+            (
+                "BATCH_TILE_WIDTH",
+                "BLOCK_COLUMNS",
+                "HIDDEN_SIZE",
+                "NORM_EPS",
+                "WEIGHT_OFFSET",
+            ),
+        ),
+        (
+            r"silu_multiply_quantize_int8_pairpacked_b(\d+)_h(\d+)\.comp",
+            "silu_multiply_quantize_int8_pairpacked.comp.template",
+            ("BLOCK_COLUMNS", "ELEMENT_COUNT"),
+        ),
+        (
+            r"silu_multiply_quantize_batch(\d+)_int8_pairpacked_"
+            r"b(\d+)_h(\d+)\.comp",
+            "silu_multiply_quantize_batch_int8_pairpacked.comp.template",
+            ("BATCH_TILE_WIDTH", "BLOCK_COLUMNS", "ELEMENT_COUNT"),
+        ),
+        (
             r"sigmoid_multiply_quantize_fp8_e4m3_b(\d+)_h(\d+)\.comp",
             "sigmoid_multiply_quantize_fp8_e4m3.comp.template",
             ("BLOCK_COLUMNS", "ELEMENT_COUNT"),

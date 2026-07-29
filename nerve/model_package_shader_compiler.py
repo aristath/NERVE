@@ -57,4 +57,3 @@ def compiled_shader_path(source_path: str) -> str:
         )
     return f"{source_path[:-5]}.spv"
 
-

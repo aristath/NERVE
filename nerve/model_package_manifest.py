@@ -12,7 +12,10 @@ from nerve.model_package_shader_compiler import (
 )
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_tensors import *
-from nerve.physical_representations import FP8_PREQUANTIZATION_CONTRACT
+from nerve.physical_representations import (
+    FP8_PREQUANTIZATION_CONTRACT,
+    PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+)
 
 
 def can_emit_physical_representation_from_producer(
@@ -22,31 +25,51 @@ def can_emit_physical_representation_from_producer(
     hidden_size: int,
     compiler_target: Json,
 ) -> bool:
-    if scope.get("contract") != FP8_PREQUANTIZATION_CONTRACT:
-        return False
+    contract = scope.get("contract")
     operation = producer.get("op")
-    operation_shape_supported = (
-        (operation == "rms_norm" and int(scope["input_size"]) == hidden_size)
-        or operation == "sigmoid_multiply"
-        or (
-            operation == "gated_delta_step"
-            and int(scope["input_size"])
-            == int(producer.get("attrs", {}).get("value_heads", 0))
-            * int(producer.get("attrs", {}).get("value_head_width", 0))
-            and int(scope["block_columns"])
-            == int(producer.get("attrs", {}).get("value_head_width", 0))
+    if contract == FP8_PREQUANTIZATION_CONTRACT:
+        operation_shape_supported = (
+            (operation == "rms_norm" and int(scope["input_size"]) == hidden_size)
+            or operation == "sigmoid_multiply"
+            or (
+                operation == "gated_delta_step"
+                and int(scope["input_size"])
+                == int(producer.get("attrs", {}).get("value_heads", 0))
+                * int(producer.get("attrs", {}).get("value_head_width", 0))
+                and int(scope["block_columns"])
+                == int(producer.get("attrs", {}).get("value_head_width", 0))
+            )
         )
-    )
+        feature_supported = all(
+            {"shader_float8", "shader_int8"}
+            <= set(device.get("shader_features", []))
+            for device in compiler_target.get("devices", [])
+        )
+        expected_block_columns = 128
+    elif contract == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT:
+        operation_shape_supported = (
+            operation == "rms_norm"
+            and int(scope["input_size"]) == hidden_size
+        ) or (
+            operation == "silu_multiply"
+            and int(scope["input_size"])
+            == int(producer.get("attrs", {}).get("element_count", 0))
+        )
+        feature_supported = True
+        expected_block_columns = 32
+    else:
+        return False
     return (
         operation_shape_supported
         and producer.get("outputs") == [scope["logical_signal"]]
-        and int(scope["block_columns"]) == 128
+        and int(scope["block_columns"]) == expected_block_columns
         and bool(compiler_target.get("devices"))
+        and feature_supported
         and all(
             int(device.get("max_compute_work_group_invocations", 0)) >= 1024
             and int(device.get("max_compute_work_group_size_x", 0)) >= 1024
-            and {"shader_float8", "shader_int8"}
-            <= set(device.get("shader_features", []))
+            and "arithmetic" in set(device.get("subgroup_operations", []))
+            and bool(device.get("subgroup_compute_supported"))
             for device in compiler_target["devices"]
         )
     )

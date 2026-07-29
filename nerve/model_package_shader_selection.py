@@ -43,21 +43,34 @@ def shader_file_for_node(
             "physical_output_representations"
         )
         if representations:
-            if (
+            valid_common = (
                 len(representations) != 1
-                or representations[0].get("contract")
-                != "bf16_blockwise_fp8_e4m3_f32_scale.v1"
                 or representations[0].get("logical_signal")
                 != node.get("outputs", [None])[0]
                 or int(representations[0].get("element_count", 0)) != hidden_size
-                or int(representations[0].get("block_columns", 0)) != 128
-            ):
+            )
+            contract = representations[0].get("contract")
+            block_columns = int(representations[0].get("block_columns", 0))
+            if valid_common or (
+                contract == FP8_PREQUANTIZATION_CONTRACT
+                and block_columns != 128
+            ) or (
+                contract == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
+                and block_columns != 32
+            ) or contract not in {
+                FP8_PREQUANTIZATION_CONTRACT,
+                PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+            }:
                 raise ModelCompileError(
                     f"RMS normalization node {node['id']!r} has an invalid "
-                    "physical FP8 output representation"
+                    "physical output representation"
                 )
+            representation_token = (
+                "fp8_e4m3" if contract == FP8_PREQUANTIZATION_CONTRACT
+                else "int8_pairpacked"
+            )
             return (
-                "rms_norm_quantize_fp8_e4m3_b128_"
+                f"rms_norm_quantize_{representation_token}_b{block_columns}_"
                 f"h{hidden_size}_eps{shader_float_token(float(node['attrs']['eps']))}"
                 f"_offset{shader_float_token(float(node['attrs']['weight_offset']))}.comp"
             )
@@ -601,7 +614,30 @@ def shader_file_for_node(
     if op == "gelu_tanh":
         return f"gelu_tanh_bf16_{int(node['attrs']['element_count'])}.comp"
     if op == "silu_multiply":
-        return f"silu_multiply_bf16_{int(node['attrs']['element_count'])}.comp"
+        element_count = int(node["attrs"]["element_count"])
+        representations = node.get("attrs", {}).get(
+            "physical_output_representations"
+        )
+        if representations:
+            if (
+                len(representations) != 1
+                or representations[0].get("contract")
+                != PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
+                or representations[0].get("logical_signal")
+                != node.get("outputs", [None])[0]
+                or int(representations[0].get("element_count", 0))
+                != element_count
+                or int(representations[0].get("block_columns", 0)) != 32
+            ):
+                raise ModelCompileError(
+                    f"SiLU-multiply node {node['id']!r} has an invalid "
+                    "physical output representation"
+                )
+            return (
+                "silu_multiply_quantize_int8_pairpacked_b32_"
+                f"h{element_count}.comp"
+            )
+        return f"silu_multiply_bf16_{element_count}.comp"
     if op == "sigmoid_multiply":
         representations = node.get("attrs", {}).get(
             "physical_output_representations"
@@ -1137,7 +1173,11 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
     if shader_file.startswith(("sparse_moe_gate_up_fp8_", "sparse_moe_down_fp8_")):
         return 512
     if shader_file.startswith(
-        ("rms_norm_quantize_", "sigmoid_multiply_quantize_")
+        (
+            "rms_norm_quantize_",
+            "sigmoid_multiply_quantize_",
+            "silu_multiply_quantize_",
+        )
     ):
         return 1024
     if shader_file.startswith(

@@ -522,6 +522,57 @@ def test_pairpacked_int8_dot_is_exactly_equivalent_to_signed_int4_dot() -> None:
     assert corrected_dot == signed_dot
 
 
+def test_compiler_renders_fused_pairpacked_int8_representation_producers(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "rms_norm_quantize_int8_pairpacked_b32_h5120_eps1e-06_offset1.comp",
+        (
+            "rms_norm_quantize_batch4_int8_pairpacked_b32_"
+            "h5120_eps1e-06_offset1.comp"
+        ),
+        "silu_multiply_quantize_int8_pairpacked_b32_h17408.comp",
+        (
+            "silu_multiply_quantize_batch4_int8_pairpacked_"
+            "b32_h17408.comp"
+        ),
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    norm = (
+        tmp_path
+        / "rms_norm_quantize_int8_pairpacked_b32_h5120_eps1e-06_offset1.comp"
+    ).read_text()
+    silu = (
+        tmp_path / "silu_multiply_quantize_int8_pairpacked_b32_h17408.comp"
+    ).read_text()
+    for source in (norm, silu):
+        assert "layout(local_size_x = 1024" in source
+        assert "const uint BLOCK_COLUMNS = 32u;" in source
+        assert "buffer QuantizedFrame" in source
+        assert "buffer BlockSum" in source
+        assert "subgroupMax" in source
+        assert "subgroupAdd(lane_sum)" in source
+        assert "{{" not in source
+    assert "const uint HIDDEN_SIZE = 5120u;" in norm
+    assert "readonly buffer Weight" in norm
+    assert "shared float reduction[64];" in norm
+    assert "if (lane < 64u)" in norm
+    assert "uint index = lane;" in norm
+    assert "gl_SubgroupSize" in norm
+    assert "const uint ELEMENT_COUNT = 17408u;" in silu
+    assert "rounded_silu" in silu
+    assert all(
+        "layout(push_constant) uniform BatchControl"
+        in (tmp_path / shader_file).read_text()
+        for shader_file in shader_files
+        if "batch4" in shader_file
+    )
+    compile_shader_artifacts(tmp_path)
+
+
 def test_packed_int4_projection_requests_reusable_int8_input_representation() -> None:
     node = {
         "id": "projection",

@@ -567,6 +567,25 @@ def weight_shared_batch_shader_file(
             1,
         )
     if re.fullmatch(
+        r"rms_norm_quantize_int8_pairpacked_b32_h\d+_"
+        r"eps[0-9eE+.-]+_offset[0-9eE+.-]+\.comp",
+        shader_file,
+    ):
+        return shader_file.replace(
+            "rms_norm_quantize_int8_pairpacked_",
+            f"rms_norm_quantize_batch{tile}_int8_pairpacked_",
+            1,
+        )
+    if re.fullmatch(
+        r"silu_multiply_quantize_int8_pairpacked_b32_h\d+\.comp",
+        shader_file,
+    ):
+        return shader_file.replace(
+            "silu_multiply_quantize_int8_pairpacked_",
+            f"silu_multiply_quantize_batch{tile}_int8_pairpacked_",
+            1,
+        )
+    if re.fullmatch(
         r"sigmoid_multiply_quantize_fp8_e4m3_b128_h\d+\.comp",
         shader_file,
     ):

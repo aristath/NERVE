@@ -1,0 +1,134 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer GateInputs { uint words[]; } gate_inputs;
+layout(set = 0, binding = 1) readonly buffer UpInputs { uint words[]; } up_inputs;
+layout(set = 0, binding = 2) buffer OutputFrames { uint words[]; } output_frames;
+layout(set = 0, binding = 3) buffer QuantizedFrames { uint words[]; } quantized_frames;
+layout(set = 0, binding = 4) buffer Scales { float values[]; } scales;
+layout(set = 0, binding = 5) buffer BlockSums { int values[]; } block_sums;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint ELEMENT_COUNT = {{ELEMENT_COUNT}}u;
+const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
+const uint BLOCK_COUNT = ELEMENT_COUNT / BLOCK_COLUMNS;
+const uint FRAME_WORDS = ELEMENT_COUNT / 2u;
+const uint INT8_WORDS = ELEMENT_COUNT / 4u;
+const uint PAIRS_PER_BLOCK = BLOCK_COLUMNS / 8u;
+const uint BF16_WORDS_PER_BLOCK = BLOCK_COLUMNS / 2u;
+const uint INT8_WORDS_PER_BLOCK = BLOCK_COLUMNS / 4u;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float rounded_silu(float value) {
+    float activated = value / (1.0 + exp(-value));
+    return bf16_to_f32(f32_to_bf16(activated));
+}
+
+uint pack_i8x4(ivec4 value) {
+    return (uint(value.x) & 255u)
+        | ((uint(value.y) & 255u) << 8u)
+        | ((uint(value.z) & 255u) << 16u)
+        | ((uint(value.w) & 255u) << 24u);
+}
+
+void main() {
+    uint subgroup_lane = gl_SubgroupInvocationID;
+    uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
+    uint task_count = BATCH_TILE_WIDTH * BLOCK_COUNT;
+    for (
+        uint task = gl_SubgroupID;
+        task < task_count;
+        task += gl_NumSubgroups
+    ) {
+        uint batch_lane = task / BLOCK_COUNT;
+        uint block = task % BLOCK_COUNT;
+        uint batch_index = batch_start + batch_lane;
+        bool valid_batch_lane = batch_index < batch_control.batch_width;
+        float rounded[8];
+        uint rounded_bits[8];
+        for (uint element = 0u; element < 8u; element++) {
+            rounded[element] = 0.0;
+            rounded_bits[element] = 0u;
+        }
+        if (valid_batch_lane && subgroup_lane < PAIRS_PER_BLOCK) {
+            uint input_word = batch_index * FRAME_WORDS
+                + block * BF16_WORDS_PER_BLOCK
+                + subgroup_lane * 4u;
+            for (uint word = 0u; word < 4u; word++) {
+                uint gate = gate_inputs.words[input_word + word];
+                uint up = up_inputs.words[input_word + word];
+                uint first = word * 2u;
+                float lo = rounded_silu(bf16_to_f32(gate))
+                    * bf16_to_f32(up);
+                float hi = rounded_silu(bf16_to_f32(gate >> 16u))
+                    * bf16_to_f32(up >> 16u);
+                rounded_bits[first] = f32_to_bf16(lo);
+                rounded_bits[first + 1u] = f32_to_bf16(hi);
+                rounded[first] = bf16_to_f32(rounded_bits[first]);
+                rounded[first + 1u] = bf16_to_f32(
+                    rounded_bits[first + 1u]
+                );
+            }
+        }
+        float lane_max = 0.0;
+        for (uint element = 0u; element < 8u; element++) {
+            lane_max = max(lane_max, abs(rounded[element]));
+        }
+        float block_max = subgroupMax(lane_max);
+        float block_scale = block_max > 0.0 ? block_max / 127.0 : 1.0;
+        ivec4 quantized_even = ivec4(round(clamp(
+            vec4(rounded[0], rounded[2], rounded[4], rounded[6])
+                / block_scale,
+            -127.0,
+            127.0
+        )));
+        ivec4 quantized_odd = ivec4(round(clamp(
+            vec4(rounded[1], rounded[3], rounded[5], rounded[7])
+                / block_scale,
+            -127.0,
+            127.0
+        )));
+        int lane_sum = quantized_even.x + quantized_even.y
+            + quantized_even.z + quantized_even.w
+            + quantized_odd.x + quantized_odd.y
+            + quantized_odd.z + quantized_odd.w;
+        int sum = subgroupAdd(lane_sum);
+        uint block_index = batch_index * BLOCK_COUNT + block;
+
+        if (valid_batch_lane && subgroup_lane == 0u) {
+            scales.values[block_index] = block_scale;
+            block_sums.values[block_index] = sum;
+        }
+        if (valid_batch_lane && subgroup_lane < PAIRS_PER_BLOCK) {
+            uint output_word = batch_index * FRAME_WORDS
+                + block * BF16_WORDS_PER_BLOCK
+                + subgroup_lane * 4u;
+            for (uint word = 0u; word < 4u; word++) {
+                output_frames.words[output_word + word] =
+                    rounded_bits[word * 2u]
+                    | (rounded_bits[word * 2u + 1u] << 16u);
+            }
+            uint quantized_word = batch_index * INT8_WORDS
+                + block * INT8_WORDS_PER_BLOCK
+                + subgroup_lane * 2u;
+            quantized_frames.words[quantized_word] =
+                pack_i8x4(quantized_even);
+            quantized_frames.words[quantized_word + 1u] =
+                pack_i8x4(quantized_odd);
+        }
+    }
+}

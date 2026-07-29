@@ -58,6 +58,25 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     )
     assert (
         weight_shared_batch_shader_file(
+            "rms_norm_quantize_int8_pairpacked_b32_"
+            "h5120_eps1e-06_offset1.comp"
+        )
+        == (
+            "rms_norm_quantize_batch16_int8_pairpacked_b32_"
+            "h5120_eps1e-06_offset1.comp"
+        )
+    )
+    assert (
+        weight_shared_batch_shader_file(
+            "silu_multiply_quantize_int8_pairpacked_b32_h17408.comp"
+        )
+        == (
+            "silu_multiply_quantize_batch16_int8_pairpacked_"
+            "b32_h17408.comp"
+        )
+    )
+    assert (
+        weight_shared_batch_shader_file(
             "linear_residual_int4_ct_sbf16_g32_16384x5376.comp"
         )
         == "linear_residual_batch16_int4_ct_sbf16_g32_16384x5376.comp"
