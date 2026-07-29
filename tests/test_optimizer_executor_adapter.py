@@ -349,6 +349,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         name="fixture component decode",
         stage="sanity",
         kind="component_comparison",
+        product_performance=False,
         coverage=("component_output_error",),
         execution_scope="component",
         activation_batch_width=1,

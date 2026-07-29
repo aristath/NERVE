@@ -258,6 +258,11 @@ def validate_benchmarked_candidate(
         )
     runs: list[ValidationRun] = []
     product_performance = None
+    product_check_ids = frozenset(
+        check["check_id"]
+        for check in plan.to_json()["checks"]
+        if check["product_performance"]
+    )
     failure_reason: str | None = None
     terminal_state = CandidateState.REJECTED
     benchmark = benchmark_record.to_json()
@@ -297,7 +302,10 @@ def validate_benchmarked_candidate(
                         terminal_state = CandidateState.CANCELLED
                 else:
                     product_performance = (
-                        qualify_whole_model_product_performance(whole)
+                        qualify_whole_model_product_performance(
+                            whole,
+                            product_check_ids=product_check_ids,
+                        )
                     )
                     if product_performance["status"] != "passed":
                         failure_reason = str(
@@ -321,7 +329,10 @@ def validate_benchmarked_candidate(
         )
         if whole is None or whole.status != "completed":
             product_performance = (
-                qualify_whole_model_product_performance(whole)
+                qualify_whole_model_product_performance(
+                    whole,
+                    product_check_ids=product_check_ids,
+                )
             )
         else:
             product_performance = {

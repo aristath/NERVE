@@ -14,10 +14,10 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
 
 
 VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v5"
+    "nerve.optimizer.validation_executor_command.v6"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v5"
+    "nerve.optimizer.validation_executor_response.v6"
 )
 
 _PROGRESS_FIELDS = {

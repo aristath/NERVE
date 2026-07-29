@@ -636,6 +636,14 @@ def validate_validation_requirements(document: Json) -> None:
             raise ValidationContractError(
                 f"validation requirements need at least one {stage!r} check"
             )
+    product_checks = [
+        check for check in checks if check["product_performance"]
+    ]
+    if len(product_checks) != 1:
+        raise ValidationContractError(
+            "validation requirements need exactly one product-performance "
+            "check"
+        )
     coverage = _list(document["coverage"], "coverage")
     coverage_names: list[str] = []
     coverage_by_kind: dict[str, Json] = {}
@@ -790,6 +798,7 @@ def validate_validation_check(document: Json) -> None:
             "name",
             "stage",
             "kind",
+            "product_performance",
             "coverage",
             "regime",
             "input",
@@ -808,6 +817,11 @@ def validate_validation_check(document: Json) -> None:
         raise ValidationContractError("validation check stage is unsupported")
     if document["kind"] not in VALIDATION_CHECK_KINDS:
         raise ValidationContractError("validation check kind is unsupported")
+    product_performance = document["product_performance"]
+    if not isinstance(product_performance, bool):
+        raise ValidationContractError(
+            "validation check product_performance must be boolean"
+        )
     coverage = _sorted_unique_strings(
         document["coverage"],
         "coverage",
@@ -857,7 +871,63 @@ def validate_validation_check(document: Json) -> None:
     _artifact_ref(document["input"], "input")
     if document["initial_state"] is not None:
         _artifact_ref(document["initial_state"], "initial_state")
-    _object(document["controls"], "controls")
+    controls = _object(document["controls"], "controls")
+    sampler = controls.get("sampler")
+    if sampler is not None:
+        sampler = _object(sampler, "controls.sampler")
+        allowed_sampler_fields = {
+            "temperature",
+            "top_k",
+            "top_p",
+            "min_p",
+            "presence_penalty",
+            "repetition_penalty",
+        }
+        unsupported_sampler_fields = sorted(
+            set(sampler) - allowed_sampler_fields
+        )
+        if not sampler or unsupported_sampler_fields:
+            raise ValidationContractError(
+                "controls.sampler is empty or has unsupported fields"
+            )
+        if "temperature" in sampler:
+            _finite_positive(
+                sampler["temperature"],
+                "controls.sampler.temperature",
+            )
+        if "top_k" in sampler:
+            _positive_integer(
+                sampler["top_k"],
+                "controls.sampler.top_k",
+            )
+        if "top_p" in sampler:
+            top_p = _finite_positive(
+                sampler["top_p"],
+                "controls.sampler.top_p",
+            )
+            if top_p > 1:
+                raise ValidationContractError(
+                    "controls.sampler.top_p must not exceed one"
+                )
+        if "min_p" in sampler:
+            min_p = _finite_nonnegative(
+                sampler["min_p"],
+                "controls.sampler.min_p",
+            )
+            if min_p > 1:
+                raise ValidationContractError(
+                    "controls.sampler.min_p must not exceed one"
+                )
+        if "presence_penalty" in sampler:
+            _finite_number(
+                sampler["presence_penalty"],
+                "controls.sampler.presence_penalty",
+            )
+        if "repetition_penalty" in sampler:
+            _finite_positive(
+                sampler["repetition_penalty"],
+                "controls.sampler.repetition_penalty",
+            )
     seeds = _list(document["seeds"], "seeds")
     if (
         not seeds
@@ -1007,6 +1077,31 @@ def validate_validation_check(document: Json) -> None:
     if semantic_comparison and "semantic_consistency" not in metrics:
         raise ValidationContractError(
             "fixture-semantic comparison requires semantic_consistency"
+        )
+    if product_performance and (
+        document["stage"] != "whole_model"
+        or regime["execution_scope"] != "whole_model"
+        or document["kind"] not in {
+            "free_running",
+            "reasoning_conversation",
+        }
+        or completion_condition
+        != "semantic_stop_or_allowance_per_turn"
+    ):
+        raise ValidationContractError(
+            "product performance requires a free-running whole-model "
+            "semantic horizon"
+        )
+    if product_performance and (
+        not isinstance(sampler, dict)
+        or sampler.get("top_k") != 1
+        or any(
+            field in sampler
+            for field in ("temperature", "top_p", "min_p")
+        )
+    ):
+        raise ValidationContractError(
+            "product performance requires deterministic top-k-one sampling"
         )
     expected = validation_check_id(document)
     if document["check_id"] != expected:
@@ -2266,6 +2361,13 @@ def _finite_nonnegative(value: object, path: str) -> float:
     number = _finite_number(value, path)
     if number < 0:
         raise ValidationContractError(f"{path} must be non-negative")
+    return number
+
+
+def _finite_positive(value: object, path: str) -> float:
+    number = _finite_number(value, path)
+    if number <= 0:
+        raise ValidationContractError(f"{path} must be positive")
     return number
 
 

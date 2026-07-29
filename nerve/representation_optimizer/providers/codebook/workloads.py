@@ -158,6 +158,7 @@ def head_norm_validation_requirements(
             ),
             stage="sanity",
             kind="component_comparison",
+            product_performance=False,
             coverage=(
                 "component_output_error",
                 "distribution_divergence",
@@ -199,6 +200,7 @@ def head_norm_validation_requirements(
             ),
             stage="sanity",
             kind="component_comparison",
+            product_performance=False,
             coverage=(
                 "component_output_error",
                 "distribution_divergence",
@@ -240,6 +242,7 @@ def head_norm_validation_requirements(
             ),
             stage="full_local",
             kind="teacher_forced",
+            product_performance=False,
             coverage=(
                 "teacher_forced_sequences",
                 "multiple_fixed_seeds",
@@ -269,6 +272,7 @@ def head_norm_validation_requirements(
             name=f"exact {representation_name} lifecycle continuity",
             stage="full_local",
             kind="lifecycle_operation",
+            product_performance=False,
             coverage=(
                 "interruption",
                 "snapshot",
@@ -304,6 +308,7 @@ def head_norm_validation_requirements(
                 ),
                 stage="full_local",
                 kind="graph_edit",
+                product_performance=False,
                 coverage=("graph_edits",),
                 execution_scope="whole_model",
                 activation_batch_width=1,
@@ -342,6 +347,7 @@ def head_norm_validation_requirements(
             name=f"exact {representation_name} alternative placement",
             stage="full_local",
             kind="placement",
+            product_performance=False,
             coverage=("alternative_placements",),
             execution_scope="whole_model",
             activation_batch_width=1,
@@ -371,6 +377,7 @@ def head_norm_validation_requirements(
             ),
             stage="full_local",
             kind="counterexample",
+            product_performance=False,
             coverage=("adversarial_counterexamples",),
             execution_scope="component",
             activation_batch_width=1,
@@ -400,6 +407,7 @@ def head_norm_validation_requirements(
             ),
             stage="full_local",
             kind="counterexample",
+            product_performance=False,
             coverage=("adversarial_counterexamples",),
             execution_scope="component",
             activation_batch_width=64,
@@ -429,6 +437,7 @@ def head_norm_validation_requirements(
             ),
             stage="whole_model",
             kind="reasoning_conversation",
+            product_performance=False,
             coverage=(
                 "free_running_long_horizon",
                 "reasoning_enabled_conversations",
@@ -464,6 +473,41 @@ def head_norm_validation_requirements(
                 "semantic_consistency",
                 "conversation_memory",
             ),
+        ),
+        create_validation_check(
+            name=(
+                f"exact {representation_name} deterministic resident "
+                "product performance"
+            ),
+            stage="whole_model",
+            kind="free_running",
+            product_performance=True,
+            coverage=("free_running_long_horizon",),
+            execution_scope="whole_model",
+            activation_batch_width=1,
+            context_size=max_context_activations,
+            context_size_basis=context_basis,
+            state_size=0,
+            boundary_mode="local",
+            input_artifact=conversation_ref,
+            initial_state_artifact=None,
+            controls={
+                "execution": "ordinary",
+                "execution_mode": "conversation",
+                "enable_thinking": True,
+                "max_output_tokens": 65_536,
+                "speculative_draft_tokens": speculative_draft_tokens,
+                "sampler": {
+                    "top_k": 1,
+                },
+            },
+            seeds=(1,),
+            step_unit="component_activations",
+            completion_condition="semantic_stop_or_allowance_per_turn",
+            minimum_steps=None,
+            output_allowance=65_536,
+            output_allowance_basis=output_basis,
+            metrics=("token_exact_match",),
         ),
     )
     covered = {coverage for check in checks for coverage in check["coverage"]}

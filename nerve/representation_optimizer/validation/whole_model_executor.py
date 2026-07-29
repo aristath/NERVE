@@ -256,6 +256,9 @@ class ResidentWholeModelValidationBackend:
             "execution_mode": execution_mode,
             "speculative_draft_tokens": speculative_draft_tokens,
             "random_seed": request.seed,
+            "sampler_config": dict(
+                check["controls"].get("sampler", {})
+            ),
             "enable_thinking": (
                 check["controls"].get("enable_thinking") is True
             ),

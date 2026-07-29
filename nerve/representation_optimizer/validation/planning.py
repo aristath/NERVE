@@ -81,6 +81,7 @@ def create_validation_check(
     output_allowance: int | None,
     output_allowance_basis: Json,
     metrics: Iterable[str],
+    product_performance: bool,
     comparison: Json | None = None,
 ) -> Json:
     document = {
@@ -88,6 +89,7 @@ def create_validation_check(
         "name": name,
         "stage": stage,
         "kind": kind,
+        "product_performance": product_performance,
         "coverage": sorted(set(coverage)),
         "regime": {
             "execution_scope": execution_scope,

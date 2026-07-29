@@ -44,7 +44,8 @@ pub struct VulkanResidentSamplerSpec {
     pub scratch_byte_capacity: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct VulkanResidentSamplerRuntimeConfig {
     pub temperature: Option<f32>,
     pub top_k: Option<u32>,
@@ -64,7 +65,7 @@ impl VulkanResidentSamplerRuntimeConfig {
             && self.repetition_penalty.is_none()
     }
 
-    fn apply_to(
+    pub fn apply_to(
         self,
         default: &VulkanResidentSamplerSpec,
     ) -> Result<VulkanResidentSamplerSpec, VulkanResidentSamplerRunnerError> {

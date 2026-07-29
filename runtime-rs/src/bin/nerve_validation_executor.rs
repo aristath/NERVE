@@ -11,8 +11,8 @@ use nerve_runtime::{
     VulkanResidentBufferPool, VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
-    VulkanResidentRuntimeModel, VulkanResidentTokenInputEvent, VulkanResidentTokenTextCodec,
-    chat_stop_token_ids_from_manifest, chat_transcript_codec,
+    VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
+    VulkanResidentTokenTextCodec, chat_stop_token_ids_from_manifest, chat_transcript_codec,
     execute_vulkan_resident_chat_transaction, reset_vulkan_resident_execution_counters,
     vulkan_resident_execution_counters,
 };
@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v5";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v5";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v6";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v6";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
@@ -44,6 +44,7 @@ enum ExecutorCommand {
         execution_mode: String,
         speculative_draft_tokens: usize,
         random_seed: u32,
+        sampler_config: VulkanResidentSamplerRuntimeConfig,
         enable_thinking: bool,
         graph_operation: String,
         graph_target_component_id: Option<String>,
@@ -98,7 +99,7 @@ struct ValidationDevicePool {
     physical_to_logical: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ValidationPackageKey {
     package_manifest: PathBuf,
     candidate_id: Option<String>,
@@ -106,6 +107,7 @@ struct ValidationPackageKey {
     component_placement: BTreeMap<String, String>,
     context_capacity: usize,
     speculative_draft_tokens: usize,
+    sampler_config: VulkanResidentSamplerRuntimeConfig,
     graph_operation: String,
     graph_target_component_id: Option<String>,
 }
@@ -395,6 +397,7 @@ fn mount(
         execution_mode,
         speculative_draft_tokens,
         random_seed,
+        sampler_config,
         enable_thinking,
         graph_operation,
         graph_target_component_id,
@@ -477,6 +480,8 @@ fn mount(
     } else if candidate_id.is_some() {
         return Err(invalid_input("candidate_id requires a sealed candidate_root").into());
     }
+    runtime_model.package.sampler.spec =
+        sampler_config.apply_to(&runtime_model.package.sampler.spec)?;
     validate_runtime_placement(&runtime_model, &physical_to_logical)?;
     let signal_processor_component_count = signal_processor_component_count(&runtime_model)?;
     let stop_token_ids = chat_stop_token_ids_from_manifest(
@@ -492,6 +497,7 @@ fn mount(
         component_placement,
         context_capacity,
         speculative_draft_tokens,
+        sampler_config,
         graph_operation,
         graph_target_component_id,
     };
@@ -1932,6 +1938,7 @@ mod tests {
             )]),
             context_capacity: 131_072,
             speculative_draft_tokens: 3,
+            sampler_config: VulkanResidentSamplerRuntimeConfig::default(),
             graph_operation: "none".to_string(),
             graph_target_component_id: None,
         };
@@ -1957,6 +1964,16 @@ mod tests {
                 ..key.clone()
             }
         );
+        assert_ne!(
+            key,
+            ValidationPackageKey {
+                sampler_config: VulkanResidentSamplerRuntimeConfig {
+                    top_k: Some(1),
+                    ..VulkanResidentSamplerRuntimeConfig::default()
+                },
+                ..key.clone()
+            }
+        );
     }
 
     #[test]
@@ -1971,6 +1988,7 @@ mod tests {
             ]),
             context_capacity: 131_072,
             speculative_draft_tokens: 3,
+            sampler_config: VulkanResidentSamplerRuntimeConfig::default(),
             graph_operation: "none".to_string(),
             graph_target_component_id: None,
         };

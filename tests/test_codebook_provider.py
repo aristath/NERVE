@@ -659,7 +659,7 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
     assert plan.static_estimate.steady_state_work["dispatch_count_change"] == 0
     assert len(plan.benchmark_workloads) == 2
     validation_checks = plan.validation_requirements.to_json()["checks"]
-    assert len(validation_checks) == 12
+    assert len(validation_checks) == 13
     sanity_checks = [
         check for check in validation_checks if check["stage"] == "sanity"
     ]
@@ -703,22 +703,46 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
         for check in whole_model_checks
         if check["controls"]["execution_mode"] == "conversation"
     ]
-    assert len(free_running_checks) == 1
-    assert free_running_checks[0]["kind"] == "reasoning_conversation"
-    assert free_running_checks[0]["seeds"] == [1]
-    assert free_running_checks[0]["horizon"]["output_allowance"] == 65_536
-    assert free_running_checks[0]["horizon"]["completion_condition"] == (
+    assert len(free_running_checks) == 2
+    semantic_check = next(
+        check
+        for check in free_running_checks
+        if not check["product_performance"]
+    )
+    product_check = next(
+        check
+        for check in free_running_checks
+        if check["product_performance"]
+    )
+    assert semantic_check["kind"] == "reasoning_conversation"
+    assert semantic_check["seeds"] == [1]
+    assert product_check["kind"] == "free_running"
+    assert product_check["controls"]["sampler"] == {"top_k": 1}
+    assert product_check["comparison"] == {
+        "output_mode": "exact_digest",
+        "state_mode": "exact_digest",
+    }
+    assert all(
+        check["horizon"]["output_allowance"] == 65_536
+        for check in free_running_checks
+    )
+    assert all(
+        check["horizon"]["completion_condition"]
+        == "semantic_stop_or_allowance_per_turn"
+        for check in free_running_checks
+    )
+    assert semantic_check["horizon"]["completion_condition"] == (
         "semantic_stop_or_allowance_per_turn"
     )
-    assert free_running_checks[0]["horizon"]["minimum_steps"] is None
-    assert (
-        free_running_checks[0]["controls"]["speculative_draft_tokens"]
-        == 0
+    assert all(
+        check["horizon"]["minimum_steps"] is None
+        and check["controls"]["speculative_draft_tokens"] == 0
+        for check in free_running_checks
     )
     structural_checks = [
         check
         for check in whole_model_checks
-        if check["kind"] != "reasoning_conversation"
+        if check["controls"]["execution_mode"] != "conversation"
     ]
     assert {
         check["controls"]["execution_mode"]
@@ -804,8 +828,14 @@ def test_bundled_candidate_runs_cheap_sanity_only_on_one_representative(
         for check in requirements["checks"]
         if check["stage"] == "whole_model"
     ]
-    assert len(whole_model) == 1
-    assert whole_model[0]["controls"]["speculative_draft_tokens"] == 3
+    assert len(whole_model) == 2
+    assert all(
+        check["controls"]["speculative_draft_tokens"] == 3
+        for check in whole_model
+    )
+    assert sum(
+        check["product_performance"] for check in whole_model
+    ) == 1
 
 
 def test_codebook_provider_and_toolchain_are_available_from_builtin_registries(

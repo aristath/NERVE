@@ -428,6 +428,7 @@ class FixtureProvider:
                 name="fixture cheap output and state sanity",
                 stage="sanity",
                 kind="component_comparison",
+                product_performance=False,
                 coverage=(
                     "component_output_error",
                     "state_transition_consistency",
@@ -462,6 +463,7 @@ class FixtureProvider:
                 name="fixture full local teacher forced sequence",
                 stage="full_local",
                 kind="teacher_forced",
+                product_performance=False,
                 coverage=(
                     "teacher_forced_sequences",
                     "multiple_fixed_seeds",
@@ -497,6 +499,7 @@ class FixtureProvider:
                 name="fixture lifecycle operations",
                 stage="full_local",
                 kind="lifecycle_operation",
+                product_performance=False,
                 coverage=(
                     "interruption",
                     "snapshot",
@@ -535,6 +538,7 @@ class FixtureProvider:
                 name="fixture graph editing",
                 stage="full_local",
                 kind="graph_edit",
+                product_performance=False,
                 coverage=("graph_edits",),
                 execution_scope="whole_model",
                 activation_batch_width=1,
@@ -567,6 +571,7 @@ class FixtureProvider:
                 name="fixture alternative placement",
                 stage="full_local",
                 kind="placement",
+                product_performance=False,
                 coverage=("alternative_placements",),
                 execution_scope="whole_model",
                 activation_batch_width=1,
@@ -599,6 +604,7 @@ class FixtureProvider:
                 name="fixture whole model free running horizon",
                 stage="whole_model",
                 kind="free_running",
+                product_performance=True,
                 coverage=(
                     "free_running_long_horizon",
                     "long_context",
@@ -633,6 +639,7 @@ class FixtureProvider:
                     "execution": "ordinary",
                     "execution_mode": "conversation",
                     "max_output_tokens": 65_536,
+                    "sampler": {"top_k": 1},
                 },
                 seeds=(1, 2),
                 step_unit="component_activations",

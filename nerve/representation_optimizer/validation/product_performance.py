@@ -25,7 +25,13 @@ _TRANSFER_COUNTERS = (
 
 def qualify_whole_model_product_performance(
     run: ValidationRun | None,
+    *,
+    product_check_ids: frozenset[str],
 ) -> Json:
+    if not product_check_ids:
+        raise ModelCompileError(
+            "whole-model product performance has no declared check"
+        )
     if run is None:
         return {
             "status": "not_run",
@@ -50,9 +56,23 @@ def qualify_whole_model_product_performance(
             "metrics": {},
         }
 
+    product_observations = tuple(
+        observation
+        for observation in document["observations"]
+        if observation["check_id"] in product_check_ids
+    )
+    observed_check_ids = {
+        observation["check_id"]
+        for observation in product_observations
+    }
+    if observed_check_ids != product_check_ids:
+        raise ModelCompileError(
+            "whole-model product performance did not execute every "
+            "declared product check"
+        )
     comparisons = tuple(
         _observation_comparison(observation)
-        for observation in document["observations"]
+        for observation in product_observations
     )
     if not comparisons:
         raise ModelCompileError(

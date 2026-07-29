@@ -344,6 +344,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         name="fixture alternative placement conversation",
         stage="full_local",
         kind="placement",
+        product_performance=False,
         coverage=("alternative_placements",),
         execution_scope="whole_model",
         activation_batch_width=1,
@@ -360,6 +361,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
             "execution": "ordinary",
             "execution_mode": "teacher_forced",
             "enable_thinking": True,
+            "sampler": {"top_k": 1},
         },
         seeds=(17,),
         step_unit="component_activations",
@@ -495,6 +497,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     ]
     assert mount_command["execution_mode"] == "teacher_forced"
     assert mount_command["speculative_draft_tokens"] == 0
+    assert mount_command["sampler_config"] == {"top_k": 1}
     assert executor.commands[1]["max_output_tokens"] is None
     assert executor.commands[1]["execution_mode"] == "teacher_forced"
     assert executor.commands[1]["step_unit"] == "component_activations"
