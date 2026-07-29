@@ -3207,7 +3207,8 @@
         "parameter_id": "weight",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519"
         }
       },
       {
@@ -3217,7 +3218,8 @@
         "parameter_id": "attention_out_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:40dafeef4d9829a0e6325d3d5057f7bba7b04d9bf45f560c7df84071adf3a614"
         }
       },
       {
@@ -3227,7 +3229,8 @@
         "parameter_id": "ffn_down",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:de5166097d7fccf0e0a1cb78108128371e3ac4865e0c223bc32b9a5e08e01f2e"
         }
       },
       {
@@ -3237,7 +3240,8 @@
         "parameter_id": "ffn_gate",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:4591336179dc76ab2a9490844577cbc43d1652361257569fe28891de25106d00"
         }
       },
       {
@@ -3247,7 +3251,8 @@
         "parameter_id": "ffn_up",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:08b60245a66a9f83a73ac2289bd1fcb16e0ccad05883152f5bde134d7d650b2b"
         }
       },
       {
@@ -3257,7 +3262,8 @@
         "parameter_id": "ffn_norm",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e"
         }
       },
       {
@@ -3267,7 +3273,8 @@
         "parameter_id": "operator_norm",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:4f9374da773ab08c5cd129685801d1258d2c04166dd8d3f7495f6fc142345bca"
         }
       },
       {
@@ -3277,7 +3284,8 @@
         "parameter_id": "k_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:4a197b5dd8da61db455ec1b968f14c5c27f6a852cbfa811031cc3be201a2051e"
         }
       },
       {
@@ -3287,7 +3295,8 @@
         "parameter_id": "q_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:f8e6368d1caad174d020c80dfaa4147e898617dee10cf54abeb24a9809d9a708"
         }
       },
       {
@@ -3297,7 +3306,8 @@
         "parameter_id": "v_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:f2ecc615c26894b6d24a4678035ee31f706f3f4f7cdf41500890ad58784c2704"
         }
       },
       {
@@ -3307,7 +3317,8 @@
         "parameter_id": "output_norm.weight",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e"
         }
       },
       {
@@ -3317,7 +3328,8 @@
         "parameter_id": "output_projection.weight",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505"
+          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "resource_id": "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519"
         }
       }
     ],

@@ -15,6 +15,7 @@ from nerve.resource_residency import (
     checkpoint_identity,
     compiled_immutable_resource,
     compiled_parameter_bindings,
+    partition_group_identity_seed,
     partition_template_identity,
     residency_content_id,
     selector_identity,
@@ -538,15 +539,16 @@ def build_planned_resource_residency_contract(
             "compiler residency analysis does not exactly cover compiled tensors"
         )
 
-    spine_resources = [
-        compiled_immutable_resource(
+    spine_resource_by_tensor = {
+        tensor_name: compiled_immutable_resource(
             package_dir=package_dir,
             tensor_index=tensor_index,
             tensor_name=tensor_name,
             lifetime="always_resident",
         )
         for tensor_name in sorted(referenced_tensors - dynamic_tensors)
-    ]
+    }
+    spine_resources = list(spine_resource_by_tensor.values())
     resources_by_id = {resource["id"]: resource for resource in spine_resources}
     if len(resources_by_id) != len(spine_resources):
         # Equal immutable content is intentionally shareable.
@@ -585,14 +587,9 @@ def build_planned_resource_residency_contract(
             tensor_to_seed[tensor_name] = member["resource_identity_seed"]
             members.append(member)
         members.sort(key=lambda member: member["resource_identity_seed"])
-        group_seed = residency_content_id(
-            "partition_group_seed",
-            {
-                "partition_count": group["partition_count"],
-                "resource_identity_seeds": [
-                    member["resource_identity_seed"] for member in members
-                ],
-            },
+        group_seed = partition_group_identity_seed(
+            group["partition_count"],
+            [member["resource_identity_seed"] for member in members],
         )
         template = {
             "id": "",
@@ -662,6 +659,7 @@ def build_planned_resource_residency_contract(
                 mapping = {
                     "kind": "atomic_group",
                     "atomic_group_id": spine_group["id"],
+                    "resource_id": spine_resource_by_tensor[tensor_name]["id"],
                 }
             bindings.append({**use, "mapping": mapping})
     bindings.sort(key=_binding_sort_key)
@@ -871,6 +869,7 @@ def _binding_sort_key(binding: Json) -> tuple[str, str, str, str, str]:
         for field in (
             "kind",
             "atomic_group_id",
+            "resource_id",
             "partition_template_id",
             "resource_identity_seed",
         )

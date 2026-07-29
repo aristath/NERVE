@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from nerve.compilation import Json, ModelCompileError
+from nerve.resource_range_integrity import (
+    ConcreteResourceInterval,
+    PartitionRangeSeries,
+    ResolvedResourceRange,
+    read_verified_resource_range,
+    resolve_partition_range,
+    validate_partition_range_storage,
+)
 
 
 RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v1"
@@ -16,6 +25,7 @@ SUPPORTED_RESIDENCY_POLICIES = ("demand_retained", "eager")
 RESOURCE_LIFETIMES = frozenset(("always_resident", "dynamic"))
 RESOURCE_STATES = frozenset(("absent", "requested", "loading", "resident", "failed"))
 SHA256_INTEGRITY_ALGORITHM = "sha256"
+RESOLVED_PARTITION_GROUP_SCHEMA = "nerve.resolved_partition_group.v1"
 
 _CONTRACT_FIELDS = frozenset(
     (
@@ -53,7 +63,9 @@ _BINDING_FIELDS = frozenset(
         "mapping",
     )
 )
-_ATOMIC_GROUP_BINDING_FIELDS = frozenset(("kind", "atomic_group_id"))
+_ATOMIC_GROUP_BINDING_FIELDS = frozenset(
+    ("kind", "atomic_group_id", "resource_id")
+)
 _PARTITION_MEMBER_BINDING_FIELDS = frozenset(
     ("kind", "partition_template_id", "resource_identity_seed")
 )
@@ -191,6 +203,29 @@ def partition_template_identity(template: Json) -> str:
     )
 
 
+def partition_group_identity_seed(
+    partition_count: int, resource_identity_seeds: list[str]
+) -> str:
+    partition_count = _require_positive_int(
+        partition_count, "partition group partition count"
+    )
+    seeds = [
+        _require_content_id(seed, "partition group resource identity seed")
+        for seed in resource_identity_seeds
+    ]
+    if seeds != sorted(set(seeds)):
+        raise ModelCompileError(
+            "partition group resource identity seeds must be unique and sorted"
+        )
+    return residency_content_id(
+        "partition_group_seed",
+        {
+            "partition_count": partition_count,
+            "resource_identity_seeds": seeds,
+        },
+    )
+
+
 def selector_identity(selector: Json) -> str:
     return residency_content_id(
         "selector",
@@ -238,6 +273,215 @@ def derived_partition_identity(identity_seed: str, partition_index: int) -> str:
     )
 
 
+def resolve_partition_atomic_group(
+    package_dir: Path,
+    contract: Json,
+    *,
+    partition_template_id: str,
+    partition_index: int,
+) -> Json:
+    template_id = _require_content_id(
+        partition_template_id, "partition template id"
+    )
+    templates = _require_object_list(
+        contract.get("partition_templates"), "partition templates"
+    )
+    template = next(
+        (
+            candidate
+            for candidate in templates
+            if candidate.get("id") == template_id
+        ),
+        None,
+    )
+    if template is None:
+        raise ModelCompileError(
+            f"unknown partition template {partition_template_id!r}"
+        )
+    partition_count = _require_positive_int(
+        template.get("partition_count"), "partition count"
+    )
+    if (
+        not isinstance(partition_index, int)
+        or isinstance(partition_index, bool)
+        or partition_index < 0
+        or partition_index >= partition_count
+    ):
+        raise ModelCompileError(
+            f"partition index {partition_index!r} is outside [0, {partition_count})"
+        )
+
+    resources = []
+    for member in _require_object_list(
+        template.get("member_templates"), "partition member templates"
+    ):
+        seed = _require_content_id(
+            member.get("resource_identity_seed"),
+            "partition resource identity seed",
+        )
+        resolved_ranges = []
+        for range_template in _require_object_list(
+            member.get("range_templates"), "partition member ranges"
+        ):
+            integrity = _require_object(
+                range_template.get("integrity"),
+                "partition range integrity",
+            )
+            resolved = resolve_partition_range(
+                package_dir,
+                artifact_path=_require_safe_relative_path(
+                    range_template.get("artifact_path"),
+                    "partition range artifact",
+                ),
+                base_byte_offset=_require_non_negative_int(
+                    range_template.get("base_byte_offset"),
+                    "partition range base",
+                ),
+                stride_bytes=_require_positive_int(
+                    range_template.get("stride_bytes"),
+                    "partition range stride",
+                ),
+                byte_count=_require_positive_int(
+                    range_template.get("byte_count"),
+                    "partition range byte count",
+                ),
+                alignment_bytes=_require_power_of_two(
+                    range_template.get("alignment_bytes"),
+                    "partition range alignment",
+                ),
+                digest_table_path=_require_safe_relative_path(
+                    integrity.get("digest_table_path"),
+                    "partition digest table",
+                ),
+                digest_table_byte_offset=_require_non_negative_int(
+                    integrity.get("digest_table_byte_offset"),
+                    "partition digest offset",
+                ),
+                digest_stride_bytes=_require_positive_int(
+                    integrity.get("digest_stride_bytes"),
+                    "partition digest stride",
+                ),
+                partition_index=partition_index,
+            )
+            resolved_ranges.append(
+                {
+                    "artifact_path": resolved.artifact_path,
+                    "byte_offset": resolved.byte_offset,
+                    "byte_count": resolved.byte_count,
+                    "alignment_bytes": resolved.alignment_bytes,
+                    "integrity": {
+                        "algorithm": SHA256_INTEGRITY_ALGORITHM,
+                        "digest": resolved.sha256,
+                    },
+                }
+            )
+        resources.append(
+            {
+                "id": derived_partition_identity(seed, partition_index),
+                "resource_identity_seed": seed,
+                "lifetime": "dynamic",
+                "ranges": resolved_ranges,
+                "compatibility": deepcopy(member.get("compatibility")),
+            }
+        )
+    resources.sort(key=lambda resource: resource["id"])
+    group_seed = _require_content_id(
+        template.get("group_identity_seed"), "partition group identity seed"
+    )
+    return {
+        "schema": RESOLVED_PARTITION_GROUP_SCHEMA,
+        "partition_template_id": template_id,
+        "partition_index": partition_index,
+        "atomic_group": {
+            "id": derived_partition_identity(group_seed, partition_index),
+            "resource_ids": [resource["id"] for resource in resources],
+            "dependencies": list(template.get("dependencies", [])),
+        },
+        "resources": resources,
+    }
+
+
+def read_verified_partition_atomic_group(
+    package_dir: Path, resolved_group: Json
+) -> dict[str, list[bytes]]:
+    if resolved_group.get("schema") != RESOLVED_PARTITION_GROUP_SCHEMA:
+        raise ModelCompileError("resolved partition group schema is invalid")
+    resources = _require_object_list(
+        resolved_group.get("resources"), "resolved partition resources"
+    )
+    atomic_group = _require_object(
+        resolved_group.get("atomic_group"),
+        "resolved partition atomic group",
+    )
+    declared_resource_ids = atomic_group.get("resource_ids")
+    if (
+        not isinstance(declared_resource_ids, list)
+        or not all(isinstance(value, str) for value in declared_resource_ids)
+        or len(declared_resource_ids) != len(set(declared_resource_ids))
+    ):
+        raise ModelCompileError(
+            "resolved partition atomic group resource ids are invalid"
+        )
+    actual_resource_ids = [
+        _require_content_id(
+            resource.get("id"), "resolved partition resource id"
+        )
+        for resource in resources
+    ]
+    if (
+        actual_resource_ids != declared_resource_ids
+        or len(actual_resource_ids) != len(set(actual_resource_ids))
+    ):
+        raise ModelCompileError(
+            "resolved partition atomic group membership is inconsistent"
+        )
+    loaded: dict[str, list[bytes]] = {}
+    for resource, resource_id in zip(
+        resources, actual_resource_ids, strict=True
+    ):
+        payloads = []
+        for byte_range in _require_object_list(
+            resource.get("ranges"), "resolved partition ranges"
+        ):
+            integrity = _require_object(
+                byte_range.get("integrity"),
+                "resolved partition range integrity",
+            )
+            if integrity.get("algorithm") != SHA256_INTEGRITY_ALGORITHM:
+                raise ModelCompileError(
+                    "resolved partition range integrity must use SHA-256"
+                )
+            payloads.append(
+                read_verified_resource_range(
+                    package_dir,
+                    ResolvedResourceRange(
+                        artifact_path=_require_safe_relative_path(
+                            byte_range.get("artifact_path"),
+                            "resolved partition artifact",
+                        ),
+                        byte_offset=_require_non_negative_int(
+                            byte_range.get("byte_offset"),
+                            "resolved partition byte offset",
+                        ),
+                        byte_count=_require_positive_int(
+                            byte_range.get("byte_count"),
+                            "resolved partition byte count",
+                        ),
+                        alignment_bytes=_require_power_of_two(
+                            byte_range.get("alignment_bytes"),
+                            "resolved partition alignment",
+                        ),
+                        sha256=_require_sha256(
+                            integrity.get("digest"),
+                            "resolved partition SHA-256",
+                        ),
+                    ),
+                )
+            )
+        loaded[resource_id] = payloads
+    return loaded
+
+
 def residency_state_transition_allowed(
     current: str,
     following: str,
@@ -277,6 +521,7 @@ def build_eager_resource_residency_contract(
         raise ModelCompileError("tensor index has no tensor mapping")
 
     resources_by_id: dict[str, Json] = {}
+    resource_id_by_tensor: dict[str, str] = {}
     for tensor_name in sorted(tensor_bindings):
         resource = compiled_immutable_resource(
             package_dir=package_dir,
@@ -285,6 +530,7 @@ def build_eager_resource_residency_contract(
             lifetime="always_resident",
         )
         resource_id = resource["id"]
+        resource_id_by_tensor[tensor_name] = resource_id
         existing = resources_by_id.get(resource_id)
         if existing is None or _range_location_key(resource) < _range_location_key(existing):
             resources_by_id[resource_id] = resource
@@ -309,6 +555,7 @@ def build_eager_resource_residency_contract(
                     "mapping": {
                         "kind": "atomic_group",
                         "atomic_group_id": eager_spine_group["id"],
+                        "resource_id": resource_id_by_tensor[tensor_name],
                     },
                 }
             )
@@ -454,7 +701,23 @@ def validate_resource_residency_contract(
 
     resource_by_id = _validate_resources(package_dir, resources)
     group_by_id = _validate_atomic_groups(groups, resource_by_id)
-    template_by_id = _validate_partition_templates(package_dir, templates, group_by_id)
+    template_by_id, partition_series = _validate_partition_templates(
+        package_dir, templates, group_by_id
+    )
+    validate_partition_range_storage(
+        package_dir,
+        concrete_intervals=[
+            ConcreteResourceInterval(
+                artifact_path=byte_range["artifact_path"],
+                byte_offset=byte_range["byte_offset"],
+                byte_count=byte_range["byte_count"],
+                resource_id=resource["id"],
+            )
+            for resource in resources
+            for byte_range in resource["ranges"]
+        ],
+        partition_series=partition_series,
+    )
     parameter_semantics, component_nodes = _compiled_semantics(manifest)
     _validate_bindings(
         bindings,
@@ -631,9 +894,10 @@ def _validate_partition_templates(
     package_dir: Path,
     templates: list[Json],
     group_by_id: dict[str, Json],
-) -> dict[str, Json]:
+) -> tuple[dict[str, Json], list[PartitionRangeSeries]]:
     _require_sorted_unique_ids(templates, "partition templates")
     template_by_id: dict[str, Json] = {}
+    partition_series: list[PartitionRangeSeries] = []
     for template in templates:
         _require_exact_fields(
             template, _PARTITION_TEMPLATE_FIELDS, "partition template"
@@ -646,7 +910,7 @@ def _validate_partition_templates(
             raise ModelCompileError(
                 f"partition template {template_id!r} must have dynamic lifetime"
             )
-        _require_content_id(
+        group_identity_seed = _require_content_id(
             template["group_identity_seed"], "partition group identity seed"
         )
         dependencies = _require_sorted_content_ids(
@@ -686,22 +950,43 @@ def _validate_partition_templates(
                     f"partition member {seed!r} has no range templates"
                 )
             for byte_range in ranges:
-                _validate_range_template(package_dir, byte_range, partition_count)
+                partition_series.append(
+                    _validate_range_template(
+                        package_dir,
+                        byte_range,
+                        partition_count,
+                        template_id=template_id,
+                        resource_identity_seed=seed,
+                    )
+                )
         if member_seeds != sorted(set(member_seeds)):
             raise ModelCompileError(
                 f"partition template {template_id!r} member seeds must be unique and sorted"
+            )
+        if (
+            partition_group_identity_seed(partition_count, member_seeds)
+            != group_identity_seed
+        ):
+            raise ModelCompileError(
+                f"partition template {template_id!r} group identity seed "
+                "does not exactly cover its members"
             )
         if partition_template_identity(template) != template_id:
             raise ModelCompileError(
                 f"partition template {template_id!r} identity does not match its contract"
             )
         template_by_id[template_id] = template
-    return template_by_id
+    return template_by_id, partition_series
 
 
 def _validate_range_template(
-    package_dir: Path, byte_range: Json, partition_count: int
-) -> None:
+    package_dir: Path,
+    byte_range: Json,
+    partition_count: int,
+    *,
+    template_id: str,
+    resource_identity_seed: str,
+) -> PartitionRangeSeries:
     _require_exact_fields(
         byte_range, _RANGE_TEMPLATE_FIELDS, "partition range template"
     )
@@ -722,6 +1007,10 @@ def _validate_range_template(
     )
     if base % alignment or stride % alignment:
         raise ModelCompileError("partition range base and stride violate alignment")
+    if stride < byte_count:
+        raise ModelCompileError(
+            "partition range stride overlaps adjacent resources"
+        )
     last_end = base + (partition_count - 1) * stride + byte_count
     try:
         artifact_bytes = (package_dir / artifact_path).stat().st_size
@@ -750,8 +1039,10 @@ def _validate_range_template(
     digest_stride = _require_positive_int(
         integrity["digest_stride_bytes"], "partition digest stride"
     )
-    if digest_stride < 32:
-        raise ModelCompileError("partition digest stride cannot hold SHA-256")
+    if digest_stride != 32 or digest_offset % 32:
+        raise ModelCompileError(
+            "partition SHA-256 table must use aligned 32-byte entries"
+        )
     table_sha256 = integrity["table_sha256"]
     if not _is_lower_hex_sha256(table_sha256):
         raise ModelCompileError("partition digest table SHA-256 is invalid")
@@ -763,6 +1054,19 @@ def _validate_range_template(
         ) from error
     if digest_offset + (partition_count - 1) * digest_stride + 32 > table_bytes:
         raise ModelCompileError("partition digest table is too small")
+    return PartitionRangeSeries(
+        template_id=template_id,
+        resource_identity_seed=resource_identity_seed,
+        artifact_path=artifact_path,
+        base_byte_offset=base,
+        stride_bytes=stride,
+        byte_count=byte_count,
+        partition_count=partition_count,
+        digest_table_path=digest_path,
+        digest_table_byte_offset=digest_offset,
+        digest_stride_bytes=digest_stride,
+        table_sha256=table_sha256,
+    )
 
 
 def _validate_bindings(
@@ -773,6 +1077,8 @@ def _validate_bindings(
 ) -> None:
     keys = []
     bound_semantics = []
+    bound_concrete_resources: set[str] = set()
+    bound_partition_members: set[tuple[str, str]] = set()
     for binding in bindings:
         _require_exact_fields(binding, _BINDING_FIELDS, "resource binding")
         for field in ("execution_scope", "component_id", "node_id", "parameter_id"):
@@ -791,6 +1097,14 @@ def _validate_bindings(
                 raise ModelCompileError(
                     f"resource binding references unknown atomic group {group_id!r}"
                 )
+            resource_id = _require_content_id(
+                mapping["resource_id"], "resource binding resource id"
+            )
+            if resource_id not in group_by_id[group_id]["resource_ids"]:
+                raise ModelCompileError(
+                    "resource binding maps a resource outside its atomic group"
+                )
+            bound_concrete_resources.add(resource_id)
         elif mapping.get("kind") == "partition_template_member":
             _require_exact_fields(
                 mapping,
@@ -813,6 +1127,7 @@ def _validate_bindings(
                 raise ModelCompileError(
                     "resource binding references an unknown partition template member"
                 )
+            bound_partition_members.add((template_id, resource_seed))
         else:
             raise ModelCompileError(
                 f"resource binding has unsupported mapping {mapping.get('kind')!r}"
@@ -824,6 +1139,23 @@ def _validate_bindings(
     if Counter(bound_semantics) != Counter(parameter_semantics):
         raise ModelCompileError(
             "resource bindings must exactly cover compiled parameter semantics"
+        )
+    expected_concrete_resources = {
+        resource_id
+        for group in group_by_id.values()
+        for resource_id in group["resource_ids"]
+    }
+    expected_partition_members = {
+        (template_id, member["resource_identity_seed"])
+        for template_id, template in template_by_id.items()
+        for member in template["member_templates"]
+    }
+    if (
+        bound_concrete_resources != expected_concrete_resources
+        or bound_partition_members != expected_partition_members
+    ):
+        raise ModelCompileError(
+            "resource bindings do not completely cover atomic resource membership"
         )
 
 
@@ -1148,6 +1480,7 @@ def _binding_key(binding: Json) -> tuple[str, str, str, str, str]:
         for field in (
             "kind",
             "atomic_group_id",
+            "resource_id",
             "partition_template_id",
             "resource_identity_seed",
         )
@@ -1263,6 +1596,12 @@ def _require_content_id(value: Any, label: str) -> str:
         or not _is_lower_hex_sha256(value.removeprefix("sha256:"))
     ):
         raise ModelCompileError(f"{label} must be a content-addressed SHA-256 id")
+    return value
+
+
+def _require_sha256(value: Any, label: str) -> str:
+    if not _is_lower_hex_sha256(value):
+        raise ModelCompileError(f"{label} must be a lowercase SHA-256 digest")
     return value
 
 

@@ -98,6 +98,7 @@ pub struct CompiledResourceBinding {
 pub enum CompiledResourceBindingMapping {
     AtomicGroup {
         atomic_group_id: String,
+        resource_id: String,
     },
     PartitionTemplateMember {
         partition_template_id: String,
@@ -291,6 +292,33 @@ fn compiled_partition_template_identity(
                 "compatibility": member.compatibility,
             })).collect::<Vec<_>>(),
             "dependencies": template.dependencies,
+        }),
+    )
+}
+
+fn compiled_partition_group_identity_seed(
+    partition_count: usize,
+    members: &[CompiledPartitionMemberTemplate],
+) -> io::Result<String> {
+    if partition_count == 0 {
+        return invalid_residency(
+            "partition group identity requires a positive partition count",
+        );
+    }
+    let seeds = members
+        .iter()
+        .map(|member| member.resource_identity_seed.as_str())
+        .collect::<Vec<_>>();
+    if !is_strictly_sorted(&seeds) {
+        return invalid_residency(
+            "partition group identity requires sorted unique member seeds",
+        );
+    }
+    resource_content_id(
+        "partition_group_seed",
+        serde_json::json!({
+            "partition_count": partition_count,
+            "resource_identity_seeds": seeds,
         }),
     )
 }
@@ -525,6 +553,7 @@ fn validate_compiled_resource_residency(
     {
         return invalid_residency("compiled partition templates are not sorted");
     }
+    validate_compiled_partition_storage(package_root, contract)?;
 
     validate_bindings_against_package(manifest, &group_ids, &template_ids)?;
     validate_selectors_and_checkpoints(manifest, &template_ids)
@@ -604,11 +633,22 @@ fn validate_partition_template(
                 || range.base_byte_offset % range.alignment_bytes != 0
                 || range.stride_bytes % range.alignment_bytes != 0
                 || range.integrity.algorithm != "sha256_table"
-                || range.integrity.digest_stride_bytes < 32
                 || !is_lower_hex_sha256(&range.integrity.table_sha256)
             {
                 return invalid_residency(
                     "compiled partition range template is invalid",
+                );
+            }
+            if range.stride_bytes < range.byte_count {
+                return invalid_residency(
+                    "partition range stride overlaps adjacent resources",
+                );
+            }
+            if range.integrity.digest_stride_bytes != 32
+                || range.integrity.digest_table_byte_offset % 32 != 0
+            {
+                return invalid_residency(
+                    "partition SHA-256 table must use aligned 32-byte entries",
                 );
             }
             let partition_offset = (template.partition_count - 1)
@@ -657,6 +697,10 @@ fn validate_partition_template(
         }
     }
     if !is_strictly_sorted(&member_seeds)
+        || compiled_partition_group_identity_seed(
+            template.partition_count,
+            &template.member_templates,
+        )? != template.group_identity_seed
         || compiled_partition_template_identity(template)? != template.id
     {
         return invalid_residency(
@@ -674,15 +718,30 @@ fn validate_bindings_against_package(
     let semantics = compiled_parameter_semantics(manifest)?;
     let mut keys = Vec::new();
     let mut bound_semantics = BTreeSet::new();
+    let mut bound_concrete_resources = BTreeSet::new();
+    let mut bound_partition_members = BTreeSet::new();
     for binding in &manifest.resource_residency.bindings {
         let mapping_key = match &binding.mapping {
-            CompiledResourceBindingMapping::AtomicGroup { atomic_group_id } => {
-                if !group_ids.contains(atomic_group_id.as_str()) {
+            CompiledResourceBindingMapping::AtomicGroup {
+                atomic_group_id,
+                resource_id,
+            } => {
+                let group = manifest
+                    .resource_residency
+                    .atomic_groups
+                    .iter()
+                    .find(|group| group.id == *atomic_group_id);
+                if !group_ids.contains(atomic_group_id.as_str())
+                    || group.is_none_or(|group| {
+                        !group.resource_ids.contains(resource_id)
+                    })
+                {
                     return invalid_residency(
-                        "compiled resource binding maps an unknown atomic group",
+                        "compiled resource binding maps a resource outside its atomic group",
                     );
                 }
-                format!("atomic_group|{atomic_group_id}||")
+                bound_concrete_resources.insert(resource_id.as_str());
+                format!("atomic_group|{atomic_group_id}|{resource_id}|")
             }
             CompiledResourceBindingMapping::PartitionTemplateMember {
                 partition_template_id,
@@ -713,6 +772,10 @@ fn validate_bindings_against_package(
                         "compiled resource binding maps an unknown partition member",
                     );
                 }
+                bound_partition_members.insert((
+                    partition_template_id.as_str(),
+                    resource_identity_seed.as_str(),
+                ));
                 format!(
                     "partition_template_member||{partition_template_id}|{resource_identity_seed}"
                 )
@@ -751,6 +814,32 @@ fn validate_bindings_against_package(
     if !is_strictly_sorted(&keys) || bound_semantics != semantics {
         return invalid_residency(
             "compiled resource bindings must exactly cover package parameters",
+        );
+    }
+    let expected_concrete_resources = manifest
+        .resource_residency
+        .atomic_groups
+        .iter()
+        .flat_map(|group| group.resource_ids.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let expected_partition_members = manifest
+        .resource_residency
+        .partition_templates
+        .iter()
+        .flat_map(|template| {
+            template.member_templates.iter().map(|member| {
+                (
+                    template.id.as_str(),
+                    member.resource_identity_seed.as_str(),
+                )
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if bound_concrete_resources != expected_concrete_resources
+        || bound_partition_members != expected_partition_members
+    {
+        return invalid_residency(
+            "compiled resource bindings do not cover atomic membership",
         );
     }
     Ok(())

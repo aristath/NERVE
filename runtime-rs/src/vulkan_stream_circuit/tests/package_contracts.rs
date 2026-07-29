@@ -70,7 +70,8 @@ fn resource_bindings_are_strictly_typed_for_concrete_and_partition_resources() {
             "parameter_id": "weight",
             "mapping": {
                 "kind": "atomic_group",
-                "atomic_group_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "atomic_group_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "resource_id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             }
         }),
     )
