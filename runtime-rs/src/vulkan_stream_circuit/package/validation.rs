@@ -331,7 +331,7 @@ fn validate_behavioral_validation_artifact(
     Ok(())
 }
 
-fn is_lower_hex_sha256(value: &str) -> bool {
+pub(super) fn is_lower_hex_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -407,7 +407,10 @@ fn update_digest_length_prefixed(digest: &mut Sha256, payload: &[u8]) {
     digest.update(payload);
 }
 
-fn validate_resident_package_relative_path(label: &str, value: &str) -> io::Result<()> {
+pub(super) fn validate_resident_package_relative_path(
+    label: &str,
+    value: &str,
+) -> io::Result<()> {
     let path = Path::new(value);
     if value.is_empty()
         || path.is_absolute()

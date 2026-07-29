@@ -2,6 +2,8 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 
 pub const RESOLVED_PARTITION_GROUP_SCHEMA: &str =
     "nerve.resolved_partition_group.v1";
+pub const RESOLVED_ATOMIC_GROUP_SCHEMA: &str =
+    "nerve.resolved_atomic_group.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCompiledResourceRange {
@@ -13,9 +15,8 @@ pub struct ResolvedCompiledResourceRange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ResolvedCompiledPartitionResource {
+pub struct ResolvedCompiledResource {
     pub id: String,
-    pub resource_identity_seed: String,
     pub ranges: Vec<ResolvedCompiledResourceRange>,
     pub compatibility: CompiledResourceCompatibility,
 }
@@ -28,7 +29,65 @@ pub struct ResolvedCompiledPartitionGroup {
     pub id: String,
     pub resource_ids: Vec<String>,
     pub dependencies: Vec<String>,
-    pub resources: Vec<ResolvedCompiledPartitionResource>,
+    pub resources: Vec<ResolvedCompiledResource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResolvedCompiledAtomicGroup {
+    pub schema: String,
+    pub id: String,
+    pub resource_ids: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub resources: Vec<ResolvedCompiledResource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolvedCompiledResourceGroup {
+    Atomic(ResolvedCompiledAtomicGroup),
+    Partition(ResolvedCompiledPartitionGroup),
+}
+
+impl From<ResolvedCompiledAtomicGroup> for ResolvedCompiledResourceGroup {
+    fn from(group: ResolvedCompiledAtomicGroup) -> Self {
+        Self::Atomic(group)
+    }
+}
+
+impl From<ResolvedCompiledPartitionGroup> for ResolvedCompiledResourceGroup {
+    fn from(group: ResolvedCompiledPartitionGroup) -> Self {
+        Self::Partition(group)
+    }
+}
+
+impl ResolvedCompiledResourceGroup {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Atomic(group) => &group.id,
+            Self::Partition(group) => &group.id,
+        }
+    }
+
+    pub fn resource_ids(&self) -> &[String] {
+        match self {
+            Self::Atomic(group) => &group.resource_ids,
+            Self::Partition(group) => &group.resource_ids,
+        }
+    }
+
+    pub fn dependencies(&self) -> &[String] {
+        match self {
+            Self::Atomic(group) => &group.dependencies,
+            Self::Partition(group) => &group.dependencies,
+        }
+    }
+
+    pub fn resources(&self) -> &[ResolvedCompiledResource] {
+        match self {
+            Self::Atomic(group) => &group.resources,
+            Self::Partition(group) => &group.resources,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -147,12 +206,11 @@ pub fn resolve_compiled_partition_group(
                 sha256: lower_hex(&digest),
             });
         }
-        resources.push(ResolvedCompiledPartitionResource {
+        resources.push(ResolvedCompiledResource {
             id: derived_partition_resource_id(
                 &member.resource_identity_seed,
                 partition_index,
             )?,
-            resource_identity_seed: member.resource_identity_seed.clone(),
             ranges,
             compatibility: member.compatibility.clone(),
         });
@@ -172,6 +230,56 @@ pub fn resolve_compiled_partition_group(
         )?,
         resource_ids,
         dependencies: template.dependencies.clone(),
+        resources,
+    })
+}
+
+pub fn resolve_compiled_atomic_group(
+    contract: &CompiledResourceResidencyContract,
+    atomic_group_id: &str,
+) -> io::Result<ResolvedCompiledAtomicGroup> {
+    validate_content_id("atomic group id", atomic_group_id)?;
+    let group = contract
+        .atomic_groups
+        .iter()
+        .find(|group| group.id == atomic_group_id)
+        .ok_or_else(|| invalid_residency_error("unknown atomic group"))?;
+    let resources = group
+        .resource_ids
+        .iter()
+        .map(|resource_id| {
+            let resource = contract
+                .resources
+                .iter()
+                .find(|resource| resource.id == *resource_id)
+                .ok_or_else(|| {
+                    invalid_residency_error(format!(
+                        "atomic group references unknown resource {resource_id:?}"
+                    ))
+                })?;
+            let ranges = resource
+                .ranges
+                .iter()
+                .map(|range| ResolvedCompiledResourceRange {
+                    artifact_path: range.artifact_path.clone(),
+                    byte_offset: range.byte_offset,
+                    byte_count: range.byte_count,
+                    alignment_bytes: range.alignment_bytes,
+                    sha256: range.integrity.digest.clone(),
+                })
+                .collect();
+            Ok(ResolvedCompiledResource {
+                id: resource.id.clone(),
+                ranges,
+                compatibility: resource.compatibility.clone(),
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(ResolvedCompiledAtomicGroup {
+        schema: RESOLVED_ATOMIC_GROUP_SCHEMA.to_string(),
+        id: group.id.clone(),
+        resource_ids: group.resource_ids.clone(),
+        dependencies: group.dependencies.clone(),
         resources,
     })
 }
