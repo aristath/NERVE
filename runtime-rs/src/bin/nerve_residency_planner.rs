@@ -4,13 +4,13 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use nerve_runtime::{
-    VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA, VulkanResidentModelPackageManifest,
-    plan_vulkan_runtime_residency,
+    ResourceResidencyPolicy, VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA,
+    VulkanResidentModelPackageManifest, plan_vulkan_runtime_residency,
 };
 use serde::{Deserialize, Serialize};
 
-const REQUEST_SCHEMA: &str = "nerve.runtime_residency_planner_request.v1";
-const RESPONSE_SCHEMA: &str = "nerve.runtime_residency_planner_response.v1";
+const REQUEST_SCHEMA: &str = "nerve.runtime_residency_planner_request.v2";
+const RESPONSE_SCHEMA: &str = "nerve.runtime_residency_planner_response.v2";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,7 @@ struct ResidencyPlannerCase {
     component_placement: BTreeMap<String, String>,
     context_capacity_activations: usize,
     mount_speculative_decoders: bool,
+    residency_policy: ResourceResidencyPolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +108,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .expect("tensor index was initialized above"),
             case.context_capacity_activations,
             case.mount_speculative_decoders,
+            case.residency_policy,
         )?;
         if plan.schema != VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA {
             return Err(

@@ -503,10 +503,68 @@ def test_runtime_target_counts_transient_working_set_before_selecting_topology(
 
     assert len(prepared.targets[0].hardware_profiles) == 2
     planned = prepared.residency_plans[0]["device_plans"]
-    assert [device["total_device_resident_bytes"] for device in planned] == [
+    assert [
+        device["initial_device_resident_bytes"] for device in planned
+    ] == [
         100,
         100,
     ]
+
+
+def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:07:00.0"
+    target = _target((pci_address,), capacity_bytes=1_000)
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(100,),
+    )
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=1,
+        busy_percent=0,
+        total_vram=1_000,
+    )
+
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(
+            tmp_path / "residency",
+            maximum_dynamic_bytes_per_device_by_count={1: 10_000},
+        ),
+        vulkan_driver_files=(_driver(tmp_path),),
+        idle_probe=LinuxAmdDeviceStateProbe(
+            sysfs_drm_root=sysfs,
+            proc_root=proc,
+        ),
+        live_target=target,
+    )
+
+    plan = prepared.residency_plans[0]
+    device = plan["device_plans"][0]
+    admission = prepared.targets[0].matched_conditions["environment"][
+        "residency_admission"
+    ]
+    safe_capacity = next(
+        iter(admission["safe_device_capacity_bytes"].values())
+    )
+    assert plan["residency_policy"] == "demand_retained"
+    assert device["initial_device_resident_bytes"] == 100
+    assert (
+        device["parameter_residency"]["maximum_addressable_bytes"]
+        == 10_100
+    )
+    assert device["initial_device_resident_bytes"] < safe_capacity
+    assert (
+        device["parameter_residency"]["maximum_addressable_bytes"]
+        > safe_capacity
+    )
 
 
 def test_runtime_target_records_post_context_idle_floor(
@@ -908,14 +966,19 @@ def _residency_planner(
     path: Path,
     *,
     extra_bytes_per_device_by_count: dict[int, int] | None = None,
+    maximum_dynamic_bytes_per_device_by_count: (
+        dict[int, int] | None
+    ) = None,
     runtime_fingerprint: str = RUNTIME_IMPLEMENTATION_FINGERPRINT,
 ) -> Path:
     extras = extra_bytes_per_device_by_count or {}
+    maximum_dynamic = maximum_dynamic_bytes_per_device_by_count or {}
     path.write_text(
         "#!/usr/bin/env python3\n"
         "import json, pathlib, sys\n"
         f"fingerprint = {runtime_fingerprint!r}\n"
         f"extras = {extras!r}\n"
+        f"maximum_dynamic = {maximum_dynamic!r}\n"
         "if sys.argv[1:] == ['--runtime-implementation-fingerprint']:\n"
         "    print(fingerprint)\n"
         "    raise SystemExit(0)\n"
@@ -928,7 +991,7 @@ def _residency_planner(
         "plans = []\n"
         "for case in request['cases']:\n"
         "    device_ids = sorted(set(case['component_placement'].values()))\n"
-        "    totals = {device_id: extras.get(len(device_ids), 0) for device_id in device_ids}\n"
+        "    activation = {device_id: extras.get(len(device_ids), 0) for device_id in device_ids}\n"
         "    tensors = {device_id: set() for device_id in device_ids}\n"
         "    for component in components:\n"
         "        if component.get('runtime_role') != 'signal_processor':\n"
@@ -936,23 +999,47 @@ def _residency_planner(
         "        device_id = case['component_placement'][component['component_id']]\n"
         "        for ref in component.get('params', {}).get('refs', {}).values():\n"
         "            tensors[device_id].add(ref['tensor'])\n"
-        "    for device_id in device_ids:\n"
-        "        totals[device_id] += sum(sizes[name] for name in tensors[device_id])\n"
+        "    always = {device_id: sum(sizes[name] for name in tensors[device_id]) for device_id in device_ids}\n"
+        "    dynamic = {device_id: maximum_dynamic.get(len(device_ids), 0) for device_id in device_ids}\n"
+        "    current = {device_id: always[device_id] + (dynamic[device_id] if case['residency_policy'] == 'eager' else 0) for device_id in device_ids}\n"
+        "    initial = {device_id: current[device_id] + activation[device_id] for device_id in device_ids}\n"
         "    device_plans = [\n"
         "        {'device_id': device_id,\n"
-        "         'breakdown': {'component_parameter_bytes': totals[device_id]},\n"
-        "         'total_device_resident_bytes': totals[device_id]}\n"
+        "         'parameter_residency': {\n"
+        "             'always_resident_bytes': always[device_id],\n"
+        "             'initial_dynamic_bytes': current[device_id] - always[device_id],\n"
+        "             'current_resident_bytes': current[device_id],\n"
+        "             'maximum_addressable_bytes': always[device_id] + dynamic[device_id],\n"
+        "             'staging_headroom_bytes': 0},\n"
+        "         'working_set': {'transient_state_bytes': 0, 'activation_headroom_bytes': activation[device_id]},\n"
+        "         'breakdown': {\n"
+        "             'stream_state_bytes': 0,\n"
+        "             'state_transaction_bytes': 0,\n"
+        "             'activation_slot_bytes': activation[device_id],\n"
+        "             'boundary_buffer_bytes': 0,\n"
+        "             'edge_buffer_bytes': 0,\n"
+        "             'stream_control_bytes': 0,\n"
+        "             'output_transducer_workspace_bytes': 0,\n"
+        "             'sampler_workspace_bytes': 0,\n"
+        "             'feedback_workspace_bytes': 0,\n"
+        "             'speculative_decoder_state_bytes': 0,\n"
+        "             'speculative_decoder_activation_bytes': 0,\n"
+        "             'speculative_decoder_workspace_bytes': 0},\n"
+        "         'initial_device_resident_bytes': initial[device_id]}\n"
         "        for device_id in device_ids\n"
         "    ]\n"
         "    plans.append({'case_id': case['case_id'], 'plan': {\n"
-        "        'schema': 'nerve.vulkan_runtime_residency_plan.v1',\n"
+        "        'schema': 'nerve.vulkan_runtime_residency_plan.v2',\n"
         "        'package_id': manifest['package_id'],\n"
+        "        'residency_policy': case['residency_policy'],\n"
         "        'context_capacity_activations': case['context_capacity_activations'],\n"
         "        'speculative_decoders_mounted': case['mount_speculative_decoders'],\n"
         "        'device_plans': device_plans,\n"
-        "        'total_device_resident_bytes': sum(totals.values()),\n"
+        "        'total_initial_device_resident_bytes': sum(initial.values()),\n"
+        "        'total_current_resident_parameter_bytes': sum(current.values()),\n"
+        "        'total_maximum_addressable_parameter_bytes': sum(always[device_id] + dynamic[device_id] for device_id in device_ids),\n"
         "    }})\n"
-        "json.dump({'schema': 'nerve.runtime_residency_planner_response.v1', 'plans': plans}, sys.stdout)\n"
+        "json.dump({'schema': 'nerve.runtime_residency_planner_response.v2', 'plans': plans}, sys.stdout)\n"
     )
     path.chmod(path.stat().st_mode | 0o111)
     return path

@@ -21,6 +21,26 @@ struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
     input_embedding_spirv_words: &'a [u32],
 }
 
+fn speculative_decoder_additional_parameter_tensors<'a>(
+    input_embedding: &'a VulkanResidentInputEmbeddingTransducerSpec,
+    decoder: &'a VulkanResidentSpeculativeDecoderPackageSpec,
+    mut target_has_tensor: impl FnMut(&str) -> bool,
+) -> Vec<&'a str> {
+    [
+        input_embedding.parameter_tensor.as_str(),
+        decoder.output_transducer.norm_parameter_tensor.as_str(),
+        decoder
+            .output_transducer
+            .projection_parameter_tensor
+            .as_str(),
+    ]
+    .into_iter()
+    .filter(|tensor| !target_has_tensor(tensor))
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect()
+}
+
 impl VulkanResidentSpeculativeDecoderModelPackage {
     fn from_runtime_model(
         device: &VulkanComputeDevice,

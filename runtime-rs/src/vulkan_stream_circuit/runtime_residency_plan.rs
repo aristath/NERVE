@@ -1,20 +1,21 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v1";
+    "nerve.vulkan_runtime_residency_plan.v2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
     pub schema: String,
     pub package_id: String,
+    pub residency_policy: ResourceResidencyPolicy,
     pub context_capacity_activations: usize,
     pub speculative_decoders_mounted: bool,
     pub device_plans: Vec<VulkanRuntimeDeviceResidencyPlan>,
-    pub total_device_resident_bytes: usize,
+    pub total_initial_device_resident_bytes: usize,
+    pub total_current_resident_parameter_bytes: usize,
+    pub total_maximum_addressable_parameter_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeDeviceResidencyBreakdown {
-    pub component_parameter_bytes: usize,
-    pub transducer_parameter_bytes: usize,
     pub stream_state_bytes: usize,
     pub state_transaction_bytes: usize,
     pub activation_slot_bytes: usize,
@@ -24,16 +25,24 @@ pub struct VulkanRuntimeDeviceResidencyBreakdown {
     pub output_transducer_workspace_bytes: usize,
     pub sampler_workspace_bytes: usize,
     pub feedback_workspace_bytes: usize,
-    pub speculative_decoder_parameter_bytes: usize,
-    pub speculative_decoder_stream_bytes: usize,
+    pub speculative_decoder_state_bytes: usize,
+    pub speculative_decoder_activation_bytes: usize,
     pub speculative_decoder_workspace_bytes: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct VulkanRuntimeWorkingSetBytes {
+    pub transient_state_bytes: usize,
+    pub activation_headroom_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeDeviceResidencyPlan {
     pub device_id: String,
+    pub parameter_residency: VulkanRuntimeParameterResidencyBytes,
+    pub working_set: VulkanRuntimeWorkingSetBytes,
     pub breakdown: VulkanRuntimeDeviceResidencyBreakdown,
-    pub total_device_resident_bytes: usize,
+    pub initial_device_resident_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +66,7 @@ pub fn plan_vulkan_runtime_residency(
     tensor_index: &TensorIndex,
     context_capacity_activations: usize,
     mount_speculative_decoders: bool,
+    residency_policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
     if context_capacity_activations == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
@@ -99,7 +109,7 @@ pub fn plan_vulkan_runtime_residency(
         ));
     }
 
-    let (resource_plan, _placement_plan, _first_placed_plan) =
+    let (_resource_plan, _placement_plan, _first_placed_plan) =
         plan_resident_package_placed_stream_circuit_with_tensor_index(
             &device_ids[0],
             &runtime_model.placement,
@@ -119,6 +129,15 @@ pub fn plan_vulkan_runtime_residency(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let mut parameter_residency_by_device =
+        plan_compiled_parameter_residency(
+            runtime_model,
+            &input_device_id,
+            &output_device_id,
+            &device_ids,
+            mount_speculative_decoders,
+            residency_policy,
+        )?;
 
     for device_id in &device_ids {
         let (_resources, _placement, placed_plan) =
@@ -134,14 +153,6 @@ pub fn plan_vulkan_runtime_residency(
         let breakdown = by_device
             .get_mut(device_id)
             .expect("owner device was indexed above");
-        breakdown.component_parameter_bytes = required_optional_bytes(
-            VulkanPermanentParameterBufferPlan::from_placed_resident_plan(
-                &placed_plan.placed_resident_plan,
-            )
-            .map_err(residency_display_error)?
-            .total_byte_capacity,
-            "component parameters",
-        )?;
         let stream = plan_stream_circuit_residency(
             &placed_plan,
             context_capacity_activations,
@@ -158,13 +169,6 @@ pub fn plan_vulkan_runtime_residency(
         breakdown.stream_control_bytes = VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
     }
 
-    plan_transducer_parameters(
-        &mut by_device,
-        &resource_plan,
-        tensor_index,
-        &input_device_id,
-        &output_device_id,
-    )?;
     let output = by_device.get_mut(&output_device_id).ok_or_else(|| {
         VulkanRuntimeResidencyPlanError(format!(
             "output device {output_device_id:?} has no resident component slice"
@@ -191,10 +195,6 @@ pub fn plan_vulkan_runtime_residency(
     )?;
 
     if mount_speculative_decoders {
-        let target_output_tensors = transducer_parameter_tensors(
-            &resource_plan,
-            "output_transducer",
-        );
         for decoder in &runtime_model.package.speculative_decoders {
             plan_speculative_decoder_residency(
                 &mut by_device,
@@ -204,33 +204,80 @@ pub fn plan_vulkan_runtime_residency(
                 decoder,
                 &output_device_id,
                 context_capacity_activations,
-                &target_output_tensors,
             )?;
         }
     }
 
-    let mut total_device_resident_bytes = 0usize;
+    let mut total_initial_device_resident_bytes = 0usize;
+    let mut total_current_resident_parameter_bytes = 0usize;
+    let mut total_maximum_addressable_parameter_bytes = 0usize;
     let mut device_plans = Vec::with_capacity(by_device.len());
     for (device_id, breakdown) in by_device {
-        let total = sum_residency_breakdown(&breakdown)?;
-        total_device_resident_bytes = checked_residency_add(
-            total_device_resident_bytes,
-            total,
-            "runtime residency total",
+        let parameter_residency = parameter_residency_by_device
+            .remove(&device_id)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "runtime parameter plan omitted device {device_id:?}"
+                ))
+            })?;
+        let working_set = VulkanRuntimeWorkingSetBytes {
+            transient_state_bytes:
+                sum_transient_state_breakdown(&breakdown)?,
+            activation_headroom_bytes:
+                sum_activation_headroom_breakdown(&breakdown)?,
+        };
+        let initial_device_resident_bytes = [
+            parameter_residency.current_resident_bytes,
+            parameter_residency.staging_headroom_bytes,
+            working_set.transient_state_bytes,
+            working_set.activation_headroom_bytes,
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, bytes| {
+            checked_residency_add(
+                total,
+                bytes,
+                "initial device residency total",
+            )
+        })?;
+        total_initial_device_resident_bytes = checked_residency_add(
+            total_initial_device_resident_bytes,
+            initial_device_resident_bytes,
+            "runtime initial residency total",
+        )?;
+        total_current_resident_parameter_bytes = checked_residency_add(
+            total_current_resident_parameter_bytes,
+            parameter_residency.current_resident_bytes,
+            "runtime current parameter total",
+        )?;
+        total_maximum_addressable_parameter_bytes = checked_residency_add(
+            total_maximum_addressable_parameter_bytes,
+            parameter_residency.maximum_addressable_bytes,
+            "runtime maximum addressable parameter total",
         )?;
         device_plans.push(VulkanRuntimeDeviceResidencyPlan {
             device_id,
+            parameter_residency,
+            working_set,
             breakdown,
-            total_device_resident_bytes: total,
+            initial_device_resident_bytes,
         });
+    }
+    if !parameter_residency_by_device.is_empty() {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "runtime parameter plan contains unknown devices".to_string(),
+        ));
     }
     Ok(VulkanRuntimeResidencyPlan {
         schema: VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA.to_string(),
         package_id: runtime_model.package.package_id.clone(),
+        residency_policy,
         context_capacity_activations,
         speculative_decoders_mounted: mount_speculative_decoders,
         device_plans,
-        total_device_resident_bytes,
+        total_initial_device_resident_bytes,
+        total_current_resident_parameter_bytes,
+        total_maximum_addressable_parameter_bytes,
     })
 }
 
@@ -308,61 +355,6 @@ fn plan_stream_circuit_residency(
     })
 }
 
-fn plan_transducer_parameters(
-    by_device: &mut BTreeMap<String, VulkanRuntimeDeviceResidencyBreakdown>,
-    resource_plan: &StreamCircuitResourcePlan,
-    tensor_index: &TensorIndex,
-    input_device_id: &str,
-    output_device_id: &str,
-) -> Result<(), VulkanRuntimeResidencyPlanError> {
-    if input_device_id == output_device_id {
-        let bytes = required_optional_bytes(
-            VulkanPermanentParameterBufferPlan::from_transducer_parameters(
-                input_device_id,
-                resource_plan,
-                Some(tensor_index),
-            )
-            .map_err(residency_display_error)?
-            .total_byte_capacity,
-            "shared transducer parameters",
-        )?;
-        by_device
-            .get_mut(input_device_id)
-            .ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(format!(
-                    "transducer device {input_device_id:?} has no resident component slice"
-                ))
-            })?
-            .transducer_parameter_bytes = bytes;
-        return Ok(());
-    }
-    for (device_id, transducer_id) in [
-        (input_device_id, "input_transducer"),
-        (output_device_id, "output_transducer"),
-    ] {
-        let bytes = required_optional_bytes(
-            VulkanPermanentParameterBufferPlan::from_transducer_parameters_for(
-                device_id,
-                resource_plan,
-                Some(tensor_index),
-                transducer_id,
-            )
-            .map_err(residency_display_error)?
-            .total_byte_capacity,
-            "transducer parameters",
-        )?;
-        by_device
-            .get_mut(device_id)
-            .ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(format!(
-                    "transducer device {device_id:?} has no resident component slice"
-                ))
-            })?
-            .transducer_parameter_bytes = bytes;
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn plan_speculative_decoder_residency(
     by_device: &mut BTreeMap<String, VulkanRuntimeDeviceResidencyBreakdown>,
@@ -372,7 +364,6 @@ fn plan_speculative_decoder_residency(
     decoder: &VulkanResidentSpeculativeDecoderPackageSpec,
     output_device_id: &str,
     context_capacity_activations: usize,
-    target_output_tensors: &BTreeSet<String>,
 ) -> Result<(), VulkanRuntimeResidencyPlanError> {
     let draft_runtime_model =
         speculative_decoder_runtime_model(target_runtime_model, decoder, output_device_id);
@@ -391,65 +382,41 @@ fn plan_speculative_decoder_residency(
             "speculative decoder device {output_device_id:?} has no resident component slice"
         ))
     })?;
-    let draft_parameter_bytes = required_optional_bytes(
-        VulkanPermanentParameterBufferPlan::from_placed_resident_plan(
-            &placed_plan.placed_resident_plan,
-        )
-        .map_err(residency_display_error)?
-        .total_byte_capacity,
-        "speculative decoder parameters",
-    )?;
-    let additional_parameter_bytes = speculative_decoder_additional_parameter_tensors(
-        &target_runtime_model.package.input_transducer.spec,
-        decoder,
-        |tensor| target_output_tensors.contains(tensor),
-    )
-    .into_iter()
-    .try_fold(0usize, |total, tensor| {
-        let byte_count = tensor_index
-            .tensors
-            .get(tensor)
-            .and_then(|metadata| metadata.byte_count)
-            .ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(format!(
-                    "speculative decoder parameter {tensor:?} has no byte count"
-                ))
-            })?;
-        checked_residency_add(
-            total,
-            byte_count,
-            "speculative decoder additional parameters",
-        )
-    })?;
-    breakdown.speculative_decoder_parameter_bytes = checked_residency_add(
-        breakdown.speculative_decoder_parameter_bytes,
-        checked_residency_add(
-            draft_parameter_bytes,
-            additional_parameter_bytes,
-            "speculative decoder parameter bytes",
-        )?,
-        "speculative decoder parameter bytes",
-    )?;
-
     let stream =
         plan_stream_circuit_residency(&placed_plan, context_capacity_activations, true)?;
-    let stream_bytes = [
+    let state_bytes = [
         stream.state_bytes,
         stream.transaction_bytes,
-        stream.activation_bytes,
-        stream.boundary_bytes,
-        stream.edge_bytes,
         VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| {
-        checked_residency_add(total, bytes, "speculative decoder stream bytes")
+        checked_residency_add(total, bytes, "speculative decoder state bytes")
     })?;
-    breakdown.speculative_decoder_stream_bytes = checked_residency_add(
-        breakdown.speculative_decoder_stream_bytes,
-        stream_bytes,
-        "speculative decoder stream bytes",
+    breakdown.speculative_decoder_state_bytes = checked_residency_add(
+        breakdown.speculative_decoder_state_bytes,
+        state_bytes,
+        "speculative decoder state bytes",
     )?;
+    let activation_bytes = [
+        stream.activation_bytes,
+        stream.boundary_bytes,
+        stream.edge_bytes,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        checked_residency_add(
+            total,
+            bytes,
+            "speculative decoder activation bytes",
+        )
+    })?;
+    breakdown.speculative_decoder_activation_bytes =
+        checked_residency_add(
+            breakdown.speculative_decoder_activation_bytes,
+            activation_bytes,
+            "speculative decoder activation bytes",
+        )?;
 
     let output_workspace = checked_residency_add(
         decoder.output_transducer.output_hidden_byte_capacity,
@@ -515,26 +482,6 @@ fn speculative_decoder_runtime_model(
         tensor_index_fragments: Vec::new(),
         implementation_selection: None,
     }
-}
-
-fn speculative_decoder_additional_parameter_tensors<'a>(
-    input_embedding: &'a VulkanResidentInputEmbeddingTransducerSpec,
-    decoder: &'a VulkanResidentSpeculativeDecoderPackageSpec,
-    mut target_has_tensor: impl FnMut(&str) -> bool,
-) -> Vec<&'a str> {
-    [
-        input_embedding.parameter_tensor.as_str(),
-        decoder.output_transducer.norm_parameter_tensor.as_str(),
-        decoder
-            .output_transducer
-            .projection_parameter_tensor
-            .as_str(),
-    ]
-    .into_iter()
-    .filter(|tensor| !target_has_tensor(tensor))
-    .collect::<BTreeSet<_>>()
-    .into_iter()
-    .collect()
 }
 
 fn sampler_workspace_bytes(
@@ -650,45 +597,37 @@ fn main_feedback_workspace_bytes(
     )
 }
 
-fn transducer_parameter_tensors(
-    resource_plan: &StreamCircuitResourcePlan,
-    transducer_id: &str,
-) -> BTreeSet<String> {
-    resource_plan
-        .transducer_parameters
-        .iter()
-        .filter(|parameter| {
-            parameter
-                .uses
-                .iter()
-                .any(|parameter_use| parameter_use.circuit_id == transducer_id)
-        })
-        .map(|parameter| parameter.tensor.clone())
-        .collect()
-}
-
-fn sum_residency_breakdown(
+fn sum_transient_state_breakdown(
     breakdown: &VulkanRuntimeDeviceResidencyBreakdown,
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
     [
-        breakdown.component_parameter_bytes,
-        breakdown.transducer_parameter_bytes,
         breakdown.stream_state_bytes,
         breakdown.state_transaction_bytes,
+        breakdown.stream_control_bytes,
+        breakdown.speculative_decoder_state_bytes,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        checked_residency_add(total, bytes, "transient state total")
+    })
+}
+
+fn sum_activation_headroom_breakdown(
+    breakdown: &VulkanRuntimeDeviceResidencyBreakdown,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    [
         breakdown.activation_slot_bytes,
         breakdown.boundary_buffer_bytes,
         breakdown.edge_buffer_bytes,
-        breakdown.stream_control_bytes,
         breakdown.output_transducer_workspace_bytes,
         breakdown.sampler_workspace_bytes,
         breakdown.feedback_workspace_bytes,
-        breakdown.speculative_decoder_parameter_bytes,
-        breakdown.speculative_decoder_stream_bytes,
+        breakdown.speculative_decoder_activation_bytes,
         breakdown.speculative_decoder_workspace_bytes,
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| {
-        checked_residency_add(total, bytes, "device residency total")
+        checked_residency_add(total, bytes, "activation headroom total")
     })
 }
 

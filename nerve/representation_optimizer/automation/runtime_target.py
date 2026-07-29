@@ -951,6 +951,7 @@ def _select_capability_groups(
                     mount_speculative_decoders=(
                         mount_speculative_decoders
                     ),
+                    residency_policy="demand_retained",
                 )
             )
         plans = plan_runtime_residency_cases(
@@ -973,7 +974,7 @@ def _select_capability_groups(
             plan = plans[case.case_id]
             planned_devices = {
                 str(device["device_id"]): int(
-                    device["total_device_resident_bytes"]
+                    device["initial_device_resident_bytes"]
                 )
                 for device in plan["device_plans"]
             }
