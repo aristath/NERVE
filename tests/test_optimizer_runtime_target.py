@@ -410,6 +410,7 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
     driver = _driver(tmp_path)
     component = _executable(tmp_path / "component-executor")
     validation = _executable(tmp_path / "validation-executor")
+    planner = _residency_planner(tmp_path / "residency-planner")
     run_root = tmp_path / "run"
 
     prepared = prepare_runtime_optimization_targets(
@@ -417,6 +418,7 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
         run_root=run_root,
         component_executor_bin=component,
         validation_executor_bin=validation,
+        residency_planner_bin=planner,
         vulkan_driver_files=(driver,),
         idle_probe=probe,
         live_target=_target(pci_addresses[1:], capacity_bytes=1_000),
@@ -424,6 +426,7 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
 
     assert not run_root.exists()
     assert prepared.parameter_bytes == 1_200
+    assert len(prepared.residency_plans) == 1
     assert [item["device_id"] for item in prepared.selected_devices] == [
         _device_id("0000:07:00.0"),
         _device_id("0000:0a:00.0"),
@@ -438,6 +441,61 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
         _device_id("0000:07:00.0"),
         _device_id("0000:0a:00.0"),
     }
+    admission = optimization_target.matched_conditions["environment"][
+        "residency_admission"
+    ]
+    assert admission["plan"] == prepared.residency_plans[0]
+    assert set(admission["safe_device_capacity_bytes"]) == {
+        _device_id("0000:07:00.0"),
+        _device_id("0000:0a:00.0"),
+    }
+
+
+def test_runtime_target_counts_transient_working_set_before_selecting_topology(
+    tmp_path: Path,
+) -> None:
+    pci_addresses = ("0000:03:00.0", "0000:07:00.0")
+    target = _target(pci_addresses, capacity_bytes=1_000)
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(100, 100),
+    )
+    sysfs = tmp_path / "sys" / "class" / "drm"
+    proc = tmp_path / "proc"
+    for index, pci_address in enumerate(pci_addresses):
+        _device_filesystem(
+            tmp_path,
+            pci_address=pci_address,
+            used_vram=1,
+            busy_percent=0,
+            card_index=index,
+            roots=(sysfs, proc),
+            total_vram=1_000,
+        )
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(
+            tmp_path / "residency",
+            extra_bytes_per_device_by_count={1: 800, 2: 0},
+        ),
+        vulkan_driver_files=(_driver(tmp_path),),
+        idle_probe=LinuxAmdDeviceStateProbe(
+            sysfs_drm_root=sysfs,
+            proc_root=proc,
+        ),
+        live_target=target,
+    )
+
+    assert len(prepared.targets[0].hardware_profiles) == 2
+    planned = prepared.residency_plans[0]["device_plans"]
+    assert [device["total_device_resident_bytes"] for device in planned] == [
+        100,
+        100,
+    ]
 
 
 def test_runtime_target_records_post_context_idle_floor(
@@ -492,6 +550,7 @@ def test_runtime_target_records_post_context_idle_floor(
         selected_device_ids=(_device_id(pci_address),),
         component_executor_bin=_executable(tmp_path / "component"),
         validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(tmp_path / "residency"),
         vulkan_driver_files=(_driver(tmp_path),),
         idle_probe=probe,
     )
@@ -543,6 +602,9 @@ def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
             validation_executor_bin=_executable(
                 tmp_path / "validation"
             ),
+            residency_planner_bin=_residency_planner(
+                tmp_path / "residency"
+            ),
             vulkan_driver_files=(_driver(tmp_path),),
             idle_probe=probe,
             live_target=target,
@@ -578,6 +640,9 @@ def test_explicit_busy_optimizer_device_is_never_substituted(
             live_target=target,
             component_executor_bin=_executable(tmp_path / "component"),
             validation_executor_bin=_executable(tmp_path / "validation"),
+            residency_planner_bin=_residency_planner(
+                tmp_path / "residency"
+            ),
         )
 
 
@@ -757,6 +822,8 @@ def _package(
         "package_id": "fixture-package",
         "tensor_index_path": "tensors.json",
         "compiler_target": target.to_json(),
+        "max_context_activations": 128,
+        "speculative_decoders": [],
         "circuit_graph": {"components": components},
     }
     path = root / "vulkan_resident_package.json"
@@ -821,6 +888,60 @@ def _executable(
         "  exit 0\n"
         "fi\n"
         "exit 0\n"
+    )
+    path.chmod(path.stat().st_mode | 0o111)
+    return path
+
+
+def _residency_planner(
+    path: Path,
+    *,
+    extra_bytes_per_device_by_count: dict[int, int] | None = None,
+    runtime_fingerprint: str = RUNTIME_IMPLEMENTATION_FINGERPRINT,
+) -> Path:
+    extras = extra_bytes_per_device_by_count or {}
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"fingerprint = {runtime_fingerprint!r}\n"
+        f"extras = {extras!r}\n"
+        "if sys.argv[1:] == ['--runtime-implementation-fingerprint']:\n"
+        "    print(fingerprint)\n"
+        "    raise SystemExit(0)\n"
+        "request = json.load(sys.stdin)\n"
+        "manifest_path = pathlib.Path(request['package_manifest'])\n"
+        "manifest = json.loads(manifest_path.read_text())\n"
+        "index = json.loads((manifest_path.parent / manifest['tensor_index_path']).read_text())\n"
+        "sizes = {name: value['byte_count'] for name, value in index['tensors'].items()}\n"
+        "components = manifest['circuit_graph']['components']\n"
+        "plans = []\n"
+        "for case in request['cases']:\n"
+        "    device_ids = sorted(set(case['component_placement'].values()))\n"
+        "    totals = {device_id: extras.get(len(device_ids), 0) for device_id in device_ids}\n"
+        "    tensors = {device_id: set() for device_id in device_ids}\n"
+        "    for component in components:\n"
+        "        if component.get('runtime_role') != 'signal_processor':\n"
+        "            continue\n"
+        "        device_id = case['component_placement'][component['component_id']]\n"
+        "        for ref in component.get('params', {}).get('refs', {}).values():\n"
+        "            tensors[device_id].add(ref['tensor'])\n"
+        "    for device_id in device_ids:\n"
+        "        totals[device_id] += sum(sizes[name] for name in tensors[device_id])\n"
+        "    device_plans = [\n"
+        "        {'device_id': device_id,\n"
+        "         'breakdown': {'component_parameter_bytes': totals[device_id]},\n"
+        "         'total_device_resident_bytes': totals[device_id]}\n"
+        "        for device_id in device_ids\n"
+        "    ]\n"
+        "    plans.append({'case_id': case['case_id'], 'plan': {\n"
+        "        'schema': 'nerve.vulkan_runtime_residency_plan.v1',\n"
+        "        'package_id': manifest['package_id'],\n"
+        "        'context_capacity_activations': case['context_capacity_activations'],\n"
+        "        'speculative_decoders_mounted': case['mount_speculative_decoders'],\n"
+        "        'device_plans': device_plans,\n"
+        "        'total_device_resident_bytes': sum(totals.values()),\n"
+        "    }})\n"
+        "json.dump({'schema': 'nerve.runtime_residency_planner_response.v1', 'plans': plans}, sys.stdout)\n"
     )
     path.chmod(path.stat().st_mode | 0o111)
     return path

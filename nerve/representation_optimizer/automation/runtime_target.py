@@ -17,6 +17,10 @@ from nerve.representation_optimizer.automation.device_state import (
     LinuxAmdDeviceStateProbe,
     declared_idle_state_digest,
 )
+from nerve.representation_optimizer.automation.residency_planner import (
+    RuntimeResidencyPlanningCase,
+    plan_runtime_residency_cases,
+)
 from nerve.representation_optimizer.automation.target import (
     OptimizationTarget,
     VerifiedDeviceLeaseManager,
@@ -84,6 +88,7 @@ class PreparedOptimizationTargets:
     selected_devices: tuple[Json, ...]
     excluded_devices: tuple[Json, ...]
     parameter_bytes: int
+    residency_plans: tuple[Json, ...]
     vulkan_driver_files: tuple[Path, ...]
 
     def to_json(self) -> Json:
@@ -92,8 +97,17 @@ class PreparedOptimizationTargets:
             "selected_devices": [dict(item) for item in self.selected_devices],
             "excluded_devices": [dict(item) for item in self.excluded_devices],
             "parameter_bytes": self.parameter_bytes,
+            "residency_plans": [dict(item) for item in self.residency_plans],
             "vulkan_driver_files": [str(path) for path in self.vulkan_driver_files],
         }
+
+
+@dataclass(frozen=True)
+class _SelectedCapabilityGroup:
+    profiles: tuple[Json, ...]
+    placement: dict[str, str]
+    residency_plan: Json
+    safe_device_capacity_bytes: dict[str, int]
 
 
 def prepare_runtime_optimization_targets(
@@ -103,6 +117,7 @@ def prepare_runtime_optimization_targets(
     runtime_bin: Path | None = None,
     component_executor_bin: Path | None = None,
     validation_executor_bin: Path | None = None,
+    residency_planner_bin: Path | None = None,
     selected_device_ids: Iterable[str] = (),
     vulkan_driver_files: Iterable[Path] = (),
     idle_probe: LinuxAmdDeviceStateProbe | None = None,
@@ -127,6 +142,11 @@ def prepare_runtime_optimization_targets(
         explicit=validation_executor_bin,
         features=("vulkan", "tokenizers"),
     )
+    residency_planner_command = runtime_executor_command(
+        "nerve-residency-planner",
+        explicit=residency_planner_bin,
+        features=("vulkan",),
+    )
     runtime_command = (
         runtime_executor_command(
             "nerve-runtime",
@@ -145,6 +165,7 @@ def prepare_runtime_optimization_targets(
             ("runtime", runtime_command),
             ("component executor", component_command),
             ("validation executor", validation_command),
+            ("residency planner", residency_planner_command),
         )
         if command is not None
     )
@@ -219,15 +240,18 @@ def prepare_runtime_optimization_targets(
     check_compile_cancelled(cancel_requested)
     selected_groups = _select_capability_groups(
         tuple(idle_profiles),
-        parameter_bytes=parameter_bytes,
+        package_manifest=package_manifest,
+        manifest=manifest,
+        residency_planner_command=residency_planner_command,
         explicit_selection=bool(requested),
         policy=policy,
+        cancel_requested=cancel_requested,
     )
     selected_ids = tuple(
         sorted(
             str(profile["hardware_identity"]["stable_device_id"])
             for group in selected_groups
-            for profile in group
+            for profile in group.profiles
         )
     )
     selected_records = [
@@ -292,7 +316,13 @@ def prepare_runtime_optimization_targets(
         )
     _require_live_identity_match(by_id, live_profiles, selected_ids)
     live_groups = tuple(
-        tuple(live_profiles[_device_id(profile)] for profile in group)
+        (
+            group,
+            tuple(
+                live_profiles[_device_id(profile)]
+                for profile in group.profiles
+            ),
+        )
         for group in selected_groups
     )
 
@@ -301,6 +331,9 @@ def prepare_runtime_optimization_targets(
             package_manifest=package_manifest,
             run_root=run_root,
             profiles=profiles,
+            placement=group.placement,
+            residency_plan=group.residency_plan,
+            safe_device_capacity_bytes=group.safe_device_capacity_bytes,
             idle_probe=probe,
             selected_observations=tuple(
                 record
@@ -315,7 +348,7 @@ def prepare_runtime_optimization_targets(
             lease_root=lease_root or default_device_lease_root(),
             source_artifacts=source_artifacts,
         )
-        for profiles in live_groups
+        for group, profiles in live_groups
     )
     check_compile_cancelled(cancel_requested)
     return PreparedOptimizationTargets(
@@ -328,6 +361,9 @@ def prepare_runtime_optimization_targets(
             sorted(excluded_records, key=lambda item: item["device_id"])
         ),
         parameter_bytes=parameter_bytes,
+        residency_plans=tuple(
+            group.residency_plan for group in selected_groups
+        ),
         vulkan_driver_files=drivers,
     )
 
@@ -715,6 +751,9 @@ def _build_target(
     package_manifest: Path,
     run_root: Path,
     profiles: tuple[Json, ...],
+    placement: dict[str, str],
+    residency_plan: Json,
+    safe_device_capacity_bytes: dict[str, int],
     idle_probe: LinuxAmdDeviceStateProbe,
     selected_observations: tuple[Json, ...],
     driver_files: tuple[Path, ...],
@@ -731,13 +770,12 @@ def _build_target(
         raise ModelCompileError(
             "one optimization execution target must have one capability class"
         )
-    manifest = _read_json(package_manifest, "compiled package manifest")
     device_ids = tuple(_device_id(profile) for profile in profiles)
-    placement = balanced_component_placement(
-        package_manifest.parent,
-        manifest,
-        device_ids,
-    )
+    if set(device_ids) != set(safe_device_capacity_bytes):
+        raise ModelCompileError(
+            "residency admission capacities do not match live target devices"
+        )
+    manifest = _read_json(package_manifest, "compiled package manifest")
     idle_digest = declared_idle_state_digest(
         profiles,
         idle_probe.policy,
@@ -773,6 +811,15 @@ def _build_target(
                     key=lambda item: item["device_id"],
                 )
             ],
+            "residency_admission": {
+                "plan": residency_plan,
+                "safe_device_capacity_bytes": dict(
+                    sorted(safe_device_capacity_bytes.items())
+                ),
+                "residency_fraction_ppm": (
+                    policy.model_residency_fraction_ppm
+                ),
+            },
         },
         "idle_device_state_digest": idle_digest,
         "exclusive_residency": True,
@@ -832,62 +879,126 @@ def _build_target(
 def _select_capability_groups(
     profiles: tuple[Json, ...],
     *,
-    parameter_bytes: int,
+    package_manifest: Path,
+    manifest: Json,
+    residency_planner_command: tuple[str, ...],
     explicit_selection: bool,
     policy: RuntimeOptimizationPolicy,
-) -> tuple[tuple[Json, ...], ...]:
+    cancel_requested: Callable[[], bool] | None,
+) -> tuple[_SelectedCapabilityGroup, ...]:
     by_capability: dict[str, list[Json]] = defaultdict(list)
     for profile in profiles:
         by_capability[str(profile["capability_class"])].append(profile)
-    groups: list[tuple[Json, ...]] = []
+    groups: list[_SelectedCapabilityGroup] = []
     failures: list[str] = []
+    max_context = manifest.get("max_context_activations")
+    if (
+        isinstance(max_context, bool)
+        or not isinstance(max_context, int)
+        or max_context <= 0
+    ):
+        raise ModelCompileError(
+            "compiled package max_context_activations is invalid"
+        )
+    mount_speculative_decoders = bool(manifest.get("speculative_decoders"))
     for capability, raw_group in sorted(by_capability.items()):
         group = sorted(raw_group, key=_device_id)
-        required = _minimum_device_count(
-            group,
-            parameter_bytes,
-            policy=policy,
+        candidate_groups = (
+            (tuple(group),)
+            if explicit_selection
+            else tuple(
+                tuple(group[:device_count])
+                for device_count in range(1, len(group) + 1)
+            )
         )
-        if required is None:
+        cases = []
+        placements: dict[str, dict[str, str]] = {}
+        profiles_by_case: dict[str, tuple[Json, ...]] = {}
+        for index, candidate_profiles in enumerate(candidate_groups, start=1):
+            device_ids = tuple(
+                _device_id(profile) for profile in candidate_profiles
+            )
+            placement = balanced_component_placement(
+                package_manifest.parent,
+                manifest,
+                device_ids,
+            )
+            case_id = f"{capability}:{index}"
+            placements[case_id] = placement
+            profiles_by_case[case_id] = candidate_profiles
+            cases.append(
+                RuntimeResidencyPlanningCase(
+                    case_id=case_id,
+                    default_device_id=device_ids[0],
+                    component_placement=placement,
+                    context_capacity_activations=max_context,
+                    mount_speculative_decoders=(
+                        mount_speculative_decoders
+                    ),
+                )
+            )
+        plans = plan_runtime_residency_cases(
+            command=residency_planner_command,
+            package_manifest=package_manifest,
+            cases=cases,
+            cancel_requested=cancel_requested,
+        )
+        selected_group = None
+        case_failures = []
+        for case in cases:
+            candidate_profiles = profiles_by_case[case.case_id]
+            capacities = {
+                _device_id(profile): _safe_profile_capacity(
+                    profile,
+                    policy=policy,
+                )
+                for profile in candidate_profiles
+            }
+            plan = plans[case.case_id]
+            planned_devices = {
+                str(device["device_id"]): int(
+                    device["total_device_resident_bytes"]
+                )
+                for device in plan["device_plans"]
+            }
+            if set(planned_devices) != set(capacities):
+                raise ModelCompileError(
+                    "runtime residency plan devices do not match the "
+                    "requested placement topology"
+                )
+            oversized = {
+                device_id: {
+                    "planned": planned_devices[device_id],
+                    "safe_capacity": capacities[device_id],
+                }
+                for device_id in sorted(capacities)
+                if planned_devices[device_id] > capacities[device_id]
+            }
+            if oversized:
+                case_failures.append(
+                    f"{len(candidate_profiles)} device(s): {oversized}"
+                )
+                continue
+            selected_group = _SelectedCapabilityGroup(
+                profiles=candidate_profiles,
+                placement=placements[case.case_id],
+                residency_plan=plan,
+                safe_device_capacity_bytes=capacities,
+            )
+            break
+        if selected_group is None:
             failures.append(
-                f"{capability} has insufficient verified-idle device memory"
+                f"{capability} cannot safely host the planned runtime "
+                f"working set ({'; '.join(case_failures)})"
             )
             continue
-        selected = group if explicit_selection else group[:required]
-        if _safe_device_capacity(selected, policy=policy) < parameter_bytes:
-            failures.append(
-                f"{capability} explicit selection cannot safely host model parameters"
-            )
-            continue
-        groups.append(tuple(selected))
+        groups.append(selected_group)
     if not groups:
         raise ModelCompileError(
             "no AMD capability class can host the compiled package: "
             + "; ".join(failures)
         )
     return tuple(groups)
-
-
-def _minimum_device_count(
-    profiles: list[Json],
-    parameter_bytes: int,
-    *,
-    policy: RuntimeOptimizationPolicy,
-) -> int | None:
-    capacity = 0
-    for index, profile in enumerate(profiles, start=1):
-        capacity += _safe_profile_capacity(profile, policy=policy)
-        if capacity >= parameter_bytes:
-            return index
-    return None
-
-
-def _safe_device_capacity(
-    profiles: Iterable[Json],
-    *,
-    policy: RuntimeOptimizationPolicy,
-) -> int:
-    return sum(_safe_profile_capacity(profile, policy=policy) for profile in profiles)
 
 
 def _safe_profile_capacity(
