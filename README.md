@@ -39,12 +39,31 @@ NERVE is not a production inference engine yet. It is a real implementation of t
 - Route-native MoE compiler structures and shader families for selected expert routes.
 - MTP/speculative decoding package structures and runtime flow.
 - Shape-aware dispatch vocabulary for prefill versus decode.
+- Versioned semantic-module trees and source provenance preserved through
+  lowering, optimization, packaging, graph editing, and runtime inspection.
+- CPU and Vulkan hardware-process discovery, empirical calibration, stable
+  capability classes, and physical-device identity.
+- An end-to-end behavioral representation optimizer that enumerates semantic
+  scopes, analyzes source algebra and structure, asks registered providers for
+  alternatives, constructs candidates in isolation, benchmarks matched
+  reference/candidate pairs, validates behavior, and publishes only qualified
+  implementations.
+- Self-contained optimized packages that retain the immutable exact baseline,
+  promoted implementation artifacts, proofs, benchmarks, validations, hardware
+  evidence, runtime predicates, and package-wide integrity metadata.
+- Runtime implementation selection after graph editing and placement, with
+  exact fallback for uncovered compatible scopes and normal chat reporting of
+  selected alternatives and representation-boundary cost.
 
 ### Important unfinished work
 
 - The Vulkan backend still has transitional fixed/circular resident state buffers in places. The scheduler has page/block-managed transient-state semantics, but resident Vulkan bindings still need to become truly page-backed before automatic prefix reuse can be wired into normal prompt admission.
 - Multi-stream activation batches are scheduled, but some placed Vulkan batch paths still execute activations sequentially internally.
 - FP8, INT4, MoE, MTP, prefill, and decode paths all need more real-model benchmarking and kernel work.
+- The representation-optimizer machinery is complete, but the built-in
+  provider library covers only the alternative representations implemented so
+  far. Additional representation families remain product and performance work,
+  not missing optimizer infrastructure.
 - The TUI exists as a runtime surface, but the full graph-editing product experience is still being built.
 
 ## Repository map
@@ -55,7 +74,8 @@ The architectural source of truth. Start here to understand the model: streams, 
 
 ### [`TODO.md`](TODO.md)
 
-The active engineering backlog and current implementation status. This tracks scheduler work, block-managed state, batching, dispatch shape, MoE, MTP, prefill, prefix/state reuse, and graph/kernel reuse.
+The current engineering goal, architectural invariants, completion criteria,
+and any work that remains for that goal.
 
 ### [`nerve/`](nerve/)
 
@@ -75,6 +95,8 @@ Python compiler and CLI package.
 | `nerve/model_package_shader_templates.py` | Shader template rendering. |
 | `nerve/model_package_shader_compiler.py` | SPIR-V artifact creation. |
 | `nerve/conversation_gate.py` | Canonical resident multi-turn correctness and performance gate. |
+| `nerve/representation_optimizer/` | Semantic scope enumeration, structural analysis, hardware targets, providers, isolated construction, matched benchmarking, behavioral validation, promotion, evidence storage, and package publication. |
+| `nerve/representation_optimizer/ARCHITECTURE.md` | Complete schemas and invariants for the behavioral representation optimizer. |
 
 CLI examples:
 
@@ -102,11 +124,163 @@ Rust runtime crate.
 | `runtime-rs/src/stream_prefix_cache.rs` | Backend-neutral prefix/state reuse primitives: prefix keys, retained cache entries, longest-compatible-prefix lookup, block-aligned insertion, restore, ref counts, and eviction. |
 | `runtime-rs/src/vulkan_compute/` | Vulkan device discovery, feature/capability handling, resident buffers, pipeline creation, dispatch, sequence submission, and buffer copies. |
 | `runtime-rs/src/vulkan_stream_circuit/` | Vulkan resident package loading, placement, device slices, resident plan buffers, dispatch binding, prompt streams, placed prompt engine, token runtime, sampler, speculative decode, batching, distributed execution, and reusable kernel/sequence machinery. |
+| `runtime-rs/src/implementation_selection/` | Target-predicate validation, compatible-scope enumeration, measured-cost selection, and exact/alternative implementation planning. |
 | `runtime-rs/shaders/` | GLSL compute shader templates and generated/compiled shader inputs for BF16, FP8, INT4, attention/state, recurrent/conv, sampler, MoE, and related runtime operations. |
 
 ### [`tests/`](tests/)
 
 Python compiler/package tests.
+
+## Behavioral representation optimization
+
+The optimizer is the concrete implementation of
+[`CONCEPT.md`](CONCEPT.md)'s behavioral-compilation rule: the exact compiled
+model specifies behavior, but does not dictate the permanent physical
+representation. The executable flow is:
+
+```text
+immutable exact package
+    -> semantic and coupled scopes
+    -> algebraic and structural evidence
+    -> registered representation providers
+    -> isolated candidate construction and ordinary re-lowering
+    -> matched binary microbenchmark
+    -> proof, local, and whole-model validation
+    -> target-guarded self-contained package publication
+    -> runtime selection after graph editing and placement
+```
+
+The exact lowered graph remains present throughout. A rejected, failed, slower,
+or invalid candidate cannot mutate it or become runtime-visible.
+
+### Hardware-process profiles
+
+A `hardware_process_profile.v1` describes what a CPU or GPU can actually expose
+to an implementation: scalar and vector arithmetic, matrix instructions,
+packed dot products, subgroups, caches, local memory, texture and fixed-function
+paths, indirect execution, copy engines, synchronization, interconnects, and
+other discoverable processes. Unsupported and API-opaque facilities are
+recorded explicitly. Calibration adds measured performance without changing the
+underlying capability class.
+
+Capability and physical identity are separate. Equivalent devices can share a
+capability class while retaining distinct stable device IDs and runtime
+bindings. The optimizer qualifies a candidate against exact capability-class
+multiplicities and an execution regime; it does not publish the benchmark
+machine's placement as a model requirement.
+
+### Provider contract
+
+A representation provider is a complete, model-independent strategy conforming
+to `RepresentationProvider` in
+`nerve/representation_optimizer/providers/protocol.py`. It must:
+
+1. match semantic responsibility and structural evidence separately;
+2. interpret cited evidence and synthesize deterministic candidate contracts;
+3. emit backend-neutral `representation_graph.v1` IR;
+4. lower that IR for a hardware-process profile;
+5. estimate feasibility, storage, construction, and steady-state work;
+6. declare construction and runtime-mount requirements;
+7. provide exact proof obligations or an explicit approximation error contract;
+8. declare matched benchmark workloads; and
+9. declare complete validation coverage.
+
+Providers are registered by provider identity plus a data-defined representation
+descriptor. They are evaluated in deterministic order, may decline normally,
+and fail independently. The registry has no model-name dispatch table.
+
+### Candidate lifecycle and benchmark rule
+
+Each candidate has an immutable evidence-linked lifecycle:
+
+```text
+synthesized
+    -> staged
+    -> statically_validated
+    -> prebenchmark_validated
+    -> benchmarked
+    -> behaviorally_validated
+    -> promotable
+    -> published
+```
+
+Construction occurs in a private, source-sealed workspace. The provider's
+semantic constructor, ordinary re-lowerer, and physical optimizer can write only
+declared outputs. Every source input and produced byte is digest checked before
+an atomic ready rename.
+
+A microbenchmark answers only “is the candidate faster?” For each declared
+role and workload, the engine makes one discarded warmup call and one matched
+measured call through the normal execution adapter. Reference and candidate
+must perform identical useful work. Setup, mounting, execution, conversion,
+transport, synchronization, teardown, and device-state restoration remain
+separate evidence. A microbenchmark that exceeds one minute fails instead of
+collecting more samples.
+
+### Validation, promotion, and runtime selection
+
+The rejection funnel is static integrity, exact or bounded-error proofs, cheap
+numerical/state sanity, matched performance, full local behavior, and
+whole-model free-running behavior. Exact candidates reproduce every declared
+output and state observation exactly. Approximate candidates must satisfy a
+versioned error contract over their complete claimed validity regime.
+Long-context, reasoning, state, graph, placement, and conversation checks cannot
+be replaced by a tiny convenience token limit.
+
+Promotion creates a new package; it never edits the exact source package in
+place. The published package contains the alternative implementation, mount
+plan, hardware profiles, runtime predicate, all cited evidence, and a rebuilt
+package-integrity contract. It is independently loadable and relocatable.
+
+At runtime, NERVE first resolves duplication, bypass, rewiring, sharding,
+placement, and physical device bindings. It then matches promoted predicates
+against the resulting graph, hardware processes, device-count multiplicity,
+interconnects, execution phase, activation/context/state envelope, and
+qualified speculative-draft-token count. A measured-cost planner selects the
+best compatible non-overlapping alternatives, including conversion costs.
+Uncovered compatible regions retain the immutable exact implementation.
+
+### Running the optimizer
+
+The optimizer consumes a compiled package, selected physical devices, and the
+same speculative regime intended for product execution:
+
+```bash
+python -m nerve \
+  --optimize-model COMPILED_MODEL \
+  --optimized-model-dir COMPILED_MODEL_OPTIMIZED \
+  --optimizer-run-dir OPTIMIZER_EVIDENCE \
+  --allow-physical-device vulkan-uuid:FIRST_AMD_UUID \
+  --allow-physical-device vulkan-uuid:SECOND_AMD_UUID \
+  --vulkan-driver-manifest /path/to/radeon_icd.json \
+  --speculative-draft-tokens 2
+```
+
+The output model is the deployable artifact. The run directory contains
+rejected and failed experiment evidence and is not a runtime dependency.
+Device allowlisting, idle-state verification, sequential execution, and clean
+release remain mandatory.
+
+### Adding a representation provider
+
+To add a representation without changing model-specific runtime code:
+
+1. add or load a validated `representation_descriptor.v1` document;
+2. implement every method in `RepresentationProvider`;
+3. implement a `CandidateToolchainResolver` that supplies the semantic
+   constructor, ordinary re-lowerer, physical optimizer, and artifact
+   validators declared by the candidate;
+4. register the provider, descriptor, and resolver in the product's provider
+   assembly;
+5. add contract, rejection, exactness/error, construction-integrity,
+   benchmark, validation, promotion, relocation, and runtime-selection tests;
+   and
+6. qualify it on the intended hardware and execution regime.
+
+Model structure is discovered through semantic scopes and evidence. A provider
+must not branch on a model family name. Full schema detail and extension
+invariants are in
+[`nerve/representation_optimizer/ARCHITECTURE.md`](nerve/representation_optimizer/ARCHITECTURE.md).
 
 ## Validation
 

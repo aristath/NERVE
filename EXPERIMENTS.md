@@ -2559,34 +2559,48 @@ The runtime continues to schedule the optimized physical graph. The editor uses
 the semantic tree and provenance to display module anatomy, implementation,
 state, parameters, kernels, and measured cost.
 
-## 75. Current NERVE Compiler Gap
+## 75. Implemented NERVE Compiler Foundation
 
-The current transpiler already emits much of the source anatomy in each layer's
-`reference_decomposition`. It records the topological normalization, mixer,
-residual, feed-forward, and final residual components. Mixer descriptions also
-record internal attention, convolutional, recurrent, and gated-delta
-subcomponents.
+The semantic-module proposal above is now implemented rather than a compiler
+gap. Source discovery constructs a versioned parent-child module tree for each
+component. Lowering binds every leaf to canonical source nodes, validates
+complete and unambiguous coverage, and carries module identities into optimized
+nodes and packaged executions. The runtime editor can inspect that semantic
+tree while execution continues to use the optimized physical graph.
 
-For example,
-[`compiled_models/qwen3_6_27b_fp8_bench/transpiled/layers/layer_03.json`](compiled_models/qwen3_6_27b_fp8_bench/transpiled/layers/layer_03.json)
-describes an attention layer containing projections, per-head normalization,
-RoPE, KV memory, attention read, output gating, and output projection.
+The behavioral representation optimizer builds on that foundation. Its current
+implementation:
 
-Circuit lowering currently reconstructs these operations as a flat,
-topologically ordered `nodes` list. The lowered circuit retains executable
-semantics but no longer retains their parent-child module relationships. The
-optimizer then fuses regions and records their semantic source nodes through
-`compiled_from`.
+1. preserves the immutable exact lowered graph as the behavioral authority;
+2. enumerates individual, coupled, layer, stateful, cross-layer, transducer, and
+   representation-boundary scopes from semantic provenance;
+3. analyzes elementwise, matrix/tensor, joint-parameter, graph, procedural, and
+   reachable-activation structure without model-name rules;
+4. presents the evidence and target hardware-process profiles to independently
+   registered representation providers;
+5. constructs candidates inside source-sealed private workspaces and sends
+   their semantic IR back through ordinary re-lowering and physical
+   optimization;
+6. rejects candidates through proof, sanity, a one-warmup/one-measurement
+   binary microbenchmark, full local checks, and whole-model free-running
+   validation;
+7. publishes only faster and behaviorally valid implementations into a new
+   self-contained package; and
+8. selects those implementations only after runtime graph editing, placement,
+   hardware binding, and execution-regime resolution.
 
-The modular compiler proposal closes that gap by:
+The package retains module identity even when one physical implementation spans
+several modules or components. Conversely, a runtime graph may duplicate,
+bypass, rewire, or place a logical component without duplicating compiler
+machinery. The implementation boundary and its versioned schemas are documented
+in
+[`nerve/representation_optimizer/ARCHITECTURE.md`](nerve/representation_optimizer/ARCHITECTURE.md).
 
-1. formalizing the source module tree;
-2. constructing exact source-node membership during lowering;
-3. preserving the tree through optimization and packaging;
-4. mapping optimized nodes and kernels back through source provenance;
-5. exposing the tree through the runtime editor schema; and
-6. rendering an expandable layer pedal without changing physical execution
-   boundaries.
+The remaining research is therefore the open representation vocabulary in the
+earlier sections of this document: finding additional expressions that are
+materially faster on real hardware and proving that they preserve useful model
+behavior. It is not a missing lifecycle, evidence, package, or runtime-selection
+mechanism.
 
 ## 76. Component-by-Component Transformation
 

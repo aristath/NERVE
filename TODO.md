@@ -62,21 +62,7 @@ proof systems, benchmarking machinery, and selection logic belong to NERVE.
 
 ## Work plan
 
-### 17. Update project documentation and remove stale design-status claims
-
-- Update `EXPERIMENTS.md` to distinguish the implemented semantic-module
-  foundation from remaining representation-optimizer research.
-- Document the hardware-process profile, provider contract, candidate lifecycle,
-  benchmark rules, validation funnel, promotion policy, and runtime selection in
-  `README.md`.
-- Cross-reference the final implementation against `CONCEPT.md`.
-- Document how to add a representation provider without modifying model-specific
-  runtime code.
-- Remove completed items from this file as each item is reviewed and confirmed
-  complete; do not retain historical progress as TODO entries.
-
-Completion requires documentation that matches the live schemas, commands,
-packages, runtime behavior, and tests.
+No remaining work items.
 
 ## Overall completion criteria
 

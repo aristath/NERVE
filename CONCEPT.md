@@ -579,6 +579,18 @@ input ---> synthesized GPU circuit ----> equivalent output
 
 The replacement may use fused operations, fewer or differently shaped matrix operations, low-rank transformations, lookup structures, learned approximations, specialized numerical representations, or a completely different computational structure. The reference model is an executable specification that can be stimulated and measured; it is not a mandatory execution plan.
 
+NERVE implements this boundary in
+[`nerve/representation_optimizer/`](nerve/representation_optimizer/). The exact
+lowered graph remains immutable while semantic scopes, algebraic evidence,
+hardware-process profiles, and registered representation providers produce
+candidate implementations. Candidates reach a self-contained optimized package
+only after matched performance measurement and complete behavioral validation.
+The Rust implementation selector then applies their measured target predicates
+after the runtime graph and placement have been resolved. The concrete schemas,
+lifecycle, validation funnel, publication rules, and extension contract are
+documented in
+[`nerve/representation_optimizer/ARCHITECTURE.md`](nerve/representation_optimizer/ARCHITECTURE.md).
+
 ### Stateful equivalence
 
 A running stream is stateful, so matching one isolated input and output is not sufficient. The reference behavior is:
