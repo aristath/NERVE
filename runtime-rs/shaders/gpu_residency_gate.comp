@@ -1,0 +1,188 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Selections {
+    uint words[];
+} selections;
+
+layout(set = 0, binding = 1) readonly buffer AddressTable {
+    uint words[];
+} address_table;
+
+layout(set = 0, binding = 2) readonly buffer ResourceGroups {
+    uint words[];
+} resource_groups;
+
+layout(set = 0, binding = 3) readonly buffer ResourceAddressSlots {
+    uint words[];
+} resource_address_slots;
+
+layout(set = 0, binding = 4) buffer ResolvedAddresses {
+    uint words[];
+} resolved_addresses;
+
+layout(set = 0, binding = 5) buffer MissingRequests {
+    uint words[];
+} missing_requests;
+
+layout(set = 0, binding = 6) buffer IndirectDispatches {
+    uint words[];
+} indirect_dispatches;
+
+layout(set = 0, binding = 7) readonly buffer GateConfiguration {
+    uint words[];
+} configuration;
+
+layout(push_constant) uniform GateControl {
+    uint selection_count;
+    uint checkpoint_tag;
+} control;
+
+const uint ADDRESS_RECORD_WORDS = 8u;
+const uint GROUP_RECORD_WORDS = 2u;
+const uint RESOLVED_HEADER_WORDS = 8u;
+const uint RESOLVED_RECORD_WORDS = 8u;
+const uint MISSING_HEADER_WORDS = 4u;
+const uint MISSING_RECORD_WORDS = 2u;
+const uint CONFIG_HEADER_WORDS = 6u;
+
+uint selected_resource(uint selection_index) {
+    return (selections.words[selection_index] >> configuration.words[0])
+        & configuration.words[1];
+}
+
+bool selection_is_duplicate(uint selection_index, uint resource_index) {
+    for (uint previous = 0u; previous < selection_index; previous += 1u) {
+        if (selected_resource(previous) == resource_index) return true;
+    }
+    return false;
+}
+
+bool address_slot_is_resident(uint slot) {
+    uint record = slot * ADDRESS_RECORD_WORDS;
+    uint address_nonzero = address_table.words[record]
+        | address_table.words[record + 1u];
+    uint byte_count_nonzero = address_table.words[record + 2u]
+        | address_table.words[record + 3u];
+    uint generation_nonzero = address_table.words[record + 4u]
+        | address_table.words[record + 5u];
+    return address_table.words[record + 6u] == 1u
+        && address_nonzero != 0u
+        && byte_count_nonzero != 0u
+        && generation_nonzero != 0u;
+}
+
+void copy_resolved_address(
+    uint resolved_index,
+    uint resource_index,
+    uint member_index,
+    uint address_slot
+) {
+    uint source = address_slot * ADDRESS_RECORD_WORDS;
+    uint destination = RESOLVED_HEADER_WORDS
+        + resolved_index * RESOLVED_RECORD_WORDS;
+    resolved_addresses.words[destination] = resource_index;
+    resolved_addresses.words[destination + 1u] = member_index;
+    resolved_addresses.words[destination + 2u] =
+        address_table.words[source];
+    resolved_addresses.words[destination + 3u] =
+        address_table.words[source + 1u];
+    resolved_addresses.words[destination + 4u] =
+        address_table.words[source + 2u];
+    resolved_addresses.words[destination + 5u] =
+        address_table.words[source + 3u];
+    resolved_addresses.words[destination + 6u] =
+        address_table.words[source + 4u];
+    resolved_addresses.words[destination + 7u] =
+        address_table.words[source + 5u];
+}
+
+void write_indirect_dispatches(bool enabled) {
+    for (uint dispatch = 0u; dispatch < configuration.words[5]; dispatch += 1u) {
+        uint word = dispatch * 3u;
+        uint dimensions = CONFIG_HEADER_WORDS + word;
+        indirect_dispatches.words[word] =
+            enabled ? configuration.words[dimensions] : 0u;
+        indirect_dispatches.words[word + 1u] =
+            enabled ? configuration.words[dimensions + 1u] : 0u;
+        indirect_dispatches.words[word + 2u] =
+            enabled ? configuration.words[dimensions + 2u] : 0u;
+    }
+}
+
+void main() {
+    uint selected_count = 0u;
+    uint resolved_count = 0u;
+    uint missing_count = 0u;
+    uint invalid_selection = 0u;
+    uint published = missing_requests.words[0];
+    uint consumed = missing_requests.words[1];
+    uint pending = published - consumed;
+
+    for (uint selection = 0u; selection < control.selection_count; selection += 1u) {
+        uint resource_index = selected_resource(selection);
+        if (selection_is_duplicate(selection, resource_index)) continue;
+        selected_count += 1u;
+        if (resource_index >= configuration.words[2]) {
+            invalid_selection = 1u;
+            continue;
+        }
+
+        uint group_record = resource_index * GROUP_RECORD_WORDS;
+        uint first_member = resource_groups.words[group_record];
+        uint member_count = resource_groups.words[group_record + 1u];
+        bool resident = true;
+        for (uint member = 0u; member < member_count; member += 1u) {
+            uint slot = resource_address_slots.words[first_member + member];
+            resident = resident && address_slot_is_resident(slot);
+        }
+        if (!resident) {
+            if (pending + missing_count < configuration.words[3]) {
+                uint queue_slot = (published + missing_count) % configuration.words[3];
+                uint request = MISSING_HEADER_WORDS
+                    + queue_slot * MISSING_RECORD_WORDS;
+                missing_requests.words[request] = control.checkpoint_tag;
+                missing_requests.words[request + 1u] = resource_index;
+            } else {
+                missing_requests.words[2] = 1u;
+            }
+            missing_count += 1u;
+            continue;
+        }
+
+        for (uint member = 0u; member < member_count; member += 1u) {
+            if (resolved_count >= configuration.words[4]) {
+                invalid_selection = 1u;
+                break;
+            }
+            uint slot = resource_address_slots.words[first_member + member];
+            copy_resolved_address(
+                resolved_count,
+                resource_index,
+                member,
+                slot
+            );
+            resolved_count += 1u;
+        }
+    }
+
+    bool all_resident = missing_count == 0u && invalid_selection == 0u;
+    resolved_addresses.words[0] = all_resident ? 1u : 0u;
+    resolved_addresses.words[1] = selected_count;
+    resolved_addresses.words[2] = resolved_count;
+    resolved_addresses.words[3] = missing_count;
+    resolved_addresses.words[4] = invalid_selection;
+    resolved_addresses.words[5] = control.checkpoint_tag;
+    resolved_addresses.words[6] = 0u;
+    resolved_addresses.words[7] = 0u;
+    write_indirect_dispatches(all_resident);
+
+    memoryBarrierBuffer();
+    if (missing_count != 0u) {
+        uint capacity = configuration.words[3];
+        uint publishable = min(missing_count, capacity - min(pending, capacity));
+        missing_requests.words[0] = published + publishable;
+        missing_requests.words[3] += 1u;
+    }
+}

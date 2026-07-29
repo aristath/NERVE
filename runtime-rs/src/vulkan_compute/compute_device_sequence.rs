@@ -759,9 +759,20 @@ impl VulkanComputeDevice {
             let mut pending_buffer_accesses = Vec::<VulkanResidentKernelBufferAccessRecord>::new();
             if !command_buffer_matches {
                 for (step_index, step) in steps.iter().enumerate() {
+                    let mut step_buffer_accesses =
+                        step.dispatch.buffer_accesses.clone();
+                    if let Some(indirect) = step.indirect_dispatch {
+                        merge_resident_kernel_buffer_accesses(
+                            &mut step_buffer_accesses,
+                            &[VulkanResidentKernelBufferAccessRecord {
+                                buffer: indirect.buffer.buffer,
+                                access: VulkanResidentKernelBufferAccess::Read,
+                            }],
+                        );
+                    }
                     let dependencies = take_resident_kernel_buffer_dependencies(
                         &mut pending_buffer_accesses,
-                        &step.dispatch.buffer_accesses,
+                        &step_buffer_accesses,
                     );
                     if !dependencies.is_empty() {
                         let buffer_barriers = dependencies
@@ -857,7 +868,7 @@ impl VulkanComputeDevice {
                     }
                     merge_resident_kernel_buffer_accesses(
                         &mut pending_buffer_accesses,
-                        &step.dispatch.buffer_accesses,
+                        &step_buffer_accesses,
                     );
                     if let Some(query_pool) = query_pool {
                         self.device.cmd_write_timestamp(
