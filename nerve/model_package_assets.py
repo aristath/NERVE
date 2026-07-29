@@ -1,5 +1,6 @@
 from nerve.model_package_common import *
 from nerve.model_package_tensors import *
+from nerve.model_package_packed_tensors import *
 
 def stream_control_binding_for_node(circuit: Json, node: Json) -> int:
     state_view_signals = {
@@ -265,7 +266,42 @@ def copy_tensor_package(
                 }
             )
             continue
-        if info.get("source_parts"):
+        quantization = info.get("quantization")
+        if (
+            isinstance(quantization, dict)
+            and quantization.get("format") == "auto_gptq"
+            and auto_gptq_packing(info) == AUTO_GPTQ_INPUT_MAJOR_PACKING
+            and auto_gptq_zero_encoding(info) == AUTO_GPTQ_PER_GROUP_ZERO
+        ):
+            source = Path(info["source_file"])
+            if not source.is_file():
+                raise ModelCompileError(f"tensor source file does not exist: {source}")
+            zero_name = str(quantization.get("qzeros") or "")
+            zero_info = packaged["tensors"].get(zero_name)
+            if not isinstance(zero_info, dict):
+                raise ModelCompileError(
+                    f"AutoGPTQ tensor {tensor_name!r} references missing zero "
+                    f"tensor {zero_name!r}"
+                )
+            zero_source = Path(zero_info["source_file"])
+            if not zero_source.is_file():
+                raise ModelCompileError(
+                    f"AutoGPTQ zero source file does not exist: {zero_source}"
+                )
+            header_bytes, data_sha256 = (
+                write_compiled_auto_gptq_fixed_zero_8(
+                    tensor_name=tensor_name,
+                    info=info,
+                    zero_info=zero_info,
+                    source=source,
+                    zero_source=zero_source,
+                    destination=destination,
+                    layout=layout,
+                    cancel_requested=cancel_requested,
+                )
+            )
+            quantization["zero_point_encoding"] = AUTO_GPTQ_FIXED_ZERO_8
+        elif info.get("source_parts"):
             header_bytes, data_sha256 = write_compiled_composite_tensor(
                 tensor_name=tensor_name,
                 info=info,
@@ -291,14 +327,21 @@ def copy_tensor_package(
         info.pop("source_parts", None)
         info.pop("source_header_bytes", None)
         info.pop("layout_hint", None)
+        source_metadata = {
+            "format": "nerve",
+            "layout": layout,
+        }
+        if (
+            isinstance(quantization, dict)
+            and quantization.get("format") == "auto_gptq"
+        ):
+            source_metadata["packing_layout"] = auto_gptq_packing(info)
+            source_metadata["zero_point_encoding"] = auto_gptq_zero_encoding(info)
         compiled_sources.append(
             {
                 "path": relative_destination,
                 "safetensors_header_bytes": header_bytes,
-                "metadata": {
-                    "format": "nerve",
-                    "layout": layout,
-                },
+                "metadata": source_metadata,
             }
         )
 

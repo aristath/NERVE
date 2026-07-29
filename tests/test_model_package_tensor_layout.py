@@ -1,4 +1,5 @@
 from model_package_layout_common import *
+from hashlib import sha256
 from nerve.model_package_derived_tensors import (
     derive_internal_q8_linear_tensors,
     derive_output_projection_tensors,
@@ -13,6 +14,9 @@ from nerve.model_package_tensors import (
     write_compiled_derived_fp8_e4m3_output_projection,
     write_compiled_derived_bf16_from_fp8_e4m3,
     write_compiled_derived_q8_0_from_fp8_e4m3,
+)
+from nerve.model_package_packed_tensors import (
+    write_compiled_auto_gptq_fixed_zero_8,
 )
 
 import numpy as np
@@ -56,6 +60,133 @@ def test_write_compiled_tensor_preserves_canonical_row_major_order(
     header_bytes = struct.unpack("<Q", compiled[:8])[0]
     payload = compiled[8 + header_bytes :]
     assert struct.unpack("<16H", payload) == values
+
+
+def test_compiler_canonicalizes_auto_gptq_weights_to_fixed_zero_8_exactly(
+    tmp_path: Path,
+) -> None:
+    tensor_name = "projection.qweight"
+    zero_name = "projection.qzeros"
+    source_values = np.full((2, 4), 0x88888888, dtype="<u4")
+    zero_values = np.array([[0x8787], [0x7777]], dtype="<u4")
+    source_header = {
+        tensor_name: {
+            "dtype": "I32",
+            "shape": [2, 4],
+            "data_offsets": [0, source_values.nbytes],
+        }
+    }
+    source_header_payload = json.dumps(source_header).encode("utf-8")
+    source = tmp_path / "source.safetensors"
+    source.write_bytes(
+        struct.pack("<Q", len(source_header_payload))
+        + source_header_payload
+        + source_values.tobytes()
+    )
+    zero_header = {
+        zero_name: {
+            "dtype": "I32",
+            "shape": [2, 1],
+            "data_offsets": [0, zero_values.nbytes],
+        }
+    }
+    zero_header_payload = json.dumps(zero_header).encode("utf-8")
+    zero_source = tmp_path / "zeros.safetensors"
+    zero_source.write_bytes(
+        struct.pack("<Q", len(zero_header_payload))
+        + zero_header_payload
+        + zero_values.tobytes()
+    )
+    destination = tmp_path / "compiled.safetensors"
+
+    header_bytes, data_sha256 = (
+        write_compiled_auto_gptq_fixed_zero_8(
+            tensor_name=tensor_name,
+            info={
+                "dtype": "I32",
+                "shape": [2, 4],
+                "logical_shape": [4, 16],
+                "data_offsets": [0, source_values.nbytes],
+                "byte_count": source_values.nbytes,
+                "quantization": {
+                    "format": "auto_gptq",
+                    "bits": 4,
+                    "group_size": 8,
+                    "zero_point_add": 1,
+                    "packing_layout": "input_major_packed_columns",
+                    "zero_point_encoding": "packed_per_group_output",
+                },
+            },
+            zero_info={
+                "dtype": "I32",
+                "shape": [2, 1],
+                "data_offsets": [0, zero_values.nbytes],
+                "byte_count": zero_values.nbytes,
+            },
+            source=source,
+            zero_source=zero_source,
+            destination=destination,
+            layout=ROW_MAJOR_LAYOUT,
+        )
+    )
+
+    compiled = destination.read_bytes()
+    header = json.loads(compiled[8 : 8 + header_bytes])
+    payload = compiled[8 + header_bytes :]
+    assert header["__metadata__"]["packing_layout"] == "input_major_packed_columns"
+    assert header["__metadata__"]["zero_point_encoding"] == "fixed_8"
+    assert header[tensor_name]["shape"] == [2, 4]
+    np.testing.assert_array_equal(
+        np.frombuffer(payload, dtype="<u4").reshape(2, 4),
+        np.array(
+            [
+                [0x88888888, 0x77777777, 0x88888888, 0x77777777],
+                [0x88888888, 0x88888888, 0x88888888, 0x88888888],
+            ],
+            dtype="<u4",
+        ),
+    )
+    assert data_sha256 == sha256(payload).hexdigest()
+
+    inexact_values = source_values.copy()
+    inexact_values[0, 1] = np.uint32(0)
+    source.write_bytes(
+        struct.pack("<Q", len(source_header_payload))
+        + source_header_payload
+        + inexact_values.tobytes()
+    )
+    with pytest.raises(
+        ModelCompileError,
+        match="cannot be represented exactly with fixed zero point 8",
+    ):
+        write_compiled_auto_gptq_fixed_zero_8(
+            tensor_name=tensor_name,
+            info={
+                "dtype": "I32",
+                "shape": [2, 4],
+                "logical_shape": [4, 16],
+                "data_offsets": [0, inexact_values.nbytes],
+                "byte_count": inexact_values.nbytes,
+                "quantization": {
+                    "format": "auto_gptq",
+                    "bits": 4,
+                    "group_size": 8,
+                    "zero_point_add": 1,
+                    "packing_layout": "input_major_packed_columns",
+                    "zero_point_encoding": "packed_per_group_output",
+                },
+            },
+            zero_info={
+                "dtype": "I32",
+                "shape": [2, 1],
+                "data_offsets": [0, zero_values.nbytes],
+                "byte_count": zero_values.nbytes,
+            },
+            source=source,
+            zero_source=zero_source,
+            destination=tmp_path / "inexact.safetensors",
+            layout=ROW_MAJOR_LAYOUT,
+        )
 
 
 def test_compiler_derives_fp8_output_projection_tensor_pair(tmp_path: Path) -> None:

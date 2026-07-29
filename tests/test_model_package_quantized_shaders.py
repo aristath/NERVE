@@ -366,6 +366,7 @@ def test_compiler_renders_native_auto_gptq_int4_linear_variants(
     assert "const uint INPUT_SIZE = 512u;" in linear
     assert "const uint OUTPUT_SIZE = 768u;" in linear
     assert "const uint OUTPUT_TILE_ROWS = 64u;" in linear
+    assert "subgroupAdd(sum)" not in linear
     assert "SPV_KHR_integer_dot_product" not in linear
     assert "int8_dot4" not in linear
     assert "quantized_input" not in linear
@@ -451,6 +452,8 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
                     "bits": 4,
                     "group_size": 128,
                     "zero_point_add": 1,
+                    "packing_layout": "input_major_packed_columns",
+                    "zero_point_encoding": "fixed_8",
                 },
             },
             "qzeros": {
@@ -471,6 +474,23 @@ def test_packed_int4_projection_requests_reusable_int8_input_representation() ->
         "input_size": 512,
         "block_columns": 32,
     }
+    assert (
+        physical_input_prequantization_spec(
+            circuit,
+            node,
+            tensor_index,
+            compiler_target={
+                "devices": [
+                    {
+                        "shader_features": [],
+                        "subgroup_operations": ["arithmetic"],
+                        "subgroup_compute_supported": True,
+                    }
+                ]
+            },
+        )
+        is None
+    )
     lowered = {
         **node,
         "inputs": ["normalized_int8", "normalized_scale"],
@@ -734,7 +754,12 @@ def test_compiler_tiles_int4_dispatch_by_physical_packing_format() -> None:
                 "dtype": "I32",
                 "shape": [640, 17408],
                 "logical_shape": [17408, 5120],
-                "quantization": {"format": "auto_gptq"},
+                "quantization": {
+                    "format": "auto_gptq",
+                    "group_size": 128,
+                    "packing_layout": "input_major_packed_columns",
+                    "zero_point_encoding": "fixed_8",
+                },
             }
         }
     }

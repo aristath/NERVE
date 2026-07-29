@@ -157,6 +157,8 @@ def test_annotates_auto_gptq_storage_as_logical_packed_linear(
         "group_size": 128,
         "symmetric": True,
         "zero_point_add": 1,
+        "packing_layout": "input_major_packed_columns",
+        "zero_point_encoding": "packed_per_group_output",
         "qzeros": "projection.qzeros",
         "scales": "projection.scales",
     }
@@ -211,4 +213,3 @@ def test_annotates_compressed_tensors_int4_storage_by_structure(
         "projection": "projection.weight_packed",
         "projection_scales": "projection.weight_scale",
     }
-

@@ -1,4 +1,8 @@
 from nerve.model_transpiler_types import *
+from nerve.quantized_layouts import (
+    AUTO_GPTQ_INPUT_MAJOR_PACKING,
+    AUTO_GPTQ_PER_GROUP_ZERO,
+)
 
 
 def tensor_matrix_shape(tensors: dict[str, Json], tensor_name: str) -> list[int]:
@@ -341,6 +345,8 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
             "group_size": group_size,
             "symmetric": bool(quantization.get("sym", True)),
             "zero_point_add": 1,
+            "packing_layout": AUTO_GPTQ_INPUT_MAJOR_PACKING,
+            "zero_point_encoding": AUTO_GPTQ_PER_GROUP_ZERO,
             "qzeros": qzeros_name,
             "scales": scales_name,
         }
@@ -513,4 +519,3 @@ def add_optional_linear_biases(
         bias = find_bias_for_weight(tensors, layer_tensors[weight_id])
         if bias is not None:
             layer_tensors[f"{weight_id}_bias"] = bias
-

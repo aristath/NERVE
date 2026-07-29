@@ -8,6 +8,13 @@ from typing import Protocol
 import numpy as np
 
 from nerve.compilation import Json, ModelCompileError, read_json
+from nerve.quantized_layouts import (
+    AUTO_GPTQ_FIXED_ZERO_8,
+    AUTO_GPTQ_INPUT_MAJOR_PACKING,
+    AUTO_GPTQ_PER_GROUP_ZERO,
+    auto_gptq_packing,
+    auto_gptq_zero_encoding,
+)
 
 
 @dataclass(frozen=True)
@@ -400,7 +407,12 @@ class PackageTensorRepository:
             raise ModelCompileError("AutoGPTQ INT4 analysis requires a rank-2 tensor")
         output_features, input_features = logical_shape
         storage_shape = tuple(int(value) for value in info["shape"])
-        expected_storage_shape = ((input_features + 7) // 8, output_features)
+        packing_layout = auto_gptq_packing(info)
+        expected_storage_shape = (
+            ((input_features + 7) // 8, output_features)
+            if packing_layout == AUTO_GPTQ_INPUT_MAJOR_PACKING
+            else ()
+        )
         if storage_shape != expected_storage_shape:
             raise ModelCompileError(
                 f"AutoGPTQ INT4 storage shape {storage_shape} does not encode "
@@ -442,21 +454,36 @@ class PackageTensorRepository:
         packed = np.asarray(
             self._memmap(info, "I32", storage_shape)[
                 np.ix_(input_indices // 8, output_indices)
-            ],
+            ].T,
             dtype=np.uint32,
         )
-        weight_shifts = ((input_indices % 8) * np.uint32(4))[:, None]
+        weight_shifts = ((input_indices % 8) * np.uint32(4))[None, :]
         quantized = ((packed >> weight_shifts) & np.uint32(0x0F)).astype(np.int16)
 
-        qzeros = np.asarray(
-            self._memmap(qzeros_info, "I32", qzeros_shape)[
-                np.ix_(input_groups, output_indices // 8)
-            ],
-            dtype=np.uint32,
-        )
-        zero_shifts = ((output_indices % 8) * np.uint32(4))[None, :]
-        zero_points = ((qzeros >> zero_shifts) & np.uint32(0x0F)).astype(np.int16)
-        zero_points += int(quantization.get("zero_point_add", 0))
+        zero_encoding = auto_gptq_zero_encoding(info)
+        if zero_encoding == AUTO_GPTQ_FIXED_ZERO_8:
+            zero_points = np.full(
+                (len(output_indices), len(input_indices)),
+                8,
+                dtype=np.int16,
+            )
+        elif zero_encoding == AUTO_GPTQ_PER_GROUP_ZERO:
+            qzeros = np.asarray(
+                self._memmap(qzeros_info, "I32", qzeros_shape)[
+                    np.ix_(input_groups, output_indices // 8)
+                ],
+                dtype=np.uint32,
+            )
+            zero_shifts = ((output_indices % 8) * np.uint32(4))[None, :]
+            zero_points = (
+                ((qzeros >> zero_shifts) & np.uint32(0x0F)).astype(np.int16)
+                + int(quantization.get("zero_point_add", 0))
+            ).T
+        else:
+            raise ModelCompileError(
+                f"AutoGPTQ INT4 analysis does not support zero encoding "
+                f"{zero_encoding!r}"
+            )
 
         raw_scales = self._memmap(
             scales_info,
@@ -464,7 +491,7 @@ class PackageTensorRepository:
             scales_shape,
         )[np.ix_(input_groups, output_indices)]
         scales = _to_f32(raw_scales, str(scales_info["dtype"]))
-        return ((quantized - zero_points).astype(np.float32) * scales).T
+        return (quantized - zero_points).astype(np.float32) * scales.T
 
     def _memmap_bytes(self, info: Json) -> np.memmap:
         source_ref = info.get("source_file")

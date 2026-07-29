@@ -51,26 +51,21 @@ float read_weight_scale(uint row, uint group) {
 {{READ_SCALE_BODY}}
 }
 
-int read_weight_zero(uint row, uint group) {
-    uint packed = qzeros.words[group * ZERO_WORDS + (row >> 3u)];
-    return int((packed >> ((row & 7u) * 4u)) & 15u) + 1;
-}
-
-vec4 unpack_weight_lo(uint packed, int zero) {
+vec4 unpack_weight_lo(uint packed) {
     return vec4(
-        float(int(packed & 15u) - zero),
-        float(int((packed >> 4u) & 15u) - zero),
-        float(int((packed >> 8u) & 15u) - zero),
-        float(int((packed >> 12u) & 15u) - zero)
+        float(int(packed & 15u) - 8),
+        float(int((packed >> 4u) & 15u) - 8),
+        float(int((packed >> 8u) & 15u) - 8),
+        float(int((packed >> 12u) & 15u) - 8)
     );
 }
 
-vec4 unpack_weight_hi(uint packed, int zero) {
+vec4 unpack_weight_hi(uint packed) {
     return vec4(
-        float(int((packed >> 16u) & 15u) - zero),
-        float(int((packed >> 20u) & 15u) - zero),
-        float(int((packed >> 24u) & 15u) - zero),
-        float(int((packed >> 28u) & 15u) - zero)
+        float(int((packed >> 16u) & 15u) - 8),
+        float(int((packed >> 20u) & 15u) - 8),
+        float(int((packed >> 24u) & 15u) - 8),
+        float(int((packed >> 28u) & 15u) - 8)
     );
 }
 
@@ -85,7 +80,6 @@ uint f32_to_bf16(float value) {
 float project_row(uint batch_index, uint row) {
     float sum = 0.0;
     for (uint group = 0u; group < WEIGHT_GROUPS; group++) {
-        int zero = read_weight_zero(row, group);
         float weight_scale = read_weight_scale(row, group);
         uint first_packed_column = group * PACKED_COLUMNS_PER_GROUP;
         for (
@@ -98,10 +92,10 @@ float project_row(uint batch_index, uint row) {
             sum = fma(
                 dot(
                     read_inputx4(batch_index, packed_column * 8u),
-                    unpack_weight_lo(packed, zero)
+                    unpack_weight_lo(packed)
                 ) + dot(
                     read_inputx4(batch_index, packed_column * 8u + 4u),
-                    unpack_weight_hi(packed, zero)
+                    unpack_weight_hi(packed)
                 ),
                 weight_scale,
                 sum
@@ -129,7 +123,7 @@ void main() {
         barrier();
 
         if (lane < OUTPUT_TILE_ROWS / 2u) {
-            row = first_row + lane * 2u;
+            uint row = first_row + lane * 2u;
             if (row < OUTPUT_SIZE) {
                 uint hi = row + 1u < OUTPUT_SIZE
                     ? f32_to_bf16(output_rows[lane * 2u + 1u])

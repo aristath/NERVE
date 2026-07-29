@@ -4,6 +4,12 @@ from nerve.physical_representations import (
     INT8_PREQUANTIZATION_CONTRACT,
     prequantization_spec,
 )
+from nerve.quantized_layouts import (
+    AUTO_GPTQ_FIXED_ZERO_8,
+    AUTO_GPTQ_INPUT_MAJOR_PACKING,
+    auto_gptq_packing,
+    auto_gptq_zero_encoding,
+)
 
 import numpy as np
 
@@ -676,7 +682,11 @@ def can_fuse_native_parallel_linears(
 
 
 def physical_input_prequantization_spec(
-    circuit: Json, node: Json, tensor_index: Json
+    circuit: Json,
+    node: Json,
+    tensor_index: Json,
+    *,
+    compiler_target: Json | None = None,
 ) -> Json | None:
     fp8_spec = _fp8_prequantization_spec(circuit, node, tensor_index)
     if fp8_spec is not None:
@@ -687,6 +697,15 @@ def physical_input_prequantization_spec(
         )
     if node.get("op") not in {"linear", "linear_residual"}:
         return None
+    if compiler_target is not None:
+        target_devices = compiler_target.get("devices", [])
+        if not target_devices or not all(
+            "shader_integer_dot_product" in set(device.get("shader_features", []))
+            and "arithmetic" in set(device.get("subgroup_operations", []))
+            and bool(device.get("subgroup_compute_supported"))
+            for device in target_devices
+        ):
+            return None
     params = node.get("params", [])
     if not params:
         return None
@@ -1238,10 +1257,15 @@ def packed_int4_linear_group_size_for_node(
     scales_shape = parameter_shape_for_id(circuit, scales_id, tensor_index)
     group_size = int(quantization.get("group_size") or 0)
     group_count = (in_features + group_size - 1) // group_size if group_size else 0
-    if packed_shape != [in_features // 8, out_features]:
+    if (
+        auto_gptq_packing(weight_info) != AUTO_GPTQ_INPUT_MAJOR_PACKING
+        or auto_gptq_zero_encoding(weight_info) != AUTO_GPTQ_FIXED_ZERO_8
+        or packed_shape != [in_features // 8, out_features]
+    ):
         raise ModelCompileError(
-            f"packed INT4 weight shape {packed_shape} does not encode "
-            f"{[out_features, in_features]}"
+            f"packed INT4 execution layout {auto_gptq_packing(weight_info)!r} "
+            f"with zero encoding {auto_gptq_zero_encoding(weight_info)!r} and "
+            f"shape {packed_shape} does not encode {[out_features, in_features]}"
         )
     if qzeros_shape != [group_count, (out_features + 7) // 8]:
         raise ModelCompileError(

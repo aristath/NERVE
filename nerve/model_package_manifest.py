@@ -436,7 +436,12 @@ def build_vulkan_resident_package_manifest(
                 can_fuse_bf16_append_attention(circuit, append, attention, tensor_index)
             ),
             prequantization_spec=lambda node, circuit=circuit: (
-                physical_input_prequantization_spec(circuit, node, tensor_index)
+                physical_input_prequantization_spec(
+                    circuit,
+                    node,
+                    tensor_index,
+                    compiler_target=compiler_target,
+                )
             ),
             can_emit_representation=lambda producer, scope: (
                 can_emit_physical_representation_from_producer(

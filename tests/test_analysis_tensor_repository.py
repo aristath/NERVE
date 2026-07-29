@@ -214,10 +214,22 @@ def test_package_repository_decodes_and_samples_autogptq_int4(tmp_path: Path):
         dtype=int,
     ).astype(np.uint32)
     zero_points = np.fromfunction(
-        lambda group, output: 1 + (group * 2 + output) % 8,
+        lambda group, output: 8 + (group + output) % 2,
         (group_count, output_features),
         dtype=int,
     ).astype(np.uint32)
+    for group in range(group_count):
+        outputs_with_zero_9 = zero_points[group] == 9
+        quantized[
+            outputs_with_zero_9,
+            group * group_size : (group + 1) * group_size,
+        ] = np.maximum(
+            quantized[
+                outputs_with_zero_9,
+                group * group_size : (group + 1) * group_size,
+            ],
+            1,
+        )
     scales = np.fromfunction(
         lambda group, output: (group + 1) * (output + 1) / 16,
         (group_count, output_features),
@@ -302,6 +314,64 @@ def test_package_repository_decodes_and_samples_autogptq_int4(tmp_path: Path):
         sampled.values,
         expected[np.ix_(*sampled.sample_indices)],
     )
+
+    canonical_quantized = quantized.copy()
+    for input_index in range(input_features):
+        canonical_quantized[:, input_index] += (
+            8 - zero_points[input_index // group_size]
+        )
+    canonical_qweight = np.zeros_like(qweight)
+    for input_index in range(input_features):
+        canonical_qweight[input_index // 8] |= (
+            canonical_quantized[:, input_index]
+            << np.uint32((input_index % 8) * 4)
+        )
+
+    fixed_zero_repository = _package(
+        tmp_path / "fixed-zero",
+        [
+            (
+                "qweight",
+                "I32",
+                list(canonical_qweight.shape),
+                canonical_qweight.astype("<u4").tobytes(),
+                {
+                    "logical_shape": [output_features, input_features],
+                    "quantization": {
+                        "format": "auto_gptq",
+                        "bits": 4,
+                        "group_size": group_size,
+                        "symmetric": True,
+                        "zero_point_add": 1,
+                        "packing_layout": "input_major_packed_columns",
+                        "zero_point_encoding": "fixed_8",
+                        "qzeros": "qzeros",
+                        "scales": "scales",
+                    },
+                },
+            ),
+            (
+                "qzeros",
+                "I32",
+                list(qzeros.shape),
+                qzeros.astype("<u4").tobytes(),
+                {},
+            ),
+            (
+                "scales",
+                "F16",
+                list(scales.shape),
+                scales.astype("<f2").tobytes(),
+                {},
+            ),
+        ],
+    )
+    fixed_zero = fixed_zero_repository.observe(
+        "qweight",
+        exhaustive_element_limit=None,
+        sampled_element_limit=160,
+    )
+    np.testing.assert_array_equal(fixed_zero.values, expected)
 
 
 def test_package_repository_sampling_is_deterministic_and_declared(tmp_path: Path):

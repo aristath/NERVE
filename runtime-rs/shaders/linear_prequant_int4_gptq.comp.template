@@ -45,16 +45,11 @@ float read_weight_scale(uint row, uint group) {
 {{READ_SCALE_BODY}}
 }
 
-int read_weight_zero(uint row, uint group) {
-    uint packed = qzeros.words[group * ZERO_WORDS + (row >> 3u)];
-    return int((packed >> ((row & 7u) * 4u)) & 15u) + 1;
-}
-
-uint pack_weight_i8x4(uint packed, uint nibble_offset, int zero) {
-    int a = int((packed >> ((nibble_offset + 0u) * 4u)) & 15u) - zero;
-    int b = int((packed >> ((nibble_offset + 1u) * 4u)) & 15u) - zero;
-    int c = int((packed >> ((nibble_offset + 2u) * 4u)) & 15u) - zero;
-    int d = int((packed >> ((nibble_offset + 3u) * 4u)) & 15u) - zero;
+uint pack_weight_i8x4(uint packed, uint nibble_offset) {
+    int a = int((packed >> ((nibble_offset + 0u) * 4u)) & 15u) - 8;
+    int b = int((packed >> ((nibble_offset + 1u) * 4u)) & 15u) - 8;
+    int c = int((packed >> ((nibble_offset + 2u) * 4u)) & 15u) - 8;
+    int d = int((packed >> ((nibble_offset + 3u) * 4u)) & 15u) - 8;
     return (uint(a) & 255u)
         | ((uint(b) & 255u) << 8u)
         | ((uint(c) & 255u) << 16u)
@@ -74,7 +69,6 @@ float project_row(uint batch_index, uint row) {
     uint input_word_base = batch_index * INT8_WORDS;
     uint input_scale_base = batch_index * INT8_BLOCKS;
     for (uint group = 0u; group < WEIGHT_GROUPS; group++) {
-        int zero = read_weight_zero(row, group);
         float weight_scale = read_weight_scale(row, group);
         uint first_packed_column = group * PACKED_COLUMNS_PER_GROUP;
         for (
@@ -98,11 +92,11 @@ float project_row(uint batch_index, uint row) {
                     + packed_in_block * 2u;
                 block_dot += dotPacked4x8EXT(
                     int32_t(quantized_inputs.words[activation_word]),
-                    int32_t(pack_weight_i8x4(packed, 0u, zero))
+                    int32_t(pack_weight_i8x4(packed, 0u))
                 );
                 block_dot += dotPacked4x8EXT(
                     int32_t(quantized_inputs.words[activation_word + 1u]),
-                    int32_t(pack_weight_i8x4(packed, 4u, zero))
+                    int32_t(pack_weight_i8x4(packed, 4u))
                 );
             }
             uint input_block = group * INT8_BLOCKS_PER_GROUP + int8_block;
@@ -134,7 +128,7 @@ void main() {
         barrier();
 
         if (lane < OUTPUT_TILE_ROWS / 2u) {
-            row = first_row + lane * 2u;
+            uint row = first_row + lane * 2u;
             if (row < OUTPUT_SIZE) {
                 uint hi = row + 1u < OUTPUT_SIZE
                     ? f32_to_bf16(output_rows[lane * 2u + 1u])
