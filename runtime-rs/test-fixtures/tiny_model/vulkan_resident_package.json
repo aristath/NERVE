@@ -1660,6 +1660,7 @@
   "tokenizer": {
     "path": "tokenizer",
     "files": [
+      "chat_template.jinja",
       "tokenizer.json",
       "tokenizer_config.json"
     ]
@@ -3219,9 +3220,13 @@
         "byte_count": 7272,
         "sha256": "8d9e4c69b7ea86becd326f0a7e617247ca99d9bf102ee30cf7d2cb49e534af78"
       },
+      "tokenizer/chat_template.jinja": {
+        "byte_count": 145,
+        "sha256": "70da5304d7b88532c7caba95fa0fd5dfc92a8bed38cafb659f58944fb252af0b"
+      },
       "tokenizer/tokenizer.json": {
-        "byte_count": 974,
-        "sha256": "d74ee0eb4c73ae5b428793af1e2c321621f6788ccaefeb72db21760e89bfe951"
+        "byte_count": 1685,
+        "sha256": "e663b11a879db32bab5580ada57509e6011f923eb542f6d4966b9e6c877b4665"
       },
       "tokenizer/tokenizer_config.json": {
         "byte_count": 99,
