@@ -1413,6 +1413,79 @@ mod tests {
     }
 
     #[test]
+    fn conditional_sequence_requires_explicit_unconditional_snapshot_safety() {
+        let spirv_words =
+            compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
+        let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let state = device.create_resident_buffer(12).unwrap();
+        state.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        let snapshot = device.create_host_visible_resident_buffer(12).unwrap();
+        snapshot.write_bytes(&[0; 12]).unwrap();
+        let predicate = device.create_conditional_resident_buffer(4).unwrap();
+        predicate.write_bytes(&0u32.to_le_bytes()).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &state, 12)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let step = VulkanResidentKernelSequenceStep::new_conditional(
+            &dispatch,
+            &[],
+            &predicate,
+            0,
+            false,
+            1,
+        )
+        .unwrap();
+        let unsafe_copy =
+            VulkanResidentKernelSequenceSnapshotCopy::new(0, &state, &snapshot, 0, 0, 12).unwrap();
+        let rejected = device
+            .record_resident_kernel_sequence_with_snapshot_copies(
+                &device.create_resident_kernel_sequence().unwrap(),
+                &[step],
+                &[unsafe_copy],
+            )
+            .unwrap_err();
+        assert!(rejected
+            .to_string()
+            .contains("without explicit checkpoint-resume safety"));
+
+        let range =
+            VulkanResidentBufferRangeCopy::new(&state, &snapshot, 0, 0, 12).unwrap();
+        let safe_copy = VulkanResidentKernelSequenceSnapshotCopy::
+            unconditional_from_range_after_conditional_step(0, range);
+        let sequence = device.create_resident_kernel_sequence().unwrap();
+        device
+            .run_resident_kernel_sequence_with_snapshot_copies(
+                &sequence,
+                &[step],
+                &[safe_copy],
+            )
+            .unwrap();
+        assert_eq!(
+            bytes_to_u32(&snapshot.read_bytes(12).unwrap()),
+            vec![1, 2, 41]
+        );
+
+        predicate.write_bytes(&1u32.to_le_bytes()).unwrap();
+        device
+            .run_recorded_resident_kernel_sequence(&sequence)
+            .unwrap();
+        assert_eq!(
+            bytes_to_u32(&snapshot.read_bytes(12).unwrap()),
+            vec![2, 3, 42]
+        );
+    }
+
+    #[test]
     fn generic_resident_kernel_dispatch_validates_push_constant_size() {
         let Some(spirv_words) = compile_test_shader_words() else {
             eprintln!("skipping Vulkan smoke: no GLSL to SPIR-V compiler found");

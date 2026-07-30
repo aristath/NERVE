@@ -48,6 +48,8 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         prefix_dispatches: &[&VulkanResidentKernelDispatch],
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         sequence_variant: u8,
+        input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
+        post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         if self.dispatch_segments.len() != 1
             || self.distributed_dispatch_count != 0
@@ -65,26 +67,30 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             .dispatch_segments
             .first()
             .expect("one demand segment was validated");
-        if segment.demand_residency.is_none() {
-            return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
-                VulkanError(
-                    "single-segment demand execution was requested for an eager segment"
-                        .to_string(),
-                ),
-            ));
-        }
-        segment.submit_with_stream_control_and_timeline_semaphores(
+        let demand = segment.demand_residency.as_ref().ok_or_else(|| {
+            VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(
+                "single-segment demand execution was requested for an eager segment"
+                    .to_string(),
+            ))
+        })?;
+        segment
+            .stream_control_buffer
+            .write_bytes_at(
+                VULKAN_STREAM_CONTROL_METADATA_OFFSET,
+                &stream_control_metadata_bytes(control),
+            )
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        demand.run(
             device,
+            &segment.dispatches,
             control,
             prefix_dispatches,
             suffix_dispatches,
             sequence_variant,
-            None,
             &[],
             &[],
-            &[],
-            true,
-            None,
+            input_copies,
+            post_copies,
         )
     }
 

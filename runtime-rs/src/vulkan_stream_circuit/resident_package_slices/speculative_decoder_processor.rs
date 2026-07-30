@@ -781,15 +781,20 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         self.input_transducer
             .prepare_token_id_only(initial_token_id)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::InputTransducer)?;
-        self.pending_hidden_input_copy
-            .run(self.pending_hidden_input_copy.byte_len())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
         let dynamic_state_capacity_activations = self.speculative_dynamic_state_capacity()?;
         let hidden_input = self
             .mounted
             .boundary_io
             .input_buffer(&self.hidden_input_signal_id)
             .expect("validated speculative hidden input must remain mounted");
+        let feedback_copy = VulkanResidentBufferRangeCopy::new(
+            self.output_transducer.normalized_frame_buffer(),
+            &hidden_input.buffer,
+            0,
+            0,
+            hidden_input.byte_capacity,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
         let mut tokens = Vec::with_capacity(draft_token_count);
         for draft_index in 0..draft_token_count {
             let stream_tick = start_stream_tick
@@ -802,20 +807,31 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 control_flags: 0,
                 dynamic_state_capacity_activations,
             };
-            self.run_demand_decoder_tick(device, control, true)?;
+            if draft_index == 0 {
+                self.run_demand_decoder_tick(
+                    device,
+                    control,
+                    true,
+                    &[VulkanResidentKernelSequenceInputCopy::new(
+                        &self.pending_hidden_input_copy,
+                    )],
+                    &[feedback_copy],
+                )?;
+            } else {
+                self.run_demand_decoder_tick(
+                    device,
+                    control,
+                    true,
+                    &[],
+                    &[feedback_copy],
+                )?;
+            }
             tokens.push(
                 self.sampler
                     .completed_run_at(stream_tick)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?
                     .token_id,
             );
-            device
-                .copy_resident_buffer_bytes(
-                    self.output_transducer.normalized_frame_buffer(),
-                    &hidden_input.buffer,
-                    hidden_input.byte_capacity,
-                )
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
         }
         Ok(tokens)
     }
@@ -830,15 +846,20 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         self.input_transducer
             .prepare_token_id_only(input_token_id)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::InputTransducer)?;
-        self.pending_hidden_input_copy
-            .run(self.pending_hidden_input_copy.byte_len())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
         let control = VulkanMountedPlacedStreamControl {
             stream_tick,
             control_flags: 0,
             dynamic_state_capacity_activations: self.speculative_dynamic_state_capacity()?,
         };
-        self.run_demand_decoder_tick(device, control, include_output)?;
+        self.run_demand_decoder_tick(
+            device,
+            control,
+            include_output,
+            &[VulkanResidentKernelSequenceInputCopy::new(
+                &self.pending_hidden_input_copy,
+            )],
+            &[],
+        )?;
         include_output
             .then(|| self.sampler.completed_run())
             .transpose()
@@ -867,9 +888,6 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             ));
         }
         let dynamic_state_capacity_activations = self.speculative_dynamic_state_capacity()?;
-        self.pending_hidden_input_copy
-            .run(self.pending_hidden_input_copy.byte_len())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
         for (tick_index, input_token_id) in input_token_ids.iter().copied().enumerate() {
             let stream_tick = start_stream_tick
                 .checked_add(u64::try_from(tick_index).map_err(|_| {
@@ -885,8 +903,6 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 .stream_control_buffer
                 .write_bytes(&stream_control_bytes(input_token_id, control))
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            self.run_demand_decoder_tick(device, control, false)?;
-
             let source_offset = tick_index
                 .checked_mul(frame_byte_capacity)
                 .ok_or_else(|| {
@@ -907,10 +923,25 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 frame_byte_capacity,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            device
-                .create_resident_buffer_copy_batch(&[copy])
-                .and_then(|binding| binding.run())
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if tick_index == 0 {
+                self.run_demand_decoder_tick(
+                    device,
+                    control,
+                    false,
+                    &[VulkanResidentKernelSequenceInputCopy::new(
+                        &self.pending_hidden_input_copy,
+                    )],
+                    &[copy],
+                )?;
+            } else {
+                self.run_demand_decoder_tick(
+                    device,
+                    control,
+                    false,
+                    &[],
+                    &[copy],
+                )?;
+            }
         }
         Ok(())
     }
@@ -920,6 +951,8 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         device: &VulkanComputeDevice,
         control: VulkanMountedPlacedStreamControl,
         include_output: bool,
+        input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
+        post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let mut prefix_dispatches =
             Vec::with_capacity(1 + self.sampler.input_tracking_dispatches().len());
@@ -931,13 +964,18 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             suffix_dispatches.push(&self.output_transducer.tied_projection_dispatch);
             suffix_dispatches.extend(self.sampler.resident_dispatches());
         }
+        let sequence_variant = u8::from(include_output)
+            | (u8::from(!input_copies.is_empty()) << 1)
+            | (u8::from(!post_copies.is_empty()) << 2);
         self.execution_plan
             .run_single_segment_demand_resident(
                 device,
                 control,
                 &prefix_dispatches,
                 &suffix_dispatches,
-                u8::from(include_output),
+                sequence_variant,
+                input_copies,
+                post_copies,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)
     }

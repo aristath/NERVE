@@ -278,6 +278,7 @@ pub struct VulkanResidentKernelSequenceSnapshotCopy<'a> {
     source_offset: vk::DeviceSize,
     destination_offset: vk::DeviceSize,
     byte_len: vk::DeviceSize,
+    allow_after_conditional_step: bool,
 }
 
 impl<'a> VulkanResidentKernelSequenceSnapshotCopy<'a> {
@@ -323,7 +324,27 @@ impl<'a> VulkanResidentKernelSequenceSnapshotCopy<'a> {
             source_offset: source_offset as vk::DeviceSize,
             destination_offset: destination_offset as vk::DeviceSize,
             byte_len: byte_len as vk::DeviceSize,
+            allow_after_conditional_step: false,
         })
+    }
+
+    /// Vulkan transfer copies are not affected by conditional rendering.
+    /// Callers may opt into an unconditional snapshot after a conditional
+    /// dispatch only when a later checkpoint resume is guaranteed to
+    /// overwrite any stale copy before it can be consumed.
+    pub fn unconditional_from_range_after_conditional_step(
+        after_step_index: usize,
+        copy: VulkanResidentBufferRangeCopy<'a>,
+    ) -> Self {
+        Self {
+            after_step_index,
+            source: copy.source,
+            destination: copy.destination,
+            source_offset: copy.source_offset,
+            destination_offset: copy.destination_offset,
+            byte_len: copy.byte_len,
+            allow_after_conditional_step: true,
+        }
     }
 
     fn recorded(self) -> VulkanResidentKernelRecordedSnapshotCopy {

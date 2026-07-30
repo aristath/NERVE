@@ -524,12 +524,12 @@ impl VulkanComputeDevice {
                         "resident kernel sequence step {step_index} condition belongs to another logical device"
                     )));
                 }
-                if snapshot_copies
-                    .iter()
-                    .any(|copy| copy.after_step_index == step_index)
-                {
+                if snapshot_copies.iter().any(|copy| {
+                    copy.after_step_index == step_index
+                        && !copy.allow_after_conditional_step
+                }) {
                     return Err(VulkanError(format!(
-                        "resident kernel sequence step {step_index} cannot combine conditional execution with an unconditional snapshot copy"
+                        "resident kernel sequence step {step_index} cannot combine conditional execution with an unconditional snapshot copy without explicit checkpoint-resume safety"
                     )));
                 }
             }

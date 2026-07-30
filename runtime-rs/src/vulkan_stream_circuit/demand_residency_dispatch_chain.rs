@@ -235,6 +235,8 @@ impl VulkanDemandResidencySegment {
         sequence_variant: u8,
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
+        post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         if !self.chains.borrow().contains_key(&sequence_variant) {
             let chain = VulkanDemandResidencyDispatchChain::new(
@@ -260,6 +262,8 @@ impl VulkanDemandResidencySegment {
             suffix_dispatches,
             wait_points,
             signal_points,
+            input_copies,
+            post_copies,
             &self.context,
         )
     }
@@ -411,6 +415,8 @@ impl VulkanDemandResidencyDispatchChain {
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
+        post_copies: &[VulkanResidentBufferRangeCopy<'_>],
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         if !self.continuation_enabled.get() {
@@ -428,6 +434,8 @@ impl VulkanDemandResidencyDispatchChain {
             suffix_dispatches,
             wait_points,
             signal_points,
+            input_copies,
+            post_copies,
         )?;
         let mut resume_count = 0usize;
         loop {
@@ -529,6 +537,8 @@ impl VulkanDemandResidencyDispatchChain {
                 suffix_dispatches,
                 &[],
                 &[],
+                &[],
+                post_copies,
             )?;
         }
     }
@@ -544,6 +554,8 @@ impl VulkanDemandResidencyDispatchChain {
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
+        post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         let model_push_constants = dispatches
             .iter()
@@ -692,18 +704,48 @@ impl VulkanDemandResidencyDispatchChain {
                 );
             }
         }
+        if input_copies.is_empty() && post_copies.is_empty() {
+            device
+                .record_resident_kernel_sequence(sequence, &steps)
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+            device
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    sequence,
+                    wait_points,
+                    signal_points,
+                )
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+            return device
+                .wait_resident_kernel_sequence(sequence)
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan);
+        }
+        if !wait_points.is_empty() || !signal_points.is_empty() {
+            return Err(demand_dispatch_error(
+                "demand-resident inline copies cannot cross a timeline boundary",
+            ));
+        }
+        let after_step_index = steps
+            .len()
+            .checked_sub(1)
+            .expect("demand-resident chains contain at least one step");
+        let snapshot_copies = post_copies
+            .iter()
+            .copied()
+            .map(|copy| {
+                VulkanResidentKernelSequenceSnapshotCopy::
+                    unconditional_from_range_after_conditional_step(
+                        after_step_index,
+                        copy,
+                    )
+            })
+            .collect::<Vec<_>>();
         device
-            .record_resident_kernel_sequence(sequence, &steps)
-            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-        device
-            .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+            .run_resident_kernel_sequence_with_input_and_snapshot_copies(
                 sequence,
-                wait_points,
-                signal_points,
+                input_copies,
+                &steps,
+                &snapshot_copies,
             )
-            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-        device
-            .wait_resident_kernel_sequence(sequence)
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
     }
 }

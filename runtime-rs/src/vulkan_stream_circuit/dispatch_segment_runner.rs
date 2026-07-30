@@ -198,6 +198,8 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 sequence_variant,
                 wait_points,
                 signal_points,
+                &[],
+                &[],
             );
         }
         if let Some(feedback_lane) = feedback_lane {
@@ -487,6 +489,8 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 prefix_dispatches,
                 suffix_dispatches,
                 sequence_variant,
+                &[],
+                &[],
                 &[],
                 &[],
             )?;
