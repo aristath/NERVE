@@ -394,16 +394,14 @@ fn validate_generation_execution_contract(
         .iter()
         .map(|node| node.op.as_str())
         .collect::<Vec<_>>();
-    let norm_weight = output
-        .params
-        .refs
-        .get("output_norm.weight")
-        .and_then(|param| param.tensor.as_deref());
-    let projection_weight = output
-        .params
-        .refs
-        .get("output_projection.weight")
-        .and_then(|param| param.tensor.as_deref());
+    let parameter_tensor = |node: &CircuitNode| {
+        node.params
+            .first()
+            .and_then(|parameter_id| output.params.refs.get(parameter_id))
+            .and_then(|parameter| parameter.tensor.as_deref())
+    };
+    let norm_weight = output_nodes.first().and_then(|node| parameter_tensor(node));
+    let projection_weight = output_nodes.get(1).and_then(|node| parameter_tensor(node));
     if output_node_ids
         != manifest
             .output_transducer

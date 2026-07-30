@@ -148,11 +148,7 @@ impl VulkanResidentBatchedOutputNormRunner {
 }
 
 struct VulkanResidentBatchedOutputProjectionRunner {
-    batch_capacity: usize,
-    norm: VulkanResidentBatchedOutputNormRunner,
-    _batched_logits_buffer: VulkanResidentBuffer,
-    projection_dispatch: VulkanResidentKernelDispatch,
-    projection_sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    projection: VulkanResidentBatchedOutputProjectionKernelRunner,
     sampler_submission_catalog:
         RefCell<BTreeMap<usize, VulkanResidentQueueSubmissionTemplate>>,
     projection_sampler_submission_catalog:
@@ -160,10 +156,19 @@ struct VulkanResidentBatchedOutputProjectionRunner {
     sampler_views: Vec<VulkanResidentSamplerLogitsView>,
 }
 
-impl VulkanResidentBatchedOutputProjectionRunner {
+struct VulkanResidentBatchedOutputProjectionKernelRunner {
+    batch_capacity: usize,
+    norm: VulkanResidentBatchedOutputNormRunner,
+    batched_logits_buffer: VulkanResidentBuffer,
+    projection_dispatch: VulkanResidentKernelDispatch,
+    projection_sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+}
+
+impl VulkanResidentBatchedOutputProjectionKernelRunner {
     #[allow(clippy::too_many_arguments)]
-    fn new_for_sampler_lanes(
+    fn new(
         device: &VulkanComputeDevice,
+        batch_capacity: usize,
         norm_batch_lane_tile_width: u32,
         batch_lane_tile_width: u32,
         raw_frames_buffer: &VulkanResidentBuffer,
@@ -173,11 +178,7 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         norm_spirv_words: &[u32],
         projection_spirv_words: &[u32],
         output_spec: &VulkanResidentOutputTransducerSpec,
-        sampler_lanes: &[&VulkanResidentSamplerRunner],
-        sampler_kernels: &[VulkanResidentSamplerKernelArtifact],
-        sampler_spec: &VulkanResidentSamplerSpec,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let batch_capacity = sampler_lanes.len();
         if batch_capacity == 0 {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
@@ -261,37 +262,12 @@ impl VulkanResidentBatchedOutputProjectionRunner {
                 std::mem::size_of::<u32>() as u32,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let mut sampler_views = Vec::with_capacity(batch_capacity);
-        for (batch_index, sampler) in sampler_lanes.iter().copied().enumerate() {
-            let logits_byte_offset = output_spec
-                .logits_byte_capacity
-                .checked_mul(batch_index)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                        "batched sampler logits offset overflowed".to_string(),
-                    ))
-                })?;
-            sampler_views.push(
-                sampler
-                    .create_logits_view(
-                        device,
-                        &batched_logits_buffer,
-                        logits_byte_offset,
-                        sampler_kernels,
-                        sampler_spec,
-                    )
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?,
-            );
-        }
         Ok(Self {
             batch_capacity,
             norm,
-            _batched_logits_buffer: batched_logits_buffer,
+            batched_logits_buffer,
             projection_dispatch,
             projection_sequence_catalog: RefCell::new(BTreeMap::new()),
-            sampler_submission_catalog: RefCell::new(BTreeMap::new()),
-            projection_sampler_submission_catalog: RefCell::new(BTreeMap::new()),
-            sampler_views,
         })
     }
 
@@ -369,6 +345,95 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         device
             .run_recorded_resident_kernel_sequence(&sequence)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+    }
+}
+
+impl VulkanResidentBatchedOutputProjectionRunner {
+    #[allow(clippy::too_many_arguments)]
+    fn new_for_sampler_lanes(
+        device: &VulkanComputeDevice,
+        norm_batch_lane_tile_width: u32,
+        batch_lane_tile_width: u32,
+        raw_frames_buffer: &VulkanResidentBuffer,
+        norm_weight: &VulkanPermanentParameterBufferAllocation,
+        projection_weight: &VulkanPermanentParameterBufferAllocation,
+        projection_scale: Option<&VulkanPermanentParameterBufferAllocation>,
+        norm_spirv_words: &[u32],
+        projection_spirv_words: &[u32],
+        output_spec: &VulkanResidentOutputTransducerSpec,
+        sampler_lanes: &[&VulkanResidentSamplerRunner],
+        sampler_kernels: &[VulkanResidentSamplerKernelArtifact],
+        sampler_spec: &VulkanResidentSamplerSpec,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let projection = VulkanResidentBatchedOutputProjectionKernelRunner::new(
+            device,
+            sampler_lanes.len(),
+            norm_batch_lane_tile_width,
+            batch_lane_tile_width,
+            raw_frames_buffer,
+            norm_weight,
+            projection_weight,
+            projection_scale,
+            norm_spirv_words,
+            projection_spirv_words,
+            output_spec,
+        )?;
+        let mut sampler_views = Vec::with_capacity(sampler_lanes.len());
+        for (batch_index, sampler) in
+            sampler_lanes.iter().copied().enumerate()
+        {
+            let logits_byte_offset = output_spec
+                .logits_byte_capacity
+                .checked_mul(batch_index)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(
+                            "batched sampler logits offset overflowed"
+                                .to_string(),
+                        ),
+                    )
+                })?;
+            sampler_views.push(
+                sampler
+                    .create_logits_view(
+                        device,
+                        &projection.batched_logits_buffer,
+                        logits_byte_offset,
+                        sampler_kernels,
+                        sampler_spec,
+                    )
+                    .map_err(
+                        VulkanResidentInProcessPlacedRuntimeError::Sampler,
+                    )?,
+            );
+        }
+        Ok(Self {
+            projection,
+            sampler_submission_catalog: RefCell::new(BTreeMap::new()),
+            projection_sampler_submission_catalog: RefCell::new(
+                BTreeMap::new(),
+            ),
+            sampler_views,
+        })
+    }
+
+    fn projection_sequence(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+    ) -> Result<
+        std::cell::Ref<'_, VulkanResidentKernelSequence>,
+        VulkanResidentInProcessPlacedRuntimeError,
+    > {
+        self.projection.projection_sequence(device, batch_width)
+    }
+
+    fn project(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.projection.project(device, batch_width)
     }
 
     fn sample_independent_streams(
@@ -501,7 +566,8 @@ impl VulkanResidentBatchedOutputProjectionRunner {
             .wait_resident_kernel_sequence(&self.sampler_views[batch_width - 1].sequence)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         if profile {
-            let catalog = self.projection_sequence_catalog.borrow();
+            let catalog =
+                self.projection.projection_sequence_catalog.borrow();
             let sequence = catalog
                 .get(&batch_width)
                 .expect("batched projection sequence was inserted");

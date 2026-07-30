@@ -570,12 +570,18 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     "temporal MTP target normalization is not mounted".to_string(),
                 ))
             })?;
-            target_output.norm.run(output_device, input_token_ids.len())?;
+            target_output
+                .projection
+                .norm
+                .run(output_device, input_token_ids.len())?;
             self.catch_up_speculative_decoders_from_target_frames(
                 devices,
                 input_token_ids,
                 start_stream_tick,
-                &target_output.norm.normalized_frames_buffer,
+                &target_output
+                    .projection
+                    .norm
+                    .normalized_frames_buffer,
                 self.model
                     .output_transducer_spec
                     .normalized_frame_byte_capacity,

@@ -14,6 +14,21 @@ def compare_exact_role_results(
         raise ModelCompileError(
             "exact result comparator received an approximate contract"
         )
+    return compare_digest_role_results(
+        request,
+        reference_result,
+        candidate_result,
+        divergence_diagnostic=divergence_diagnostic,
+    )
+
+
+def compare_digest_role_results(
+    request: Json,
+    reference_result: Json,
+    candidate_result: Json,
+    *,
+    divergence_diagnostic: str,
+) -> Json:
     identical = (
         reference_result["output_digest"]
         == candidate_result["output_digest"]

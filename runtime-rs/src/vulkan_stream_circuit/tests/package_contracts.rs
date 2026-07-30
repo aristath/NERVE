@@ -784,6 +784,53 @@ fn generation_contract_rejects_execution_and_graph_drift() {
             .to_string();
     assert!(boundary_error.contains("sampler public output"));
 }
+
+#[test]
+fn generation_contract_resolves_output_parameters_from_node_bindings() {
+    let mut manifest = fixture_model_package_manifest();
+    let output = manifest
+        .circuit_graph
+        .components
+        .iter_mut()
+        .find(|component| {
+            component.runtime_role == CircuitRuntimeRole::OutputTransducer
+        })
+        .unwrap();
+    let replacement_id = "output_projection.weight.fp8_e4m3".to_string();
+    let projection = output
+        .params
+        .refs
+        .remove("output_projection.weight")
+        .unwrap();
+    output
+        .params
+        .refs
+        .insert(replacement_id.clone(), projection.clone());
+    output
+        .circuit
+        .parameters
+        .refs
+        .remove("output_projection.weight");
+    output
+        .circuit
+        .parameters
+        .refs
+        .insert(replacement_id.clone(), projection);
+    output
+        .circuit
+        .nodes
+        .iter_mut()
+        .find(|node| node.op == "linear_projection")
+        .unwrap()
+        .params[0] = replacement_id;
+
+    validate_generation_execution_contract(
+        &manifest,
+        &manifest.circuit_graph,
+    )
+    .unwrap();
+}
+
 #[test]
 fn physical_helper_uses_declared_semantic_source_nodes() {
     let helper = CircuitNode {

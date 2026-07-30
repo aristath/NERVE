@@ -276,6 +276,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     "speculative causal target output was not initialized".to_string(),
                 ))
             })?
+            .projection
             .norm
             .normalized_frames_buffer;
         decoder.run_catch_up_window(

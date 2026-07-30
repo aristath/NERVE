@@ -18,6 +18,12 @@ fn targeted_component_quanta_cover_prefill_work_exactly() {
 }
 
 #[test]
+fn targeted_output_prefill_microbenchmark_yields_two_windows() {
+    let quanta = targeted_execution_quanta(128, 4).unwrap();
+    assert_eq!(quanta, vec![16, 16]);
+}
+
+#[test]
 fn targeted_component_quanta_reject_partial_activation_batches() {
     let error = targeted_execution_quanta(65, 64).unwrap_err();
     assert!(

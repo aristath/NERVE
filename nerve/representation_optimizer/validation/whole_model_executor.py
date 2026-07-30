@@ -35,6 +35,7 @@ from nerve.representation_optimizer.validation.contracts import (
     validation_role_result_id,
 )
 from nerve.representation_optimizer.validation.comparison import (
+    compare_digest_role_results,
     compare_exact_role_results,
 )
 from nerve.representation_optimizer.validation.conversation_semantics import (
@@ -415,9 +416,22 @@ class ResidentWholeModelValidationBackend:
                 ),
             )
         if request.behavioral_contract["mode"] != "exact":
+            if comparison == {
+                "output_mode": "exact_digest",
+                "state_mode": "exact_digest",
+            }:
+                return compare_digest_role_results(
+                    request.to_json(),
+                    reference_result,
+                    candidate_result,
+                    divergence_diagnostic=(
+                        "candidate teacher-forced output or resident state "
+                        "diverged from the source implementation"
+                    ),
+                )
             raise ModelCompileError(
                 "approximate whole-model validation requires fixture-semantic "
-                "comparison"
+                "or digest comparison"
             )
         if comparison != {
             "output_mode": "exact_digest",

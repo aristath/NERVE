@@ -45,6 +45,10 @@ pub struct VulkanResidentModelPackageDeviceSlice {
 struct VulkanResidentTargetedOutputTransducerResources {
     parameter_buffers: Arc<VulkanPermanentParameterBuffers>,
     embedding_norm_spirv_words: Vec<u32>,
+    embedding_norm_batch_spirv_words: Vec<u32>,
     projection_spirv_words: Vec<u32>,
+    projection_batch_spirv_words: Vec<u32>,
+    embedding_norm_batch_lane_tile_width: u32,
+    projection_batch_lane_tile_width: u32,
     spec: VulkanResidentOutputTransducerSpec,
 }

@@ -67,11 +67,25 @@ pub enum VulkanResidentTargetedExecutionSession {
 pub struct VulkanResidentTargetedOutputTransducerSession {
     component_id: String,
     node_id: String,
+    phase: VulkanTargetedComponentExecutionPhase,
     resident_parameter_bytes: usize,
-    input_frame: VulkanResidentBuffer,
-    runner: VulkanResidentOutputTransducerRunner,
-    sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    execution: VulkanTargetedOutputTransducerExecution,
     capture_output_values: bool,
+}
+
+enum VulkanTargetedOutputTransducerExecution {
+    Decode {
+        input_frame: VulkanResidentBuffer,
+        runner: VulkanResidentOutputTransducerRunner,
+        sequence_catalog:
+            RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    },
+    Prefill {
+        raw_frames: VulkanResidentBuffer,
+        runner: VulkanResidentBatchedOutputProjectionKernelRunner,
+        sequence_catalog:
+            RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    },
 }
 
 enum VulkanTargetedComponentExecution {
@@ -185,11 +199,6 @@ impl VulkanResidentTargetedOutputTransducerSession {
         phase: VulkanTargetedComponentExecutionPhase,
         capture_output_values: bool,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
-        if phase != VulkanTargetedComponentExecutionPhase::Decode {
-            return targeted_component_error(
-                "targeted output-transducer execution currently supports decode only",
-            );
-        }
         let output = slice.targeted_output.as_ref().ok_or_else(|| {
             targeted_component_error_value(
                 "resident device slice has no targeted output-transducer resources",
@@ -202,34 +211,122 @@ impl VulkanResidentTargetedOutputTransducerSession {
             ));
         }
         let resident_parameter_bytes = output.parameter_buffers.total_byte_capacity;
-        let input_frame = device
-            .create_resident_buffer(output.spec.input_frame_byte_capacity)
-            .map_err(|error| {
-                targeted_component_error_value(format!(
-                    "failed to allocate targeted output-transducer input frame: {error}"
-                ))
-            })?;
-        let runner = VulkanResidentOutputTransducerRunner::from_input_frame(
-            device,
-            &input_frame,
-            input_frame.byte_capacity(),
-            &output.parameter_buffers,
-            &output.embedding_norm_spirv_words,
-            &output.projection_spirv_words,
-            &output.spec,
-        )
-        .map_err(|error| {
-            targeted_component_error_value(format!(
-                "failed to mount targeted output transducer: {error}"
-            ))
-        })?;
+        let execution = match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => {
+                let input_frame = device
+                    .create_resident_buffer(
+                        output.spec.input_frame_byte_capacity,
+                    )
+                    .map_err(|error| {
+                        targeted_component_error_value(format!(
+                            "failed to allocate targeted output-transducer input frame: {error}"
+                        ))
+                    })?;
+                let runner =
+                    VulkanResidentOutputTransducerRunner::from_input_frame(
+                        device,
+                        &input_frame,
+                        input_frame.byte_capacity(),
+                        &output.parameter_buffers,
+                        &output.embedding_norm_spirv_words,
+                        &output.projection_spirv_words,
+                        &output.spec,
+                    )
+                    .map_err(|error| {
+                        targeted_component_error_value(format!(
+                            "failed to mount targeted output transducer: {error}"
+                        ))
+                    })?;
+                VulkanTargetedOutputTransducerExecution::Decode {
+                    input_frame,
+                    runner,
+                    sequence_catalog: RefCell::new(BTreeMap::new()),
+                }
+            }
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width,
+            } => {
+                if activation_batch_width == 0 {
+                    return targeted_component_error(
+                        "targeted output-transducer prefill width must be positive",
+                    );
+                }
+                let raw_frames_byte_capacity = output
+                    .spec
+                    .input_frame_byte_capacity
+                    .checked_mul(activation_batch_width)
+                    .ok_or_else(|| {
+                        targeted_component_error_value(
+                            "targeted output-transducer prefill input capacity overflowed",
+                        )
+                    })?;
+                let raw_frames = device
+                    .create_resident_buffer(raw_frames_byte_capacity)
+                    .map_err(|error| {
+                        targeted_component_error_value(format!(
+                            "failed to allocate targeted output-transducer prefill frames: {error}"
+                        ))
+                    })?;
+                let norm_weight = output
+                    .parameter_buffers
+                    .parameter_buffer(&output.spec.norm_parameter_tensor)
+                    .ok_or_else(|| {
+                        targeted_component_error_value(
+                            "targeted output-transducer norm parameter is absent",
+                        )
+                    })?;
+                let projection_weight = output
+                    .parameter_buffers
+                    .parameter_buffer(
+                        &output.spec.projection_parameter_tensor,
+                    )
+                    .ok_or_else(|| {
+                        targeted_component_error_value(
+                            "targeted output-transducer projection parameter is absent",
+                        )
+                    })?;
+                let projection_scale =
+                    projection_scale_parameter_buffer(
+                        &output.parameter_buffers,
+                        &output.spec,
+                    )
+                    .map_err(|error| {
+                        targeted_component_error_value(format!(
+                            "failed to bind targeted output-transducer projection scale: {error}"
+                        ))
+                    })?;
+                let runner =
+                    VulkanResidentBatchedOutputProjectionKernelRunner::new(
+                        device,
+                        activation_batch_width,
+                        output.embedding_norm_batch_lane_tile_width,
+                        output.projection_batch_lane_tile_width,
+                        &raw_frames,
+                        norm_weight,
+                        projection_weight,
+                        projection_scale,
+                        &output.embedding_norm_batch_spirv_words,
+                        &output.projection_batch_spirv_words,
+                        &output.spec,
+                    )
+                    .map_err(|error| {
+                        targeted_component_error_value(format!(
+                            "failed to mount targeted batched output transducer: {error}"
+                        ))
+                    })?;
+                VulkanTargetedOutputTransducerExecution::Prefill {
+                    raw_frames,
+                    runner,
+                    sequence_catalog: RefCell::new(BTreeMap::new()),
+                }
+            }
+        };
         Ok(Self {
             component_id: component_id.to_string(),
             node_id: node_id.to_string(),
+            phase,
             resident_parameter_bytes,
-            input_frame,
-            runner,
-            sequence_catalog: RefCell::new(BTreeMap::new()),
+            execution,
             capture_output_values,
         })
     }
@@ -254,14 +351,29 @@ impl VulkanResidentTargetedOutputTransducerSession {
         self.write_fixture(seed)?;
         let counters =
             self.execute_quanta(device, useful_units, maximum_quantum_wait)?;
-        let output_values = self
-            .runner
-            .read_logits_bytes(self.runner.logits_byte_capacity)
-            .map_err(|error| {
-                targeted_component_error_value(format!(
-                    "failed to read targeted output logits: {error}"
-                ))
-            })?;
+        let output_values = match &self.execution {
+            VulkanTargetedOutputTransducerExecution::Decode {
+                runner,
+                ..
+            } => runner
+                .read_logits_bytes(runner.logits_byte_capacity)
+                .map_err(|error| {
+                    targeted_component_error_value(format!(
+                        "failed to read targeted output logits: {error}"
+                    ))
+                })?,
+            VulkanTargetedOutputTransducerExecution::Prefill {
+                runner,
+                ..
+            } => runner
+                .batched_logits_buffer
+                .read_bytes(runner.batched_logits_buffer.byte_capacity())
+                .map_err(|error| {
+                    targeted_component_error_value(format!(
+                        "failed to read targeted batched output logits: {error}"
+                    ))
+                })?,
+        };
         let output_digest = targeted_finalized_artifact_digest(
             Sha256::digest(&output_values).as_slice(),
         );
@@ -269,8 +381,14 @@ impl VulkanResidentTargetedOutputTransducerSession {
             component_id: self.component_id.clone(),
             node_id: self.node_id.clone(),
             op: "output_transducer".to_string(),
-            phase: "decode".to_string(),
-            activation_batch_width: 1,
+            phase: match self.phase {
+                VulkanTargetedComponentExecutionPhase::Decode => "decode",
+                VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+                    "prefill"
+                }
+            }
+            .to_string(),
+            activation_batch_width: self.phase.activation_batch_width(),
             useful_units,
             execution_ns: counters.execution_ns,
             output_digest,
@@ -295,9 +413,19 @@ impl VulkanResidentTargetedOutputTransducerSession {
         &self,
         seed: u32,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        self.input_frame
+        let input = match &self.execution {
+            VulkanTargetedOutputTransducerExecution::Decode {
+                input_frame,
+                ..
+            } => input_frame,
+            VulkanTargetedOutputTransducerExecution::Prefill {
+                raw_frames,
+                ..
+            } => raw_frames,
+        };
+        input
             .write_bytes(&targeted_fixture_bytes(
-                self.input_frame.byte_capacity(),
+                input.byte_capacity(),
                 seed,
                 0,
             ))
@@ -314,7 +442,11 @@ impl VulkanResidentTargetedOutputTransducerSession {
         useful_units: usize,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
-        let quanta = targeted_execution_quanta(useful_units, 1)?;
+        let activation_batch_width = self.phase.activation_batch_width();
+        let quanta = targeted_execution_quanta(
+            useful_units,
+            activation_batch_width,
+        )?;
         let mut counters = VulkanTargetedComponentRunCounters {
             execution_ns: 0,
             windows: Vec::with_capacity(quanta.len()),
@@ -326,21 +458,46 @@ impl VulkanResidentTargetedOutputTransducerSession {
         let mut start_unit = 0usize;
         for (index, repetitions) in quanta.into_iter().enumerate() {
             self.ensure_sequence(device, repetitions)?;
-            let catalog = self.sequence_catalog.borrow();
-            let sequence = catalog
-                .get(&repetitions)
-                .expect("targeted output sequence was inserted");
             let wait_started = Instant::now();
-            let duration_ns = device
-                .run_timestamped_recorded_resident_kernel_sequence_for(
-                    sequence,
-                    maximum_quantum_wait,
-                )
-                .map_err(|error| {
-                    targeted_component_error_value(format!(
-                        "targeted output-transducer quantum failed: {error}"
-                    ))
-                })?;
+            let duration_ns = match &self.execution {
+                VulkanTargetedOutputTransducerExecution::Decode {
+                    sequence_catalog,
+                    ..
+                } => {
+                    let catalog = sequence_catalog.borrow();
+                    let sequence = catalog
+                        .get(&repetitions)
+                        .expect(
+                            "targeted output decode sequence was inserted",
+                        );
+                    device
+                        .run_timestamped_recorded_resident_kernel_sequence_for(
+                            sequence,
+                            maximum_quantum_wait,
+                        )
+                }
+                VulkanTargetedOutputTransducerExecution::Prefill {
+                    sequence_catalog,
+                    ..
+                } => {
+                    let catalog = sequence_catalog.borrow();
+                    let sequence = catalog
+                        .get(&repetitions)
+                        .expect(
+                            "targeted output prefill sequence was inserted",
+                        );
+                    device
+                        .run_timestamped_recorded_resident_kernel_sequence_for(
+                            sequence,
+                            maximum_quantum_wait,
+                        )
+                }
+            }
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "targeted output-transducer quantum failed: {error}"
+                ))
+            })?;
             let wait_ns = elapsed_nanoseconds(wait_started);
             counters.execution_ns =
                 counters.execution_ns.saturating_add(duration_ns);
@@ -350,7 +507,14 @@ impl VulkanResidentTargetedOutputTransducerSession {
             counters.queue_wait_ns = counters
                 .queue_wait_ns
                 .saturating_add(wait_ns.saturating_sub(duration_ns));
-            let end_unit = start_unit + repetitions;
+            let quantum_units = repetitions
+                .checked_mul(activation_batch_width)
+                .ok_or_else(|| {
+                    targeted_component_error_value(
+                        "targeted output-transducer useful-work count overflowed",
+                    )
+                })?;
+            let end_unit = start_unit + quantum_units;
             counters
                 .windows
                 .push(VulkanTargetedComponentThroughputWindow {
@@ -362,9 +526,18 @@ impl VulkanResidentTargetedOutputTransducerSession {
             start_unit = end_unit;
         }
         counters.execution_ns = counters.execution_ns.max(1);
-        counters.physical_dispatch_count = useful_units
-            .checked_mul(self.runner.dispatch_count)
-            .ok_or_else(|| {
+        counters.physical_dispatch_count = match &self.execution {
+            VulkanTargetedOutputTransducerExecution::Decode {
+                runner,
+                ..
+            } => useful_units.checked_mul(runner.dispatch_count),
+            VulkanTargetedOutputTransducerExecution::Prefill { .. } => {
+                useful_units
+                    .checked_div(activation_batch_width)
+                    .and_then(|repetitions| repetitions.checked_mul(2))
+            }
+        }
+        .ok_or_else(|| {
                 targeted_component_error_value(
                     "targeted output-transducer dispatch count overflowed",
                 )
@@ -378,7 +551,17 @@ impl VulkanResidentTargetedOutputTransducerSession {
         device: &VulkanComputeDevice,
         repetitions: usize,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        if self.sequence_catalog.borrow().contains_key(&repetitions) {
+        let sequence_catalog = match &self.execution {
+            VulkanTargetedOutputTransducerExecution::Decode {
+                sequence_catalog,
+                ..
+            }
+            | VulkanTargetedOutputTransducerExecution::Prefill {
+                sequence_catalog,
+                ..
+            } => sequence_catalog,
+        };
+        if sequence_catalog.borrow().contains_key(&repetitions) {
             return Ok(());
         }
         let sequence = device
@@ -388,17 +571,47 @@ impl VulkanResidentTargetedOutputTransducerSession {
                     "failed to create targeted output-transducer sequence: {error}"
                 ))
             })?;
-        let mut steps =
-            Vec::with_capacity(repetitions * self.runner.dispatch_count);
-        for _ in 0..repetitions {
-            steps.push(VulkanResidentKernelSequenceStep::new(
-                &self.runner.embedding_norm_dispatch,
-                &[],
-            ));
-            steps.push(VulkanResidentKernelSequenceStep::new(
-                &self.runner.tied_projection_dispatch,
-                &[],
-            ));
+        let mut steps = Vec::with_capacity(repetitions * 2);
+        let prefill_width = u32::try_from(
+            self.phase.activation_batch_width(),
+        )
+        .map_err(|_| {
+            targeted_component_error_value(
+                "targeted output-transducer prefill width exceeds u32",
+            )
+        })?
+        .to_le_bytes();
+        match &self.execution {
+            VulkanTargetedOutputTransducerExecution::Decode {
+                runner,
+                ..
+            } => {
+                for _ in 0..repetitions {
+                    steps.push(VulkanResidentKernelSequenceStep::new(
+                        &runner.embedding_norm_dispatch,
+                        &[],
+                    ));
+                    steps.push(VulkanResidentKernelSequenceStep::new(
+                        &runner.tied_projection_dispatch,
+                        &[],
+                    ));
+                }
+            }
+            VulkanTargetedOutputTransducerExecution::Prefill {
+                runner,
+                ..
+            } => {
+                for _ in 0..repetitions {
+                    steps.push(VulkanResidentKernelSequenceStep::new(
+                        &runner.norm.norm_dispatch,
+                        &prefill_width,
+                    ));
+                    steps.push(VulkanResidentKernelSequenceStep::new(
+                        &runner.projection_dispatch,
+                        &prefill_width,
+                    ));
+                }
+            }
         }
         device
             .record_resident_kernel_sequence(&sequence, &steps)
@@ -407,9 +620,7 @@ impl VulkanResidentTargetedOutputTransducerSession {
                     "failed to record targeted output-transducer sequence: {error}"
                 ))
             })?;
-        self.sequence_catalog
-            .borrow_mut()
-            .insert(repetitions, sequence);
+        sequence_catalog.borrow_mut().insert(repetitions, sequence);
         Ok(())
     }
 
@@ -418,12 +629,30 @@ impl VulkanResidentTargetedOutputTransducerSession {
     }
 
     fn resident_transient_bytes(&self) -> usize {
-        self.input_frame
-            .byte_capacity()
-            .saturating_add(
-                self.runner.normalized_frame_buffer.byte_capacity(),
-            )
-            .saturating_add(self.runner.logits_buffer.byte_capacity())
+        match &self.execution {
+            VulkanTargetedOutputTransducerExecution::Decode {
+                input_frame,
+                runner,
+                ..
+            } => input_frame
+                .byte_capacity()
+                .saturating_add(
+                    runner.normalized_frame_buffer.byte_capacity(),
+                )
+                .saturating_add(runner.logits_buffer.byte_capacity()),
+            VulkanTargetedOutputTransducerExecution::Prefill {
+                raw_frames,
+                runner,
+                ..
+            } => raw_frames
+                .byte_capacity()
+                .saturating_add(
+                    runner.norm.normalized_frames_buffer.byte_capacity(),
+                )
+                .saturating_add(
+                    runner.batched_logits_buffer.byte_capacity(),
+                ),
+        }
     }
 }
 

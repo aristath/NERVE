@@ -16,7 +16,11 @@ struct VulkanResidentModelPackageDeviceSlicePlan {
 struct VulkanResidentTargetedOutputTransducerPlan {
     parameter_plan: VulkanPermanentParameterBufferPlan,
     embedding_norm_spirv_words: Vec<u32>,
+    embedding_norm_batch_spirv_words: Vec<u32>,
     projection_spirv_words: Vec<u32>,
+    projection_batch_spirv_words: Vec<u32>,
+    embedding_norm_batch_lane_tile_width: u32,
+    projection_batch_lane_tile_width: u32,
     spec: VulkanResidentOutputTransducerSpec,
 }
 
@@ -172,6 +176,14 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                             .output_transducer
                             .embedding_norm_shader_path,
                     )?,
+                embedding_norm_batch_spirv_words:
+                    load_required_resident_model_package_shader(
+                        manifest_dir,
+                        &runtime_model
+                            .package
+                            .output_transducer
+                            .embedding_norm_batch_shader_path,
+                    )?,
                 projection_spirv_words:
                     load_required_resident_model_package_shader(
                         manifest_dir,
@@ -180,6 +192,22 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                             .output_transducer
                             .projection_shader_path,
                     )?,
+                projection_batch_spirv_words:
+                    load_required_resident_model_package_shader(
+                        manifest_dir,
+                        &runtime_model
+                            .package
+                            .output_transducer
+                            .projection_batch_shader_path,
+                    )?,
+                embedding_norm_batch_lane_tile_width: runtime_model
+                    .package
+                    .output_transducer
+                    .embedding_norm_batch_lane_tile_width,
+                projection_batch_lane_tile_width: runtime_model
+                    .package
+                    .output_transducer
+                    .projection_batch_lane_tile_width,
                 spec: runtime_model.package.output_transducer.spec.clone(),
             })
         })
@@ -306,8 +334,16 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                     parameter_buffers,
                     embedding_norm_spirv_words:
                         output.embedding_norm_spirv_words,
+                    embedding_norm_batch_spirv_words:
+                        output.embedding_norm_batch_spirv_words,
                     projection_spirv_words:
                         output.projection_spirv_words,
+                    projection_batch_spirv_words:
+                        output.projection_batch_spirv_words,
+                    embedding_norm_batch_lane_tile_width:
+                        output.embedding_norm_batch_lane_tile_width,
+                    projection_batch_lane_tile_width:
+                        output.projection_batch_lane_tile_width,
                     spec: output.spec,
                 })
             })
