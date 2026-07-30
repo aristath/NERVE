@@ -153,10 +153,24 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
         excluded_tensors: &BTreeSet<String>,
         parameter_pool: Option<&VulkanResidentBufferPool>,
     ) -> Result<VulkanResidentModelPackageDeviceSlice, VulkanResidentTokenModelPackageError> {
+        let dynamically_addressed_tensors = self
+            .placed_plan
+            .binding_plan
+            .selected_parameter_tensors()
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to separate permanent and dynamic parameters for device {:?}: {error}",
+                    self.device_id
+                ))
+            })?;
+        let excluded_tensors = excluded_tensors
+            .union(&dynamically_addressed_tensors)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let parameter_buffer_plan =
             VulkanPermanentParameterBufferPlan::from_placed_resident_plan_excluding_tensors(
                 &self.placed_plan.placed_resident_plan,
-                excluded_tensors,
+                &excluded_tensors,
             )
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
@@ -219,6 +233,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             loaded_manifest: self.loaded_manifest,
             batch_kernels: self.batch_kernels,
             parameter_buffers,
+            dynamic_resource_buffers: None,
         })
     }
 }

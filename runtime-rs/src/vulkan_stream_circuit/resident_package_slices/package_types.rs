@@ -37,4 +37,5 @@ pub struct VulkanResidentModelPackageDeviceSlice {
     loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,
     batch_kernels: Vec<VulkanResidentComponentBatchKernelArtifact>,
     parameter_buffers: Arc<VulkanPermanentParameterBuffers>,
+    dynamic_resource_buffers: Option<Arc<VulkanDynamicResourceBuffers>>,
 }

@@ -146,7 +146,7 @@ impl VulkanResidentModelPackageDeviceSlice {
             local_edge_overrides,
             edge_endpoint_overrides,
             stream_control_override,
-            None,
+            self.dynamic_resource_buffers.clone(),
         )
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(

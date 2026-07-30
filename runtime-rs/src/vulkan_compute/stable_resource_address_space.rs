@@ -2,20 +2,21 @@ const VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VulkanStableResourceArenaConfig {
-    pub chunk_byte_capacity: usize,
+    pub initial_chunk_byte_capacity: usize,
     pub committed_byte_capacity: usize,
     pub minimum_alignment: usize,
 }
 
 impl VulkanStableResourceArenaConfig {
     pub fn new(
-        chunk_byte_capacity: usize,
+        initial_chunk_byte_capacity: usize,
         committed_byte_capacity: usize,
         minimum_alignment: usize,
     ) -> Result<Self, VulkanError> {
-        if chunk_byte_capacity == 0 {
+        if initial_chunk_byte_capacity == 0 {
             return Err(VulkanError(
-                "stable resource arena chunk capacity must not be zero".to_string(),
+                "stable resource arena initial chunk capacity must not be zero"
+                    .to_string(),
             ));
         }
         if committed_byte_capacity == 0 {
@@ -23,14 +24,14 @@ impl VulkanStableResourceArenaConfig {
                 "stable resource arena committed capacity must not be zero".to_string(),
             ));
         }
-        if chunk_byte_capacity > committed_byte_capacity {
+        if initial_chunk_byte_capacity > committed_byte_capacity {
             return Err(VulkanError(format!(
-                "stable resource arena chunk capacity {chunk_byte_capacity} exceeds committed capacity {committed_byte_capacity}"
+                "stable resource arena initial chunk capacity {initial_chunk_byte_capacity} exceeds committed capacity {committed_byte_capacity}"
             )));
         }
         validate_stable_resource_alignment(minimum_alignment)?;
         Ok(Self {
-            chunk_byte_capacity,
+            initial_chunk_byte_capacity,
             committed_byte_capacity,
             minimum_alignment,
         })
@@ -184,11 +185,12 @@ impl VulkanStableResourceArena {
                 "stable resource arena needs at least {minimum_new_chunk_capacity} additional bytes for a {byte_count}-byte allocation aligned to {alignment}, but only {remaining_capacity} committed bytes remain"
             )));
         }
-        let new_chunk_capacity = self
-            .config
-            .chunk_byte_capacity
-            .max(minimum_new_chunk_capacity)
-            .min(remaining_capacity);
+        let new_chunk_capacity = next_stable_resource_chunk_capacity(
+            self.config.initial_chunk_byte_capacity,
+            state.committed_byte_capacity,
+            remaining_capacity,
+            minimum_new_chunk_capacity,
+        )?;
         let buffer = Arc::new(
             device.create_addressable_resident_buffer(new_chunk_capacity)?,
         );
@@ -258,6 +260,30 @@ impl VulkanStableResourceArena {
             VulkanError("stable resource arena state lock was poisoned".to_string())
         })
     }
+}
+
+fn next_stable_resource_chunk_capacity(
+    initial_chunk_byte_capacity: usize,
+    committed_byte_capacity: usize,
+    remaining_byte_capacity: usize,
+    minimum_new_chunk_capacity: usize,
+) -> Result<usize, VulkanError> {
+    if initial_chunk_byte_capacity == 0
+        || remaining_byte_capacity == 0
+        || minimum_new_chunk_capacity == 0
+        || minimum_new_chunk_capacity > remaining_byte_capacity
+    {
+        return Err(VulkanError(
+            "stable resource arena chunk growth inputs are invalid".to_string(),
+        ));
+    }
+    // Grow the next allocation with the arena's already committed footprint.
+    // This yields base, base, 2*base, 4*base... chunks while preserving strict
+    // lazy allocation and capping the final chunk at the physical byte budget.
+    let growth_target = initial_chunk_byte_capacity
+        .max(committed_byte_capacity)
+        .max(minimum_new_chunk_capacity);
+    Ok(growth_target.min(remaining_byte_capacity))
 }
 
 impl VulkanStableResourceAllocation {

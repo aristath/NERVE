@@ -25,6 +25,7 @@ include!("tests/descriptor_plan_tests.rs");
 include!("tests/reusable_kernel_plan_tests.rs");
 include!("tests/prepared_dispatch_plan_tests.rs");
 include!("tests/runtime_residency_plan.rs");
+include!("tests/compiled_resource_device_store.rs");
 include!("tests/device_resource_residency.rs");
 include!("tests/physical_residency_checkpoint.rs");
 include!("tests/residency_backpressure_scheduler.rs");

@@ -21,6 +21,7 @@ pub struct VulkanCompiledSelectorAddressLayout {
 pub struct VulkanCompiledParameterSlotTable {
     pub key: VulkanDynamicResourceBindingKey,
     pub selector_id: String,
+    pub execution_scope: String,
     pub parameter_ids: Vec<String>,
     pub resource_count: usize,
     pub slots: Vec<usize>,
@@ -290,6 +291,7 @@ impl VulkanCompiledResourceAddressLayout {
                     &selector.selection_signal,
                 ),
                 selector_id: selector.id.clone(),
+                execution_scope: scope,
                 parameter_ids,
                 resource_count: selector.resource_count,
                 slots: table_slots,
@@ -306,6 +308,41 @@ impl VulkanCompiledResourceAddressLayout {
 
     pub fn slot_count(&self) -> usize {
         self.slots.len()
+    }
+
+    pub fn metadata_byte_count_for_components(
+        &self,
+        execution_scope: &str,
+        component_ids: &BTreeSet<String>,
+    ) -> Result<usize, VulkanCompiledResourceAddressLayoutError> {
+        let address_table_bytes = self
+            .slot_count()
+            .checked_mul(32)
+            .ok_or_else(|| {
+                VulkanCompiledResourceAddressLayoutError(
+                    "compiled resource address-table byte count overflowed"
+                        .to_string(),
+                )
+            })?;
+        self.parameter_slot_tables
+            .iter()
+            .filter(|table| {
+                table.execution_scope == execution_scope
+                    && component_ids.contains(&table.key.component_id)
+            })
+            .try_fold(address_table_bytes, |total, table| {
+                table
+                    .slots
+                    .len()
+                    .checked_mul(size_of::<u32>())
+                    .and_then(|bytes| total.checked_add(bytes))
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceAddressLayoutError(
+                            "compiled resource metadata byte count overflowed"
+                                .to_string(),
+                        )
+                    })
+            })
     }
 
     pub fn selector(
@@ -329,6 +366,30 @@ impl VulkanCompiledResourceAddressLayout {
             .binary_search_by(|table| table.key.cmp(key))
             .ok()
             .map(|index| &self.parameter_slot_tables[index])
+    }
+
+    pub fn resource_slots_for_ids(
+        &self,
+        resource_ids: &[String],
+    ) -> Result<Vec<usize>, VulkanCompiledResourceAddressLayoutError> {
+        let slots_by_resource_id = self
+            .slots
+            .iter()
+            .map(|slot| (slot.resource_id.as_str(), slot.slot))
+            .collect::<BTreeMap<_, _>>();
+        resource_ids
+            .iter()
+            .map(|resource_id| {
+                slots_by_resource_id
+                    .get(resource_id.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceAddressLayoutError(format!(
+                            "compiled resource {resource_id:?} has no stable address slot"
+                        ))
+                    })
+            })
+            .collect()
     }
 }
 
@@ -397,7 +458,7 @@ mod compiled_resource_address_layout_tests {
                     mapping:
                         CompiledResourceBindingMapping::PartitionTemplateMember {
                             partition_template_id: template_id.clone(),
-                            resource_identity_seed: weight_seed,
+                            resource_identity_seed: weight_seed.clone(),
                         },
                 },
                 CompiledResourceBinding {
@@ -408,7 +469,7 @@ mod compiled_resource_address_layout_tests {
                     mapping:
                         CompiledResourceBindingMapping::PartitionTemplateMember {
                             partition_template_id: template_id.clone(),
-                            resource_identity_seed: scale_seed,
+                            resource_identity_seed: scale_seed.clone(),
                         },
                 },
             ],
@@ -457,5 +518,26 @@ mod compiled_resource_address_layout_tests {
         assert_eq!(table.selector_id, selector_id);
         assert_eq!(table.parameter_ids, ["bank", "scale"]);
         assert_eq!(table.slots, [0, 3, 1, 4, 2, 5]);
+
+        let mut resource_ids = vec![
+            derived_partition_resource_id(&weight_seed, 1).unwrap(),
+            derived_partition_resource_id(&scale_seed, 1).unwrap(),
+        ];
+        resource_ids.sort();
+        let expected_slots = resource_ids
+            .iter()
+            .map(|resource_id| {
+                layout
+                    .slots
+                    .iter()
+                    .find(|slot| slot.resource_id == *resource_id)
+                    .unwrap()
+                    .slot
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            layout.resource_slots_for_ids(&resource_ids).unwrap(),
+            expected_slots
+        );
     }
 }

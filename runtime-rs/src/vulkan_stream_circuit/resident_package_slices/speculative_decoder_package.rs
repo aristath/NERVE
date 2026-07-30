@@ -19,6 +19,8 @@ struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
     target_output_parameters: &'a VulkanPermanentParameterBuffers,
     input_embedding_spec: &'a VulkanResidentInputEmbeddingTransducerSpec,
     input_embedding_spirv_words: &'a [u32],
+    compiled_resource_device_stores:
+        &'a BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
 }
 
 fn speculative_decoder_additional_parameter_tensors<'a>(
@@ -50,7 +52,7 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let draft_runtime_model =
             speculative_decoder_runtime_model(context.runtime_model, decoder, device_id);
-        let device_slice = Arc::new(
+        let mut device_slice =
             VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
                 device,
                 context.manifest_dir,
@@ -58,8 +60,83 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
                 device_id,
                 Some(context.capacity),
             )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
-        );
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        let selected_tensors = device_slice
+            .placed_plan
+            .binding_plan
+            .selected_parameter_tensors()
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to inspect speculative decoder {:?} selected parameters: {error}",
+                        decoder.id
+                    )),
+                )
+            })?;
+        if !selected_tensors.is_empty() {
+            let store = context
+                .compiled_resource_device_stores
+                .get(device_id)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "speculative decoder {:?} has no compiled resource store on device {device_id:?}",
+                            decoder.id
+                        )),
+                    )
+                })?;
+            let component_ids = device_slice
+                .placed_plan
+                .binding_plan
+                .circuits
+                .iter()
+                .map(|circuit| circuit.component_id.clone())
+                .collect::<BTreeSet<_>>();
+            let execution_scope = format!("draft:{}", decoder.id);
+            device_slice.dynamic_resource_buffers = Some(
+                store
+                    .dynamic_buffers_for_components(
+                        device,
+                        &execution_scope,
+                        &component_ids,
+                    )
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to bind speculative decoder {:?} dynamic resources: {error}",
+                                decoder.id
+                            )),
+                        )
+                    })?,
+            );
+            let owner = DeviceResourceResidencyOwnerId::new(format!(
+                "{}:{device_id}:{execution_scope}",
+                context.runtime_model.package.package_id
+            ))
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to create speculative compiled resource owner: {error}"
+                    )),
+                )
+            })?;
+            store
+                .load_all_for_components(
+                    device,
+                    &execution_scope,
+                    &component_ids,
+                    owner,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to load speculative decoder {:?} eager compiled resources: {error}",
+                            decoder.id
+                        )),
+                    )
+                })?;
+        }
+        let device_slice = Arc::new(device_slice);
 
         let additional_tensors = speculative_decoder_additional_parameter_tensors(
             context.input_embedding_spec,

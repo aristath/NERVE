@@ -56,6 +56,33 @@ fn stable_resource_free_ranges_coalesce_on_both_sides() {
 }
 
 #[test]
+fn stable_resource_chunk_growth_is_lazy_logarithmic_and_capacity_bounded() {
+    assert_eq!(
+        next_stable_resource_chunk_capacity(4096, 0, 65_536, 1024).unwrap(),
+        4096
+    );
+    assert_eq!(
+        next_stable_resource_chunk_capacity(4096, 4096, 61_440, 1024).unwrap(),
+        4096
+    );
+    assert_eq!(
+        next_stable_resource_chunk_capacity(4096, 8192, 57_344, 1024).unwrap(),
+        8192
+    );
+    assert_eq!(
+        next_stable_resource_chunk_capacity(4096, 16_384, 49_152, 20_000).unwrap(),
+        20_000
+    );
+    assert_eq!(
+        next_stable_resource_chunk_capacity(4096, 36_384, 29_152, 1024).unwrap(),
+        29_152
+    );
+    assert!(
+        next_stable_resource_chunk_capacity(4096, 4096, 1024, 2048).is_err()
+    );
+}
+
+#[test]
 fn stable_resource_address_space_is_visible_stable_and_transactional() {
     let Some(device_index) = stable_resource_test_device_index() else {
         eprintln!(

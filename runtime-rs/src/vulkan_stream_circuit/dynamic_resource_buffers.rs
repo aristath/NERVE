@@ -31,6 +31,22 @@ impl VulkanDynamicResourceBuffers {
         address_table: &VulkanStableResourceAddressTable,
         layout: &VulkanCompiledResourceAddressLayout,
     ) -> Result<Self, VulkanError> {
+        Self::from_layout_for_components(
+            device,
+            address_table,
+            layout,
+            None,
+            &BTreeSet::new(),
+        )
+    }
+
+    pub fn from_layout_for_components(
+        device: &VulkanComputeDevice,
+        address_table: &VulkanStableResourceAddressTable,
+        layout: &VulkanCompiledResourceAddressLayout,
+        execution_scope: Option<&str>,
+        component_ids: &BTreeSet<String>,
+    ) -> Result<Self, VulkanError> {
         if address_table.slot_count() != layout.slot_count() {
             return Err(VulkanError(format!(
                 "dynamic resource layout has {} slots but its address table has {}",
@@ -39,7 +55,12 @@ impl VulkanDynamicResourceBuffers {
             )));
         }
         let mut parameter_slots = BTreeMap::new();
-        for table in &layout.parameter_slot_tables {
+        for table in layout.parameter_slot_tables.iter().filter(|table| {
+            execution_scope
+                .is_none_or(|scope| table.execution_scope == scope)
+                && (component_ids.is_empty()
+                    || component_ids.contains(&table.key.component_id))
+        }) {
             let words = table
                 .slots
                 .iter()

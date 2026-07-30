@@ -103,6 +103,35 @@ impl VulkanStreamCircuitBindingPlan {
             .iter()
             .find(|circuit| circuit.component_id == component_id)
     }
+
+    pub fn selected_parameter_tensors(
+        &self,
+    ) -> Result<BTreeSet<String>, VulkanBindingPlanError> {
+        let mut selected = BTreeSet::new();
+        let mut permanent = BTreeSet::new();
+        for circuit in &self.circuits {
+            for node in &circuit.nodes {
+                let selected_parameter_ids = node
+                    .selected_parameter_accesses
+                    .iter()
+                    .flat_map(|access| access.parameter_ids.iter())
+                    .collect::<BTreeSet<_>>();
+                for parameter in &node.parameters {
+                    if selected_parameter_ids.contains(&parameter.param_id) {
+                        selected.insert(parameter.tensor.clone());
+                    } else {
+                        permanent.insert(parameter.tensor.clone());
+                    }
+                }
+            }
+        }
+        if let Some(tensor) = selected.intersection(&permanent).next() {
+            return Err(VulkanBindingPlanError(format!(
+                "tensor {tensor:?} is bound through both dynamic and permanent parameter paths"
+            )));
+        }
+        Ok(selected)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

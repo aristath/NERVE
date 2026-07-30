@@ -231,6 +231,75 @@ fn selected_parameters_lower_to_generic_dynamic_resource_descriptors() {
 }
 
 #[test]
+fn selected_parameter_tensors_cannot_alias_permanent_parameters() {
+    let selected_parameter = VulkanParameterBinding {
+        param_id: "selected".to_string(),
+        tensor: "weights.shared".to_string(),
+        byte_count: Some(16),
+        shape: Some(vec![2, 2]),
+    };
+    let permanent_parameter = VulkanParameterBinding {
+        param_id: "permanent".to_string(),
+        tensor: "weights.shared".to_string(),
+        byte_count: Some(16),
+        shape: Some(vec![2, 2]),
+    };
+    let node = |
+        node_index: usize,
+        node_id: &str,
+        parameters: Vec<VulkanParameterBinding>,
+        selected_parameter_accesses: Vec<VulkanSelectedParameterAccessBinding>,
+    | {
+        VulkanNodeBinding {
+            node_index,
+            node_id: node_id.to_string(),
+            op: "compute".to_string(),
+            specialization: "generic".to_string(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            parameters,
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            selection_domain: None,
+            selected_parameter_accesses,
+        }
+    };
+    let plan = VulkanStreamCircuitBindingPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        circuits: vec![VulkanCircuitBindingPlan {
+            component_id: "component".to_string(),
+            circuit_id: "circuit".to_string(),
+            input_ports: Vec::new(),
+            output_ports: Vec::new(),
+            nodes: vec![
+                node(
+                    0,
+                    "selected_compute",
+                    vec![selected_parameter],
+                    vec![VulkanSelectedParameterAccessBinding {
+                        component_id: "component".to_string(),
+                        node_id: "selected_compute".to_string(),
+                        selection_signal: "selected_resources".to_string(),
+                        partition_axis: 0,
+                        parameter_ids: vec!["selected".to_string()],
+                    }],
+                ),
+                node(
+                    1,
+                    "permanent_compute",
+                    vec![permanent_parameter],
+                    Vec::new(),
+                ),
+            ],
+        }],
+    };
+
+    let error = plan.selected_parameter_tensors().unwrap_err();
+
+    assert!(error.to_string().contains("both dynamic and permanent"));
+}
+
+#[test]
 fn fused_head_norm_rope_kernel_receives_stream_control_metadata() {
     let metadata = VulkanKernelStreamMetadata::for_op("parallel_head_norm_rope_2way");
 

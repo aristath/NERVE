@@ -32,6 +32,8 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
     distributed_loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
+    compiled_resource_device_stores:
+        BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +45,15 @@ pub struct VulkanResidentStreamStateDeclaration {
 impl VulkanResidentInProcessPlacedModelPackage {
     pub fn stream_execution_class_id(&self) -> String {
         self.runtime_execution_identity.clone()
+    }
+
+    pub fn compiled_resource_device_store(
+        &self,
+        device_id: &str,
+    ) -> Option<&VulkanCompiledResourceDeviceStore> {
+        self.compiled_resource_device_stores
+            .get(device_id)
+            .map(Arc::as_ref)
     }
 
     pub fn resident_state_buffer(
