@@ -74,27 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 13. Integrate runtime placement and multi-device ownership
-
-- Make residency ownership explicit per physical device selected by the runtime
-  graph.
-- Support the same compiled model entirely on one device or split across
-  multiple devices without recompilation.
-- Initially load a requested resource on the device executing its component.
-- Define the generic boundary for future choices between remote execution,
-  activation transport, peer transfer, and a second resident copy; do not
-  silently duplicate resources now.
-- Preserve sharing and correct ownership when components are moved, duplicated,
-  bypassed, or rewired.
-- Make placement and device-slice inspection derive internal shard-worker
-  ownership correctly. Inspection must neither reject a logical shard device
-  merely because no whole component is assigned to it nor mount every component
-  when asked to inspect one internal shard.
-
-Completion requires sequential one-AMD and multi-AMD tests of placement changes,
-duplicated components, graph rewiring, internal shard inspection, residency
-reuse, and clean teardown.
-
 ### 14. Expose policy, state, and normal-operation metrics
 
 - Add runtime and TUI selection for `eager` and `demand-retained` residency.
