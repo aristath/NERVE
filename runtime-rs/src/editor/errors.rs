@@ -11,8 +11,9 @@ use crate::{
     ResolvedLoweredExecutionGraph, RuntimeAvailableDevice,
     RuntimeAvailableMemoryHeap,
     ResourceResidencyPolicy,
-    StreamCircuitNodeInstance, StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan,
-    StreamCircuitRuntimeGraph, VulkanComputeDeviceCatalog,
+    StreamCircuitNodeDeviceAssignment, StreamCircuitNodeInstance,
+    StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan, StreamCircuitRuntimeGraph,
+    VulkanComputeDeviceCatalog,
     VulkanComputeDeviceInfo,
     VulkanResidentModelPackageManifest,
 };

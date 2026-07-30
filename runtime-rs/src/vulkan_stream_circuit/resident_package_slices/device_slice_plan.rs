@@ -92,9 +92,19 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                 runtime_model.package.activation_element_bytes,
             )?;
         let hosted_component_count = placed_plan.binding_plan.circuits.len();
-        if hosted_component_count == 0 {
+        let output_component_id = runtime_model
+            .package
+            .output_transducer
+            .spec
+            .transducer_id
+            .as_str();
+        let hosts_targeted_output = runtime_model
+            .placement
+            .device_for_component(output_component_id)
+            == device_id;
+        if hosted_component_count == 0 && !hosts_targeted_output {
             return Err(VulkanResidentTokenModelPackageError::new(format!(
-                "resident model package {:?} has no components assigned to device {device_id:?}",
+                "resident model package {:?} has no executable runtime boundary assigned to device {device_id:?}",
                 runtime_model.package.package_id
             )));
         }
@@ -139,18 +149,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &runtime_model.component_executions,
             &prepared_plan,
         )?;
-        let output_component_id = runtime_model
-            .package
-            .output_transducer
-            .spec
-            .transducer_id
-            .as_str();
-        let targeted_output = (
-            runtime_model
-                .placement
-                .device_for_component(output_component_id)
-                == device_id
-        )
+        let targeted_output = hosts_targeted_output
         .then(|| {
             Ok(VulkanResidentTargetedOutputTransducerPlan {
                 parameter_plan:

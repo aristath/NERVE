@@ -30,6 +30,7 @@ impl StreamCircuitRuntimeGraph {
                     instance_id: instance_id.clone(),
                     source_component_id: source_component_id.clone(),
                     device_id: String::new(),
+                    device_assignment: StreamCircuitNodeDeviceAssignment::Automatic,
                     enabled: true,
                     control_values: BTreeMap::new(),
                     state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,
@@ -69,6 +70,11 @@ impl StreamCircuitRuntimeGraph {
                     instance_id: artifact.component.id.clone(),
                     source_component_id: artifact.component.id.clone(),
                     device_id: spec.device_for_component(&artifact.component.id).to_string(),
+                    device_assignment: if spec.node_devices.contains_key(&artifact.component.id) {
+                        StreamCircuitNodeDeviceAssignment::Explicit
+                    } else {
+                        StreamCircuitNodeDeviceAssignment::Automatic
+                    },
                     enabled: true,
                     control_values: BTreeMap::new(),
                     state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,
@@ -82,7 +88,7 @@ impl StreamCircuitRuntimeGraph {
     pub fn placement_spec(&self) -> StreamCircuitPlacementSpec {
         let mut spec = StreamCircuitPlacementSpec::new(self.default_device_id.clone());
         for instance in self.instances.iter().filter(|instance| instance.enabled) {
-            if instance.device_id != self.default_device_id {
+            if instance.device_assignment == StreamCircuitNodeDeviceAssignment::Explicit {
                 spec = spec.with_component_device(&instance.instance_id, &instance.device_id);
             }
         }
@@ -124,6 +130,7 @@ impl StreamCircuitRuntimeGraph {
             instance_id: new_instance_id.clone(),
             source_component_id: source.source_component_id.clone(),
             device_id: source.device_id.clone(),
+            device_assignment: source.device_assignment,
             enabled: source.enabled,
             control_values: BTreeMap::new(),
             state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,
@@ -303,12 +310,14 @@ impl StreamCircuitRuntimeGraph {
                 instance_id: instance_id.clone(),
                 source_component_id: source_component_id.clone(),
                 device_id: self.default_device_id.clone(),
+                device_assignment: StreamCircuitNodeDeviceAssignment::Automatic,
                 enabled: true,
                 control_values: BTreeMap::new(),
                 state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,
             };
             if let Some(previous) = previous_by_id.get(instance_id.as_str()) {
                 instance.device_id = previous.device_id.clone();
+                instance.device_assignment = previous.device_assignment;
                 if previous.source_component_id == *source_component_id {
                     instance.enabled = previous.enabled;
                     instance.control_values = previous.control_values.clone();
@@ -486,6 +495,7 @@ impl StreamCircuitRuntimeGraph {
                 ))
             })?;
         instance.device_id = device_id;
+        instance.device_assignment = StreamCircuitNodeDeviceAssignment::Explicit;
         Ok(self)
     }
 

@@ -348,6 +348,8 @@ impl RuntimeModelEditor {
                     instance_id,
                     source_component_id: source_id.clone(),
                     device_id: self.draft.default_device_id.clone(),
+                    device_assignment:
+                        StreamCircuitNodeDeviceAssignment::Automatic,
                     enabled: true,
                     control_values: BTreeMap::new(),
                     state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,

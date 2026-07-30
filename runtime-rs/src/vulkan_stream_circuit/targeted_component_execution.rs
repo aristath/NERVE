@@ -68,7 +68,7 @@ pub struct VulkanResidentTargetedOutputTransducerSession {
     component_id: String,
     node_id: String,
     resident_parameter_bytes: usize,
-    mounted: VulkanMountedPlacedStreamCircuit,
+    input_frame: VulkanResidentBuffer,
     runner: VulkanResidentOutputTransducerRunner,
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
     capture_output_values: bool,
@@ -202,10 +202,17 @@ impl VulkanResidentTargetedOutputTransducerSession {
             ));
         }
         let resident_parameter_bytes = output.parameter_buffers.total_byte_capacity;
-        let mounted = slice.create_mounted_stream_circuit(device)?;
-        let runner = VulkanResidentOutputTransducerRunner::from_mounted_output_transducer(
+        let input_frame = device
+            .create_resident_buffer(output.spec.input_frame_byte_capacity)
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to allocate targeted output-transducer input frame: {error}"
+                ))
+            })?;
+        let runner = VulkanResidentOutputTransducerRunner::from_input_frame(
             device,
-            &mounted,
+            &input_frame,
+            input_frame.byte_capacity(),
             &output.parameter_buffers,
             &output.embedding_norm_spirv_words,
             &output.projection_spirv_words,
@@ -220,7 +227,7 @@ impl VulkanResidentTargetedOutputTransducerSession {
             component_id: component_id.to_string(),
             node_id: node_id.to_string(),
             resident_parameter_bytes,
-            mounted,
+            input_frame,
             runner,
             sequence_catalog: RefCell::new(BTreeMap::new()),
             capture_output_values,
@@ -288,19 +295,9 @@ impl VulkanResidentTargetedOutputTransducerSession {
         &self,
         seed: u32,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        let input = self
-            .mounted
-            .boundary_io
-            .output_buffer(&self.runner.input_signal_id)
-            .ok_or_else(|| {
-                targeted_component_error_value(
-                    "targeted output transducer has no mounted input frame",
-                )
-            })?;
-        input
-            .buffer
+        self.input_frame
             .write_bytes(&targeted_fixture_bytes(
-                input.byte_capacity,
+                self.input_frame.byte_capacity(),
                 seed,
                 0,
             ))
@@ -421,14 +418,8 @@ impl VulkanResidentTargetedOutputTransducerSession {
     }
 
     fn resident_transient_bytes(&self) -> usize {
-        self.mounted
-            .buffers
-            .total_byte_capacity
-            .saturating_add(self.mounted.boundary_io.total_byte_capacity)
-            .saturating_add(self.mounted.edge_io.total_byte_capacity)
-            .saturating_add(
-                self.mounted.stream_control_buffer.byte_capacity(),
-            )
+        self.input_frame
+            .byte_capacity()
             .saturating_add(
                 self.runner.normalized_frame_buffer.byte_capacity(),
             )

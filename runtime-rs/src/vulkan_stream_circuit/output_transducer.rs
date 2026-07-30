@@ -47,6 +47,43 @@ impl VulkanResidentOutputTransducerRunner {
         tied_projection_spirv_words: &[u32],
         spec: &VulkanResidentOutputTransducerSpec,
     ) -> Result<Self, VulkanResidentOutputTransducerRunnerError> {
+        let output_frame = mounted
+            .boundary_io
+            .output_buffer(&spec.input_signal_id)
+            .ok_or_else(
+                || VulkanResidentOutputTransducerRunnerError::MissingModelOutputBuffer {
+                    signal_id: spec.input_signal_id.clone(),
+                },
+            )?;
+        Self::from_input_frame(
+            device,
+            &output_frame.buffer,
+            output_frame.byte_capacity,
+            transducer_parameter_buffers,
+            embedding_norm_spirv_words,
+            tied_projection_spirv_words,
+            spec,
+        )
+    }
+
+    pub(crate) fn from_input_frame(
+        device: &VulkanComputeDevice,
+        input_frame: &VulkanResidentBuffer,
+        input_frame_byte_capacity: usize,
+        transducer_parameter_buffers: &VulkanPermanentParameterBuffers,
+        embedding_norm_spirv_words: &[u32],
+        tied_projection_spirv_words: &[u32],
+        spec: &VulkanResidentOutputTransducerSpec,
+    ) -> Result<Self, VulkanResidentOutputTransducerRunnerError> {
+        if input_frame_byte_capacity != spec.input_frame_byte_capacity {
+            return Err(
+                VulkanResidentOutputTransducerRunnerError::InvalidInputFrameByteCapacity {
+                    signal_id: spec.input_signal_id.clone(),
+                    byte_capacity: input_frame_byte_capacity,
+                    expected_byte_capacity: spec.input_frame_byte_capacity,
+                },
+            );
+        }
         let embedding_norm_weight = transducer_parameter_buffers
             .parameter_buffer(&spec.norm_parameter_tensor)
             .ok_or_else(|| {
@@ -62,9 +99,9 @@ impl VulkanResidentOutputTransducerRunner {
                 }
             })?;
         let embedding_scale = projection_scale_parameter_buffer(transducer_parameter_buffers, spec)?;
-        Self::from_mounted_output_transducer_with_parameter_allocations(
+        Self::from_input_frame_with_parameter_allocations(
             device,
-            mounted,
+            input_frame,
             embedding_norm_weight,
             embedding_weight,
             embedding_scale,
@@ -74,9 +111,9 @@ impl VulkanResidentOutputTransducerRunner {
         )
     }
 
-    fn from_mounted_output_transducer_with_parameter_allocations(
+    fn from_input_frame_with_parameter_allocations(
         device: &VulkanComputeDevice,
-        mounted: &VulkanMountedPlacedStreamCircuit,
+        input_frame: &VulkanResidentBuffer,
         embedding_norm_weight: &VulkanPermanentParameterBufferAllocation,
         embedding_weight: &VulkanPermanentParameterBufferAllocation,
         embedding_scale: Option<&VulkanPermanentParameterBufferAllocation>,
@@ -84,24 +121,6 @@ impl VulkanResidentOutputTransducerRunner {
         tied_projection_spirv_words: &[u32],
         spec: &VulkanResidentOutputTransducerSpec,
     ) -> Result<Self, VulkanResidentOutputTransducerRunnerError> {
-        let output_frame = mounted
-            .boundary_io
-            .output_buffer(&spec.input_signal_id)
-            .ok_or_else(
-                || VulkanResidentOutputTransducerRunnerError::MissingModelOutputBuffer {
-                    signal_id: spec.input_signal_id.clone(),
-                },
-            )?;
-        if output_frame.byte_capacity != spec.input_frame_byte_capacity {
-            return Err(
-                VulkanResidentOutputTransducerRunnerError::InvalidInputFrameByteCapacity {
-                    signal_id: spec.input_signal_id.clone(),
-                    byte_capacity: output_frame.byte_capacity,
-                    expected_byte_capacity: spec.input_frame_byte_capacity,
-                },
-            );
-        }
-
         validate_output_projection_weight(embedding_weight, spec)?;
         validate_output_projection_scale(embedding_scale, spec)?;
         validate_output_embedding_norm_weight(embedding_norm_weight, spec)?;
@@ -113,8 +132,8 @@ impl VulkanResidentOutputTransducerRunner {
         let embedding_norm_bindings = [
             VulkanResidentKernelBufferBinding::new(
                 0,
-                &output_frame.buffer,
-                output_frame.byte_capacity,
+                input_frame,
+                spec.input_frame_byte_capacity,
             )
             .with_access(VulkanResidentKernelBufferAccess::Read),
             VulkanResidentKernelBufferBinding::new(
@@ -195,6 +214,45 @@ impl VulkanResidentOutputTransducerRunner {
             sequence: device.create_resident_kernel_sequence()?,
             node_ids: spec.node_ids.clone(),
         })
+    }
+
+    fn from_mounted_output_transducer_with_parameter_allocations(
+        device: &VulkanComputeDevice,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        embedding_norm_weight: &VulkanPermanentParameterBufferAllocation,
+        embedding_weight: &VulkanPermanentParameterBufferAllocation,
+        embedding_scale: Option<&VulkanPermanentParameterBufferAllocation>,
+        embedding_norm_spirv_words: &[u32],
+        tied_projection_spirv_words: &[u32],
+        spec: &VulkanResidentOutputTransducerSpec,
+    ) -> Result<Self, VulkanResidentOutputTransducerRunnerError> {
+        let output_frame = mounted
+            .boundary_io
+            .output_buffer(&spec.input_signal_id)
+            .ok_or_else(
+                || VulkanResidentOutputTransducerRunnerError::MissingModelOutputBuffer {
+                    signal_id: spec.input_signal_id.clone(),
+                },
+            )?;
+        if output_frame.byte_capacity != spec.input_frame_byte_capacity {
+            return Err(
+                VulkanResidentOutputTransducerRunnerError::InvalidInputFrameByteCapacity {
+                    signal_id: spec.input_signal_id.clone(),
+                    byte_capacity: output_frame.byte_capacity,
+                    expected_byte_capacity: spec.input_frame_byte_capacity,
+                },
+            );
+        }
+        Self::from_input_frame_with_parameter_allocations(
+            device,
+            &output_frame.buffer,
+            embedding_norm_weight,
+            embedding_weight,
+            embedding_scale,
+            embedding_norm_spirv_words,
+            tied_projection_spirv_words,
+            spec,
+        )
     }
 
     pub fn run(

@@ -3,11 +3,21 @@ pub struct StreamCircuitNodeInstance {
     pub instance_id: String,
     pub source_component_id: String,
     pub device_id: String,
+    #[serde(default)]
+    pub device_assignment: StreamCircuitNodeDeviceAssignment,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub control_values: BTreeMap<String, serde_json::Value>,
     pub state_policy: StreamCircuitNodeInstanceStatePolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCircuitNodeDeviceAssignment {
+    #[default]
+    Automatic,
+    Explicit,
 }
 
 fn default_enabled() -> bool {

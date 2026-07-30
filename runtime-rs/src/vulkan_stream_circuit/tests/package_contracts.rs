@@ -681,6 +681,37 @@ fn fused_generation_components_follow_connected_processor_devices() {
 }
 
 #[test]
+fn explicit_output_transducer_placement_is_independent_and_owns_sampling() {
+    let resolved = fixture_model_package_manifest()
+        .circuit_graph
+        .to_resolved_lowered_execution_graph(PathBuf::from("."))
+        .unwrap();
+    let runtime_graph = resolved
+        .default_runtime_graph("gpu0")
+        .unwrap()
+        .with_instance_device("layer_00", "gpu-processor")
+        .unwrap()
+        .with_instance_device("output_transducer", "gpu-output")
+        .unwrap();
+    let runtime_graph =
+        attach_generation_node_devices_for_vulkan(runtime_graph, &resolved).unwrap();
+    let device_for = |instance_id: &str| {
+        runtime_graph
+            .instances
+            .iter()
+            .find(|instance| instance.instance_id == instance_id)
+            .unwrap()
+            .device_id
+            .as_str()
+    };
+
+    assert_eq!(device_for("input_transducer"), "gpu-processor");
+    assert_eq!(device_for("layer_00"), "gpu-processor");
+    assert_eq!(device_for("output_transducer"), "gpu-output");
+    assert_eq!(device_for("sampler"), "gpu-output");
+}
+
+#[test]
 fn runtime_chain_control_preserves_generation_components_and_feedback() {
     let manifest = fixture_model_package_manifest();
     let chain = vec![

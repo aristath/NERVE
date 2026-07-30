@@ -94,6 +94,14 @@ impl VulkanResidentPackageCircuitGraph {
         package_root: impl Into<PathBuf>,
     ) -> Result<ResolvedLoweredExecutionGraph, VulkanResidentTokenModelPackageError> {
         let full = self.to_resolved_lowered_execution_graph(package_root)?;
+        let input_transducer = runtime_transducer_parameter_metadata(
+            &full,
+            CircuitRuntimeRole::InputTransducer,
+        )?;
+        let output_transducer = runtime_transducer_parameter_metadata(
+            &full,
+            CircuitRuntimeRole::OutputTransducer,
+        )?;
         let processor_ids = full
             .circuits
             .iter()
@@ -136,6 +144,8 @@ impl VulkanResidentPackageCircuitGraph {
                 .or_insert(0) += 1;
         }
         let mut index = full.index.clone();
+        index.graph.input_transducer = input_transducer;
+        index.graph.output_transducer = output_transducer;
         index.graph.circuits = circuit_refs;
         index.graph.edges = edges;
         index.graph.boundary = StreamCircuitGraphBoundary {
@@ -249,6 +259,38 @@ impl VulkanResidentPackageCircuitGraph {
             .into_iter()
             .collect()
     }
+}
+
+fn runtime_transducer_parameter_metadata(
+    graph: &ResolvedLoweredExecutionGraph,
+    role: CircuitRuntimeRole,
+) -> Result<Value, VulkanResidentTokenModelPackageError> {
+    let matching = graph
+        .circuits
+        .iter()
+        .filter(|artifact| artifact.component.runtime_role == role)
+        .collect::<Vec<_>>();
+    let [artifact] = matching.as_slice() else {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "resident package requires exactly one {role:?}, found {}",
+            matching.len()
+        )));
+    };
+    let params = artifact
+        .params
+        .refs
+        .iter()
+        .map(|(parameter_id, parameter)| {
+            (
+                parameter_id.clone(),
+                serde_json::json!({"tensor": parameter.tensor}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok(serde_json::json!({
+        "id": artifact.component.id,
+        "params": params,
+    }))
 }
 
 pub(crate) fn execution_boundary_inputs(

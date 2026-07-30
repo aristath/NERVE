@@ -135,9 +135,13 @@ impl VulkanResidentModelPackageManifest {
                 .iter()
                 .find(|artifact| artifact.component.id == instance.source_component_id)
                 .expect("validated runtime graph source must exist");
-            if !source.component.runtime_role.is_signal_processor() {
+            if !source
+                .component
+                .runtime_role
+                .is_runtime_implementation_target()
+            {
                 return Err(VulkanResidentTokenModelPackageError::new(format!(
-                    "component {instance_id:?} is attached to the processor boundary and cannot be placed independently by the Vulkan backend"
+                    "component {instance_id:?} is not an independently placeable Vulkan runtime implementation target"
                 )));
             }
             runtime_graph = runtime_graph
@@ -385,11 +389,28 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
         .map(|instance| (instance.instance_id.as_str(), instance.device_id.clone()))
         .collect::<BTreeMap<_, _>>();
     let input_device = device_by_instance[input_edge.destination.component_id.as_str()].clone();
-    let output_device = device_by_instance[output_edge.source.component_id.as_str()].clone();
+    let processor_output_device =
+        device_by_instance[output_edge.source.component_id.as_str()].clone();
+    let output_device = runtime_graph
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == output_transducer_id)
+        .filter(|instance| {
+            instance.device_assignment
+                == crate::stream_circuit::StreamCircuitNodeDeviceAssignment::Explicit
+        })
+        .map(|instance| instance.device_id.clone())
+        .unwrap_or(processor_output_device);
     for instance in &mut runtime_graph.instances {
-        if instance.instance_id == input_transducer_id {
+        if instance.instance_id == input_transducer_id
+            && instance.device_assignment
+                == crate::stream_circuit::StreamCircuitNodeDeviceAssignment::Automatic
+        {
             instance.device_id = input_device.clone();
-        } else if instance.instance_id == output_transducer_id || instance.instance_id == sampler_id
+        } else if (instance.instance_id == output_transducer_id
+            || instance.instance_id == sampler_id)
+            && instance.device_assignment
+                == crate::stream_circuit::StreamCircuitNodeDeviceAssignment::Automatic
         {
             instance.device_id = output_device.clone();
         }

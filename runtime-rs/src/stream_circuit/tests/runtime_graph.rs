@@ -433,6 +433,7 @@
             instance_id: "branch".to_string(),
             source_component_id: "layer_00".to_string(),
             device_id: "gpu0".to_string(),
+            device_assignment: StreamCircuitNodeDeviceAssignment::Automatic,
             enabled: true,
             control_values: BTreeMap::new(),
             state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,

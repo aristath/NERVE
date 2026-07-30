@@ -274,6 +274,8 @@
                     instance_id: "layer_00".to_string(),
                     source_component_id: "layer_00".to_string(),
                     device_id: "gpu0".to_string(),
+                    device_assignment:
+                        StreamCircuitNodeDeviceAssignment::Automatic,
                     enabled: true,
                     control_values: BTreeMap::new(),
                     state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,
@@ -444,6 +446,8 @@
                     instance_id: "layer_05_repeat".to_string(),
                     source_component_id: "layer_05".to_string(),
                     device_id: "vulkan:5".to_string(),
+                    device_assignment:
+                        StreamCircuitNodeDeviceAssignment::Explicit,
                     enabled: true,
                     control_values: BTreeMap::new(),
                     state_policy: StreamCircuitNodeInstanceStatePolicy::Fresh,
