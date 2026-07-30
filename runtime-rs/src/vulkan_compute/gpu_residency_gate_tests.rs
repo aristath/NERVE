@@ -10,41 +10,89 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
         selection_index_mask: 0xffff,
         address_slots_by_resource_index: vec![vec![0, 1], vec![2, 3]],
         missing_request_capacity: 4,
-        downstream_dispatches: vec![[2, 1, 1]],
+        downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
+            byte_offset: VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+            dimensions: [2, 1, 1],
+        }],
     };
-    assert!(valid.validate(8, 4).is_ok());
+    assert!(
+        valid
+            .validate(
+                8,
+                4,
+                2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+            )
+            .is_ok()
+    );
 
     let mut invalid = valid.clone();
     invalid.maximum_selection_count = 0;
-    assert!(invalid.validate(8, 4).is_err());
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0;
-    assert!(invalid.validate(8, 4).is_err());
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0x1;
     invalid.address_slots_by_resource_index =
         vec![vec![0], vec![1], vec![2]];
-    assert!(invalid.validate(8, 4).is_err());
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
     let mut invalid = valid.clone();
     invalid.address_slots_by_resource_index[0].push(1);
-    assert!(invalid.validate(8, 4).is_err());
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
     let mut invalid = valid.clone();
     invalid.address_slots_by_resource_index[0].push(4);
-    assert!(invalid.validate(8, 4).is_err());
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
     let mut invalid = valid.clone();
     invalid.missing_request_capacity = 1;
-    assert!(invalid.validate(8, 4).is_err());
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
     let mut invalid = valid.clone();
-    invalid.downstream_dispatches[0][1] = 0;
-    assert!(invalid.validate(8, 4).is_err());
+    invalid.downstream_dispatches[0].dimensions[1] = 0;
+    assert!(
+        invalid
+            .validate(8, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 
-    assert!(valid.validate(4, 4).is_err());
+    assert!(
+        valid
+            .validate(4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
+    assert!(
+        valid
+            .validate(8, 4, VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .is_err()
+    );
 }
 
 #[test]
@@ -109,18 +157,31 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
     selections
         .write_bytes(&u32_words_bytes(&[0, 1]))
         .unwrap();
+    let indirect_dispatches = Arc::new(
+        device
+            .create_resident_buffer(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .unwrap(),
+    );
+    indirect_dispatches
+        .write_bytes(&vec![0; indirect_dispatches.byte_capacity()])
+        .unwrap();
     let gate = VulkanGpuResidencyGate::new(
         &device,
         &gate_shader,
         Arc::clone(&selections),
-        &table,
+        table.shared_buffer(),
+        table.slot_count(),
+        Arc::clone(&indirect_dispatches),
         VulkanGpuResidencyGateConfig {
             maximum_selection_count: 2,
             selection_index_shift: 0,
             selection_index_mask: 0xffff,
             address_slots_by_resource_index: vec![vec![0], vec![1]],
             missing_request_capacity: 4,
-            downstream_dispatches: vec![[1, 1, 1]],
+            downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
+                byte_offset: 0,
+                dimensions: [1, 1, 1],
+            }],
         },
     )
     .unwrap();
@@ -249,6 +310,243 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
 }
 
 #[test]
+fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_prefix() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!(
+            "skipping GPU residency gate-chain test: explicit Vulkan device unset"
+        );
+        return;
+    };
+    let gate_shader =
+        vulkan_gpu_residency_gate_spirv_words().expect("embedded gate shader must be valid");
+    let downstream_shader = compile_gpu_residency_gate_shader(
+        GPU_RESIDENCY_GATE_DOWNSTREAM_SHADER,
+    )
+    .expect("GPU residency gate-chain test requires a GLSL compiler");
+    let device =
+        VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let mut transfer = device
+        .create_resident_transfer_stream(2, 4096)
+        .unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(4096, 8192, 256).unwrap(),
+    )
+    .unwrap();
+    let first = Arc::new(arena.allocate(&device, 64, 256).unwrap());
+    let second = Arc::new(arena.allocate(&device, 64, 256).unwrap());
+    let upload = transfer
+        .submit(&[
+            VulkanResidentBufferWriteRange::new(
+                first.buffer(),
+                first.buffer_byte_offset(),
+                &[1; 64],
+            )
+            .unwrap(),
+            VulkanResidentBufferWriteRange::new(
+                second.buffer(),
+                second.buffer_byte_offset(),
+                &[2; 64],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+    transfer.wait(&upload).unwrap();
+    let mut table =
+        VulkanStableResourceAddressTable::new(&device, &mut transfer, 2).unwrap();
+    let selection_first = Arc::new(device.create_resident_buffer(4).unwrap());
+    let selection_second = Arc::new(device.create_resident_buffer(4).unwrap());
+    selection_first.write_bytes(&0u32.to_le_bytes()).unwrap();
+    selection_second.write_bytes(&0u32.to_le_bytes()).unwrap();
+    let indirect_dispatches = Arc::new(
+        device
+            .create_resident_buffer(3 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .unwrap(),
+    );
+    indirect_dispatches
+        .write_bytes(&vec![0; indirect_dispatches.byte_capacity()])
+        .unwrap();
+    let first_gate = VulkanGpuResidencyGate::new(
+        &device,
+        &gate_shader,
+        selection_first,
+        table.shared_buffer(),
+        table.slot_count(),
+        Arc::clone(&indirect_dispatches),
+        VulkanGpuResidencyGateConfig {
+            maximum_selection_count: 1,
+            selection_index_shift: 0,
+            selection_index_mask: u32::MAX,
+            address_slots_by_resource_index: vec![vec![0]],
+            missing_request_capacity: 1,
+            downstream_dispatches: vec![
+                VulkanGpuResidencyIndirectDispatch {
+                    byte_offset: 0,
+                    dimensions: [1, 1, 1],
+                },
+                VulkanGpuResidencyIndirectDispatch {
+                    byte_offset: VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                    dimensions: [1, 1, 1],
+                },
+                VulkanGpuResidencyIndirectDispatch {
+                    byte_offset: 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                    dimensions: [1, 1, 1],
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let second_gate = VulkanGpuResidencyGate::new(
+        &device,
+        &gate_shader,
+        selection_second,
+        table.shared_buffer(),
+        table.slot_count(),
+        Arc::clone(&indirect_dispatches),
+        VulkanGpuResidencyGateConfig {
+            maximum_selection_count: 1,
+            selection_index_shift: 0,
+            selection_index_mask: u32::MAX,
+            address_slots_by_resource_index: vec![vec![1]],
+            missing_request_capacity: 1,
+            downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
+                byte_offset: 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                dimensions: [1, 1, 1],
+            }],
+        },
+    )
+    .unwrap();
+    let first_output = device.create_resident_buffer(4).unwrap();
+    let second_output = device.create_resident_buffer(4).unwrap();
+    first_output.write_bytes(&0u32.to_le_bytes()).unwrap();
+    second_output.write_bytes(&0u32.to_le_bytes()).unwrap();
+    let first_compute = device
+        .create_resident_kernel_dispatch(
+            &downstream_shader,
+            &[VulkanResidentKernelBufferBinding::new(0, &first_output, 4)
+                .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    let second_compute = device
+        .create_resident_kernel_dispatch(
+            &downstream_shader,
+            &[VulkanResidentKernelBufferBinding::new(0, &second_output, 4)
+                .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    let full_sequence = device.create_resident_kernel_sequence().unwrap();
+    let resume_sequence = device.create_resident_kernel_sequence().unwrap();
+    let first_control = first_gate.push_constants(1, 11).unwrap();
+    let second_control = second_gate.push_constants(1, 22).unwrap();
+    let increment = 1u32.to_le_bytes();
+    device
+        .record_resident_kernel_sequence(
+            &full_sequence,
+            &[
+                VulkanResidentKernelSequenceStep::new(first_gate.dispatch(), &first_control),
+                first_gate
+                    .indirect_dispatch_step(0, &first_compute, &increment)
+                    .unwrap(),
+                VulkanResidentKernelSequenceStep::new_indirect(
+                    second_gate.dispatch(),
+                    &second_control,
+                    &indirect_dispatches,
+                    VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                )
+                .unwrap(),
+                second_gate
+                    .indirect_dispatch_step(
+                        2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                        &second_compute,
+                        &increment,
+                    )
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+    device
+        .record_resident_kernel_sequence(
+            &resume_sequence,
+            &[
+                VulkanResidentKernelSequenceStep::new(second_gate.dispatch(), &second_control),
+                second_gate
+                    .indirect_dispatch_step(
+                        2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                        &second_compute,
+                        &increment,
+                    )
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+
+    device
+        .run_recorded_resident_kernel_sequence(&full_sequence)
+        .unwrap();
+    assert_eq!(first_output.read_bytes(4).unwrap(), 0u32.to_le_bytes());
+    assert_eq!(second_output.read_bytes(4).unwrap(), 0u32.to_le_bytes());
+    let first_miss = first_gate.missing_snapshot().unwrap();
+    assert_eq!(first_miss.requests[0].checkpoint_tag, 11);
+    assert!(second_gate.missing_snapshot().unwrap().requests.is_empty());
+    first_gate
+        .acknowledge_missing_through(first_miss.published_count)
+        .unwrap();
+    let first_publication = table
+        .publish_group(&mut transfer, &[(0, Arc::clone(&first))])
+        .unwrap();
+
+    device
+        .run_recorded_resident_kernel_sequence(&full_sequence)
+        .unwrap();
+    assert_eq!(first_output.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+    assert_eq!(second_output.read_bytes(4).unwrap(), 0u32.to_le_bytes());
+    let second_miss = second_gate.missing_snapshot().unwrap();
+    assert_eq!(second_miss.requests[0].checkpoint_tag, 22);
+    second_gate
+        .acknowledge_missing_through(second_miss.published_count)
+        .unwrap();
+    let second_publication = table
+        .publish_group(&mut transfer, &[(1, Arc::clone(&second))])
+        .unwrap();
+
+    device
+        .run_recorded_resident_kernel_sequence(&resume_sequence)
+        .unwrap();
+    assert_eq!(
+        first_output.read_bytes(4).unwrap(),
+        1u32.to_le_bytes(),
+        "resuming the second checkpoint must not replay preceding selected work"
+    );
+    assert_eq!(second_output.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+    assert!(first_gate.missing_snapshot().unwrap().requests.is_empty());
+    assert!(second_gate.missing_snapshot().unwrap().requests.is_empty());
+
+    drop(full_sequence);
+    drop(resume_sequence);
+    drop(first_compute);
+    drop(second_compute);
+    drop(first_gate);
+    drop(second_gate);
+    drop(indirect_dispatches);
+    table
+        .clear_group(&mut transfer, &second_publication)
+        .unwrap();
+    table
+        .clear_group(&mut transfer, &first_publication)
+        .unwrap();
+    drop(table);
+    drop(second);
+    drop(first);
+    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+}
+
+#[test]
 fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
     let started = std::time::Instant::now();
     let Some(device_index) = stable_resource_test_device_index() else {
@@ -313,14 +611,23 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
         &device,
         &gate_shader,
         Arc::clone(&selection),
-        &table,
+        table.shared_buffer(),
+        table.slot_count(),
+        Arc::new(
+            device
+                .create_resident_buffer(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+                .unwrap(),
+        ),
         VulkanGpuResidencyGateConfig {
             maximum_selection_count: 1,
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
             address_slots_by_resource_index: vec![vec![0]],
             missing_request_capacity: 1,
-            downstream_dispatches: vec![[workgroup_count, 1, 1]],
+            downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
+                byte_offset: 0,
+                dimensions: [workgroup_count, 1, 1],
+            }],
         },
     )
     .unwrap();

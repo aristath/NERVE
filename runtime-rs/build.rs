@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -42,6 +43,11 @@ fn recursive_directory_files_with_extension(
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    compile_runtime_shader(
+        &manifest_dir.join("shaders/gpu_residency_gate.comp"),
+        &PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"))
+            .join("gpu_residency_gate.spv"),
+    );
     let hardware_discovery_sources = [
         "Cargo.lock",
         "Cargo.toml",
@@ -107,15 +113,20 @@ fn main() {
         calibrator_digest.finalize()
     );
 
-    let mut runtime_inputs = ["Cargo.lock", "Cargo.toml", "build.rs"]
-        .into_iter()
-        .map(|relative| (relative.to_string(), manifest_dir.join(relative)))
-        .chain(recursive_directory_files_with_extension(
-            &manifest_dir.join("src"),
-            "src",
-            "rs",
-        ))
-        .collect::<Vec<_>>();
+    let mut runtime_inputs = [
+        "Cargo.lock",
+        "Cargo.toml",
+        "build.rs",
+        "shaders/gpu_residency_gate.comp",
+    ]
+    .into_iter()
+    .map(|relative| (relative.to_string(), manifest_dir.join(relative)))
+    .chain(recursive_directory_files_with_extension(
+        &manifest_dir.join("src"),
+        "src",
+        "rs",
+    ))
+    .collect::<Vec<_>>();
     runtime_inputs.sort_by(|left, right| left.0.cmp(&right.0));
     let mut runtime_digest = Sha256::new();
     for (relative, path) in runtime_inputs {
@@ -132,4 +143,35 @@ fn main() {
         "cargo:rustc-env=NERVE_RUNTIME_IMPLEMENTATION_FINGERPRINT={RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:{:x}",
         runtime_digest.finalize()
     );
+}
+
+fn compile_runtime_shader(source: &Path, output: &Path) {
+    println!("cargo:rerun-if-changed={}", source.display());
+    let compiler = std::env::var_os("GLSLANG_VALIDATOR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("glslangValidator"));
+    let result = Command::new(&compiler)
+        .arg("--target-env")
+        .arg("vulkan1.4")
+        .arg("-V")
+        .arg("-S")
+        .arg("comp")
+        .arg("-o")
+        .arg(output)
+        .arg(source)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to launch {:?} while compiling runtime shader {:?}: {error}",
+                compiler, source
+            )
+        });
+    if !result.status.success() {
+        panic!(
+            "failed to compile runtime shader {:?} for Vulkan 1.4: {}{}",
+            source,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+        );
+    }
 }

@@ -46,6 +46,7 @@ const uint RESOLVED_RECORD_WORDS = 8u;
 const uint MISSING_HEADER_WORDS = 4u;
 const uint MISSING_RECORD_WORDS = 2u;
 const uint CONFIG_HEADER_WORDS = 6u;
+const uint CONFIG_DISPATCH_WORDS = 4u;
 
 uint selected_resource(uint selection_index) {
     return (selections.words[selection_index] >> configuration.words[0])
@@ -100,14 +101,14 @@ void copy_resolved_address(
 
 void write_indirect_dispatches(bool enabled) {
     for (uint dispatch = 0u; dispatch < configuration.words[5]; dispatch += 1u) {
-        uint word = dispatch * 3u;
-        uint dimensions = CONFIG_HEADER_WORDS + word;
-        indirect_dispatches.words[word] =
-            enabled ? configuration.words[dimensions] : 0u;
-        indirect_dispatches.words[word + 1u] =
-            enabled ? configuration.words[dimensions + 1u] : 0u;
-        indirect_dispatches.words[word + 2u] =
-            enabled ? configuration.words[dimensions + 2u] : 0u;
+        uint record = CONFIG_HEADER_WORDS + dispatch * CONFIG_DISPATCH_WORDS;
+        uint target = configuration.words[record];
+        indirect_dispatches.words[target] =
+            enabled ? configuration.words[record + 1u] : 0u;
+        indirect_dispatches.words[target + 1u] =
+            enabled ? configuration.words[record + 2u] : 0u;
+        indirect_dispatches.words[target + 2u] =
+            enabled ? configuration.words[record + 3u] : 0u;
     }
 }
 
