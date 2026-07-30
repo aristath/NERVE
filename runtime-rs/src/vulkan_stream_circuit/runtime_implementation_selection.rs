@@ -7,6 +7,23 @@ struct VulkanRuntimeComponentOverlay {
     execution: VulkanResidentComponentExecutionSpec,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VulkanRuntimeOutputTransducerOverlay {
+    schema: String,
+    source_component_id: String,
+    component: VulkanResidentPackageComponentCircuit,
+    output_transducer: VulkanResidentOutputTransducerPackageSpec,
+    speculative_output_transducers: Vec<VulkanRuntimeDraftOutputTransducerOverlay>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VulkanRuntimeDraftOutputTransducerOverlay {
+    decoder_id: String,
+    output_transducer: VulkanResidentDraftOutputTransducerPackageSpec,
+}
+
 impl crate::RuntimeSelectionRequest {
     pub fn from_vulkan_runtime_model(
         runtime_model: &VulkanResidentRuntimeModel,
@@ -36,7 +53,7 @@ impl crate::RuntimeSelectionRequest {
             .filter(|instance| {
                 source_roles
                     .get(instance.source_component_id.as_str())
-                    .is_some_and(|role| role.is_signal_processor())
+                    .is_some_and(|role| role.is_runtime_implementation_target())
             })
             .map(|instance| {
                 let mut logical_device_ids = vec![
@@ -312,7 +329,7 @@ impl VulkanResidentRuntimeModel {
             .filter(|instance| {
                 source_roles
                     .get(instance.source_component_id.as_str())
-                    .is_some_and(|role| role.is_signal_processor())
+                    .is_some_and(|role| role.is_runtime_implementation_target())
             })
             .map(|instance| instance.instance_id.clone())
             .filter(|instance_id| !mounted_instances.contains(instance_id))
@@ -670,79 +687,111 @@ fn mount_runtime_candidate_region_application(
         )));
     }
 
-    for replacement in &region.component_replacements {
+    for replacement in &region.replacements {
+        let source_component_id = replacement.source_component_id();
         let matching_instances = island_instances
             .values()
             .filter(|instance| {
                 instance.source_component_id
-                    == replacement.source_component_id
+                    == source_component_id
             })
             .collect::<Vec<_>>();
         if matching_instances.len() != 1 {
             return Err(VulkanResidentTokenModelPackageError::new(format!(
                 "runtime candidate application {application_id:?} does not map source component {:?} exactly once in island {:?}",
-                replacement.source_component_id,
+                source_component_id,
                 instance_ids,
             )));
         }
         let source = source_components
-            .get(&replacement.source_component_id)
+            .get(source_component_id)
             .cloned()
             .ok_or_else(|| {
                 VulkanResidentTokenModelPackageError::new(format!(
                     "runtime candidate application {application_id:?} references unknown source component {:?}",
-                    replacement.source_component_id
+                    source_component_id
                 ))
             })?;
         let overlay_path = contained_candidate_artifact(
             candidate_root,
-            &replacement.overlay_ref,
-            "runtime component overlay",
+            replacement.overlay_ref(),
+            "runtime overlay",
         )?;
         let bytes = fs::read(&overlay_path).map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
-                "failed to read runtime component overlay {overlay_path:?}: {error}"
+                "failed to read runtime overlay {overlay_path:?}: {error}"
             ))
         })?;
-        let mut overlay: VulkanRuntimeComponentOverlay =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "invalid runtime component overlay {overlay_path:?}: {error}"
-                ))
-            })?;
-        validate_runtime_component_overlay(
-            &overlay,
-            &source,
-            matching_instances[0].instance_id.as_str(),
-            &island_ids,
-            &effective_edges,
-            &runtime_model.runtime_graph.boundary,
-        )?;
-        let source_execution = runtime_model
-            .component_executions
-            .iter()
-            .find(|execution| {
-                execution.component_id
-                    == matching_instances[0].instance_id
-            })
-            .cloned()
-            .ok_or_else(|| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "runtime candidate application {application_id:?} cannot find source execution for instance {:?}",
-                    matching_instances[0].instance_id,
-                ))
-            })?;
-        rebase_overlay_shader_paths(
-            &mut overlay.execution,
-            &source_execution,
-            package_root,
-            candidate_root,
-        )?;
-        mount_runtime_component_overlay(
-            runtime_model,
-            matching_instances[0].instance_id.as_str(),
-            overlay,
-        )?;
+        match replacement {
+            crate::RuntimeReplacement::Component { .. } => {
+                let mut overlay: VulkanRuntimeComponentOverlay =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "invalid runtime component overlay {overlay_path:?}: {error}"
+                        ))
+                    })?;
+                validate_runtime_component_overlay(
+                    &overlay,
+                    &source,
+                    matching_instances[0].instance_id.as_str(),
+                    &island_ids,
+                    &effective_edges,
+                    &runtime_model.runtime_graph.boundary,
+                )?;
+                let source_execution = runtime_model
+                    .component_executions
+                    .iter()
+                    .find(|execution| {
+                        execution.component_id
+                            == matching_instances[0].instance_id
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "runtime candidate application {application_id:?} cannot find source execution for instance {:?}",
+                            matching_instances[0].instance_id,
+                        ))
+                    })?;
+                rebase_overlay_shader_paths(
+                    &mut overlay.execution,
+                    &source_execution,
+                    package_root,
+                    candidate_root,
+                )?;
+                mount_runtime_component_overlay(
+                    runtime_model,
+                    matching_instances[0].instance_id.as_str(),
+                    overlay,
+                )?;
+            }
+            crate::RuntimeReplacement::OutputTransducer { .. } => {
+                let mut overlay: VulkanRuntimeOutputTransducerOverlay =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "invalid runtime output-transducer overlay {overlay_path:?}: {error}"
+                        ))
+                    })?;
+                validate_runtime_output_transducer_overlay(
+                    runtime_model,
+                    &overlay,
+                    &source,
+                    matching_instances[0].instance_id.as_str(),
+                    &island_ids,
+                    &effective_edges,
+                )?;
+                rebase_output_transducer_overlay_shader_paths(
+                    &mut overlay,
+                    &runtime_model.package,
+                    package_root,
+                    candidate_root,
+                )?;
+                mount_runtime_output_transducer_overlay(
+                    runtime_model,
+                    matching_instances[0].instance_id.as_str(),
+                    overlay,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -886,18 +935,45 @@ fn validate_runtime_component_overlay(
     graph_boundary: &StreamCircuitGraphBoundary,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
     if overlay.schema != crate::VULKAN_COMPONENT_OVERLAY_SCHEMA
-        || overlay.source_component_id != source.component_id
-        || overlay.component.component_id != source.component_id
-        || overlay.component.circuit.source.component_id
-            != source.component_id
         || overlay.execution.component_id != source.component_id
-        || overlay.component.operator_type != source.operator_type
         || overlay.execution.operator_type != source.operator_type
-        || overlay.component.runtime_role != source.runtime_role
-        || overlay.component.circuit.runtime_role != source.runtime_role
     {
         return Err(VulkanResidentTokenModelPackageError::new(format!(
             "runtime component overlay for {:?} changes its logical source identity",
+            source.component_id
+        )));
+    }
+    validate_runtime_overlay_component(
+        &overlay.source_component_id,
+        &overlay.component,
+        source,
+        runtime_instance_id,
+        island_instance_ids,
+        effective_edges,
+        graph_boundary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_overlay_component(
+    overlay_source_component_id: &str,
+    overlay_component: &VulkanResidentPackageComponentCircuit,
+    source: &VulkanResidentPackageComponentCircuit,
+    runtime_instance_id: &str,
+    island_instance_ids: &BTreeSet<&str>,
+    effective_edges: &[crate::stream_circuit::StreamCircuitGraphEdge],
+    graph_boundary: &StreamCircuitGraphBoundary,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if overlay_source_component_id != source.component_id
+        || overlay_component.component_id != source.component_id
+        || overlay_component.circuit.source.component_id
+            != source.component_id
+        || overlay_component.operator_type != source.operator_type
+        || overlay_component.runtime_role != source.runtime_role
+        || overlay_component.circuit.runtime_role != source.runtime_role
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime overlay for {:?} changes its logical source identity",
             source.component_id
         )));
     }
@@ -908,8 +984,7 @@ fn validate_runtime_component_overlay(
         .iter()
         .map(|port| (port.id.as_str(), port))
         .collect::<BTreeMap<_, _>>();
-    let overlay_inputs = overlay
-        .component
+    let overlay_inputs = overlay_component
         .circuit
         .boundary
         .inputs
@@ -923,8 +998,7 @@ fn validate_runtime_component_overlay(
         .iter()
         .map(|port| (port.id.as_str(), port))
         .collect::<BTreeMap<_, _>>();
-    let overlay_outputs = overlay
-        .component
+    let overlay_outputs = overlay_component
         .circuit
         .boundary
         .outputs
@@ -994,6 +1068,111 @@ fn validate_runtime_component_overlay(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_output_transducer_overlay(
+    runtime_model: &VulkanResidentRuntimeModel,
+    overlay: &VulkanRuntimeOutputTransducerOverlay,
+    source: &VulkanResidentPackageComponentCircuit,
+    runtime_instance_id: &str,
+    island_instance_ids: &BTreeSet<&str>,
+    effective_edges: &[crate::stream_circuit::StreamCircuitGraphEdge],
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if overlay.schema != crate::VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA
+        || source.runtime_role != CircuitRuntimeRole::OutputTransducer
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime output-transducer overlay for {:?} has an incompatible identity",
+            source.component_id
+        )));
+    }
+    validate_runtime_overlay_component(
+        &overlay.source_component_id,
+        &overlay.component,
+        source,
+        runtime_instance_id,
+        island_instance_ids,
+        effective_edges,
+        &runtime_model.runtime_graph.boundary,
+    )?;
+    validate_output_transducer_logical_contract(
+        &runtime_model.package.output_transducer,
+        &overlay.output_transducer,
+    )?;
+
+    let source_drafts = runtime_model
+        .package
+        .speculative_decoders
+        .iter()
+        .map(|decoder| (decoder.id.as_str(), &decoder.output_transducer))
+        .collect::<BTreeMap<_, _>>();
+    let overlay_draft_ids = overlay
+        .speculative_output_transducers
+        .iter()
+        .map(|decoder| decoder.decoder_id.as_str())
+        .collect::<Vec<_>>();
+    if overlay_draft_ids.windows(2).any(|pair| pair[0] >= pair[1])
+        || overlay_draft_ids.iter().copied().collect::<BTreeSet<_>>()
+            != source_drafts.keys().copied().collect::<BTreeSet<_>>()
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime output-transducer overlay must cover each speculative decoder exactly once",
+        ));
+    }
+    for draft in &overlay.speculative_output_transducers {
+        validate_draft_output_transducer_logical_contract(
+            source_drafts[draft.decoder_id.as_str()],
+            &draft.output_transducer,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_output_transducer_logical_contract(
+    source: &VulkanResidentOutputTransducerPackageSpec,
+    overlay: &VulkanResidentOutputTransducerPackageSpec,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let source_spec = &source.spec;
+    let overlay_spec = &overlay.spec;
+    if overlay_spec.transducer_id != source_spec.transducer_id
+        || overlay_spec.input_signal_id != source_spec.input_signal_id
+        || overlay_spec.node_ids != source_spec.node_ids
+        || overlay_spec.norm_parameter_shape != source_spec.norm_parameter_shape
+        || overlay_spec.projection_parameter_shape != source_spec.projection_parameter_shape
+        || overlay_spec.input_frame_byte_capacity != source_spec.input_frame_byte_capacity
+        || overlay_spec.normalized_frame_byte_capacity
+            != source_spec.normalized_frame_byte_capacity
+        || overlay_spec.logits_byte_capacity != source_spec.logits_byte_capacity
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime output-transducer overlay changes its logical signal or tensor geometry",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_draft_output_transducer_logical_contract(
+    source: &VulkanResidentDraftOutputTransducerPackageSpec,
+    overlay: &VulkanResidentDraftOutputTransducerPackageSpec,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if overlay.component_id != source.component_id
+        || overlay.input_signal_id != source.input_signal_id
+        || overlay.hidden_signal_id != source.hidden_signal_id
+        || overlay.logits_signal_id != source.logits_signal_id
+        || overlay.norm_parameter_shape != source.norm_parameter_shape
+        || overlay.projection_parameter_shape != source.projection_parameter_shape
+        || overlay.input_frame_byte_capacity != source.input_frame_byte_capacity
+        || overlay.output_hidden_byte_capacity != source.output_hidden_byte_capacity
+        || overlay.logits_byte_capacity != source.logits_byte_capacity
+        || overlay.vocabulary_size != source.vocabulary_size
+        || overlay.hidden_size != source.hidden_size
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime draft output-transducer overlay changes its logical signal or tensor geometry",
+        ));
+    }
+    Ok(())
+}
+
 fn rebase_overlay_shader_paths(
     execution: &mut VulkanResidentComponentExecutionSpec,
     source_execution: &VulkanResidentComponentExecutionSpec,
@@ -1036,6 +1215,71 @@ fn rebase_overlay_shader_paths(
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+fn rebase_output_transducer_overlay_shader_paths(
+    overlay: &mut VulkanRuntimeOutputTransducerOverlay,
+    source: &VulkanResidentModelPackageManifest,
+    package_root: &Path,
+    candidate_root: &Path,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let target_paths = [
+        (
+            &mut overlay.output_transducer.embedding_norm_shader_path,
+            source.output_transducer.embedding_norm_shader_path.as_str(),
+        ),
+        (
+            &mut overlay.output_transducer.embedding_norm_batch_shader_path,
+            source
+                .output_transducer
+                .embedding_norm_batch_shader_path
+                .as_str(),
+        ),
+        (
+            &mut overlay.output_transducer.projection_shader_path,
+            source.output_transducer.projection_shader_path.as_str(),
+        ),
+        (
+            &mut overlay.output_transducer.projection_batch_shader_path,
+            source
+                .output_transducer
+                .projection_batch_shader_path
+                .as_str(),
+        ),
+    ];
+    for (overlay_path, source_path) in target_paths {
+        *overlay_path = rebase_overlay_shader_path(
+            overlay_path,
+            Some(source_path),
+            package_root,
+            candidate_root,
+            "runtime output-transducer shader",
+        )?;
+    }
+
+    let source_drafts = source
+        .speculative_decoders
+        .iter()
+        .map(|decoder| (decoder.id.as_str(), &decoder.output_transducer))
+        .collect::<BTreeMap<_, _>>();
+    for draft in &mut overlay.speculative_output_transducers {
+        let source_draft = source_drafts[draft.decoder_id.as_str()];
+        draft.output_transducer.norm_shader_path = rebase_overlay_shader_path(
+            &draft.output_transducer.norm_shader_path,
+            Some(&source_draft.norm_shader_path),
+            package_root,
+            candidate_root,
+            "runtime draft output-transducer norm shader",
+        )?;
+        draft.output_transducer.projection_shader_path = rebase_overlay_shader_path(
+            &draft.output_transducer.projection_shader_path,
+            Some(&source_draft.projection_shader_path),
+            package_root,
+            candidate_root,
+            "runtime draft output-transducer projection shader",
+        )?;
     }
     Ok(())
 }
@@ -1106,5 +1350,42 @@ fn mount_runtime_component_overlay(
             ))
         })?;
     *execution = overlay.execution;
+    Ok(())
+}
+
+fn mount_runtime_output_transducer_overlay(
+    runtime_model: &mut VulkanResidentRuntimeModel,
+    runtime_instance_id: &str,
+    mut overlay: VulkanRuntimeOutputTransducerOverlay,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    overlay.component.component_id = runtime_instance_id.to_string();
+    overlay.component.circuit.source.component_id =
+        runtime_instance_id.to_string();
+    overlay.output_transducer.spec.transducer_id =
+        runtime_instance_id.to_string();
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter_mut()
+        .find(|component| component.component_id == runtime_instance_id)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime implementation cannot find output transducer {runtime_instance_id:?}"
+            ))
+        })?;
+    *component = overlay.component;
+    runtime_model.package.output_transducer = overlay.output_transducer;
+
+    let speculative_outputs = overlay
+        .speculative_output_transducers
+        .into_iter()
+        .map(|draft| (draft.decoder_id, draft.output_transducer))
+        .collect::<BTreeMap<_, _>>();
+    for decoder in &mut runtime_model.package.speculative_decoders {
+        decoder.output_transducer = speculative_outputs
+            .get(&decoder.id)
+            .expect("validated output overlay must cover every speculative decoder")
+            .clone();
+    }
     Ok(())
 }

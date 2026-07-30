@@ -349,13 +349,14 @@ class ExactEmbeddedHeadNormParameterProgramProvider:
     ) -> Json:
         opportunities = _opportunities(context)
         return {
-            "schema": "nerve.optimizer.runtime_mount_plan.v2",
+            "schema": "nerve.optimizer.runtime_mount_plan.v3",
             "candidate_id": candidate["candidate_id"],
-            "adapter_id": "vulkan_stream_circuit_component_overlay.v1",
+            "adapter_id": "vulkan_stream_circuit_overlay.v2",
             "regions": [
                 {
-                    "component_replacements": [
+                    "replacements": [
                         {
+                            "kind": "component",
                             "source_component_id": opportunity.component_id,
                             "overlay_ref": member_path(
                                 opportunity.scope_id, OVERLAY_PATH
@@ -619,7 +620,7 @@ def _build_plan(
         ),
         _output(
             prefix(OVERLAY_PATH),
-            "runtime_component_overlay",
+            "runtime_overlay",
             "mount",
             "ordinary_lowering",
             0,

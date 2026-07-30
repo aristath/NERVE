@@ -12,10 +12,11 @@ pub const RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA: &str =
 pub const PROMOTION_DECISION_SCHEMA: &str = "nerve.optimizer.promotion_decision.v2";
 pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v2";
 pub const VALIDATION_RECORD_SCHEMA: &str = "nerve.optimizer.validation_record.v2";
-pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v2";
+pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v3";
 pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v1";
-pub const VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER: &str =
-    "vulkan_stream_circuit_component_overlay.v1";
+pub const VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA: &str =
+    "nerve.optimizer.vulkan_output_transducer_overlay.v1";
+pub const VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER: &str = "vulkan_stream_circuit_overlay.v2";
 pub const STAGED_CANDIDATE_INTEGRITY_SCHEMA: &str = "nerve.optimizer.staged_candidate_integrity.v1";
 pub const STAGED_CANDIDATE_INTEGRITY_FILE: &str = "integrity.json";
 pub const STAGED_ARTIFACT_DIGEST_SCHEMA: &str = "nerve.optimizer.artifact_sha256.v1";
@@ -216,7 +217,7 @@ pub struct RuntimeMountPlan {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeMountRegion {
-    pub component_replacements: Vec<RuntimeComponentReplacement>,
+    pub replacements: Vec<RuntimeReplacement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,9 +230,39 @@ pub struct RuntimeStagedCandidate {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeComponentReplacement {
-    pub source_component_id: String,
-    pub overlay_ref: String,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeReplacement {
+    Component {
+        source_component_id: String,
+        overlay_ref: String,
+    },
+    OutputTransducer {
+        source_component_id: String,
+        overlay_ref: String,
+    },
+}
+
+impl RuntimeReplacement {
+    pub fn source_component_id(&self) -> &str {
+        match self {
+            Self::Component {
+                source_component_id,
+                ..
+            }
+            | Self::OutputTransducer {
+                source_component_id,
+                ..
+            } => source_component_id,
+        }
+    }
+
+    pub fn overlay_ref(&self) -> &str {
+        match self {
+            Self::Component { overlay_ref, .. } | Self::OutputTransducer { overlay_ref, .. } => {
+                overlay_ref
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

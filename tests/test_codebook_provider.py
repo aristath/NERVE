@@ -774,8 +774,9 @@ def test_exact_codebook_provider_is_structure_generic_and_emits_complete_plan(
     assert multiple_seed_checks[0]["seeds"] == [1, 2]
     assert plan.mount_requirements.to_json()["regions"] == [
         {
-            "component_replacements": [
+            "replacements": [
                 {
+                    "kind": "component",
                     "source_component_id": "arbitrary_component",
                     "overlay_ref": member_path(
                         candidate["scope_ids"][0],

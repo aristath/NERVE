@@ -215,7 +215,8 @@ fn staged_runtime_candidate_fixture() -> (
             "candidate_id": candidate_id,
             "adapter_id": crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
             "regions": [{
-                "component_replacements": [{
+                "replacements": [{
+                    "kind": "component",
                     "source_component_id": "layer_00",
                     "overlay_ref": "overlays/layer_00.json",
                 }],
@@ -415,8 +416,8 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
                 crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER
                     .to_string(),
             regions: vec![crate::RuntimeMountRegion {
-                component_replacements: vec![
-                    crate::RuntimeComponentReplacement {
+                replacements: vec![
+                    crate::RuntimeReplacement::Component {
                         source_component_id: "layer_00".to_string(),
                         overlay_ref: overlay_ref.to_string(),
                     },
@@ -477,7 +478,7 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
             speculative_draft_tokens: 0,
         },
         selected: vec![selected],
-        exact_instance_ids: Vec::new(),
+        exact_instance_ids: vec!["output_transducer".to_string()],
         rejected: Vec::new(),
         total_estimated_saved_ns: 100,
         total_conversion_ns: 0,
@@ -531,6 +532,135 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
     mounted.load_runtime_tensor_index(&package_root).unwrap();
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn output_transducer_overlay_mounts_target_representation_as_one_unit() {
+    let manifest =
+        VulkanResidentModelPackageManifest::from_json_file(
+            tiny_model_dir().join("vulkan_resident_package.json"),
+        )
+        .unwrap();
+    let mut runtime_model = manifest
+        .mount_runtime_graph_controls(
+            Some("gpu0"),
+            &BTreeMap::new(),
+            &[],
+            None,
+        )
+        .unwrap();
+    let source = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| {
+            component.runtime_role == CircuitRuntimeRole::OutputTransducer
+        })
+        .unwrap()
+        .clone();
+    let runtime_instance_id = source.component_id.clone();
+    let mut component = source.clone();
+    component.implementation = "optimized_output_representation".to_string();
+    component.circuit.implementation =
+        "optimized_output_representation".to_string();
+    let mut output_transducer =
+        runtime_model.package.output_transducer.clone();
+    output_transducer.spec.projection_parameter_tensor =
+        "optimizer.output_projection".to_string();
+    output_transducer.spec.projection_parameter_dtype =
+        "F8_E4M3".to_string();
+    output_transducer.spec.projection_parameter_byte_capacity /= 2;
+    output_transducer.spec.projection_scale_parameter_tensor =
+        Some("optimizer.output_projection.scale".to_string());
+    output_transducer.spec.projection_scale_parameter_dtype =
+        Some("BF16".to_string());
+    output_transducer.spec.projection_scale_parameter_shape =
+        Some(vec![1]);
+    output_transducer.spec.projection_scale_parameter_byte_capacity =
+        Some(2);
+    output_transducer.projection_shader_path =
+        "kernels/output_projection.spv".to_string();
+    output_transducer.projection_batch_shader_path =
+        "kernels/output_projection_batch.spv".to_string();
+    let mut overlay = VulkanRuntimeOutputTransducerOverlay {
+        schema: crate::VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA.to_string(),
+        source_component_id: source.component_id.clone(),
+        component,
+        output_transducer,
+        speculative_output_transducers: Vec::new(),
+    };
+    let effective_edges = runtime_model
+        .runtime_graph
+        .effective_edges()
+        .unwrap();
+    let island_ids =
+        BTreeSet::from([runtime_instance_id.as_str()]);
+    validate_runtime_output_transducer_overlay(
+        &runtime_model,
+        &overlay,
+        &source,
+        &runtime_instance_id,
+        &island_ids,
+        &effective_edges,
+    )
+    .unwrap();
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let candidate_root = std::env::temp_dir().join(format!(
+        "nerve-output-overlay-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(candidate_root.join("kernels")).unwrap();
+    for shader in [
+        "kernels/output_projection.spv",
+        "kernels/output_projection_batch.spv",
+    ] {
+        std::fs::write(candidate_root.join(shader), b"candidate shader")
+            .unwrap();
+    }
+    rebase_output_transducer_overlay_shader_paths(
+        &mut overlay,
+        &runtime_model.package,
+        &tiny_model_dir(),
+        &candidate_root,
+    )
+    .unwrap();
+    mount_runtime_output_transducer_overlay(
+        &mut runtime_model,
+        &runtime_instance_id,
+        overlay,
+    )
+    .unwrap();
+
+    assert_eq!(
+        runtime_model
+            .package
+            .output_transducer
+            .spec
+            .projection_parameter_dtype,
+        "F8_E4M3"
+    );
+    assert!(
+        Path::new(
+            &runtime_model.package.output_transducer.projection_shader_path
+        )
+        .starts_with(&candidate_root)
+    );
+    assert_eq!(
+        runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.component_id == runtime_instance_id)
+            .unwrap()
+            .implementation,
+        "optimized_output_representation"
+    );
+    std::fs::remove_dir_all(candidate_root).unwrap();
 }
 
 #[test]

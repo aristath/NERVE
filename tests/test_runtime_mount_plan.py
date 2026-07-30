@@ -30,7 +30,7 @@ def build_plan() -> CandidateBuildPlan:
             "outputs": [
                 {
                     "path": "overlays/component.json",
-                    "kind": "runtime_component_overlay",
+                    "kind": "runtime_overlay",
                     "lifetime": "mount",
                     "producer_phase": "ordinary_lowering",
                     "resident_bytes": 0,
@@ -67,15 +67,16 @@ def build_plan() -> CandidateBuildPlan:
 
 def mount_document() -> dict[str, object]:
     return {
-        "schema": "nerve.optimizer.runtime_mount_plan.v2",
+        "schema": "nerve.optimizer.runtime_mount_plan.v3",
         "candidate_id": "candidate_fixture",
         "adapter_id": (
-            "vulkan_stream_circuit_component_overlay.v1"
+            "vulkan_stream_circuit_overlay.v2"
         ),
         "regions": [
             {
-                "component_replacements": [
+                "replacements": [
                     {
+                        "kind": "component",
                         "source_component_id": "component",
                         "overlay_ref": "overlays/component.json",
                     }
@@ -94,7 +95,7 @@ def test_mount_plan_binds_executable_artifacts_to_candidate_outputs():
     )
 
     assert (
-        mount.to_json()["regions"][0]["component_replacements"][0]
+        mount.to_json()["regions"][0]["replacements"][0]
         ["source_component_id"]
         == "component"
     )
@@ -137,7 +138,7 @@ def test_mount_plan_rejects_undeclared_or_escaping_artifacts():
         "../component.json",
     ):
         document = mount_document()
-        document["regions"][0]["component_replacements"][0][
+        document["regions"][0]["replacements"][0][
             "overlay_ref"
         ] = reference
 
@@ -185,3 +186,51 @@ def test_mount_artifacts_reject_source_identity_drift(
         match="source component disagrees",
     ):
         validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+def test_mount_artifacts_accept_output_transducer_overlay_as_semantic_unit(
+    tmp_path: Path,
+):
+    document = mount_document()
+    replacement = document["regions"][0]["replacements"][0]
+    replacement["kind"] = "output_transducer"
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(
+        json.dumps(
+            {
+                "schema": (
+                    "nerve.optimizer."
+                    "vulkan_output_transducer_overlay.v1"
+                ),
+                "source_component_id": "component",
+                "component": {"runtime_role": "output_transducer"},
+                "output_transducer": {"spec": {}},
+                "speculative_output_transducers": [
+                    {
+                        "decoder_id": "draft_00",
+                        "output_transducer": {},
+                    },
+                    {
+                        "decoder_id": "draft_01",
+                        "output_transducer": {},
+                    },
+                ],
+            }
+        )
+    )
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps(
+            {
+                "schema": "nerve.tensor_index.v1",
+                "tensors": {},
+            }
+        )
+    )
+    mount = RuntimeMountPlan.from_json(
+        document,
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    validate_runtime_mount_artifacts(tmp_path, mount)

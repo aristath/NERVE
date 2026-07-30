@@ -14,12 +14,15 @@ from nerve.representation_optimizer.contracts import (
 from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
 
 
-RUNTIME_MOUNT_PLAN_SCHEMA = "nerve.optimizer.runtime_mount_plan.v2"
+RUNTIME_MOUNT_PLAN_SCHEMA = "nerve.optimizer.runtime_mount_plan.v3"
 VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER = (
-    "vulkan_stream_circuit_component_overlay.v1"
+    "vulkan_stream_circuit_overlay.v2"
 )
 VULKAN_COMPONENT_OVERLAY_SCHEMA = (
     "nerve.optimizer.vulkan_component_overlay.v1"
+)
+VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA = (
+    "nerve.optimizer.vulkan_output_transducer_overlay.v1"
 )
 
 
@@ -97,26 +100,38 @@ def validate_runtime_mount_plan(
     for region_index, raw_region in enumerate(regions):
         region_label = f"runtime mount plan regions[{region_index}]"
         region = _object(raw_region, region_label)
-        _fields(region, {"component_replacements"}, region_label)
+        _fields(region, {"replacements"}, region_label)
         replacements = _list(
-            region["component_replacements"],
-            f"{region_label}.component_replacements",
+            region["replacements"],
+            f"{region_label}.replacements",
         )
         region_sources: list[str] = []
         for replacement_index, raw_replacement in enumerate(replacements):
             label = (
-                f"{region_label}.component_replacements"
+                f"{region_label}.replacements"
                 f"[{replacement_index}]"
             )
             replacement = _object(raw_replacement, label)
             _fields(
                 replacement,
                 {
+                    "kind",
                     "source_component_id",
                     "overlay_ref",
                 },
                 label,
             )
+            replacement_kind = _text(
+                replacement["kind"],
+                f"{label}.kind",
+            )
+            if replacement_kind not in {
+                "component",
+                "output_transducer",
+            }:
+                raise ContractValidationError(
+                    f"{label}.kind is unsupported: {replacement_kind!r}"
+                )
             source_component_id = _text(
                 replacement["source_component_id"],
                 f"{label}.source_component_id",
@@ -128,7 +143,7 @@ def validate_runtime_mount_plan(
                     replacement["overlay_ref"],
                     f"{label}.overlay_ref",
                     declared_outputs,
-                    expected_kind="runtime_component_overlay",
+                    expected_kind="runtime_overlay",
                 )
             )
         if (
@@ -181,38 +196,85 @@ def validate_runtime_mount_artifacts(
 ) -> None:
     document = mount_plan.to_json()
     for region in document["regions"]:
-        for replacement in region["component_replacements"]:
+        for replacement in region["replacements"]:
             overlay = _read_object(root / replacement["overlay_ref"])
-            _fields(
-                overlay,
-                {
+            kind = replacement["kind"]
+            if kind == "component":
+                label = "Vulkan component overlay"
+                expected_fields = {
                     "schema",
                     "source_component_id",
                     "component",
                     "execution",
-                },
-                "Vulkan component overlay",
-            )
-            if overlay["schema"] != VULKAN_COMPONENT_OVERLAY_SCHEMA:
+                }
+                expected_schema = VULKAN_COMPONENT_OVERLAY_SCHEMA
+            else:
+                label = "Vulkan output-transducer overlay"
+                expected_fields = {
+                    "schema",
+                    "source_component_id",
+                    "component",
+                    "output_transducer",
+                    "speculative_output_transducers",
+                }
+                expected_schema = VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA
+            _fields(overlay, expected_fields, label)
+            if overlay["schema"] != expected_schema:
                 raise ContractValidationError(
-                    "Vulkan component overlay schema is unsupported"
+                    f"{label} schema is unsupported"
                 )
             if (
                 overlay["source_component_id"]
                 != replacement["source_component_id"]
             ):
                 raise ContractValidationError(
-                    "Vulkan component overlay source component disagrees "
+                    f"{label} source component disagrees "
                     "with its mount plan"
                 )
             _object(
                 overlay["component"],
-                "Vulkan component overlay component",
+                f"{label} component",
             )
-            _object(
-                overlay["execution"],
-                "Vulkan component overlay execution",
-            )
+            if kind == "component":
+                _object(
+                    overlay["execution"],
+                    "Vulkan component overlay execution",
+                )
+            else:
+                _object(
+                    overlay["output_transducer"],
+                    "Vulkan output-transducer package",
+                )
+                drafts = _list(
+                    overlay["speculative_output_transducers"],
+                    "Vulkan speculative output transducers",
+                )
+                decoder_ids = []
+                for index, draft in enumerate(drafts):
+                    draft = _object(
+                        draft,
+                        f"Vulkan speculative output transducers[{index}]",
+                    )
+                    _fields(
+                        draft,
+                        {"decoder_id", "output_transducer"},
+                        f"Vulkan speculative output transducers[{index}]",
+                    )
+                    decoder_ids.append(
+                        _text(
+                            draft["decoder_id"],
+                            f"Vulkan speculative output transducers[{index}].decoder_id",
+                        )
+                    )
+                    _object(
+                        draft["output_transducer"],
+                        f"Vulkan speculative output transducers[{index}].output_transducer",
+                    )
+                if decoder_ids != sorted(set(decoder_ids)):
+                    raise ContractValidationError(
+                        "Vulkan speculative output transducers must be sorted "
+                        "and unique by decoder_id"
+                    )
     for reference in document["tensor_index_refs"]:
         fragment = _read_object(root / reference)
         if fragment.get("schema") != "nerve.tensor_index.v1":

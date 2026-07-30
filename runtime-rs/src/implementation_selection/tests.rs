@@ -227,9 +227,9 @@ fn loaded_implementation(
             candidate_id: format!("candidate_{implementation_id}"),
             adapter_id: VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER.to_string(),
             regions: vec![RuntimeMountRegion {
-                component_replacements: source_components
+                replacements: source_components
                     .iter()
-                    .map(|source_component_id| RuntimeComponentReplacement {
+                    .map(|source_component_id| RuntimeReplacement::Component {
                         source_component_id: (*source_component_id).to_string(),
                         overlay_ref: format!("overlays/{source_component_id}.json"),
                     })
@@ -640,13 +640,13 @@ fn one_implementation_can_cover_disconnected_semantic_regions() {
     );
     implementation.mount_plan.regions = vec![
         RuntimeMountRegion {
-            component_replacements: vec![RuntimeComponentReplacement {
+            replacements: vec![RuntimeReplacement::Component {
                 source_component_id: "layer_a".to_string(),
                 overlay_ref: "overlays/layer_a.json".to_string(),
             }],
         },
         RuntimeMountRegion {
-            component_replacements: vec![RuntimeComponentReplacement {
+            replacements: vec![RuntimeReplacement::Component {
                 source_component_id: "layer_b".to_string(),
                 overlay_ref: "overlays/layer_b.json".to_string(),
             }],

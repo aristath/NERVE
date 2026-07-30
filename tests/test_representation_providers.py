@@ -287,7 +287,7 @@ class FixtureProvider:
                 },
                 {
                     "path": "state/compact_layout.json",
-                    "kind": "runtime_component_overlay",
+                    "kind": "runtime_overlay",
                     "lifetime": "mount",
                     "producer_phase": "semantic_construction",
                     "resident_bytes": 32,
@@ -322,15 +322,16 @@ class FixtureProvider:
     def mount_requirements(self, context, candidate):
         self._called("mount_requirements")
         return {
-            "schema": "nerve.optimizer.runtime_mount_plan.v2",
+            "schema": "nerve.optimizer.runtime_mount_plan.v3",
             "candidate_id": candidate["candidate_id"],
             "adapter_id": (
-                "vulkan_stream_circuit_component_overlay.v1"
+                "vulkan_stream_circuit_overlay.v2"
             ),
             "regions": [
                 {
-                    "component_replacements": [
+                    "replacements": [
                         {
+                            "kind": "component",
                             "source_component_id": "component",
                             "overlay_ref": "state/compact_layout.json",
                         }

@@ -3,8 +3,8 @@ use super::{
     OPTIMIZATION_SCOPE_CATALOG_SCHEMA, OPTIMIZER_STAGE_SCHEMA, PROMOTION_DECISION_SCHEMA,
     RUNTIME_MOUNT_PLAN_SCHEMA, RuntimeImplementationCatalog, RuntimeImplementationRegistry,
     RuntimeImplementationWorkloadMetrics, RuntimeMountPlan, RuntimeOptimizationScope,
-    VALIDATION_RECORD_SCHEMA, VULKAN_COMPONENT_OVERLAY_SCHEMA,
-    VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
+    RuntimeReplacement, VALIDATION_RECORD_SCHEMA, VULKAN_COMPONENT_OVERLAY_SCHEMA,
+    VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA, VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -311,9 +311,9 @@ pub(super) fn validate_mount_plan(
         .iter()
         .map(|region| {
             region
-                .component_replacements
+                .replacements
                 .iter()
-                .map(|replacement| replacement.source_component_id.as_str())
+                .map(RuntimeReplacement::source_component_id)
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -343,30 +343,39 @@ pub(super) fn validate_mount_plan(
     for replacement in mount_plan
         .regions
         .iter()
-        .flat_map(|region| region.component_replacements.iter())
+        .flat_map(|region| region.replacements.iter())
     {
-        if !references.insert(replacement.overlay_ref.as_str()) {
+        if !references.insert(replacement.overlay_ref()) {
             return invalid("runtime mount plan reuses an artifact reference");
         }
         let overlay = read_object(
-            &confined_path(
-                candidate_root,
-                &replacement.overlay_ref,
-                "runtime component overlay",
-            )?,
-            "runtime component overlay",
+            &confined_path(candidate_root, replacement.overlay_ref(), "runtime overlay")?,
+            "runtime overlay",
         )?;
-        require_schema(
-            &overlay,
-            VULKAN_COMPONENT_OVERLAY_SCHEMA,
-            "runtime component overlay",
-        )?;
-        if text(&overlay, "source_component_id", "runtime component overlay")?
-            != replacement.source_component_id
-            || !required(&overlay, "component", "runtime component overlay")?.is_object()
-            || !required(&overlay, "execution", "runtime component overlay")?.is_object()
+        let (schema, required_payloads) = match replacement {
+            RuntimeReplacement::Component { .. } => (
+                VULKAN_COMPONENT_OVERLAY_SCHEMA,
+                &["component", "execution"][..],
+            ),
+            RuntimeReplacement::OutputTransducer { .. } => (
+                VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA,
+                &[
+                    "component",
+                    "output_transducer",
+                    "speculative_output_transducers",
+                ][..],
+            ),
+        };
+        require_schema(&overlay, schema, "runtime overlay")?;
+        if text(&overlay, "source_component_id", "runtime overlay")?
+            != replacement.source_component_id()
+            || required_payloads.iter().any(|field| {
+                !required(&overlay, field, "runtime overlay").is_ok_and(Value::is_object)
+                    && !(*field == "speculative_output_transducers"
+                        && required(&overlay, field, "runtime overlay").is_ok_and(Value::is_array))
+            })
         {
-            return invalid("runtime component overlay does not match its mount-plan replacement");
+            return invalid("runtime overlay does not match its mount-plan replacement");
         }
     }
     if !strictly_sorted_unique(

@@ -156,8 +156,8 @@ impl RuntimeStagedCandidate {
         let source_component_ids = mount_plan
             .regions
             .iter()
-            .flat_map(|region| region.component_replacements.iter())
-            .map(|replacement| replacement.source_component_id.clone())
+            .flat_map(|region| region.replacements.iter())
+            .map(|replacement| replacement.source_component_id().to_string())
             .collect::<BTreeSet<_>>();
         validate_mount_plan(
             &candidate_root,

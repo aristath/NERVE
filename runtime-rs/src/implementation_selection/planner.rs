@@ -324,9 +324,9 @@ pub(crate) fn maximum_nonoverlapping_region_applications(
         .iter()
         .map(|region| {
             let required_sources = region
-                .component_replacements
+                .replacements
                 .iter()
-                .map(|replacement| replacement.source_component_id.clone())
+                .map(|replacement| replacement.source_component_id().to_string())
                 .collect::<Vec<_>>();
             maximum_nonoverlapping_matching_applications(&required_sources, instances, edges)
         })

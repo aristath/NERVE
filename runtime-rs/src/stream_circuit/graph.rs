@@ -226,6 +226,10 @@ impl CircuitRuntimeRole {
     pub fn is_signal_processor(self) -> bool {
         matches!(self, Self::SignalProcessor)
     }
+
+    pub fn is_runtime_implementation_target(self) -> bool {
+        matches!(self, Self::SignalProcessor | Self::OutputTransducer)
+    }
 }
 
 impl StreamCircuit {
