@@ -1269,6 +1269,11 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
                 // INT4_CT_OUTPUT_TILE_ROWS
             )
         return int(attrs["experts_per_token"]) * ((int(attrs["hidden_size"]) + 1) // 2)
+    if node["op"] == "moe_reduce":
+        hidden_words = (int(node["attrs"]["hidden_size"]) + 1) // 2
+        return (
+            hidden_words + MOE_REDUCE_LOCAL_SIZE - 1
+        ) // MOE_REDUCE_LOCAL_SIZE
     if node["op"] in {
         "rms_norm_per_head",
         "rms_norm_per_head_unscaled",
@@ -1301,6 +1306,8 @@ def local_size_x_for_node(node: Json) -> int:
         )
     if node["op"] == "rg_lru_step":
         return int(node["attrs"]["block_width"])
+    if node["op"] == "moe_reduce":
+        return MOE_REDUCE_LOCAL_SIZE
     return 64
 
 

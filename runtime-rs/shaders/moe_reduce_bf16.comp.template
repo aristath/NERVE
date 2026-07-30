@@ -1,6 +1,6 @@
 #version 450
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer ExpertOutputs {
     uint words[];
@@ -30,7 +30,12 @@ float add_bf16(float left, float right) {
 }
 
 void main() {
-    for (uint word = gl_LocalInvocationID.x; word < HIDDEN_WORDS; word += 64u) {
+    uint invocation_count = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (
+        uint word = gl_GlobalInvocationID.x;
+        word < HIDDEN_WORDS;
+        word += invocation_count
+    ) {
         float lo = 0.0;
         float hi = 0.0;
         for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {

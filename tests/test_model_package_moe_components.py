@@ -227,6 +227,8 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
         )
         == reduce_file
     )
+    assert workgroup_count_x_for_node({}, reduce_node, {}) == 6
+    assert local_size_x_for_shader_file(reduce_file, reduce_node) == 256
     copy_shader_templates(shader_source_dir, tmp_path, {primary, batch, reduce_file})
 
     primary_source = (tmp_path / primary).read_text()
@@ -260,6 +262,9 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "already_selected" not in batch_source
     assert "if (gl_NumSubgroups == 1u)" in batch_source
     reduce_source = (tmp_path / reduce_file).read_text()
+    assert "layout(local_size_x = 256" in reduce_source
+    assert "uint word = gl_GlobalInvocationID.x;" in reduce_source
+    assert "word += invocation_count" in reduce_source
     assert "const float ROUTED_SCALE = 2.5;" in reduce_source
     assert "f32_to_bf16(lo * ROUTED_SCALE)" in reduce_source
     assert "{{" not in primary_source
