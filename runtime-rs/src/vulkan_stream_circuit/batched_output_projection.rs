@@ -322,9 +322,12 @@ impl VulkanResidentBatchedOutputProjectionRunner {
             .borrow()
             .contains_key(&batch_width_usize)
         {
-            let sequence = device
-                .create_resident_kernel_sequence()
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            let sequence = if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
+                device.create_profiled_resident_kernel_sequence(2)
+            } else {
+                device.create_resident_kernel_sequence()
+            }
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             self.projection_sequence_catalog
                 .borrow_mut()
                 .insert(batch_width_usize, sequence);
@@ -442,12 +445,15 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         stream_ticks: &[u64],
         dynamic_state_capacities: &[u32],
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let profile = std::env::var_os("NERVE_VK_PERF_LOGGER").is_some();
+        let started = profile.then(std::time::Instant::now);
         let batch_width = self.prepare_sampler_lanes(
             device,
             token_prefixes,
             stream_ticks,
             dynamic_state_capacities,
         )?;
+        let prepared = started.map(|started| started.elapsed());
         if !self
             .projection_sampler_submission_catalog
             .borrow()
@@ -493,7 +499,54 @@ impl VulkanResidentBatchedOutputProjectionRunner {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         device
             .wait_resident_kernel_sequence(&self.sampler_views[batch_width - 1].sequence)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        if profile {
+            let catalog = self.projection_sequence_catalog.borrow();
+            let sequence = catalog
+                .get(&batch_width)
+                .expect("batched projection sequence was inserted");
+            let durations = device
+                .read_recorded_resident_kernel_step_durations_ns(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if durations.len() != 2 {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "batched output projection produced {} profile steps; expected 2",
+                        durations.len()
+                    )),
+                ));
+            }
+            eprintln!(
+                "nerve Vulkan output projection: width={} norm_us={:.3} projection_us={:.3}",
+                batch_width,
+                durations[0] as f64 / 1_000.0,
+                durations[1] as f64 / 1_000.0,
+            );
+            for (lane, view) in self.sampler_views.iter().take(batch_width).enumerate() {
+                let sampler_durations = device
+                    .read_recorded_resident_kernel_step_durations_ns(&view.sequence)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let stages = sampler_durations
+                    .iter()
+                    .map(|duration| format!("{:.3}", *duration as f64 / 1_000.0))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "nerve Vulkan sampler: width={} lane={} stages_us=[{}] total_us={:.3}",
+                    batch_width,
+                    lane,
+                    stages,
+                    sampler_durations.iter().sum::<u64>() as f64 / 1_000.0,
+                );
+            }
+            eprintln!(
+                "nerve Vulkan output wall: width={} prepare_us={:.3} total_us={:.3}",
+                batch_width,
+                prepared.expect("profile timer exists").as_secs_f64() * 1_000_000.0,
+                started.expect("profile timer exists").elapsed().as_secs_f64() * 1_000_000.0,
+            );
+        }
+        Ok(())
     }
 
     fn prepare_sampler_lanes(

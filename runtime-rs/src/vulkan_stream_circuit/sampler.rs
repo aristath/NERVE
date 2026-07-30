@@ -1153,9 +1153,14 @@ impl VulkanResidentSamplerRunner {
                 0,
             )?);
         }
+        let sequence = if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
+            device.create_profiled_resident_kernel_sequence(resident_dispatches.len())?
+        } else {
+            device.create_resident_kernel_sequence()?
+        };
         Ok(VulkanResidentSamplerLogitsView {
             resident_dispatches,
-            sequence: device.create_resident_kernel_sequence()?,
+            sequence,
             _scratch_buffer: scratch_buffer,
             stream_control_buffer,
             _feedback_control_buffer: feedback_control_buffer,
