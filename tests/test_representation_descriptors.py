@@ -38,6 +38,7 @@ def test_builtin_descriptor_catalog_is_canonical_and_covers_open_expression_spac
     names = {str(document["identity"]["name"]) for document in documents}
 
     assert names == {
+        "block_scaled_numeric_parameter",
         "bounded_multiscale_state",
         "coarse_to_fine_evaluation",
         "generated_program_with_exceptions",

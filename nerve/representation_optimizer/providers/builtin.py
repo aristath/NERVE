@@ -11,6 +11,10 @@ from nerve.representation_optimizer.providers.codebook import (
     ExactEmbeddedHeadNormParameterProgramProvider,
     ExactHeadNormCodebookProvider,
 )
+from nerve.representation_optimizer.providers.output_fp8 import (
+    BlockScaledOutputProjectionProvider,
+    BlockScaledOutputToolchainResolver,
+)
 from nerve.representation_optimizer.providers.registry import ProviderRegistry
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
 
@@ -23,6 +27,7 @@ def load_builtin_provider_registry(
         providers=(
             ExactEmbeddedHeadNormParameterProgramProvider(),
             ExactHeadNormCodebookProvider(),
+            BlockScaledOutputProjectionProvider(),
         ),
     )
 
@@ -34,6 +39,7 @@ class BuiltinCandidateToolchainResolver:
         self._resolvers = (
             CodebookToolchainResolver(),
             EmbeddedParameterProgramToolchainResolver(),
+            BlockScaledOutputToolchainResolver(),
         )
 
     def resolve(self, plan: ProviderCandidatePlan):

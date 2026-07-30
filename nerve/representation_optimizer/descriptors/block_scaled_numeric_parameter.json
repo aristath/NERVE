@@ -1,0 +1,117 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_e4f65309a974211acf56c332af58b238",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "block_scaled_numeric_parameter",
+    "version": "1"
+  },
+  "summary": "Represents a dense numeric parameter with independently scaled hardware-native blocks while preserving the surrounding execution boundary.",
+  "responsibilities": {
+    "may_express": [
+      "feature_transformation",
+      "output_transducer"
+    ],
+    "composition_scopes": [
+      "operator",
+      "output_transducer",
+      "representation_island"
+    ]
+  },
+  "evidence": [
+    {
+      "claim_kind": "operator_structure",
+      "acceptable_statuses": ["supported"],
+      "exactness": "approximate",
+      "required_facts": ["operators"]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {
+        "name": "dense_boundary_signal",
+        "kind": "dense_numeric_vector",
+        "properties": {"materialization": "boundary_only"}
+      }
+    ],
+    "parameters": [
+      {
+        "name": "block_scaled_parameter",
+        "kind": "dense_low_precision_values_with_inverse_scales",
+        "properties": {"scale_granularity": "declared_block"}
+      }
+    ],
+    "states": []
+  },
+  "execution": {
+    "topologies": ["block_scaled_projection"],
+    "time_models": ["streaming_activation", "synchronous_activation"]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {
+        "name": "cooperative_matrix",
+        "requirement": "optional",
+        "operations": ["block_scaled_matrix_multiply"],
+        "numeric_formats": ["bf16", "f16", "f32", "f8_e4m3"]
+      },
+      {
+        "name": "shader_vector",
+        "requirement": "required",
+        "operations": ["block_scaled_dot_product"],
+        "numeric_formats": ["bf16", "f32", "f8_e4m3"]
+      }
+    ],
+    "composition": "all_required"
+  },
+  "construction": {
+    "required": true,
+    "phases": ["analyze_dynamic_range", "quantize_blocks", "measure_error"],
+    "artifacts": [
+      {"kind": "block_scaled_parameter", "lifetime": "residency"},
+      {"kind": "inverse_scale_parameter", "lifetime": "residency"},
+      {"kind": "quantization_error_report", "lifetime": "compile"}
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": ["dense_numeric_vector"],
+    "produced_outputs": ["dense_numeric_vector"],
+    "cost_terms": [
+      {
+        "name": "inverse_scale_read_bytes",
+        "unit": "bytes",
+        "directions": ["internal"],
+        "measured_phase": "steady_state"
+      },
+      {
+        "name": "parameter_read_bytes",
+        "unit": "bytes",
+        "directions": ["internal"],
+        "measured_phase": "steady_state"
+      }
+    ],
+    "island_compatibility": {
+      "can_span_scopes": false,
+      "preserves_native_signals": true,
+      "absorbable_transducers": ["parameter_dequantization"]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": [],
+    "error_contract": {
+      "metrics": ["normalized_rms_logit_error", "top_1_mismatch_rate", "top_32_mismatch_rate"],
+      "requires_declared_domain": true
+    },
+    "validity_predicates": ["declared_block_geometry", "hardware_native_numeric_format"]
+  },
+  "correction_paths": [
+    {
+      "name": "retain_source_parameter",
+      "trigger": "candidate exceeds its numeric or semantic error contract",
+      "action": "reject the candidate and retain the source representation",
+      "guarantee": "source behavior remains available"
+    }
+  ],
+  "tags": ["block-scaled", "hardware-native", "low-precision", "output-projection"]
+}

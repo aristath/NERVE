@@ -38,7 +38,7 @@ def test_compiler_renders_fp8_output_projection_shaders(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
         "tied_output_projection_fp8_e4m3_b16x128_248320x5120_scale1_to_f32.comp",
-        "tied_output_projection_batch1_fp8_e4m3_b16x128_248320x5120_scale1_to_f32.comp",
+        "tied_output_projection_batch4_fp8_e4m3_b16x128_248320x5120_scale1_to_f32.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
@@ -49,7 +49,7 @@ def test_compiler_renders_fp8_output_projection_shaders(tmp_path: Path) -> None:
     ).read_text()
     batch = (
         tmp_path
-        / "tied_output_projection_batch1_fp8_e4m3_b16x128_248320x5120_scale1_to_f32.comp"
+        / "tied_output_projection_batch4_fp8_e4m3_b16x128_248320x5120_scale1_to_f32.comp"
     ).read_text()
     for source in (decode, batch):
         assert "binding = 1) readonly buffer ProjectionWeight" in source
@@ -59,11 +59,13 @@ def test_compiler_renders_fp8_output_projection_shaders(tmp_path: Path) -> None:
         assert "const uint OUTPUT_TILE_ROWS = 32u;" in source
         assert "const uint ROW_CLUSTER_LANES = 32u;" in source
         assert "uint local_row = gl_SubgroupID * rows_per_subgroup + row_cluster;" in source
-        assert "sum = subgroupClusteredAdd(sum, ROW_CLUSTER_LANES);" in source
+        assert "subgroupClusteredAdd(" in source
         assert "fp8_dot4_acc32" in source
         assert "{{" not in source
     assert "layout(push_constant) uniform BatchControl" not in decode
     assert "layout(push_constant) uniform BatchControl" in batch
+    assert "fe4m3vec4 quantized_input[BATCH_TILE_WIDTH][INPUT_FP8_WORDS]" in batch
+    assert "float sums[BATCH_TILE_WIDTH]" in batch
     assert "batch_index * VOCAB_SIZE + row" in batch
 
 

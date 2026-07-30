@@ -378,7 +378,7 @@ def build_vulkan_resident_package_manifest(
             f"{projection_block_columns}_{vocab_size}x{hidden_size}"
             f"_scale{shader_float_token(output_scale)}_to_f32.comp"
         )
-        projection_batch_lane_tile_width = 1
+        projection_batch_lane_tile_width = 4
         projection_batch_shader_file = (
             f"tied_output_projection_batch{projection_batch_lane_tile_width}_"
             f"fp8_e4m3_b{projection_block_rows}x{projection_block_columns}_"
