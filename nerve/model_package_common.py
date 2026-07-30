@@ -56,6 +56,8 @@ Q8_0_OUTPUT_TILE_ROWS = 32
 INT4_VALUES_PER_PACKED_WORD = 8
 INT4_GPTQ_OUTPUT_TILE_ROWS = 64
 INT4_CT_OUTPUT_TILE_ROWS = 16
+GATED_DELTA_MAX_LANES_PER_VALUE = 8
+GATED_DELTA_MAX_LOCAL_SIZE_X = 1024
 GLSL_VULKAN_DEVICE_EXTENSION_REQUIREMENTS = {
     "GL_EXT_integer_dot_product": "VK_KHR_shader_integer_dot_product",
     "GL_EXT_float_e4m3": "VK_EXT_shader_float8",
@@ -132,6 +134,33 @@ TOKENIZER_PACKAGE_FILES = (
     "spiece.model",
     "sentencepiece.bpe.model",
 )
+
+
+def gated_delta_lanes_per_value(
+    key_head_width: int,
+    value_head_width: int,
+) -> int:
+    if key_head_width <= 0 or value_head_width <= 0:
+        raise ModelCompileError(
+            "gated-delta head widths must be positive, got "
+            f"key={key_head_width} value={value_head_width}"
+        )
+    lanes = next(
+        (
+            candidate
+            for candidate in (8, 4, 2, 1)
+            if candidate <= GATED_DELTA_MAX_LANES_PER_VALUE
+            and key_head_width % candidate == 0
+            and value_head_width * candidate <= GATED_DELTA_MAX_LOCAL_SIZE_X
+        ),
+        0,
+    )
+    if lanes == 0:
+        raise ModelCompileError(
+            "gated-delta shape cannot be mapped to clustered column lanes: "
+            f"key={key_head_width} value={value_head_width}"
+        )
+    return lanes
 
 
 def package_artifact_path(package_dir: Path, value: Any, label: str) -> Path:

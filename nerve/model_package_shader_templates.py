@@ -2640,6 +2640,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             raise ModelCompileError(
                 f"gated-delta value head width {value_width} is not a supported workgroup width"
             )
+        lanes_per_value = gated_delta_lanes_per_value(key_width, value_width)
+        local_size_x = value_width * lanes_per_value
         quantized_block_columns = (
             int(gated_delta_shape.group(10))
             if gated_delta_shape.group(10) is not None
@@ -2679,7 +2681,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             a_log_binding = 7
         if quantized_block_columns is None:
             output_store = (
-                "    if ((value_dim & 1u) == 0u) {\n"
+                "    if (value_lane == 0u && (value_dim & 1u) == 0u) {\n"
                 "        uint output_index = value_head * VALUE_HEAD_WIDTH + value_dim;\n"
                 + (
                     "        uint output_word = (position * VALUE_WIDTH + output_index) >> 1u;\n"
@@ -2693,9 +2695,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
         else:
             output_store = (
-                "    uint rounded = f32_to_bf16(head_output[value_dim]);\n"
-                "    head_output[value_dim] = bf16_to_f32(rounded);\n"
-                "    float subgroup_max = subgroupMax(abs(head_output[value_dim]));\n"
+                "    if (value_lane == 0u) {\n"
+                "        uint rounded = f32_to_bf16(head_output[value_dim]);\n"
+                "        head_output[value_dim] = bf16_to_f32(rounded);\n"
+                "    }\n"
+                "    barrier();\n"
+                "    float subgroup_max = subgroupMax(\n"
+                "        value_lane == 0u ? abs(head_output[value_dim]) : 0.0\n"
+                "    );\n"
                 "    if (gl_SubgroupInvocationID == 0u) {\n"
                 "        reduction[gl_SubgroupID] = subgroup_max;\n"
                 "    }\n"
@@ -2712,16 +2719,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                     else "    uint scale_index = value_head;\n"
                     "    uint output_base = value_head * VALUE_HEAD_WIDTH;\n"
                 )
-                + "    if (value_dim == 0u) {\n"
+                + "    if (gl_LocalInvocationID.x == 0u) {\n"
                 "        output_scale.values[scale_index] = block_scale;\n"
                 "    }\n"
-                "    if ((value_dim & 1u) == 0u) {\n"
+                "    if (value_lane == 0u && (value_dim & 1u) == 0u) {\n"
                 "        uint output_index = output_base + value_dim;\n"
                 "        output_frame.words[output_index >> 1u] =\n"
                 "            (f32_to_bf16(head_output[value_dim + 1u]) << 16u)\n"
                 "            | f32_to_bf16(head_output[value_dim]);\n"
                 "    }\n"
-                "    if ((value_dim & 3u) == 0u) {\n"
+                "    if (value_lane == 0u && (value_dim & 3u) == 0u) {\n"
                 "        uint output_index = output_base + value_dim;\n"
                 "        quantized_output.words[output_index >> 2u] = pack_fp8(\n"
                 "            fe4m3vec4(vec4(\n"
@@ -2746,6 +2753,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "VALUE_HEADS": str(value_heads),
                 "VALUE_HEAD_WIDTH": str(value_width),
                 "KEY_HEAD_REPEAT": str(value_heads // key_heads),
+                "LOCAL_SIZE_X": str(local_size_x),
+                "LANES_PER_VALUE": str(lanes_per_value),
+                "KEY_DIMS_PER_LANE": str(key_width // lanes_per_value),
                 "READ_A_LOG": scalar_parameter_read_expression(
                     "a_log", gated_delta_shape.group(6)
                 ),

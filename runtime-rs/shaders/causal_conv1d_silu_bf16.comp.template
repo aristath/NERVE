@@ -104,12 +104,13 @@ uint convolve_and_advance(uint channel) {
 }
 
 void main() {
-    for (uint channel_pair = gl_LocalInvocationID.x;
-         channel_pair < CHANNELS / 2u;
-         channel_pair += 64u) {
-        uint first_channel = channel_pair * 2u;
-        uint first = convolve_and_advance(first_channel);
-        uint second = convolve_and_advance(first_channel + 1u);
-        output_frame.words[channel_pair] = first | (second << 16);
+    uint channel_pair = gl_GlobalInvocationID.x;
+    if (channel_pair >= CHANNELS / 2u) {
+        return;
     }
+
+    uint first_channel = channel_pair * 2u;
+    uint first = convolve_and_advance(first_channel);
+    uint second = convolve_and_advance(first_channel + 1u);
+    output_frame.words[channel_pair] = first | (second << 16);
 }

@@ -959,6 +959,15 @@ def shader_file_for_node(
 
 
 def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
+    if node["op"] == "causal_conv1d_silu":
+        channels = int(node["attrs"]["channels"])
+        if channels <= 0 or channels % 2 != 0:
+            raise ModelCompileError(
+                "packed BF16 causal convolution requires a positive even channel "
+                f"count, got {channels}"
+            )
+        channel_pairs = channels // 2
+        return (channel_pairs + 63) // 64
     if node["op"] in {
         "quantize_fp8_e4m3",
         "quantize_int8_symmetric",
@@ -1161,7 +1170,13 @@ def local_size_x_for_node(node: Json) -> int:
         )
         return attention_workgroup_shape(int(attrs["head_width"]))[0]
     if node["op"] == "gated_delta_step":
-        return int(node["attrs"]["value_head_width"])
+        attrs = node["attrs"]
+        key_head_width = int(attrs["key_head_width"])
+        value_head_width = int(attrs["value_head_width"])
+        return value_head_width * gated_delta_lanes_per_value(
+            key_head_width,
+            value_head_width,
+        )
     if node["op"] == "rg_lru_step":
         return int(node["attrs"]["block_width"])
     return 64

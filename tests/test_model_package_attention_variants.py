@@ -1,4 +1,8 @@
 from model_package_layout_common import *
+from nerve.model_package import (
+    gated_delta_lanes_per_value,
+    local_size_x_for_node,
+)
 
 def test_compiler_renders_biased_recurrent_and_windowed_attention_components(
     tmp_path: Path,
@@ -144,6 +148,19 @@ def test_compiler_renders_hybrid_recurrent_and_gated_attention_components(
     ).read_text()
     split = (tmp_path / "split_bf16_2x8x256_head_interleaved.comp").read_text()
     assert "const uint CHANNELS = 6144u;" in convolution
+    assert "uint channel_pair = gl_GlobalInvocationID.x;" in convolution
+    assert "channel_pair += 64u" not in convolution
+    assert (
+        workgroup_count_x_for_node(
+            {},
+            {
+                "op": "causal_conv1d_silu",
+                "attrs": {"channels": 6144},
+            },
+            {},
+        )
+        == 48
+    )
     assert "const uint KEY_HEADS = 16u;" in recurrence
     assert "const uint VALUE_HEAD_WIDTH = 128u;" in recurrence
     assert "uintBitsToFloat(a_log.words[index])" in recurrence
@@ -153,24 +170,41 @@ def test_compiler_renders_hybrid_recurrent_and_gated_attention_components(
     assert "unpack_bf16(norm_weight.words[index >> 1u], index)" in bf16_recurrence
     assert "shared float raw_query[KEY_HEAD_WIDTH];" not in temporal_recurrence
     assert "shared float raw_key[KEY_HEAD_WIDTH];" not in temporal_recurrence
-    assert "for (uint key_dim = 0u; key_dim < KEY_HEAD_WIDTH; key_dim++)" in temporal_recurrence
-    assert "q_sum = fma(q, q, q_sum);" in temporal_recurrence
-    assert "k_sum = fma(k, k, k_sum);" in temporal_recurrence
-    assert "q_sum = subgroupAdd(q_sum);" not in temporal_recurrence
-    assert "k_sum = subgroupAdd(k_sum);" not in temporal_recurrence
-    assert "float beta = 1.0 /" in temporal_recurrence
-    assert "float decay = exp(decay_log);" in temporal_recurrence
+    for source in (recurrence, temporal_recurrence):
+        assert "layout(local_size_x = 1024" in source
+        assert "const uint LANES_PER_VALUE = 8u;" in source
+        assert "const uint KEY_DIMS_PER_LANE = 16u;" in source
+        assert "float recurrent_state[KEY_DIMS_PER_LANE];" in source
+        assert (
+            "uint key_dim = shard * LANES_PER_VALUE + value_lane;" in source
+        )
+        assert "subgroupClusteredAdd(key_memory, 8u)" in source
+        assert "subgroupClusteredAdd(mixed, 8u)" in source
+        assert "if (value_lane == 0u)" in source
+        assert "{{" not in source
     assert (
-        "float previous = recurrent_state[key_dim] * decay;" in temporal_recurrence
+        local_size_x_for_node(
+            {
+                "op": "gated_delta_step",
+                "attrs": {
+                    "key_head_width": 128,
+                    "value_head_width": 128,
+                },
+            }
+        )
+        == 1024
     )
-    assert "recurrent_state[key_dim] = previous;" in temporal_recurrence
-    assert "float next = recurrent_state[key_dim] + key * delta;" in temporal_recurrence
+    assert gated_delta_lanes_per_value(128, 1024) == 1
+    assert "q_partial = subgroupAdd(q_square);" in temporal_recurrence
+    assert "k_partial = subgroupAdd(k_square);" in temporal_recurrence
+    assert "recurrent_state[shard] *= decay;" in temporal_recurrence
+    assert "recurrent_state[shard] = recurrent_state[shard]" in temporal_recurrence
     for source in (quantized_recurrence, quantized_temporal_recurrence):
         assert "binding = 5) buffer QuantizedOutput" in source
         assert "binding = 6) buffer OutputScale" in source
         assert "binding = 10) readonly buffer StateRead" in source
         assert "binding = 11) buffer StateWrite" in source
-        assert "subgroupMax(abs(head_output[value_dim]))" in source
+        assert "value_lane == 0u ? abs(head_output[value_dim]) : 0.0" in source
         assert "pack_fp8(" in source
         assert "{{" not in source
     assert (
