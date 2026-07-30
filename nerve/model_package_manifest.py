@@ -461,6 +461,14 @@ def build_vulkan_resident_package_manifest(
             can_fuse_append_attention=lambda append, attention, circuit=circuit: (
                 can_fuse_bf16_append_attention(circuit, append, attention, tensor_index)
             ),
+            can_fuse_mixed_precision_parallel_linears=lambda fp8, bf16, circuit=circuit: (
+                can_fuse_mixed_precision_parallel_linears(
+                    circuit,
+                    fp8,
+                    bf16,
+                    tensor_index,
+                )
+            ),
             prequantization_spec=lambda node, circuit=circuit: (
                 physical_input_prequantization_spec(
                     circuit,
@@ -1011,6 +1019,31 @@ def component_kernel_spec(
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...] = (),
 ) -> Json:
     source_node_ids = normalized_source_node_ids(node)
+    if node["op"] == "mixed_parallel_linear_4way":
+        return {
+            "execution_index": execution_index,
+            "node_id": node["id"],
+            "op": node["op"],
+            "source_node_ids": source_node_ids,
+            "semantic_module_ids": semantic_module_ids_for_source_nodes(
+                circuit, source_node_ids
+            ),
+            "execution_domain": "decode",
+            "shader_path": f"shaders/{shader_file}",
+            "local_size_x": local_size_x,
+            "workgroup_count_x": workgroup_count_x,
+            "batch_mode": "weight_shared",
+            "batch_implementations": (
+                mixed_parallel_projection_batch_implementations(
+                    shader_file,
+                    local_size_x=local_size_x,
+                    workgroup_count_x=workgroup_count_x,
+                    cooperative_float8_e4m3_shapes=(
+                        cooperative_float8_e4m3_shapes
+                    ),
+                )
+            ),
+        }
     causal_scan_stages = causal_scan_batch_stages(shader_file, local_size_x)
     direct_frame_parallel_shader_file = (
         None

@@ -916,6 +916,71 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    mixed_parallel = re.fullmatch(
+        r"mixed_parallel_linear_4way_prequant_(?:batch(\d+)_)?"
+        r"fp8_e4m3_b(\d+)x(\d+)_bf16_(\d+)x"
+        r"(\d+)_(\d+)_(\d+)_(\d+)\.comp",
+        shader_file,
+    )
+    if mixed_parallel is not None:
+        batch_tile_width = (
+            int(mixed_parallel.group(1))
+            if mixed_parallel.group(1) is not None
+            else None
+        )
+        (
+            block_rows,
+            block_columns,
+            input_size,
+            output_a_size,
+            output_b_size,
+            output_c_size,
+            output_d_size,
+        ) = map(int, mixed_parallel.groups()[1:])
+        output_sizes = (
+            output_a_size,
+            output_b_size,
+            output_c_size,
+            output_d_size,
+        )
+        if (
+            (batch_tile_width is not None and batch_tile_width <= 0)
+            or block_rows <= 0
+            or block_columns != 128
+            or input_size <= 0
+            or input_size % block_columns
+            or any(output_size <= 0 or output_size % 2 for output_size in output_sizes)
+            or (output_c_size + output_d_size) // 2
+            > max(
+                (output_a_size + FP8_PREQUANT_TILE_ROWS - 1)
+                // FP8_PREQUANT_TILE_ROWS,
+                (output_b_size + FP8_PREQUANT_TILE_ROWS - 1)
+                // FP8_PREQUANT_TILE_ROWS,
+            )
+        ):
+            raise ModelCompileError(
+                f"invalid mixed parallel-linear shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "mixed_parallel_linear_4way_prequant_batch_fp8_e4m3_bf16.comp.template"
+                if batch_tile_width is not None
+                else "mixed_parallel_linear_4way_prequant_fp8_e4m3_bf16.comp.template"
+            ),
+            {
+                "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
+                "BLOCK_ROWS": str(block_rows),
+                "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
+                "OUTPUT_A_SIZE": str(output_a_size),
+                "OUTPUT_B_SIZE": str(output_b_size),
+                "OUTPUT_C_SIZE": str(output_c_size),
+                "OUTPUT_D_SIZE": str(output_d_size),
+                "OUTPUT_TILE_ROWS": str(FP8_PREQUANT_TILE_ROWS),
+            },
+        )
+
     prequant_parallel_fp8 = re.fullmatch(
         r"parallel_linear_(?:batch(\d+)_)?([23])way_prequant_fp8_e4m3_"
         r"b(\d+)x(\d+)_(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",

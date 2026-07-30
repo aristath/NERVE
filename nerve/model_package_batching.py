@@ -629,6 +629,17 @@ def weight_shared_batch_shader_file(
             f"_prequant_batch{tile}_fp8_e4m3_",
             1,
         )
+    mixed_parallel = re.fullmatch(
+        r"mixed_parallel_linear_4way_prequant_fp8_e4m3_"
+        r"b\d+x\d+_bf16_\d+x\d+_\d+_\d+_\d+\.comp",
+        shader_file,
+    )
+    if mixed_parallel is not None:
+        return shader_file.replace(
+            "_prequant_fp8_e4m3_",
+            f"_prequant_batch{tile}_fp8_e4m3_",
+            1,
+        )
     prequant_parallel_fp8 = re.fullmatch(
         r"parallel_linear_[23]way_prequant_fp8_e4m3_"
         r"b\d+x\d+_\d+x\d+_\d+(?:_\d+)?\.comp",
@@ -836,6 +847,134 @@ def weight_shared_batch_shader_file(
                 f"{input_size}x{output_size}.comp"
             )
     return None
+
+
+def mixed_parallel_projection_source_shader_files(
+    shader_file: str,
+) -> tuple[str, str] | None:
+    match = re.fullmatch(
+        r"mixed_parallel_linear_4way_prequant_fp8_e4m3_"
+        r"b(\d+)x(\d+)_bf16_(\d+)x(\d+)_(\d+)_(\d+)_(\d+)\.comp",
+        shader_file,
+    )
+    if match is None:
+        return None
+    (
+        block_rows,
+        block_columns,
+        input_size,
+        output_a,
+        output_b,
+        output_c,
+        output_d,
+    ) = match.groups()
+    return (
+        "parallel_linear_2way_prequant_fp8_e4m3_"
+        f"b{block_rows}x{block_columns}_{input_size}x{output_a}_{output_b}.comp",
+        f"parallel_linear_2way_bf16_{input_size}x{output_c}_{output_d}.comp",
+    )
+
+
+def mixed_parallel_projection_batch_implementations(
+    shader_file: str,
+    *,
+    local_size_x: int,
+    workgroup_count_x: int,
+    cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...],
+) -> list[Json]:
+    sources = mixed_parallel_projection_source_shader_files(shader_file)
+    if sources is None:
+        raise ModelCompileError(
+            f"shader {shader_file!r} is not a mixed parallel projection"
+        )
+    fp8_shader_file, bf16_shader_file = sources
+    implementations: list[Json] = []
+    bf16_cooperative = cooperative_bfloat16_batch_shader_file(bf16_shader_file)
+    for shape in cooperative_float8_e4m3_shapes:
+        fp8_cooperative = cooperative_float8_e4m3_batch_shader_file(
+            fp8_shader_file,
+            shape=shape,
+        )
+        if fp8_cooperative is None or bf16_cooperative is None:
+            continue
+        implementations.append(
+            {
+                "execution_domain": "prefill",
+                "lane_tile_width": 4 * shape[1],
+                "independent_candidate_compatible": False,
+                "causal_sequence_compatible": True,
+                "device_requirements": {
+                    "vulkan_device_extensions": [],
+                    "vulkan_features": [],
+                    "subgroup_operations": [],
+                    "cooperative_float8_e4m3_shape": list(shape),
+                    "cooperative_bfloat16_shape": COOPERATIVE_BFLOAT16_SHAPE,
+                    "subgroup_size": 64,
+                },
+                "stages": [
+                    persistent_batch_control_stage(
+                        fp8_cooperative,
+                        256,
+                        cooperative_float8_e4m3_workgroup_count_x(
+                            fp8_shader_file,
+                            shape=shape,
+                        ),
+                        descriptor_bindings=[
+                            {"binding": 0, "source_binding": 0},
+                            {"binding": 1, "source_binding": 1},
+                            {"binding": 2, "source_binding": 3},
+                            {"binding": 3, "source_binding": 4},
+                            {"binding": 4, "source_binding": 7},
+                            {"binding": 5, "source_binding": 8},
+                            {"binding": 6, "source_binding": 9},
+                            {"binding": 7, "source_binding": 10},
+                        ],
+                    ),
+                    persistent_batch_control_stage(
+                        bf16_cooperative,
+                        256,
+                        cooperative_bfloat16_workgroup_count_x(bf16_shader_file),
+                        descriptor_bindings=[
+                            {"binding": 0, "source_binding": 2},
+                            {"binding": 1, "source_binding": 5},
+                            {"binding": 2, "source_binding": 6},
+                            {"binding": 3, "source_binding": 11},
+                            {"binding": 4, "source_binding": 12},
+                        ],
+                    ),
+                ],
+            }
+        )
+    for tile_width in EXACT_BATCH_LANE_TILE_WIDTHS:
+        batch_shader_file = weight_shared_batch_shader_file(
+            shader_file,
+            tile_width=tile_width,
+        )
+        if batch_shader_file is None:
+            raise ModelCompileError(
+                f"mixed projection {shader_file!r} lost batch width {tile_width}"
+            )
+        implementations.append(
+            {
+                "execution_domain": "decode_and_prefill",
+                "lane_tile_width": tile_width,
+                "independent_candidate_compatible": True,
+                "causal_sequence_compatible": True,
+                "device_requirements": {
+                    "vulkan_device_extensions": [],
+                    "vulkan_features": [],
+                    "subgroup_operations": [],
+                },
+                "stages": [
+                    persistent_batch_control_stage(
+                        batch_shader_file,
+                        local_size_x,
+                        workgroup_count_x,
+                    )
+                ],
+            }
+        )
+    return implementations
 
 
 def weight_shared_batch_workgroup_count_x(

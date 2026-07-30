@@ -1,0 +1,231 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_float_e4m3 : require
+#extension GL_EXT_spirv_intrinsics : require
+
+spirv_instruction(
+    extensions = ["SPV_VALVE_mixed_float_dot_product"],
+    capabilities = [6915],
+    id = 6918
+)
+float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QuantizedInputs {
+    uint words[];
+} quantized_inputs;
+layout(set = 0, binding = 1) readonly buffer InputScales {
+    float values[];
+} input_scales;
+layout(set = 0, binding = 2) readonly buffer LogicalInput {
+    uint words[];
+} logical_input;
+layout(set = 0, binding = 3) buffer OutputA { uint words[]; } output_a;
+layout(set = 0, binding = 4) buffer OutputB { uint words[]; } output_b;
+layout(set = 0, binding = 5) buffer OutputC { uint words[]; } output_c;
+layout(set = 0, binding = 6) buffer OutputD { uint words[]; } output_d;
+layout(set = 0, binding = 7) readonly buffer WeightA {
+    uint words[];
+} weight_a;
+layout(set = 0, binding = 8) readonly buffer WeightScaleInvA {
+    uint words[];
+} weight_scale_inv_a;
+layout(set = 0, binding = 9) readonly buffer WeightB {
+    uint words[];
+} weight_b;
+layout(set = 0, binding = 10) readonly buffer WeightScaleInvB {
+    uint words[];
+} weight_scale_inv_b;
+layout(set = 0, binding = 11) readonly buffer WeightC {
+    uint words[];
+} weight_c;
+layout(set = 0, binding = 12) readonly buffer WeightD {
+    uint words[];
+} weight_d;
+
+const uint BLOCK_ROWS = {{BLOCK_ROWS}}u;
+const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
+const uint INPUT_SIZE = {{INPUT_SIZE}}u;
+const uint OUTPUT_A_SIZE = {{OUTPUT_A_SIZE}}u;
+const uint OUTPUT_B_SIZE = {{OUTPUT_B_SIZE}}u;
+const uint OUTPUT_C_SIZE = {{OUTPUT_C_SIZE}}u;
+const uint OUTPUT_D_SIZE = {{OUTPUT_D_SIZE}}u;
+const uint OUTPUT_TILE_ROWS = {{OUTPUT_TILE_ROWS}}u;
+const uint INPUT_FP8_WORDS = INPUT_SIZE / 4u;
+const uint INPUT_BF16_WORDS = INPUT_SIZE / 2u;
+const uint BLOCK_FP8_WORDS = BLOCK_COLUMNS / 4u;
+const uint SCALE_COLUMNS = INPUT_SIZE / BLOCK_COLUMNS;
+const uint OUTPUT_C_WORDS = OUTPUT_C_SIZE / 2u;
+const uint OUTPUT_D_WORDS = OUTPUT_D_SIZE / 2u;
+const uint SMALL_OUTPUT_WORDS = OUTPUT_C_WORDS + OUTPUT_D_WORDS;
+
+shared float output_rows[2][OUTPUT_TILE_ROWS];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float read_bf16_word(uint packed, uint index) {
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+
+fe4m3vec4 read_fp8x4(uint packed) {
+    return uintBitsToFloate4m3EXT(u8vec4(
+        uint8_t(packed),
+        uint8_t(packed >> 8u),
+        uint8_t(packed >> 16u),
+        uint8_t(packed >> 24u)
+    ));
+}
+
+float read_fp8_weight_scale(uint branch, uint row, uint block) {
+    uint index = (row / BLOCK_ROWS) * SCALE_COLUMNS + block;
+    uint packed = branch == 0u
+        ? weight_scale_inv_a.words[index >> 1u]
+        : weight_scale_inv_b.words[index >> 1u];
+    return read_bf16_word(packed, index);
+}
+
+fe4m3vec4 read_fp8_weightx4(uint branch, uint row, uint word) {
+    uint index = row * INPUT_FP8_WORDS + word;
+    return read_fp8x4(
+        branch == 0u ? weight_a.words[index] : weight_b.words[index]
+    );
+}
+
+uint read_bf16_weight_pair(
+    uint branch,
+    uint local_word,
+    uint column_word,
+    uint row_offset
+) {
+    uint row = local_word * 2u + row_offset;
+    uint index = row * INPUT_BF16_WORDS + column_word;
+    return branch == 0u ? weight_c.words[index] : weight_d.words[index];
+}
+
+uint fp8_output_size(uint branch) {
+    return branch == 0u ? OUTPUT_A_SIZE : OUTPUT_B_SIZE;
+}
+
+void write_fp8_output(uint branch, uint row, uint value) {
+    if (branch == 0u) {
+        output_a.words[row / 2u] = value;
+    } else {
+        output_b.words[row / 2u] = value;
+    }
+}
+
+void project_small_outputs() {
+    uint global_word = gl_WorkGroupID.x;
+    if (global_word >= SMALL_OUTPUT_WORDS || gl_SubgroupID != 0u) {
+        return;
+    }
+    uint branch = global_word < OUTPUT_C_WORDS ? 0u : 1u;
+    uint local_word = branch == 0u
+        ? global_word
+        : global_word - OUTPUT_C_WORDS;
+    float lo_sum = 0.0;
+    float hi_sum = 0.0;
+    for (
+        uint column_word = gl_SubgroupInvocationID;
+        column_word < INPUT_BF16_WORDS;
+        column_word += gl_SubgroupSize
+    ) {
+        uint input_pair = logical_input.words[column_word];
+        float input_lo = bf16_to_f32(input_pair);
+        float input_hi = bf16_to_f32(input_pair >> 16u);
+        uint lo_weight_pair = read_bf16_weight_pair(
+            branch, local_word, column_word, 0u
+        );
+        uint hi_weight_pair = read_bf16_weight_pair(
+            branch, local_word, column_word, 1u
+        );
+        lo_sum = fma(input_lo, bf16_to_f32(lo_weight_pair), lo_sum);
+        lo_sum = fma(input_hi, bf16_to_f32(lo_weight_pair >> 16u), lo_sum);
+        hi_sum = fma(input_lo, bf16_to_f32(hi_weight_pair), hi_sum);
+        hi_sum = fma(input_hi, bf16_to_f32(hi_weight_pair >> 16u), hi_sum);
+    }
+    lo_sum = subgroupAdd(lo_sum);
+    hi_sum = subgroupAdd(hi_sum);
+    if (gl_SubgroupInvocationID == 0u) {
+        uint packed = (f32_to_bf16(hi_sum) << 16u) | f32_to_bf16(lo_sum);
+        if (branch == 0u) {
+            output_c.words[local_word] = packed;
+        } else {
+            output_d.words[local_word] = packed;
+        }
+    }
+}
+
+void main() {
+    project_small_outputs();
+
+    uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
+    for (uint branch = 0u; branch < 2u; branch++) {
+        for (
+            uint local_row = gl_SubgroupID;
+            local_row < OUTPUT_TILE_ROWS;
+            local_row += gl_NumSubgroups
+        ) {
+            uint row = first_row + local_row;
+            float sum = 0.0;
+            if (row < fp8_output_size(branch)) {
+                for (
+                    uint word = gl_SubgroupInvocationID;
+                    word < INPUT_FP8_WORDS;
+                    word += gl_SubgroupSize
+                ) {
+                    uint block = word / BLOCK_FP8_WORDS;
+                    sum = fma(
+                        fp8_dot4_acc32(
+                            read_fp8x4(quantized_inputs.words[word]),
+                            read_fp8_weightx4(branch, row, word),
+                            0.0
+                        ),
+                        input_scales.values[block]
+                            * read_fp8_weight_scale(branch, row, block),
+                        sum
+                    );
+                }
+            }
+            sum = subgroupAdd(sum);
+            if (gl_SubgroupInvocationID == 0u) {
+                output_rows[branch][local_row] = sum;
+            }
+        }
+    }
+    barrier();
+
+    for (
+        uint item = gl_LocalInvocationID.x;
+        item < 2u * ((OUTPUT_TILE_ROWS + 1u) / 2u);
+        item += gl_WorkGroupSize.x
+    ) {
+        uint branch = item / ((OUTPUT_TILE_ROWS + 1u) / 2u);
+        uint local_pair = item % ((OUTPUT_TILE_ROWS + 1u) / 2u);
+        uint row = first_row + local_pair * 2u;
+        uint output_size = fp8_output_size(branch);
+        if (row < output_size) {
+            uint hi = row + 1u < output_size
+                ? f32_to_bf16(output_rows[branch][local_pair * 2u + 1u])
+                : 0u;
+            write_fp8_output(
+                branch,
+                row,
+                (hi << 16u)
+                    | f32_to_bf16(output_rows[branch][local_pair * 2u])
+            );
+        }
+    }
+}

@@ -28,6 +28,9 @@ def optimize_circuit_for_vulkan(
     can_fuse_recurrent_output_gate: Callable[[Json, Json], bool] | None = None,
     can_fuse_linear_split_recurrent: Callable[[Json, Json], bool] | None = None,
     can_fuse_append_attention: Callable[[Json, Json], bool] | None = None,
+    can_fuse_mixed_precision_parallel_linears: (
+        Callable[[Json, Json], bool] | None
+    ) = None,
     prequantization_spec: Callable[[Json], Json | None] | None = None,
     can_emit_representation: Callable[[Json, Json], bool] | None = None,
 ) -> Json:
@@ -105,12 +108,96 @@ def optimize_circuit_for_vulkan(
             for output in optimized.get("boundary", {}).get("outputs", [])
         },
     )
-    optimized["nodes"] = _lower_prequantized_inputs(
+    lowered_nodes = _lower_prequantized_inputs(
         compiled_nodes,
         prequantization_spec,
         can_emit_representation,
     )
+    optimized["nodes"] = _fuse_mixed_precision_parallel_linears(
+        lowered_nodes,
+        can_fuse_mixed_precision_parallel_linears,
+    )
     return optimized
+
+
+def _fuse_mixed_precision_parallel_linears(
+    nodes: list[Json],
+    can_fuse: Callable[[Json, Json], bool] | None,
+) -> list[Json]:
+    if can_fuse is None:
+        return nodes
+    fused_nodes: list[Json] = []
+    index = 0
+    while index < len(nodes):
+        first = nodes[index]
+        second = nodes[index + 1] if index + 1 < len(nodes) else None
+        first_attrs = first.get("attrs", {})
+        if (
+            second is None
+            or first.get("op") != "parallel_linear_2way"
+            or second.get("op") != "parallel_linear_2way"
+            or first_attrs.get("physical_input_contract")
+            != "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+            or first_attrs.get("physical_logical_inputs") != second.get("inputs")
+            or len(first.get("inputs", [])) != 2
+            or len(second.get("inputs", [])) != 1
+            or len(first.get("outputs", [])) != 2
+            or len(second.get("outputs", [])) != 2
+            or first.get("state_reads")
+            or first.get("state_writes")
+            or second.get("state_reads")
+            or second.get("state_writes")
+            or not can_fuse(first, second)
+        ):
+            fused_nodes.append(deepcopy(first))
+            index += 1
+            continue
+
+        fused_nodes.append(
+            {
+                "id": first["id"],
+                "op": "mixed_parallel_linear_4way",
+                "inputs": [
+                    *deepcopy(first["inputs"]),
+                    *deepcopy(second["inputs"]),
+                ],
+                "outputs": [
+                    *deepcopy(first["outputs"]),
+                    *deepcopy(second["outputs"]),
+                ],
+                "params": [
+                    *deepcopy(first["params"]),
+                    *deepcopy(second["params"]),
+                ],
+                "attrs": {
+                    "compiled_from": [
+                        *_source_node_ids(first),
+                        *_source_node_ids(second),
+                    ],
+                    "branch_count": 4,
+                    "branch_parameter_counts": [2, 2, 1, 1],
+                    "branch_dtypes": ["F8_E4M3", "F8_E4M3", "BF16", "BF16"],
+                    "output_element_bytes": [
+                        *first_attrs.get("output_element_bytes", [2, 2]),
+                        *second.get("attrs", {}).get(
+                            "output_element_bytes", [2, 2]
+                        ),
+                    ],
+                    "physical_input_contract": first_attrs[
+                        "physical_input_contract"
+                    ],
+                    "physical_input_provider_id": first_attrs[
+                        "physical_input_provider_id"
+                    ],
+                    "physical_logical_inputs": deepcopy(
+                        first_attrs["physical_logical_inputs"]
+                    ),
+                    "physical_passthrough_inputs": deepcopy(second["inputs"]),
+                },
+            }
+        )
+        index += 2
+    return fused_nodes
 
 
 def _lower_prequantized_inputs(

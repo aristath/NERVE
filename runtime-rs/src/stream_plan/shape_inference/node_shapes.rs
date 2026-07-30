@@ -110,7 +110,9 @@ fn infer_node_output_shapes(
                 .map(|input| signals.get(input).and_then(|signal| signal.shape.clone()))
                 .collect())
         }
-        "parallel_linear_2way" | "parallel_linear_3way" => {
+        "parallel_linear_2way"
+        | "parallel_linear_3way"
+        | "mixed_parallel_linear_4way" => {
             infer_parallel_linear_output_shapes(component_id, node, signals, params, tensor_index)
         }
         "linear" | "linear_residual" | "linear_projection" | "parallel_linear_silu_multiply" => {
@@ -424,6 +426,7 @@ fn infer_parallel_linear_output_shapes(
     let expected_branch_count = match node.op.as_str() {
         "parallel_linear_2way" => 2,
         "parallel_linear_3way" => 3,
+        "mixed_parallel_linear_4way" => 4,
         _ => unreachable!("parallel-linear shape inference called for {}", node.op),
     };
     let declared_branch_count = attr_usize(node, "branch_count");

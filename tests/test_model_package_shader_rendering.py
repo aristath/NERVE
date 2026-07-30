@@ -34,6 +34,33 @@ def test_compiler_renders_parallel_linear_shaders(tmp_path: Path) -> None:
     assert "{{" not in fp8_pair_source
 
 
+def test_compiler_renders_mixed_precision_parallel_projection(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    scalar = (
+        "mixed_parallel_linear_4way_prequant_fp8_e4m3_"
+        "b128x128_bf16_2048x8192_4096_32_32.comp"
+    )
+    batch = scalar.replace("_prequant_fp8_", "_prequant_batch4_fp8_")
+
+    copy_shader_templates(shader_source_dir, tmp_path, {scalar, batch})
+
+    scalar_source = (tmp_path / scalar).read_text()
+    batch_source = (tmp_path / batch).read_text()
+    for source in (scalar_source, batch_source):
+        assert "binding = 2) readonly buffer LogicalInput" in source
+        assert "binding = 11) readonly buffer WeightC" in source
+        assert "binding = 12) readonly buffer WeightD" in source
+        assert "const uint OUTPUT_A_SIZE = 8192u;" in source
+        assert "const uint OUTPUT_D_SIZE = 32u;" in source
+        assert "void project_small_outputs" in source
+        assert "fp8_dot4_acc32" in source
+        assert "{{" not in source
+    assert "layout(push_constant) uniform BatchControl" not in scalar_source
+    assert "layout(push_constant) uniform BatchControl" in batch_source
+
+
 def test_compiler_renders_fp8_output_projection_shaders(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {

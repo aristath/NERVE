@@ -28,6 +28,7 @@ EXACT_REWRITE_CONTRACTS = {
     "parallel_head_norm_rope_2way": "parallel_head_norm_rope_exact_bf16.v1",
     "parallel_linear_2way": "parallel_linear_exact_bf16.v1",
     "parallel_linear_3way": "parallel_linear_exact_bf16.v1",
+    "mixed_parallel_linear_4way": "parallel_linear_4way_exact.v1",
     "parallel_linear_silu_multiply": "parallel_linear_silu_multiply_exact_bf16.v1",
     "silu_multiply": "silu_multiply_exact_bf16.v1",
 }
@@ -63,6 +64,9 @@ EXACT_REWRITE_SOURCE_OPS = {
     },
     "parallel_linear_2way": {("linear", "linear")},
     "parallel_linear_3way": {("linear", "linear", "linear")},
+    "mixed_parallel_linear_4way": {
+        ("linear", "linear", "linear", "linear")
+    },
     "parallel_linear_silu_multiply": {("linear", "linear", "silu", "multiply")},
     "silu_multiply": {("silu", "multiply")},
 }
@@ -71,6 +75,7 @@ PHYSICAL_NODE_ATTRS = {
     "physical_input_contract",
     "physical_input_provider_id",
     "physical_logical_inputs",
+    "physical_passthrough_inputs",
     "physical_output_representations",
 }
 def build_behavioral_validation(
@@ -383,6 +388,9 @@ def _validate_physical_representation_providers(
             target = node_by_id.get(target_id)
             target_attrs = target.get("attrs", {}) if isinstance(target, dict) else {}
             logical_inputs = target_attrs.get("physical_logical_inputs")
+            passthrough_inputs = target_attrs.get(
+                "physical_passthrough_inputs", []
+            )
             target_source_ids = target_attrs.get("compiled_from") or (
                 [target["id"]] if isinstance(target, dict) else []
             )
@@ -392,8 +400,16 @@ def _validate_physical_representation_providers(
                 or target_id in target_ids
                 or not isinstance(logical_inputs, list)
                 or not logical_inputs
+                or not isinstance(passthrough_inputs, list)
+                or any(
+                    not isinstance(signal, str)
+                    or signal not in logical_inputs
+                    for signal in passthrough_inputs
+                )
+                or len(set(passthrough_inputs)) != len(passthrough_inputs)
                 or helper.get("inputs") != [logical_inputs[0]]
-                or target.get("inputs") != [*outputs, *logical_inputs[1:]]
+                or target.get("inputs")
+                != [*outputs, *logical_inputs[1:], *passthrough_inputs]
                 or target_attrs.get("physical_input_contract")
                 != contract_id
                 or target_attrs.get("physical_input_provider_id") != helper_id
@@ -516,13 +532,24 @@ def _validate_physical_representation_providers(
                 target = node_by_id.get(target_id)
                 target_attrs = target.get("attrs", {}) if isinstance(target, dict) else {}
                 logical_inputs = target_attrs.get("physical_logical_inputs")
+                passthrough_inputs = target_attrs.get(
+                    "physical_passthrough_inputs", []
+                )
                 if (
                     target is None
                     or target_id in target_ids
                     or not isinstance(logical_inputs, list)
                     or not logical_inputs
+                    or not isinstance(passthrough_inputs, list)
+                    or any(
+                        not isinstance(signal, str)
+                        or signal not in logical_inputs
+                        for signal in passthrough_inputs
+                    )
+                    or len(set(passthrough_inputs)) != len(passthrough_inputs)
                     or logical_inputs[0] != logical_signal
-                    or target.get("inputs") != [*outputs, *logical_inputs[1:]]
+                    or target.get("inputs")
+                    != [*outputs, *logical_inputs[1:], *passthrough_inputs]
                     or target_attrs.get("physical_input_contract")
                     != contract.id
                     or target_attrs.get("physical_input_provider_id") != provider["id"]
@@ -745,6 +772,16 @@ def _validate_exact_rewrite_semantics(
         branch_parameter_counts = [len(node.get("params", [])) for node in region]
         if any(parameter_count != 1 for parameter_count in branch_parameter_counts):
             expected_attrs["branch_parameter_counts"] = branch_parameter_counts
+    elif op == "mixed_parallel_linear_4way":
+        _require_empty_attrs(component_id, op, region)
+        expected_attrs = {
+            "compiled_from": source_ids,
+            "branch_count": 4,
+            "branch_parameter_counts": [
+                len(node.get("params", [])) for node in region
+            ],
+            "branch_dtypes": ["F8_E4M3", "F8_E4M3", "BF16", "BF16"],
+        }
     elif op == "linear_residual":
         _require_empty_attrs(component_id, op, region)
         expected_attrs = {

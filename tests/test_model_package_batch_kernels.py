@@ -103,6 +103,14 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     assert weight_shared_batch_shader_file(
         "parallel_linear_2way_prequant_fp8_e4m3_b128x128_5120x5120_1024.comp"
     ) == ("parallel_linear_batch16_2way_prequant_fp8_e4m3_b128x128_5120x5120_1024.comp")
+    assert weight_shared_batch_shader_file(
+        "mixed_parallel_linear_4way_prequant_fp8_e4m3_"
+        "b128x128_bf16_2048x8192_4096_32_32.comp",
+        tile_width=4,
+    ) == (
+        "mixed_parallel_linear_4way_prequant_batch4_fp8_e4m3_"
+        "b128x128_bf16_2048x8192_4096_32_32.comp"
+    )
     assert (
         weight_shared_batch_shader_file("linear_bf16_1024x1024.comp")
         == "linear_batch16_bf16_1024x1024.comp"
@@ -748,6 +756,58 @@ def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
             }
         ],
     }
+
+
+def test_mixed_parallel_projection_uses_fused_decode_and_split_prefill() -> None:
+    shader_file = (
+        "mixed_parallel_linear_4way_prequant_fp8_e4m3_"
+        "b128x128_bf16_2048x8192_4096_32_32.comp"
+    )
+    spec = component_kernel_spec(
+        execution_index=1,
+        node={
+            "id": "mixed_projection",
+            "op": "mixed_parallel_linear_4way",
+            "attrs": {"compiled_from": ["a", "b", "c", "d"]},
+        },
+        circuit={},
+        shader_file=shader_file,
+        local_size_x=1024,
+        workgroup_count_x=512,
+        cooperative_float8_e4m3_shapes=((16, 16, 16),),
+    )
+
+    cooperative, *exact = spec["batch_implementations"]
+    assert cooperative["execution_domain"] == "prefill"
+    assert cooperative["lane_tile_width"] == 64
+    assert len(cooperative["stages"]) == 2
+    assert cooperative["stages"][0]["descriptor_bindings"] == [
+        {"binding": 0, "source_binding": 0},
+        {"binding": 1, "source_binding": 1},
+        {"binding": 2, "source_binding": 3},
+        {"binding": 3, "source_binding": 4},
+        {"binding": 4, "source_binding": 7},
+        {"binding": 5, "source_binding": 8},
+        {"binding": 6, "source_binding": 9},
+        {"binding": 7, "source_binding": 10},
+    ]
+    assert cooperative["stages"][1]["descriptor_bindings"] == [
+        {"binding": 0, "source_binding": 2},
+        {"binding": 1, "source_binding": 5},
+        {"binding": 2, "source_binding": 6},
+        {"binding": 3, "source_binding": 11},
+        {"binding": 4, "source_binding": 12},
+    ]
+    assert [implementation["lane_tile_width"] for implementation in exact] == [
+        2,
+        4,
+        8,
+        16,
+    ]
+    assert all(
+        implementation["stages"][0]["workgroup_count_x"] == 512
+        for implementation in exact
+    )
     assert [implementation["lane_tile_width"] for implementation in exact] == [
         2,
         4,

@@ -151,6 +151,70 @@ def shader_file_for_node(
             prefix += "_bias"
         prefix += "_bf16"
         return f"{prefix}_{in_features}x{out_features}.comp"
+    if op == "mixed_parallel_linear_4way":
+        attrs = node.get("attrs", {})
+        if (
+            len(node.get("inputs", [])) != 3
+            or len(node.get("outputs", [])) != 4
+            or len(node.get("params", [])) != 6
+            or attrs.get("branch_count") != 4
+            or attrs.get("branch_parameter_counts") != [2, 2, 1, 1]
+            or attrs.get("branch_dtypes")
+            != ["F8_E4M3", "F8_E4M3", "BF16", "BF16"]
+            or not uses_prequantized_fp8_input(node)
+        ):
+            raise ModelCompileError(
+                f"mixed parallel-linear node {node['id']!r} has invalid bindings"
+            )
+        parameter_groups = [
+            node["params"][:2],
+            node["params"][2:4],
+            node["params"][4:5],
+            node["params"][5:6],
+        ]
+        shapes = [
+            parameter_shape_for_id(circuit, group[0], tensor_index)
+            for group in parameter_groups
+        ]
+        dtypes = [
+            parameter_dtype_for_id(circuit, group[0], tensor_index)
+            for group in parameter_groups
+        ]
+        layouts = {
+            parameter_layout_for_id(circuit, group[0], tensor_index)
+            for group in parameter_groups
+        }
+        block_shapes = {
+            fp8_block_shape_for_node(
+                circuit,
+                {
+                    "id": f"{node['id']}__branch_{index}",
+                    "params": parameter_groups[index],
+                },
+                tensor_index,
+            )
+            for index in range(2)
+        }
+        if (
+            dtypes != ["F8_E4M3", "F8_E4M3", "BF16", "BF16"]
+            or layouts != {ROW_MAJOR_LAYOUT}
+            or len(block_shapes) != 1
+            or any(len(shape) != 2 for shape in shapes)
+            or len({int(shape[1]) for shape in shapes}) != 1
+        ):
+            raise ModelCompileError(
+                f"mixed parallel-linear node {node['id']!r} has incompatible "
+                f"projection shapes {shapes}"
+            )
+        block_rows, block_columns = block_shapes.pop()
+        input_width = int(shapes[0][1])
+        output_widths = [int(shape[0]) for shape in shapes]
+        return (
+            "mixed_parallel_linear_4way_prequant_fp8_e4m3_"
+            f"b{block_rows}x{block_columns}_bf16_{input_width}x"
+            + "_".join(map(str, output_widths))
+            + ".comp"
+        )
     if op in {"parallel_linear_2way", "parallel_linear_3way"}:
         expected_branch_count = 2 if op == "parallel_linear_2way" else 3
         branch_count = int(node["attrs"]["branch_count"])
@@ -982,6 +1046,16 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
     if node["op"] == "parallel_head_norm_rope_2way":
         return sum(
             int(branch["norm"]["head_count"]) for branch in node["attrs"]["branches"]
+        )
+    if node["op"] == "mixed_parallel_linear_4way":
+        output_sizes = [
+            int(parameter_shape_for_id(circuit, node["params"][offset], tensor_index)[0])
+            for offset in (0, 2)
+        ]
+        return max(
+            (output_size + FP8_PREQUANT_TILE_ROWS - 1)
+            // FP8_PREQUANT_TILE_ROWS
+            for output_size in output_sizes
         )
     if node["op"] in {"parallel_linear_2way", "parallel_linear_3way"}:
         branch_count = int(node["attrs"]["branch_count"])

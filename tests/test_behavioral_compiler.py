@@ -297,12 +297,13 @@ def test_exact_candidate_gate_accepts_fused_physical_representation_provider() -
             ],
         }
     )
-    candidate["nodes"][1]["inputs"] = quantized_outputs
+    candidate["nodes"][1]["inputs"] = [*quantized_outputs, "normalized"]
     candidate["nodes"][1]["attrs"] = {
         "output_element_bytes": [2],
         "physical_input_contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
         "physical_input_provider_id": "normalization",
         "physical_logical_inputs": ["normalized"],
+        "physical_passthrough_inputs": ["normalized"],
     }
 
     evidence = prove_exact_circuit_candidate(
@@ -311,6 +312,13 @@ def test_exact_candidate_gate_accepts_fused_physical_representation_provider() -
 
     assert evidence["status"] == "passed"
     assert evidence["physical_representation_count"] == 1
+
+    candidate["nodes"][1]["inputs"].append("normalized")
+    candidate["nodes"][1]["attrs"]["physical_passthrough_inputs"].append("normalized")
+    with pytest.raises(ModelCompileError, match="invalid physical representation provider"):
+        prove_exact_circuit_candidate(
+            component_id="layer_00", source=source, candidate=candidate
+        )
 
 
 def test_exact_candidate_gate_rejects_dropped_source_behavior() -> None:

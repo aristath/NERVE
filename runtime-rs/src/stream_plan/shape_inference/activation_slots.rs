@@ -738,6 +738,110 @@ mod tests {
     }
 
     #[test]
+    fn infers_mixed_parallel_linear_output_shapes_from_all_four_weights() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "mixed".to_string(),
+            op: "mixed_parallel_linear_4way".to_string(),
+            inputs: vec![
+                "hidden_fp8".to_string(),
+                "hidden_scale".to_string(),
+                "hidden".to_string(),
+            ],
+            outputs: vec![
+                "qkv".to_string(),
+                "z".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+            ],
+            params: vec![
+                "qkv_weight".to_string(),
+                "qkv_scale".to_string(),
+                "z_weight".to_string(),
+                "z_scale".to_string(),
+                "b_weight".to_string(),
+                "a_weight".to_string(),
+            ],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "branch_count": 4,
+                "branch_parameter_counts": [2, 2, 1, 1],
+                "output_element_bytes": [2, 2, 2, 2]
+            }),
+        };
+        let signals = BTreeMap::from([(
+            "hidden_fp8".to_string(),
+            PlannedSignal {
+                id: "hidden_fp8".to_string(),
+                producer: SignalProducer::BoundaryInput,
+                consumers: vec!["mixed".to_string()],
+                shape: Some(vec![2048]),
+                element_bytes: Some(1),
+                storage: SignalStorage::Boundary,
+                is_boundary_output: false,
+            },
+        )]);
+        let parameter_ref = |tensor: &str| ParameterRef {
+            tensor: Some(tensor.to_string()),
+            role: None,
+            extra: serde_json::Map::new(),
+        };
+        let params = BTreeMap::from([
+            ("qkv_weight".to_string(), parameter_ref("qkv.weight")),
+            ("qkv_scale".to_string(), parameter_ref("qkv.scale")),
+            ("z_weight".to_string(), parameter_ref("z.weight")),
+            ("z_scale".to_string(), parameter_ref("z.scale")),
+            ("b_weight".to_string(), parameter_ref("b.weight")),
+            ("a_weight".to_string(), parameter_ref("a.weight")),
+        ]);
+        let tensor = |dtype: &str, shape: Vec<usize>| TensorMetadata {
+            dtype: dtype.to_string(),
+            shape,
+            logical_shape: None,
+            parameter_count: None,
+            byte_count: None,
+            data_offsets: None,
+            source_file: None,
+            data_sha256: None,
+            layout: None,
+        };
+        let tensor_index = TensorIndex {
+            schema: TENSOR_INDEX_SCHEMA.to_string(),
+            tensors: BTreeMap::from([
+                (
+                    "qkv.weight".to_string(),
+                    tensor("F8_E4M3", vec![8192, 2048]),
+                ),
+                ("qkv.scale".to_string(), tensor("BF16", vec![64, 16])),
+                (
+                    "z.weight".to_string(),
+                    tensor("F8_E4M3", vec![4096, 2048]),
+                ),
+                ("z.scale".to_string(), tensor("BF16", vec![32, 16])),
+                ("b.weight".to_string(), tensor("BF16", vec![32, 2048])),
+                ("a.weight".to_string(), tensor("BF16", vec![32, 2048])),
+            ]),
+        };
+
+        assert_eq!(
+            infer_parallel_linear_output_shapes(
+                "layer_00",
+                &node,
+                &signals,
+                &params,
+                Some(&tensor_index),
+            )
+            .unwrap(),
+            vec![
+                Some(vec![8192]),
+                Some(vec![4096]),
+                Some(vec![32]),
+                Some(vec![32]),
+            ]
+        );
+    }
+
+    #[test]
     fn infers_fused_parallel_ffn_projection_output_shape() {
         let node = crate::stream_circuit::CircuitNode {
             id: "fused_ffn".to_string(),

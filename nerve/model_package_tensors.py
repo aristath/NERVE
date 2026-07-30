@@ -763,6 +763,92 @@ def can_fuse_native_parallel_linears(
     )
 
 
+def can_fuse_mixed_precision_parallel_linears(
+    circuit: Json,
+    fp8_projection: Json,
+    bf16_projection: Json,
+    tensor_index: Json,
+) -> bool:
+    if (
+        fp8_projection.get("op") != "parallel_linear_2way"
+        or bf16_projection.get("op") != "parallel_linear_2way"
+        or fp8_projection.get("attrs", {}).get("branch_parameter_counts")
+        != [2, 2]
+        or bf16_projection.get("attrs", {}).get(
+            "branch_parameter_counts", [1, 1]
+        )
+        != [1, 1]
+        or len(fp8_projection.get("params", [])) != 4
+        or len(bf16_projection.get("params", [])) != 2
+    ):
+        return False
+    fp8_parameter_groups = [
+        fp8_projection["params"][:2],
+        fp8_projection["params"][2:],
+    ]
+    fp8_weight_ids = [group[0] for group in fp8_parameter_groups]
+    bf16_weight_ids = list(bf16_projection["params"])
+    try:
+        fp8_shapes = [
+            parameter_shape_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in fp8_weight_ids
+        ]
+        bf16_shapes = [
+            parameter_shape_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in bf16_weight_ids
+        ]
+        fp8_block_shapes = {
+            fp8_block_shape_for_node(
+                circuit,
+                {
+                    "id": f"{fp8_projection['id']}__branch_{index}",
+                    "params": parameter_group,
+                },
+                tensor_index,
+            )
+            for index, parameter_group in enumerate(fp8_parameter_groups)
+        }
+        dtypes = [
+            *(
+                parameter_dtype_for_id(circuit, parameter_id, tensor_index)
+                for parameter_id in fp8_weight_ids
+            ),
+            *(
+                parameter_dtype_for_id(circuit, parameter_id, tensor_index)
+                for parameter_id in bf16_weight_ids
+            ),
+        ]
+        layouts = {
+            parameter_layout_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in [*fp8_weight_ids, *bf16_weight_ids]
+        }
+    except (KeyError, ModelCompileError):
+        return False
+    shapes = [*fp8_shapes, *bf16_shapes]
+    if (
+        dtypes != ["F8_E4M3", "F8_E4M3", "BF16", "BF16"]
+        or layouts != {ROW_MAJOR_LAYOUT}
+        or len(fp8_block_shapes) != 1
+        or any(
+            len(shape) != 2
+            or int(shape[0]) <= 0
+            or int(shape[0]) % 2
+            or int(shape[1]) <= 0
+            or int(shape[1]) % 4
+            for shape in shapes
+        )
+        or len({int(shape[1]) for shape in shapes}) != 1
+    ):
+        return False
+    fp8_output_tiles = max(
+        (int(shape[0]) + FP8_PREQUANT_TILE_ROWS - 1)
+        // FP8_PREQUANT_TILE_ROWS
+        for shape in fp8_shapes
+    )
+    bf16_output_words = sum((int(shape[0]) + 1) // 2 for shape in bf16_shapes)
+    return bf16_output_words <= fp8_output_tiles
+
+
 def physical_input_prequantization_spec(
     circuit: Json,
     node: Json,

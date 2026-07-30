@@ -1091,6 +1091,74 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             ["weight", "weight_scale_inv"], optimized["nodes"][0]["params"]
         )
 
+    def test_fuses_adjacent_fp8_and_bf16_parallel_projections(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "large_a__large_b",
+                    "op": "parallel_linear_2way",
+                    "inputs": ["hidden_fp8", "hidden_scale"],
+                    "outputs": ["large_a_out", "large_b_out"],
+                    "params": ["large_a", "large_a_scale", "large_b", "large_b_scale"],
+                    "attrs": {
+                        "compiled_from": ["large_a", "large_b"],
+                        "branch_count": 2,
+                        "branch_parameter_counts": [2, 2],
+                        "output_element_bytes": [2, 2],
+                        "physical_input_contract": (
+                            "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+                        ),
+                        "physical_input_provider_id": "norm",
+                        "physical_logical_inputs": ["hidden"],
+                    },
+                },
+                {
+                    "id": "small_c__small_d",
+                    "op": "parallel_linear_2way",
+                    "inputs": ["hidden"],
+                    "outputs": ["small_c_out", "small_d_out"],
+                    "params": ["small_c", "small_d"],
+                    "attrs": {
+                        "compiled_from": ["small_c", "small_d"],
+                        "branch_count": 2,
+                        "output_element_bytes": [2, 2],
+                    },
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_mixed_precision_parallel_linears=lambda _fp8, _bf16: True,
+        )
+
+        self.assertEqual(1, len(optimized["nodes"]))
+        fused = optimized["nodes"][0]
+        self.assertEqual("mixed_parallel_linear_4way", fused["op"])
+        self.assertEqual(
+            ["hidden_fp8", "hidden_scale", "hidden"], fused["inputs"]
+        )
+        self.assertEqual(
+            ["large_a_out", "large_b_out", "small_c_out", "small_d_out"],
+            fused["outputs"],
+        )
+        self.assertEqual(
+            [
+                "large_a",
+                "large_a_scale",
+                "large_b",
+                "large_b_scale",
+                "small_c",
+                "small_d",
+            ],
+            fused["params"],
+        )
+        self.assertEqual([2, 2, 1, 1], fused["attrs"]["branch_parameter_counts"])
+        self.assertEqual(
+            ["large_a", "large_b", "small_c", "small_d"],
+            fused["attrs"]["compiled_from"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
