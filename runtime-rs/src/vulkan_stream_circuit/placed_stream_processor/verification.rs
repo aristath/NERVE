@@ -214,8 +214,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 "causal verification output is not mounted".to_string(),
             ))
         })?;
-        target_output.project(output_device, input_token_ids.len())?;
-        target_output.sample_lanes(
+        target_output.project_and_sample_lanes(
             output_device,
             &token_prefixes,
             &stream_ticks,
