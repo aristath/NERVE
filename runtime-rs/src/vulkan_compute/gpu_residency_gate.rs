@@ -4,14 +4,7 @@ const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT: usize = 4;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT: usize = 2;
-const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 8;
-const VULKAN_GPU_RESIDENCY_GATE_CONFIG_DISPATCH_WORD_COUNT: usize = 4;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VulkanGpuResidencyIndirectDispatch {
-    pub byte_offset: usize,
-    pub dimensions: [u32; 3],
-}
+const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanGpuResidencyGateConfig {
@@ -21,7 +14,6 @@ pub struct VulkanGpuResidencyGateConfig {
     pub selection_index_shift: u32,
     pub selection_index_mask: u32,
     pub address_slots_by_resource_index: Vec<Vec<usize>>,
-    pub downstream_dispatches: Vec<VulkanGpuResidencyIndirectDispatch>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +46,7 @@ pub struct VulkanGpuResidencyGate {
     _resource_address_slots: Arc<VulkanResidentBuffer>,
     resolved_addresses: Arc<VulkanResidentBuffer>,
     missing_queue: VulkanGpuResidencyMissQueue,
-    indirect_dispatches: Arc<VulkanResidentBuffer>,
+    continuation_predicate: Arc<VulkanResidentBuffer>,
     dispatch: VulkanResidentKernelDispatch,
 }
 
@@ -64,7 +56,6 @@ impl VulkanGpuResidencyGateConfig {
         selection_buffer_byte_capacity: usize,
         address_table_slot_count: usize,
         missing_request_capacity: usize,
-        indirect_dispatch_buffer_byte_capacity: usize,
     ) -> Result<(), VulkanError> {
         if self.maximum_selection_count == 0 {
             return Err(VulkanError(
@@ -154,36 +145,6 @@ impl VulkanGpuResidencyGateConfig {
                 missing_request_capacity, self.maximum_selection_count
             )));
         }
-        if self.downstream_dispatches.is_empty()
-            || self
-                .downstream_dispatches
-                .iter()
-                .any(|dispatch| dispatch.dimensions.contains(&0))
-        {
-            return Err(VulkanError(
-                "GPU residency gate downstream dispatch dimensions must be non-empty and nonzero"
-                    .to_string(),
-            ));
-        }
-        let mut target_offsets = BTreeSet::new();
-        for dispatch in &self.downstream_dispatches {
-            validate_resident_indirect_dispatch_range(
-                indirect_dispatch_buffer_byte_capacity,
-                dispatch.byte_offset,
-            )?;
-            if !target_offsets.insert(dispatch.byte_offset) {
-                return Err(VulkanError(format!(
-                    "GPU residency gate repeats downstream indirect byte offset {}",
-                    dispatch.byte_offset
-                )));
-            }
-            if u32::try_from(dispatch.byte_offset / size_of::<u32>()).is_err() {
-                return Err(VulkanError(format!(
-                    "GPU residency gate downstream indirect byte offset {} exceeds its shader representation",
-                    dispatch.byte_offset
-                )));
-            }
-        }
         Ok(())
     }
 
@@ -210,25 +171,31 @@ impl VulkanGpuResidencyGate {
         address_table_buffer: Arc<VulkanResidentBuffer>,
         address_table_slot_count: usize,
         missing_queue: VulkanGpuResidencyMissQueue,
-        indirect_dispatches: Arc<VulkanResidentBuffer>,
+        continuation_predicate: Arc<VulkanResidentBuffer>,
         config: VulkanGpuResidencyGateConfig,
     ) -> Result<Self, VulkanError> {
         config.validate(
             selection_buffer.byte_capacity(),
             address_table_slot_count,
             missing_queue.capacity(),
-            indirect_dispatches.byte_capacity(),
         )?;
+        if continuation_predicate.byte_capacity() < size_of::<u32>() {
+            return Err(VulkanError(format!(
+                "GPU residency continuation predicate has {} bytes; expected at least {}",
+                continuation_predicate.byte_capacity(),
+                size_of::<u32>()
+            )));
+        }
         if !device.owns_resident_buffer(&address_table_buffer)
             || !device.owns_resident_buffer(missing_queue.buffer())
-            || !device.owns_resident_buffer(&indirect_dispatches)
+            || !device.owns_resident_buffer(&continuation_predicate)
         {
             return Err(VulkanError(
                 "GPU residency gate buffers belong to another logical device".to_string(),
             ));
         }
 
-        let mut configuration_words = vec![
+        let configuration_words = vec![
             config.selection_index_shift,
             config.selection_index_mask,
             u32::try_from(config.address_slots_by_resource_index.len()).map_err(|_| {
@@ -240,9 +207,6 @@ impl VulkanGpuResidencyGate {
             u32::try_from(config.maximum_resolved_address_count()?).map_err(|_| {
                 VulkanError("GPU residency resolved capacity exceeds u32".to_string())
             })?,
-            u32::try_from(config.downstream_dispatches.len()).map_err(|_| {
-                VulkanError("GPU residency downstream dispatch count exceeds u32".to_string())
-            })?,
             u32::try_from(config.selection_count_per_lane).map_err(|_| {
                 VulkanError("GPU residency selection count per lane exceeds u32".to_string())
             })?,
@@ -253,26 +217,6 @@ impl VulkanGpuResidencyGate {
         debug_assert_eq!(
             configuration_words.len(),
             VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT
-        );
-        configuration_words.extend(
-            config
-                .downstream_dispatches
-                .iter()
-                .flat_map(|dispatch| {
-                    [
-                        u32::try_from(dispatch.byte_offset / size_of::<u32>())
-                            .expect("validated indirect word offset fits u32"),
-                        dispatch.dimensions[0],
-                        dispatch.dimensions[1],
-                        dispatch.dimensions[2],
-                    ]
-                }),
-        );
-        debug_assert_eq!(
-            configuration_words.len(),
-            VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT
-                + config.downstream_dispatches.len()
-                    * VULKAN_GPU_RESIDENCY_GATE_CONFIG_DISPATCH_WORD_COUNT
         );
         let configuration = Arc::new(
             device.create_resident_buffer(words_byte_count(configuration_words.len())?)?,
@@ -383,9 +327,9 @@ impl VulkanGpuResidencyGate {
             },
             VulkanResidentKernelBufferBinding {
                 binding: 6,
-                buffer: &indirect_dispatches,
+                buffer: &continuation_predicate,
                 byte_offset: 0,
-                byte_len: indirect_dispatches.byte_capacity(),
+                byte_len: size_of::<u32>(),
                 access: VulkanResidentKernelBufferAccess::Write,
             },
             VulkanResidentKernelBufferBinding {
@@ -413,7 +357,7 @@ impl VulkanGpuResidencyGate {
             _resource_address_slots: resource_address_slots,
             resolved_addresses,
             missing_queue,
-            indirect_dispatches,
+            continuation_predicate,
             dispatch,
         })
     }
@@ -447,36 +391,12 @@ impl VulkanGpuResidencyGate {
         Ok(bytes)
     }
 
-    pub fn indirect_dispatch_step<'a>(
-        &'a self,
-        byte_offset: usize,
-        dispatch: &'a VulkanResidentKernelDispatch,
-        push_constants: &'a [u8],
-    ) -> Result<VulkanResidentKernelSequenceStep<'a>, VulkanError> {
-        if !self
-            .config
-            .downstream_dispatches
-            .iter()
-            .any(|target| target.byte_offset == byte_offset)
-        {
-            return Err(VulkanError(format!(
-                "GPU residency indirect byte offset {byte_offset} is not controlled by this gate"
-            )));
-        }
-        VulkanResidentKernelSequenceStep::new_indirect(
-            dispatch,
-            push_constants,
-            &self.indirect_dispatches,
-            byte_offset,
-        )
-    }
-
     pub fn resolved_addresses_buffer(&self) -> &VulkanResidentBuffer {
         &self.resolved_addresses
     }
 
-    pub fn indirect_dispatch_buffer(&self) -> &VulkanResidentBuffer {
-        &self.indirect_dispatches
+    pub fn continuation_predicate(&self) -> &VulkanResidentBuffer {
+        &self.continuation_predicate
     }
 
     pub fn notification_epoch(&self) -> Result<u32, VulkanError> {

@@ -26,9 +26,9 @@ layout(set = 0, binding = 5) buffer MissingRequests {
     uint words[];
 } missing_requests;
 
-layout(set = 0, binding = 6) buffer IndirectDispatches {
-    uint words[];
-} indirect_dispatches;
+layout(set = 0, binding = 6) buffer ContinuationPredicate {
+    uint enabled;
+} continuation;
 
 layout(set = 0, binding = 7) readonly buffer GateConfiguration {
     uint words[];
@@ -46,13 +46,11 @@ const uint RESOLVED_HEADER_WORDS = 8u;
 const uint RESOLVED_RECORD_WORDS = 8u;
 const uint MISSING_HEADER_WORDS = 4u;
 const uint MISSING_RECORD_WORDS = 2u;
-const uint CONFIG_HEADER_WORDS = 8u;
-const uint CONFIG_DISPATCH_WORDS = 4u;
 
 uint selected_resource(uint selection_index) {
-    uint lane = selection_index / configuration.words[6];
-    uint lane_selection = selection_index % configuration.words[6];
-    uint selection_word = lane * configuration.words[7] + lane_selection;
+    uint lane = selection_index / configuration.words[5];
+    uint lane_selection = selection_index % configuration.words[5];
+    uint selection_word = lane * configuration.words[6] + lane_selection;
     return (selections.words[selection_word] >> configuration.words[0])
         & configuration.words[1];
 }
@@ -101,19 +99,6 @@ void copy_resolved_address(
         address_table.words[source + 4u];
     resolved_addresses.words[destination + 7u] =
         address_table.words[source + 5u];
-}
-
-void write_indirect_dispatches(bool enabled) {
-    for (uint dispatch = 0u; dispatch < configuration.words[5]; dispatch += 1u) {
-        uint record = CONFIG_HEADER_WORDS + dispatch * CONFIG_DISPATCH_WORDS;
-        uint target = configuration.words[record];
-        indirect_dispatches.words[target] =
-            enabled ? configuration.words[record + 1u] : 0u;
-        indirect_dispatches.words[target + 1u] =
-            enabled ? configuration.words[record + 2u] : 0u;
-        indirect_dispatches.words[target + 2u] =
-            enabled ? configuration.words[record + 3u] : 0u;
-    }
 }
 
 void main() {
@@ -185,9 +170,9 @@ void main() {
     resolved_addresses.words[6] = 0u;
     resolved_addresses.words[7] = 0u;
     if (!all_resident) {
-        write_indirect_dispatches(false);
+        continuation.enabled = 0u;
     } else if (control.restore_downstream != 0u) {
-        write_indirect_dispatches(true);
+        continuation.enabled = 1u;
     }
 
     memoryBarrierBuffer();

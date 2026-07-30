@@ -13,29 +13,12 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
         selection_index_shift: 0,
         selection_index_mask: 0xffff,
         address_slots_by_resource_index: vec![vec![0, 1], vec![2, 3]],
-        downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
-            byte_offset: VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-            dimensions: [2, 1, 1],
-        }],
     };
-    assert!(
-        valid
-            .validate(
-                8,
-                4,
-                4,
-                2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-            )
-            .is_ok()
-    );
+    assert!(valid.validate(8, 4, 4).is_ok());
 
     let mut invalid = valid.clone();
     invalid.maximum_selection_count = 0;
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut padded_lanes = valid.clone();
     padded_lanes.maximum_selection_count = 4;
@@ -43,99 +26,43 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
     padded_lanes.selection_lane_stride_words = 4;
     assert!(
         padded_lanes
-            .validate(
-                6 * size_of::<u32>(),
-                4,
-                4,
-                2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-            )
+            .validate(6 * size_of::<u32>(), 4, 4)
             .is_ok()
     );
     assert!(
         padded_lanes
-            .validate(
-                5 * size_of::<u32>(),
-                4,
-                4,
-                2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-            )
+            .validate(5 * size_of::<u32>(), 4, 4)
             .is_err()
     );
 
     let mut invalid = valid.clone();
     invalid.maximum_selection_count = 3;
-    assert!(
-        invalid
-            .validate(12, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(12, 4, 4).is_err());
 
     let mut invalid = valid.clone();
     invalid.selection_lane_stride_words = 1;
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0;
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0x1;
     invalid.address_slots_by_resource_index =
         vec![vec![0], vec![1], vec![2]];
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
     invalid.address_slots_by_resource_index[0].push(1);
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
     invalid.address_slots_by_resource_index[0].push(4);
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(invalid.validate(8, 4, 4).is_err());
 
-    assert!(
-        valid
-            .validate(8, 4, 1, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
-
-    let mut invalid = valid.clone();
-    invalid.downstream_dispatches[0].dimensions[1] = 0;
-    assert!(
-        invalid
-            .validate(8, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
-
-    assert!(
-        valid
-            .validate(4, 4, 4, 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
-    assert!(
-        valid
-            .validate(8, 4, 4, VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .is_err()
-    );
+    assert!(valid.validate(8, 4, 1).is_err());
+    assert!(valid.validate(4, 4, 4).is_err());
 }
 
 #[test]
@@ -204,13 +131,10 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
     selections
         .write_bytes(&u32_words_bytes(&[0, 1, 99, 99, 1, 0]))
         .unwrap();
-    let indirect_dispatches = Arc::new(
-        device
-            .create_resident_buffer(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .unwrap(),
-    );
-    indirect_dispatches
-        .write_bytes(&vec![0; indirect_dispatches.byte_capacity()])
+    let continuation_predicate =
+        Arc::new(device.create_conditional_resident_buffer(4).unwrap());
+    continuation_predicate
+        .write_bytes(&1u32.to_le_bytes())
         .unwrap();
     let missing_queue = VulkanGpuResidencyMissQueue::new(&device, 4).unwrap();
     let gate = VulkanGpuResidencyGate::new(
@@ -220,7 +144,7 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
         table.shared_buffer(),
         table.slot_count(),
         missing_queue,
-        Arc::clone(&indirect_dispatches),
+        Arc::clone(&continuation_predicate),
         VulkanGpuResidencyGateConfig {
             maximum_selection_count: 4,
             selection_count_per_lane: 2,
@@ -228,10 +152,6 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
             selection_index_shift: 0,
             selection_index_mask: 0xffff,
             address_slots_by_resource_index: vec![vec![0], vec![1]],
-            downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
-                byte_offset: 0,
-                dimensions: [1, 1, 1],
-            }],
         },
     )
     .unwrap();
@@ -408,13 +328,10 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
     let selection_second = Arc::new(device.create_resident_buffer(4).unwrap());
     selection_first.write_bytes(&0u32.to_le_bytes()).unwrap();
     selection_second.write_bytes(&0u32.to_le_bytes()).unwrap();
-    let indirect_dispatches = Arc::new(
-        device
-            .create_resident_buffer(3 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-            .unwrap(),
-    );
-    indirect_dispatches
-        .write_bytes(&vec![0; indirect_dispatches.byte_capacity()])
+    let continuation_predicate =
+        Arc::new(device.create_conditional_resident_buffer(4).unwrap());
+    continuation_predicate
+        .write_bytes(&1u32.to_le_bytes())
         .unwrap();
     let missing_queue = VulkanGpuResidencyMissQueue::new(&device, 2).unwrap();
     let first_gate = VulkanGpuResidencyGate::new(
@@ -424,7 +341,7 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
         table.shared_buffer(),
         table.slot_count(),
         missing_queue.clone(),
-        Arc::clone(&indirect_dispatches),
+        Arc::clone(&continuation_predicate),
         VulkanGpuResidencyGateConfig {
             maximum_selection_count: 1,
             selection_count_per_lane: 1,
@@ -432,20 +349,6 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
             address_slots_by_resource_index: vec![vec![0]],
-            downstream_dispatches: vec![
-                VulkanGpuResidencyIndirectDispatch {
-                    byte_offset: 0,
-                    dimensions: [1, 1, 1],
-                },
-                VulkanGpuResidencyIndirectDispatch {
-                    byte_offset: VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-                    dimensions: [1, 1, 1],
-                },
-                VulkanGpuResidencyIndirectDispatch {
-                    byte_offset: 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-                    dimensions: [1, 1, 1],
-                },
-            ],
         },
     )
     .unwrap();
@@ -456,7 +359,7 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
         table.shared_buffer(),
         table.slot_count(),
         missing_queue.clone(),
-        Arc::clone(&indirect_dispatches),
+        Arc::clone(&continuation_predicate),
         VulkanGpuResidencyGateConfig {
             maximum_selection_count: 1,
             selection_count_per_lane: 1,
@@ -464,10 +367,6 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
             address_slots_by_resource_index: vec![vec![1]],
-            downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
-                byte_offset: 2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-                dimensions: [1, 1, 1],
-            }],
         },
     )
     .unwrap();
@@ -505,23 +404,33 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
             &full_sequence,
             &[
                 VulkanResidentKernelSequenceStep::new(first_gate.dispatch(), &first_control),
-                first_gate
-                    .indirect_dispatch_step(0, &first_compute, &increment)
-                    .unwrap(),
-                VulkanResidentKernelSequenceStep::new_indirect(
-                    second_gate.dispatch(),
-                    &second_control,
-                    &indirect_dispatches,
-                    VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+                VulkanResidentKernelSequenceStep::new_conditional(
+                    &first_compute,
+                    &increment,
+                    &continuation_predicate,
+                    0,
+                    false,
+                    1,
                 )
                 .unwrap(),
-                second_gate
-                    .indirect_dispatch_step(
-                        2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-                        &second_compute,
-                        &increment,
-                    )
-                    .unwrap(),
+                VulkanResidentKernelSequenceStep::new_conditional(
+                    second_gate.dispatch(),
+                    &second_control,
+                    &continuation_predicate,
+                    0,
+                    false,
+                    2,
+                )
+                .unwrap(),
+                VulkanResidentKernelSequenceStep::new_conditional(
+                    &second_compute,
+                    &increment,
+                    &continuation_predicate,
+                    0,
+                    false,
+                    3,
+                )
+                .unwrap(),
             ],
         )
         .unwrap();
@@ -530,13 +439,15 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
             &resume_sequence,
             &[
                 VulkanResidentKernelSequenceStep::new(second_gate.dispatch(), &second_control),
-                second_gate
-                    .indirect_dispatch_step(
-                        2 * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
-                        &second_compute,
-                        &increment,
-                    )
-                    .unwrap(),
+                VulkanResidentKernelSequenceStep::new_conditional(
+                    &second_compute,
+                    &increment,
+                    &continuation_predicate,
+                    0,
+                    false,
+                    1,
+                )
+                .unwrap(),
             ],
         )
         .unwrap();
@@ -587,7 +498,7 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
     drop(second_compute);
     drop(first_gate);
     drop(second_gate);
-    drop(indirect_dispatches);
+    drop(continuation_predicate);
     table
         .clear_group(&mut transfer, &second_publication)
         .unwrap();
@@ -671,7 +582,7 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
         missing_queue,
         Arc::new(
             device
-                .create_resident_buffer(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+                .create_conditional_resident_buffer(4)
                 .unwrap(),
         ),
         VulkanGpuResidencyGateConfig {
@@ -681,10 +592,6 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
             address_slots_by_resource_index: vec![vec![0]],
-            downstream_dispatches: vec![VulkanGpuResidencyIndirectDispatch {
-                byte_offset: 0,
-                dimensions: [workgroup_count, 1, 1],
-            }],
         },
     )
     .unwrap();
@@ -731,10 +638,13 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
                     gate.dispatch(),
                     &gate_control,
                 ),
-                gate.indirect_dispatch_step(
-                    0,
+                VulkanResidentKernelSequenceStep::new_conditional(
                     &demand_dispatch,
                     &element_count,
+                    gate.continuation_predicate(),
+                    0,
+                    false,
+                    1,
                 )
                 .unwrap(),
             ],
@@ -1089,10 +999,13 @@ fn run_gpu_residency_gate_sequence(
                     gate.dispatch(),
                     &gate_control,
                 ),
-                gate.indirect_dispatch_step(
-                    0,
+                VulkanResidentKernelSequenceStep::new_conditional(
                     downstream,
                     downstream_push_constants,
+                    gate.continuation_predicate(),
+                    0,
+                    false,
+                    1,
                 )
                 .unwrap(),
             ],

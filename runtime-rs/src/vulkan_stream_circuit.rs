@@ -49,10 +49,10 @@ use crate::tensor_storage::TensorStorage;
 use crate::vulkan::{DEFAULT_COMPUTE_LOCAL_SIZE_X, DEFAULT_SPIRV_ENTRY_POINT, read_spirv_words};
 use crate::vulkan_compute::{
     VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT, VulkanComputeDevice, VulkanError,
-    VulkanGpuResidencyGate, VulkanGpuResidencyGateConfig, VulkanGpuResidencyIndirectDispatch,
-    VulkanGpuResidencyMissQueue, VulkanResidentBuffer, VulkanResidentBufferCopy,
-    VulkanResidentBufferCopyBatch, VulkanResidentBufferPool, VulkanResidentBufferPoolKey,
-    VulkanResidentBufferRangeCopy, VulkanResidentBufferReadRange, VulkanResidentBufferWriteRange,
+    VulkanGpuResidencyGate, VulkanGpuResidencyGateConfig, VulkanGpuResidencyMissQueue,
+    VulkanResidentBuffer, VulkanResidentBufferCopy, VulkanResidentBufferCopyBatch,
+    VulkanResidentBufferPool, VulkanResidentBufferPoolKey, VulkanResidentBufferRangeCopy,
+    VulkanResidentBufferReadRange, VulkanResidentBufferWriteRange,
     VulkanResidentExecutionQuantumMeasurement, VulkanResidentKernelBufferAccess,
     VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,

@@ -38,11 +38,9 @@ struct VulkanDemandResidencyGateRuntime {
 
 struct VulkanDemandResidencyDispatchChain {
     commands: Vec<VulkanDemandResidencyCommand>,
-    command_indirect_offsets: Vec<Option<usize>>,
     first_gate_command_index: usize,
-    indirect_dispatches: Arc<VulkanResidentBuffer>,
-    enabled_indirect_dispatch_bytes: Vec<u8>,
-    indirect_dispatches_enabled: Cell<bool>,
+    continuation_predicate: Arc<VulkanResidentBuffer>,
+    continuation_enabled: Cell<bool>,
     missing_queue: VulkanGpuResidencyMissQueue,
     gates: Vec<VulkanDemandResidencyGateRuntime>,
     full_sequence: VulkanResidentKernelSequence,
@@ -317,54 +315,20 @@ impl VulkanDemandResidencyDispatchChain {
             .iter()
             .position(|command| matches!(command, VulkanDemandResidencyCommand::Gate(_)))
             .expect("demand segment has at least one gate");
-        let mut command_indirect_offsets = vec![None; commands.len()];
-        let mut next_indirect_offset = 0usize;
-        for (command_index, offset) in command_indirect_offsets
-            .iter_mut()
-            .enumerate()
-            .skip(first_gate_command_index + 1)
-        {
-            *offset = Some(next_indirect_offset);
-            next_indirect_offset = next_indirect_offset
-                .checked_add(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-                .ok_or_else(|| {
-                    demand_dispatch_error(format!(
-                        "demand command {command_index} indirect offset overflowed"
-                    ))
-                })?;
-        }
-        if next_indirect_offset == 0 {
+        if first_gate_command_index + 1 == commands.len() {
             return Err(demand_dispatch_error(
                 "demand gate has no selected computation after it",
             ));
         }
-        let indirect_dispatches =
-            Arc::new(device.create_resident_buffer(next_indirect_offset).map_err(
+        let continuation_predicate = Arc::new(
+            device
+                .create_conditional_resident_buffer(size_of::<u32>())
+                .map_err(
                 VulkanMountedPlacedResidentKernelDispatchError::Vulkan,
-            )?);
-        let mut enabled_indirect_dispatch_bytes = vec![0; next_indirect_offset];
-        for (command_index, command) in commands
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(first_gate_command_index + 1)
-        {
-            let byte_offset = command_indirect_offsets[command_index]
-                .expect("every demand command after a gate is indirect");
-            let dimensions = demand_command_dimensions(
-                command,
-                dispatches,
-                prefix_dispatches,
-                suffix_dispatches,
-            )?;
-            for (axis, dimension) in dimensions.into_iter().enumerate() {
-                let axis_offset = byte_offset + axis * size_of::<u32>();
-                enabled_indirect_dispatch_bytes[axis_offset..axis_offset + size_of::<u32>()]
-                    .copy_from_slice(&dimension.to_le_bytes());
-            }
-        }
-        indirect_dispatches
-            .write_bytes(&enabled_indirect_dispatch_bytes)
+            )?,
+        );
+        continuation_predicate
+            .write_bytes(&1u32.to_le_bytes())
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let missing_capacity = gate_specs
             .iter()
@@ -384,24 +348,6 @@ impl VulkanDemandResidencyDispatchChain {
                     *command == VulkanDemandResidencyCommand::Gate(gate_index)
                 })
                 .expect("expanded command chain contains every gate");
-            let downstream_dispatches = commands
-                .iter()
-                .enumerate()
-                .skip(command_index + 1)
-                .map(|(downstream_index, command)| {
-                    let byte_offset = command_indirect_offsets[downstream_index]
-                        .expect("every command after a gate is indirect");
-                    Ok(VulkanGpuResidencyIndirectDispatch {
-                        byte_offset,
-                        dimensions: demand_command_dimensions(
-                            *command,
-                            dispatches,
-                            prefix_dispatches,
-                            suffix_dispatches,
-                        )?,
-                    })
-                })
-                .collect::<Result<Vec<_>, VulkanMountedPlacedResidentKernelDispatchError>>()?;
             let checkpoint_tag = u32::try_from(gate_index + 1).map_err(|_| {
                 demand_dispatch_error("demand gate count exceeds u32")
             })?;
@@ -412,7 +358,7 @@ impl VulkanDemandResidencyDispatchChain {
                 Arc::clone(&address_table),
                 address_table_slot_count,
                 missing_queue.clone(),
-                Arc::clone(&indirect_dispatches),
+                Arc::clone(&continuation_predicate),
                 VulkanGpuResidencyGateConfig {
                     maximum_selection_count: spec.selection_count,
                     selection_count_per_lane: spec.selection_count,
@@ -422,7 +368,6 @@ impl VulkanDemandResidencyDispatchChain {
                     address_slots_by_resource_index: spec
                         .address_slots_by_resource_index
                         .clone(),
-                    downstream_dispatches,
                 },
             )
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
@@ -445,11 +390,9 @@ impl VulkanDemandResidencyDispatchChain {
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         Ok(Self {
             commands,
-            command_indirect_offsets,
             first_gate_command_index,
-            indirect_dispatches,
-            enabled_indirect_dispatch_bytes,
-            indirect_dispatches_enabled: Cell::new(true),
+            continuation_predicate,
+            continuation_enabled: Cell::new(true),
             missing_queue,
             gates,
             full_sequence,
@@ -470,11 +413,11 @@ impl VulkanDemandResidencyDispatchChain {
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
-        if !self.indirect_dispatches_enabled.get() {
-            self.indirect_dispatches
-                .write_bytes(&self.enabled_indirect_dispatch_bytes)
+        if !self.continuation_enabled.get() {
+            self.continuation_predicate
+                .write_bytes(&1u32.to_le_bytes())
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-            self.indirect_dispatches_enabled.set(true);
+            self.continuation_enabled.set(true);
         }
         self.run_from_gate(
             device,
@@ -493,10 +436,10 @@ impl VulkanDemandResidencyDispatchChain {
                 .notification_epoch()
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
             if notification_epoch == self.observed_notification_epoch.get() {
-                self.indirect_dispatches_enabled.set(true);
+                self.continuation_enabled.set(true);
                 return Ok(());
             }
-            self.indirect_dispatches_enabled.set(false);
+            self.continuation_enabled.set(false);
             let missing = self
                 .missing_queue
                 .snapshot()
@@ -647,6 +590,7 @@ impl VulkanDemandResidencyDispatchChain {
             .collect::<Result<Vec<_>, _>>()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let mut steps = Vec::with_capacity(self.commands.len() - start_command_index);
+        let mut conditional_region_id = 1u32;
         for (command_index, command) in self
             .commands
             .iter()
@@ -716,13 +660,33 @@ impl VulkanDemandResidencyDispatchChain {
                     push_constants,
                 ));
             } else {
+                let region_id =
+                    if matches!(command, VulkanDemandResidencyCommand::Gate(_)) {
+                        conditional_region_id =
+                            conditional_region_id.checked_add(1).ok_or_else(|| {
+                                demand_dispatch_error(
+                                    "demand conditional region count exceeds u32",
+                                )
+                            })?;
+                        let gate_region = conditional_region_id;
+                        conditional_region_id =
+                            conditional_region_id.checked_add(1).ok_or_else(|| {
+                                demand_dispatch_error(
+                                    "demand conditional region count exceeds u32",
+                                )
+                            })?;
+                        gate_region
+                    } else {
+                        conditional_region_id
+                    };
                 steps.push(
-                    VulkanResidentKernelSequenceStep::new_indirect(
+                    VulkanResidentKernelSequenceStep::new_conditional(
                         dispatch,
                         push_constants,
-                        &self.indirect_dispatches,
-                        self.command_indirect_offsets[command_index]
-                            .expect("every command after the direct gate is indirect"),
+                        &self.continuation_predicate,
+                        0,
+                        false,
+                        region_id,
                     )
                     .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?,
                 );
@@ -742,47 +706,6 @@ impl VulkanDemandResidencyDispatchChain {
             .wait_resident_kernel_sequence(sequence)
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
     }
-}
-
-fn demand_command_dimensions(
-    command: VulkanDemandResidencyCommand,
-    dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
-    prefix_dispatches: &[&VulkanResidentKernelDispatch],
-    suffix_dispatches: &[&VulkanResidentKernelDispatch],
-) -> Result<[u32; 3], VulkanMountedPlacedResidentKernelDispatchError> {
-    if matches!(command, VulkanDemandResidencyCommand::Gate(_)) {
-        return Ok([1, 1, 1]);
-    }
-    let dispatch = match command {
-        VulkanDemandResidencyCommand::Prefix(index) => {
-            *prefix_dispatches.get(index).ok_or_else(|| {
-                demand_dispatch_error(format!(
-                    "demand prefix dispatch {index} is absent"
-                ))
-            })?
-        }
-        VulkanDemandResidencyCommand::Dispatch(index) => &dispatches
-            .get(index)
-            .ok_or_else(|| {
-                demand_dispatch_error(format!(
-                    "demand model dispatch {index} is absent"
-                ))
-            })?
-            .resident_dispatch,
-        VulkanDemandResidencyCommand::Gate(_) => unreachable!("gate dimensions returned early"),
-        VulkanDemandResidencyCommand::Suffix(index) => {
-            *suffix_dispatches.get(index).ok_or_else(|| {
-                demand_dispatch_error(format!(
-                    "demand suffix dispatch {index} is absent"
-                ))
-            })?
-        }
-    };
-    Ok([
-        dispatch.workgroup_count_x(),
-        dispatch.workgroup_count_y(),
-        1,
-    ])
 }
 
 fn demand_dispatch_error(

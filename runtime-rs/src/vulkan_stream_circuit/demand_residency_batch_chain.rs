@@ -45,11 +45,9 @@ struct VulkanDemandResidencyBatchGateRuntime {
 
 struct VulkanDemandResidencyBatchChain {
     commands: Vec<VulkanDemandResidencyBatchCommand>,
-    command_indirect_offsets: Vec<Option<usize>>,
     first_gate_command_index: usize,
-    indirect_dispatches: Arc<VulkanResidentBuffer>,
-    enabled_indirect_dispatch_bytes: Vec<u8>,
-    indirect_dispatches_enabled: Cell<bool>,
+    continuation_predicate: Arc<VulkanResidentBuffer>,
+    continuation_enabled: Cell<bool>,
     missing_queue: VulkanGpuResidencyMissQueue,
     gates: Vec<VulkanDemandResidencyBatchGateRuntime>,
     full_sequence: VulkanResidentKernelSequence,
@@ -373,49 +371,18 @@ impl VulkanDemandResidencyBatchChain {
                     "demand-resident batch chain contains no residency gate",
                 )
             })?;
-        let mut command_indirect_offsets = vec![None; commands.len()];
-        let mut next_indirect_offset = 0usize;
-        for (command_index, offset) in command_indirect_offsets
-            .iter_mut()
-            .enumerate()
-            .skip(first_gate_command_index + 1)
-        {
-            *offset = Some(next_indirect_offset);
-            next_indirect_offset = next_indirect_offset
-                .checked_add(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
-                .ok_or_else(|| {
-                    demand_batch_error(format!(
-                        "demand batch command {command_index} indirect offset overflowed"
-                    ))
-                })?;
-        }
-        if next_indirect_offset == 0 {
+        if first_gate_command_index + 1 == commands.len() {
             return Err(demand_batch_error(
                 "demand batch gate has no selected computation after it",
             ));
         }
-        let indirect_dispatches =
-            Arc::new(device.create_resident_buffer(next_indirect_offset).map_err(
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-            )?);
-        let mut enabled_indirect_dispatch_bytes = vec![0; next_indirect_offset];
-        for (command_index, command) in commands
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(first_gate_command_index + 1)
-        {
-            let byte_offset = command_indirect_offsets[command_index]
-                .expect("every demand batch command after a gate is indirect");
-            let dimensions = demand_batch_command_dimensions(command, steps)?;
-            for (axis, dimension) in dimensions.into_iter().enumerate() {
-                let axis_offset = byte_offset + axis * size_of::<u32>();
-                enabled_indirect_dispatch_bytes[axis_offset..axis_offset + size_of::<u32>()]
-                    .copy_from_slice(&dimension.to_le_bytes());
-            }
-        }
-        indirect_dispatches
-            .write_bytes(&enabled_indirect_dispatch_bytes)
+        let continuation_predicate = Arc::new(
+            device
+                .create_conditional_resident_buffer(size_of::<u32>())
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+        );
+        continuation_predicate
+            .write_bytes(&1u32.to_le_bytes())
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let missing_capacity = gate_specs
             .iter()
@@ -446,19 +413,6 @@ impl VulkanDemandResidencyBatchChain {
                         == VulkanDemandResidencyBatchCommand::Gate(gate_index)
                 })
                 .expect("expanded demand batch chain contains every gate");
-            let downstream_dispatches = commands
-                .iter()
-                .enumerate()
-                .skip(command_index + 1)
-                .map(|(downstream_index, command)| {
-                    let byte_offset = command_indirect_offsets[downstream_index]
-                        .expect("every demand batch command after a gate is indirect");
-                    Ok(VulkanGpuResidencyIndirectDispatch {
-                        byte_offset,
-                        dimensions: demand_batch_command_dimensions(*command, steps)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, VulkanResidentInProcessPlacedRuntimeError>>()?;
             let checkpoint_tag = u32::try_from(gate_index + 1).map_err(|_| {
                 demand_batch_error("demand batch gate count exceeds u32")
             })?;
@@ -477,7 +431,7 @@ impl VulkanDemandResidencyBatchChain {
                 Arc::clone(&address_table),
                 address_table_slot_count,
                 missing_queue.clone(),
-                Arc::clone(&indirect_dispatches),
+                Arc::clone(&continuation_predicate),
                 VulkanGpuResidencyGateConfig {
                     maximum_selection_count: selection_count,
                     selection_count_per_lane: spec.selection_count_per_activation,
@@ -487,7 +441,6 @@ impl VulkanDemandResidencyBatchChain {
                     address_slots_by_resource_index: spec
                         .address_slots_by_resource_index
                         .clone(),
-                    downstream_dispatches,
                 },
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -510,11 +463,9 @@ impl VulkanDemandResidencyBatchChain {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         Ok(Self {
             commands,
-            command_indirect_offsets,
             first_gate_command_index,
-            indirect_dispatches,
-            enabled_indirect_dispatch_bytes,
-            indirect_dispatches_enabled: Cell::new(true),
+            continuation_predicate,
+            continuation_enabled: Cell::new(true),
             missing_queue,
             gates,
             full_sequence,
@@ -531,11 +482,11 @@ impl VulkanDemandResidencyBatchChain {
         dynamic_state_capacity_activations: u32,
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        if !self.indirect_dispatches_enabled.get() {
-            self.indirect_dispatches
-                .write_bytes(&self.enabled_indirect_dispatch_bytes)
+        if !self.continuation_enabled.get() {
+            self.continuation_predicate
+                .write_bytes(&1u32.to_le_bytes())
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            self.indirect_dispatches_enabled.set(true);
+            self.continuation_enabled.set(true);
         }
         self.run_from_gate(
             device,
@@ -551,10 +502,10 @@ impl VulkanDemandResidencyBatchChain {
                 .notification_epoch()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             if notification_epoch == self.observed_notification_epoch.get() {
-                self.indirect_dispatches_enabled.set(true);
+                self.continuation_enabled.set(true);
                 return Ok(());
             }
-            self.indirect_dispatches_enabled.set(false);
+            self.continuation_enabled.set(false);
             let missing = self
                 .missing_queue
                 .snapshot()
@@ -728,6 +679,7 @@ impl VulkanDemandResidencyBatchChain {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut sequence_steps =
             Vec::with_capacity(self.commands.len() - start_command_index);
+        let mut conditional_region_id = 1u32;
         for (command_index, command) in self
             .commands
             .iter()
@@ -780,13 +732,35 @@ impl VulkanDemandResidencyBatchChain {
                     push_constants,
                 ));
             } else {
+                let region_id = if matches!(
+                    command,
+                    VulkanDemandResidencyBatchCommand::Gate(_)
+                ) {
+                    conditional_region_id =
+                        conditional_region_id.checked_add(1).ok_or_else(|| {
+                            demand_batch_error(
+                                "demand batch conditional region count exceeds u32",
+                            )
+                        })?;
+                    let gate_region = conditional_region_id;
+                    conditional_region_id =
+                        conditional_region_id.checked_add(1).ok_or_else(|| {
+                            demand_batch_error(
+                                "demand batch conditional region count exceeds u32",
+                            )
+                        })?;
+                    gate_region
+                } else {
+                    conditional_region_id
+                };
                 sequence_steps.push(
-                    VulkanResidentKernelSequenceStep::new_indirect(
+                    VulkanResidentKernelSequenceStep::new_conditional(
                         dispatch,
                         push_constants,
-                        &self.indirect_dispatches,
-                        self.command_indirect_offsets[command_index]
-                            .expect("every demand batch command after the direct gate is indirect"),
+                        &self.continuation_predicate,
+                        0,
+                        false,
+                        region_id,
                     )
                     .map_err(
                         VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
@@ -829,30 +803,6 @@ fn demand_batch_step_push_constants(
             "invalid demand batch stream control: {error}"
         ))
     })
-}
-
-fn demand_batch_command_dimensions(
-    command: VulkanDemandResidencyBatchCommand,
-    steps: &[VulkanComponentBatchDispatchStep],
-) -> Result<[u32; 3], VulkanResidentInProcessPlacedRuntimeError> {
-    match command {
-        VulkanDemandResidencyBatchCommand::Gate(_) => Ok([1, 1, 1]),
-        VulkanDemandResidencyBatchCommand::Step(step_index) => {
-            let dispatch = &steps
-                .get(step_index)
-                .ok_or_else(|| {
-                    demand_batch_error(format!(
-                        "demand batch step {step_index} is absent"
-                    ))
-                })?
-                .dispatch;
-            Ok([
-                dispatch.workgroup_count_x(),
-                dispatch.workgroup_count_y(),
-                1,
-            ])
-        }
-    }
 }
 
 fn demand_batch_error(
