@@ -540,6 +540,119 @@ fn per_device_residency_directories_never_alias_physical_devices() {
 }
 
 #[test]
+fn stable_resource_upload_capacity_failure_rolls_back_every_allocation_and_publication(
+) {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) => {
+            eprintln!("skipping stable upload rollback test: {error}");
+            return;
+        }
+    };
+    let root =
+        crate::test_support::TempDir::new("stable_upload_rollback");
+    fs::write(root.path().join("weights.bin"), b"abcdefghABCDEFGH").unwrap();
+    let compatibility = CompiledResourceCompatibility {
+        device_api: "vulkan".to_string(),
+        storage_class: "storage_buffer".to_string(),
+        read_only: true,
+        required_features: vec!["buffer_device_address".to_string()],
+    };
+    let resources = [
+        (0usize, &b"abcdefgh"[..]),
+        (8, &b"ABCDEFGH"[..]),
+    ]
+        .into_iter()
+        .enumerate()
+        .map(|(resource_index, (byte_offset, bytes))| {
+            ResolvedCompiledResource {
+                id: format!(
+                    "sha256:{}",
+                    char::from(b'1' + resource_index as u8)
+                        .to_string()
+                        .repeat(64)
+                ),
+                ranges: vec![ResolvedCompiledResourceRange {
+                    artifact_path: "weights.bin".to_string(),
+                    byte_offset,
+                    byte_count: bytes.len(),
+                    alignment_bytes: 8,
+                    sha256: format!("{:x}", Sha256::digest(bytes)),
+                }],
+                compatibility: compatibility.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let group = ResolvedCompiledPartitionGroup {
+        schema: RESOLVED_PARTITION_GROUP_SCHEMA.to_string(),
+        partition_template_id: format!("sha256:{}", "3".repeat(64)),
+        partition_index: 0,
+        id: format!("sha256:{}", "4".repeat(64)),
+        resource_ids: resources
+            .iter()
+            .map(|resource| resource.id.clone())
+            .collect(),
+        dependencies: Vec::new(),
+        resources,
+    };
+    let resolved = ResolvedCompiledResourceGroup::Partition(group);
+    let descriptor =
+        DeviceResourceGroupDescriptor::from_resolved(&resolved).unwrap();
+    let backing_store = CompiledResourceBackingStore::new(
+        root.path(),
+        CompiledResourceBackingStoreLimits {
+            worker_count: 1,
+            queued_request_capacity: 1,
+            maximum_ranges_per_group: 2,
+            maximum_logical_bytes_per_group: 16,
+            maximum_retained_payload_bytes: 16,
+            maximum_coalesced_read_bytes: 16,
+            maximum_coalescing_gap_bytes: 0,
+        },
+    )
+    .unwrap();
+    let loaded = backing_store.try_load(resolved).unwrap().wait().unwrap();
+    let mut transfer =
+        device.create_resident_transfer_stream(1, 64).unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(8, 8, 8).unwrap(),
+    )
+    .unwrap();
+    let mut address_table =
+        VulkanStableResourceAddressTable::new(&device, &mut transfer, 2)
+            .unwrap();
+
+    let error = match
+        upload_loaded_compiled_resource_group_to_stable_address_space(
+            &device,
+            &mut transfer,
+            &arena,
+            &mut address_table,
+            &descriptor,
+            &loaded,
+            &[0, 1],
+            8,
+        )
+    {
+        Ok(_) => panic!("capacity-constrained stable upload succeeded"),
+        Err(error) => error,
+    };
+
+    assert!(error.0.contains("committed bytes remain"), "{error}");
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
+    );
+    assert!(
+        (0..address_table.slot_count())
+            .all(|slot| address_table.record(slot).unwrap().resident == 0)
+    );
+    drop(loaded);
+    assert_eq!(backing_store.retained_payload_bytes(), 0);
+}
+
+#[test]
 fn external_compiled_group_has_one_device_load_and_explicit_release() {
     let package_root = match std::env::var("NERVE_TEST_COMPILED_PACKAGE_ROOT") {
         Ok(path) => PathBuf::from(path),

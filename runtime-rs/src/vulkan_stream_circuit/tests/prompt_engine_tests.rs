@@ -85,6 +85,70 @@ fn placed_prompt_engine_owns_streams_and_submits_input_events() {
     assert!(snapshot.idle);
     assert_eq!(snapshot.streams[0].next_stream_tick, 2);
     assert_eq!(snapshot.streams[0].completed_prompt_event_count, 1);
+    engine
+        .enqueue_input_event(
+            "main",
+            VulkanResidentTokenInputEvent::new(
+                "cancelled_by_shutdown",
+                vec![2, 3],
+                1,
+            ),
+        )
+        .unwrap();
+    let shutdown = engine.shutdown();
+    assert!(shutdown.complete, "{:?}", shutdown.errors);
+    assert_eq!(shutdown.stream_count, 1);
+    assert_eq!(shutdown.package_count, 1);
+    assert_eq!(shutdown.scheduler_in_flight_activation_count, 0);
+    assert_eq!(shutdown.resource_teardowns.len(), 1);
+    assert!(shutdown.resource_teardowns[0].complete);
+
+    let baseline_file_descriptors =
+        compiled_store_process_file_descriptor_count();
+    let baseline_workers = compiled_store_worker_thread_count();
+    for cycle_index in 0..3 {
+        let runtime_model =
+            tiny_fixture_model_runtime_model_with_placement(
+                StreamCircuitPlacementSpec::new("gpu0"),
+            );
+        let stream =
+            VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+                BTreeMap::from([("gpu0".to_string(), Rc::clone(&device))]),
+                manifest_dir,
+                runtime_model,
+                Some(64),
+                0,
+                0,
+            )
+            .unwrap();
+        let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+        engine
+            .add_stream(format!("cycle-{cycle_index}"), stream)
+            .unwrap();
+        engine
+            .enqueue_input_event(
+                &format!("cycle-{cycle_index}"),
+                VulkanResidentTokenInputEvent::new(
+                    format!("pending-{cycle_index}"),
+                    vec![1, 2],
+                    2,
+                ),
+            )
+            .unwrap();
+        let shutdown = engine.shutdown();
+        assert!(shutdown.complete, "{:?}", shutdown.errors);
+        assert_eq!(shutdown.scheduler_in_flight_activation_count, 0);
+        assert_eq!(shutdown.stream_count, 1);
+        assert_eq!(shutdown.package_count, 1);
+        assert_eq!(
+            compiled_store_process_file_descriptor_count(),
+            baseline_file_descriptors
+        );
+        assert_eq!(
+            compiled_store_worker_thread_count(),
+            baseline_workers
+        );
+    }
 }
 
 #[test]

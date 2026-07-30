@@ -869,6 +869,13 @@
                     mtp: Vec::new(),
                     stores: Vec::new(),
                 },
+            shutdown:
+                crate::VulkanPlacedPromptEngineShutdownReport {
+                    stream_count: 1,
+                    package_count: 1,
+                    complete: true,
+                    ..Default::default()
+                },
         };
         let benchmark_transport = RuntimePromptBenchmarkTransportTotalsReport {
             published_packet_count: 0,
@@ -975,6 +982,7 @@
             placed_payload["resource_residency"]["policy"],
             "demand_retained"
         );
+        assert_eq!(placed_payload["shutdown"]["complete"], true);
         assert_eq!(benchmark_payload["profile_runs"], 1);
         assert_eq!(benchmark_payload["run_time_ns"]["average"], 90.0);
         assert_eq!(

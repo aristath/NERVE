@@ -1,3 +1,16 @@
+fn compiled_store_process_file_descriptor_count() -> usize {
+    fs::read_dir("/proc/self/fd").unwrap().count()
+}
+
+fn compiled_store_worker_thread_count() -> usize {
+    fs::read_dir("/proc/self/task")
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("comm"))
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter(|name| name.trim().starts_with("nerve-resource"))
+        .count()
+}
+
 #[test]
 fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let device =
@@ -215,6 +228,29 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .unwrap_err();
     assert!(unowned_error.to_string().contains("is unknown"));
 
+    let mut corrupt_weight_bytes = weight_bytes.to_vec();
+    corrupt_weight_bytes[8] ^= 0xff;
+    fs::write(
+        root.path().join("weights.bin"),
+        &corrupt_weight_bytes,
+    )
+    .unwrap();
+    let corrupt_error = store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            1,
+            owner.clone(),
+        )
+        .unwrap_err();
+    assert!(
+        corrupt_error
+            .to_string()
+            .contains("failed SHA-256"),
+        "unexpected corrupt-resource error: {corrupt_error}"
+    );
+    fs::write(root.path().join("weights.bin"), weight_bytes).unwrap();
+
     store
         .load_selector_resource(
             &device,
@@ -234,9 +270,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .unwrap();
 
     let stats = store.statistics().unwrap();
-    assert_eq!(stats.miss_count, 1);
+    assert_eq!(stats.miss_count, 2);
     assert_eq!(stats.hit_count, 1);
     assert_eq!(stats.resident_group_count, 1);
+    assert_eq!(stats.failed_group_count, 1);
     assert_eq!(stats.dynamic_resident_bytes, 8);
     assert_eq!(stats.high_water_resident_group_count, 1);
     assert_eq!(stats.high_water_dynamic_resident_bytes, 8);
@@ -248,12 +285,13 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(report.resident_unit_count, 1);
     assert_eq!(report.high_water_resident_unit_count, 1);
     assert_eq!(report.residency_directory_hit_count, 1);
-    assert_eq!(report.residency_load_required_count, 1);
+    assert_eq!(report.residency_load_required_count, 2);
     assert_eq!(report.gpu_selection_count, 0);
     assert_eq!(report.gpu_resident_hit_count, 0);
     assert_eq!(report.gpu_miss_count, 5);
     assert_eq!(report.successful_load_count, 1);
-    assert_eq!(report.failed_load_count, 0);
+    assert_eq!(report.failed_load_count, 1);
+    assert_eq!(report.failed_unit_count, 1);
     assert_eq!(report.physical_read_count, 1);
     assert_eq!(report.physical_bytes_read, 8);
     assert_eq!(report.uploaded_bytes, 8);
@@ -288,6 +326,35 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         0
     );
 
+    store.inject_teardown_failure_before_address_clear();
+    let injected = store.unload().unwrap_err();
+    assert!(
+        injected
+            .to_string()
+            .contains("injected compiled resource teardown failure")
+    );
+    let quiescing_error = store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            0,
+            DeviceResourceResidencyOwnerId::new("quiescing-owner").unwrap(),
+        )
+        .unwrap_err();
+    assert!(quiescing_error.to_string().contains("Quiescing"));
+    assert_eq!(
+        store.statistics().unwrap().dynamic_resident_bytes,
+        0
+    );
+    let retained_words = buffers
+        .address_table()
+        .read_bytes(layout.slot_count() * 32)
+        .unwrap()
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(retained_words[selected_slot * 8 + 6], 1);
+
     let release = store.unload().unwrap();
 
     assert_eq!(release.group_count, 1);
@@ -299,6 +366,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let unloaded = store.residency_report().unwrap();
     assert_eq!(unloaded.current_payload_bytes, 0);
     assert_eq!(unloaded.resident_unit_count, 0);
+    assert_eq!(unloaded.failed_unit_count, 0);
     assert_eq!(unloaded.high_water_payload_bytes, 8);
     assert_eq!(unloaded.high_water_resident_unit_count, 1);
     let retired_words = buffers
@@ -312,5 +380,120 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         assert_eq!(record[0] | record[1], 0);
         assert_eq!(record[2] | record[3], 0);
         assert_eq!(record[6], 0);
+    }
+    let repeated = store.unload().unwrap();
+    assert_eq!(repeated, DeviceResourceResidencyRelease::default());
+    let retired_error = store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            0,
+            DeviceResourceResidencyOwnerId::new("retired-owner").unwrap(),
+        )
+        .unwrap_err();
+    assert!(retired_error.to_string().contains("Unloaded"));
+    drop(buffers);
+    drop(store);
+
+    let baseline_file_descriptors =
+        compiled_store_process_file_descriptor_count();
+    let baseline_workers = compiled_store_worker_thread_count();
+    for cycle_index in 0..3 {
+        let cycle_store = VulkanCompiledResourceDeviceStore::new(
+            &device,
+            format!("amd-test-cycle-{cycle_index}"),
+            device.physical_device_id(),
+            vec!["gpu0".to_string()],
+            root.path(),
+            Arc::clone(&contract),
+            Arc::clone(&layout),
+            BTreeSet::from([
+                selector_id.clone(),
+                alias_selector_id.clone(),
+            ]),
+            4096,
+            8192,
+            1024,
+            1,
+            128,
+            64,
+            layout.address_table_byte_count().unwrap(),
+        )
+        .unwrap();
+        cycle_store.mark_mount_complete().unwrap();
+        if cycle_index == 0 {
+            cycle_store.inject_next_upload_as_device_lost();
+            let device_loss = cycle_store
+                .load_selector_resource(
+                    &device,
+                    &selector_id,
+                    0,
+                    DeviceResourceResidencyOwnerId::new(
+                        "device-loss-owner",
+                    )
+                    .unwrap(),
+                )
+                .unwrap_err();
+            assert!(device_loss.to_string().contains("ERROR_DEVICE_LOST"));
+            let terminal = cycle_store
+                .load_selector_resource(
+                    &device,
+                    &selector_id,
+                    1,
+                    DeviceResourceResidencyOwnerId::new(
+                        "post-device-loss-owner",
+                    )
+                    .unwrap(),
+                )
+                .unwrap_err();
+            assert!(terminal.to_string().contains("Failed"));
+            assert!(terminal.to_string().contains("ERROR_DEVICE_LOST"));
+            let cycle_release = cycle_store.unload().unwrap();
+            assert_eq!(
+                cycle_release,
+                DeviceResourceResidencyRelease::default()
+            );
+            drop(cycle_store);
+            assert_eq!(
+                compiled_store_worker_thread_count(),
+                baseline_workers
+            );
+            assert_eq!(
+                compiled_store_process_file_descriptor_count(),
+                baseline_file_descriptors
+            );
+            continue;
+        }
+        cycle_store
+            .load_selector_resource(
+                &device,
+                &selector_id,
+                0,
+                DeviceResourceResidencyOwnerId::new(format!(
+                    "cycle-{cycle_index}"
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            cycle_store
+                .residency_report()
+                .unwrap()
+                .current_payload_bytes,
+            8
+        );
+        assert_eq!(cycle_store.backing_store.retained_payload_bytes(), 0);
+        let cycle_release = cycle_store.unload().unwrap();
+        assert_eq!(cycle_release.group_count, 1);
+        assert_eq!(cycle_release.byte_count, 8);
+        drop(cycle_store);
+        assert_eq!(
+            compiled_store_worker_thread_count(),
+            baseline_workers
+        );
+        assert_eq!(
+            compiled_store_process_file_descriptor_count(),
+            baseline_file_descriptors
+        );
     }
 }

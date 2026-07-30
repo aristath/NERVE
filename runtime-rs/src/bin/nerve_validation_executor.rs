@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use nerve_runtime::{
     RuntimeChatSession, RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanResidentBufferPool, VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
+    VulkanPlacedPromptEngineShutdownReport, VulkanResidentBufferPool,
+    VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
     VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
@@ -306,11 +307,15 @@ fn shutdown_validation_resources(
     }
     let pre_release_quiesce_duration_ns = nonzero_elapsed_ns(pre_release_quiesce_started);
 
-    // The mounted engine contains transient buffers and references to pooled
-    // parameters.  It must disappear before the pool can prove exclusive
-    // ownership of every permanent allocation.
+    // The mounted engine owns transient buffers and compiled-resource
+    // residency. It must acknowledge serialized release before the pool can
+    // prove exclusive ownership of every permanent allocation.
     let role_release_started = Instant::now();
-    drop(reusable_role.take());
+    let engine_shutdown = shutdown_validation_role(
+        reusable_role
+            .take()
+            .expect("validated reusable role remains present"),
+    )?;
     let role_release_duration_ns = nonzero_elapsed_ns(role_release_started);
 
     let mut pool = devices
@@ -373,6 +378,7 @@ fn shutdown_validation_resources(
         "physical_device_ids": physical_device_ids,
         "pre_release_quiesce_duration_ns": pre_release_quiesce_duration_ns,
         "role_release_duration_ns": role_release_duration_ns,
+        "engine_shutdown": engine_shutdown,
         "device_releases": device_releases,
         "shutdown_duration_ns": nonzero_elapsed_ns(shutdown_started),
     }))
@@ -596,11 +602,25 @@ fn retire_reusable_role(
         return Ok(());
     };
     quiesce_validation_devices(devices)?;
-    drop(role);
+    shutdown_validation_role(role)?;
     if evict_before_replacement {
         evict_idle_validation_parameters(devices)?;
     }
     Ok(())
+}
+
+fn shutdown_validation_role(
+    role: MountedValidation,
+) -> Result<VulkanPlacedPromptEngineShutdownReport, Box<dyn Error>> {
+    let report = role.engine.shutdown();
+    if !report.complete {
+        return Err(invalid_input(format!(
+            "validation engine teardown failed: {:?}",
+            report.errors,
+        ))
+        .into());
+    }
+    Ok(report)
 }
 
 fn quiesce_validation_devices(devices: &ValidationDevicePool) -> Result<(), Box<dyn Error>> {

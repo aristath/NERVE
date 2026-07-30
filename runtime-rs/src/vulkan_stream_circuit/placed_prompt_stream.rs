@@ -313,18 +313,25 @@ impl VulkanResidentInProcessPlacedPromptStream {
     fn quiesce_and_discard_transaction_work(
         &mut self,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        if let Some(pending) = self.pending_scheduler_activation.as_ref() {
-            if !self.wait_resident_feedback_window_for(&pending.window, u64::MAX)? {
-                return Err(placed_scheduler_divergence(
-                    "submitted feedback work did not quiesce during transaction restoration",
-                ));
-            }
-        }
-        self.pending_scheduler_activation = None;
+        let pending_scheduler_activation =
+            self.pending_scheduler_activation.take();
+        let quiescence = pending_scheduler_activation
+            .as_ref()
+            .map(|pending| {
+                self.wait_resident_feedback_window_for(&pending.window, u64::MAX)
+                    .and_then(|completed| {
+                        completed.then_some(()).ok_or_else(|| {
+                            placed_scheduler_divergence(
+                                "submitted feedback work did not quiesce during transaction restoration",
+                            )
+                        })
+                    })
+            })
+            .unwrap_or(Ok(()));
         self.active_input_event = None;
         self.pending_input_events.clear();
         self.session.transport.reset_tick_state();
-        Ok(())
+        quiescence
     }
 
     pub fn enqueue_input_event(

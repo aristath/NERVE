@@ -17,6 +17,7 @@ pub struct VulkanResidentInProcessPlacedPromptEngine {
         BTreeMap<VulkanResidentInProcessPlacedPromptEngineBatchKey, VulkanResidentPlacedMultiStreamBatchRunner>,
     active_transaction_stream_ids: BTreeSet<String>,
     pending_wait_group_cursor: usize,
+    shutdown_attempted: bool,
 }
 
 impl Default for VulkanResidentInProcessPlacedPromptEngine {
@@ -27,9 +28,9 @@ impl Default for VulkanResidentInProcessPlacedPromptEngine {
 
 impl Drop for VulkanResidentInProcessPlacedPromptEngine {
     fn drop(&mut self) {
-        // Batch runners own descriptor sets that remain bound to buffers owned
-        // by the streams. Destroy those descriptors before stream teardown.
-        self.multi_stream_batch_runners.clear();
+        if !self.shutdown_attempted {
+            let _ = self.shutdown_in_place();
+        }
     }
 }
 
@@ -44,6 +45,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             multi_stream_batch_runners: BTreeMap::new(),
             active_transaction_stream_ids: BTreeSet::new(),
             pending_wait_group_cursor: 0,
+            shutdown_attempted: false,
         }
     }
 

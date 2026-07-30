@@ -590,4 +590,5 @@ pub struct RuntimePlacedPromptRunReport {
     pub selection_coverage: RuntimeSelectionCoverageReport,
     pub resource_residency:
         crate::VulkanCompiledResourceResidencyReport,
+    pub shutdown: crate::VulkanPlacedPromptEngineShutdownReport,
 }

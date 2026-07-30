@@ -22,6 +22,26 @@ struct VulkanCompiledResourceDeviceAddressState {
         BTreeMap<String, Vec<VulkanStableResourceAddressPublication>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanCompiledResourceStoreLifecycleState {
+    Active,
+    Failed,
+    Quiescing,
+    Unloaded,
+}
+
+struct VulkanCompiledResourceStoreLifecycle {
+    state: VulkanCompiledResourceStoreLifecycleState,
+    active_load_operation_count: usize,
+    teardown_in_progress: bool,
+    terminal_failure: Option<String>,
+    pending_release: DeviceResourceResidencyRelease,
+}
+
+struct VulkanCompiledResourceStoreLoadGuard<'a> {
+    store: &'a VulkanCompiledResourceDeviceStore,
+}
+
 pub struct VulkanCompiledResourceDeviceStore {
     device_id: String,
     physical_device_id: String,
@@ -44,6 +64,13 @@ pub struct VulkanCompiledResourceDeviceStore {
     transfer_staging_host_bytes: usize,
     coverage_index: Vec<VulkanCompiledResourceComponentCoverageIndex>,
     instrumentation: VulkanCompiledResourceStoreInstrumentation,
+    lifecycle: std::sync::Mutex<VulkanCompiledResourceStoreLifecycle>,
+    lifecycle_changed: std::sync::Condvar,
+    #[cfg(test)]
+    fail_next_teardown_before_address_clear:
+        std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_next_upload_as_device_lost: std::sync::atomic::AtomicBool,
 }
 
 impl VulkanCompiledResourceDeviceStore {
@@ -260,11 +287,37 @@ impl VulkanCompiledResourceDeviceStore {
             coverage_index,
             instrumentation:
                 VulkanCompiledResourceStoreInstrumentation::default(),
+            lifecycle: std::sync::Mutex::new(
+                VulkanCompiledResourceStoreLifecycle {
+                    state:
+                        VulkanCompiledResourceStoreLifecycleState::Active,
+                    active_load_operation_count: 0,
+                    teardown_in_progress: false,
+                    terminal_failure: None,
+                    pending_release:
+                        DeviceResourceResidencyRelease::default(),
+                },
+            ),
+            lifecycle_changed: std::sync::Condvar::new(),
+            #[cfg(test)]
+            fail_next_teardown_before_address_clear:
+                std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_upload_as_device_lost:
+                std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     pub fn device_id(&self) -> &str {
         &self.device_id
+    }
+
+    pub fn physical_device_id(&self) -> &str {
+        &self.physical_device_id
+    }
+
+    pub fn logical_device_ids(&self) -> &[String] {
+        &self.logical_device_ids
     }
 
     pub fn allowed_selector_ids(&self) -> &BTreeSet<String> {
@@ -295,6 +348,22 @@ impl VulkanCompiledResourceDeviceStore {
     }
 
     pub fn load_selector_resource(
+        &self,
+        device: &VulkanComputeDevice,
+        selector_id: &str,
+        resource_index: usize,
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let _load = self.begin_load_operation()?;
+        self.load_selector_resource_while_active(
+            device,
+            selector_id,
+            resource_index,
+            owner,
+        )
+    }
+
+    fn load_selector_resource_while_active(
         &self,
         device: &VulkanComputeDevice,
         selector_id: &str,
@@ -366,6 +435,33 @@ impl VulkanCompiledResourceDeviceStore {
                         );
                     }
                 };
+                #[cfg(test)]
+                if self
+                    .fail_next_upload_as_device_lost
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let error = VulkanError(
+                        "injected compiled resource upload failure: ERROR_DEVICE_LOST"
+                            .to_string(),
+                    );
+                    self.record_terminal_device_failure(&error)?;
+                    let _ = permit.fail(
+                        DeviceResourceResidencyError::load_failed(
+                            error.to_string(),
+                        ),
+                    );
+                    return Err(compiled_device_store_vulkan_error(error));
+                }
+                if let Err(error) =
+                    self.ensure_device_work_is_available()
+                {
+                    let _ = permit.fail(
+                        DeviceResourceResidencyError::load_failed(
+                            error.to_string(),
+                        ),
+                    );
+                    return Err(error);
+                }
                 let mut state = self.address_state.lock().map_err(|_| {
                     VulkanCompiledResourceDeviceStoreError::new(
                         "compiled resource address state was poisoned",
@@ -399,6 +495,10 @@ impl VulkanCompiledResourceDeviceStore {
                 ) {
                     Ok(upload) => upload,
                     Err(error) => {
+                        if compiled_resource_vulkan_error_is_device_loss(&error)
+                        {
+                            self.record_terminal_device_failure(&error)?;
+                        }
                         let residency_error = DeviceResourceResidencyError::new(
                             DeviceResourceResidencyErrorKind::Failed,
                             format!("compiled resource upload failed: {error}"),
@@ -479,6 +579,7 @@ impl VulkanCompiledResourceDeviceStore {
         component_ids: &BTreeSet<String>,
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let _load = self.begin_load_operation()?;
         let selected = self
             .contract
             .selectors
@@ -497,7 +598,7 @@ impl VulkanCompiledResourceDeviceStore {
             .collect::<Vec<_>>();
         let selected = self.unique_selector_resources(selected)?;
         for (selector_id, resource_index) in &selected {
-            self.load_selector_resource(
+            self.load_selector_resource_while_active(
                 device,
                 selector_id,
                 *resource_index,
@@ -512,6 +613,7 @@ impl VulkanCompiledResourceDeviceStore {
         device: &VulkanComputeDevice,
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let _load = self.begin_load_operation()?;
         let selected = self
             .contract
             .selectors
@@ -528,7 +630,7 @@ impl VulkanCompiledResourceDeviceStore {
             .collect::<Vec<_>>();
         let selected = self.unique_selector_resources(selected)?;
         for (selector_id, resource_index) in &selected {
-            self.load_selector_resource(
+            self.load_selector_resource_while_active(
                 device,
                 selector_id,
                 *resource_index,
@@ -825,22 +927,147 @@ impl VulkanCompiledResourceDeviceStore {
         })
     }
 
-    pub fn unload(
+    fn unload(
         &self,
     ) -> Result<DeviceResourceResidencyRelease, VulkanCompiledResourceDeviceStoreError>
     {
+        if !self.begin_teardown_attempt()? {
+            return Ok(DeviceResourceResidencyRelease::default());
+        }
+        let teardown = self.teardown_after_quiescence();
+        match teardown {
+            Ok(()) => self.finish_teardown_attempt(),
+            Err(error) => {
+                let cleanup = self.fail_teardown_attempt();
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup_error) => Err(
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "{error}; teardown lifecycle cleanup also failed: {cleanup_error}"
+                        )),
+                    ),
+                }
+            }
+        }
+    }
+
+    fn begin_teardown_attempt(
+        &self,
+    ) -> Result<bool, VulkanCompiledResourceDeviceStoreError> {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        loop {
+            match lifecycle.state {
+                VulkanCompiledResourceStoreLifecycleState::Unloaded => {
+                    return Ok(false);
+                }
+                VulkanCompiledResourceStoreLifecycleState::Active => {
+                    lifecycle.state =
+                        VulkanCompiledResourceStoreLifecycleState::Quiescing;
+                    lifecycle.teardown_in_progress = true;
+                    break;
+                }
+                VulkanCompiledResourceStoreLifecycleState::Failed => {
+                    lifecycle.state =
+                        VulkanCompiledResourceStoreLifecycleState::Quiescing;
+                    lifecycle.teardown_in_progress = true;
+                    break;
+                }
+                VulkanCompiledResourceStoreLifecycleState::Quiescing
+                    if !lifecycle.teardown_in_progress =>
+                {
+                    lifecycle.teardown_in_progress = true;
+                    break;
+                }
+                VulkanCompiledResourceStoreLifecycleState::Quiescing => {
+                    lifecycle = self
+                        .lifecycle_changed
+                        .wait(lifecycle)
+                        .map_err(|_| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "compiled resource store lifecycle was poisoned while waiting for teardown",
+                            )
+                        })?;
+                }
+            }
+        }
+        while lifecycle.active_load_operation_count != 0 {
+            lifecycle =
+                self.lifecycle_changed.wait(lifecycle).map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource store lifecycle was poisoned while quiescing",
+                    )
+                })?;
+        }
+        Ok(true)
+    }
+
+    fn teardown_after_quiescence(
+        &self,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         let release = self
             .manager
             .unload_device()
             .map_err(compiled_device_store_residency_error)?;
+        {
+            let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource store lifecycle was poisoned",
+                )
+            })?;
+            let pending_release = DeviceResourceResidencyRelease {
+                group_count: lifecycle
+                .pending_release
+                .group_count
+                .checked_add(release.group_count)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource teardown group count overflowed",
+                    )
+                })?,
+                byte_count: lifecycle
+                    .pending_release
+                    .byte_count
+                    .checked_add(release.byte_count)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "compiled resource teardown byte count overflowed",
+                        )
+                    })?,
+                cancelled_load_count: lifecycle
+                    .pending_release
+                    .cancelled_load_count
+                    .checked_add(release.cancelled_load_count)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "compiled resource teardown cancellation count overflowed",
+                        )
+                    })?,
+            };
+            lifecycle.pending_release = pending_release;
+        }
+        #[cfg(test)]
+        if self
+            .fail_next_teardown_before_address_clear
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "injected compiled resource teardown failure before address clear",
+            ));
+        }
         let mut state = self.address_state.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource address state was poisoned",
             )
         })?;
-        let publications = std::mem::take(&mut state.publications)
-            .into_values()
+        let publications = state
+            .publications
+            .values()
             .flatten()
+            .cloned()
             .collect::<Vec<_>>();
         if !publications.is_empty() {
             let VulkanCompiledResourceDeviceAddressState {
@@ -851,8 +1078,166 @@ impl VulkanCompiledResourceDeviceStore {
             address_table
                 .clear_group(transfer, &publications)
                 .map_err(compiled_device_store_vulkan_error)?;
+            state.publications.clear();
         }
+        drop(state);
+        let residency = self
+            .manager
+            .snapshot()
+            .map_err(compiled_device_store_residency_error)?;
+        let arena = self
+            .arena
+            .stats()
+            .map_err(compiled_device_store_vulkan_error)?;
+        if !residency.directory.is_empty()
+            || residency.statistics.dynamic_resident_bytes != 0
+            || residency.statistics.reserved_loading_bytes != 0
+            || residency.statistics.loading_group_count != 0
+            || residency.statistics.resident_group_count != 0
+            || residency.statistics.failed_group_count != 0
+            || arena.active_allocation_count != 0
+            || arena.allocated_byte_count != 0
+            || arena.committed_byte_capacity != 0
+            || arena.chunk_count != 0
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource store teardown did not quiesce cleanly: directory={}, dynamic_bytes={}, reserved_bytes={}, loading={}, resident={}, failed={}, arena_allocations={}, arena_bytes={}, arena_committed={}, arena_chunks={}",
+                residency.directory.len(),
+                residency.statistics.dynamic_resident_bytes,
+                residency.statistics.reserved_loading_bytes,
+                residency.statistics.loading_group_count,
+                residency.statistics.resident_group_count,
+                residency.statistics.failed_group_count,
+                arena.active_allocation_count,
+                arena.allocated_byte_count,
+                arena.committed_byte_capacity,
+                arena.chunk_count,
+            )));
+        }
+        Ok(())
+    }
+
+    fn finish_teardown_attempt(
+        &self,
+    ) -> Result<DeviceResourceResidencyRelease, VulkanCompiledResourceDeviceStoreError>
+    {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        lifecycle.state =
+            VulkanCompiledResourceStoreLifecycleState::Unloaded;
+        lifecycle.teardown_in_progress = false;
+        let release = std::mem::take(&mut lifecycle.pending_release);
+        self.lifecycle_changed.notify_all();
         Ok(release)
+    }
+
+    fn fail_teardown_attempt(
+        &self,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        lifecycle.teardown_in_progress = false;
+        self.lifecycle_changed.notify_all();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn inject_teardown_failure_before_address_clear(&self) {
+        self.fail_next_teardown_before_address_clear
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn inject_next_upload_as_device_lost(&self) {
+        self.fail_next_upload_as_device_lost
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn ensure_device_work_is_available(
+        &self,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        if lifecycle.state
+            == VulkanCompiledResourceStoreLifecycleState::Failed
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                lifecycle
+                    .terminal_failure
+                    .clone()
+                    .unwrap_or_else(|| {
+                        "compiled resource device is unavailable".to_string()
+                    }),
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_terminal_device_failure(
+        &self,
+        error: &VulkanError,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        if lifecycle.state
+            == VulkanCompiledResourceStoreLifecycleState::Active
+        {
+            lifecycle.state =
+                VulkanCompiledResourceStoreLifecycleState::Failed;
+            lifecycle.terminal_failure = Some(format!(
+                "compiled resource physical device {:?} is unavailable after a terminal Vulkan failure: {error}",
+                self.physical_device_id,
+            ));
+            self.lifecycle_changed.notify_all();
+        }
+        Ok(())
+    }
+
+    fn begin_load_operation(
+        &self,
+    ) -> Result<
+        VulkanCompiledResourceStoreLoadGuard<'_>,
+        VulkanCompiledResourceDeviceStoreError,
+    > {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        if lifecycle.state
+            != VulkanCompiledResourceStoreLifecycleState::Active
+        {
+            let terminal_failure = lifecycle
+                .terminal_failure
+                .as_deref()
+                .map(|failure| format!(": {failure}"))
+                .unwrap_or_default();
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource store {:?} is {:?} and cannot accept new loads{terminal_failure}",
+                self.device_id, lifecycle.state,
+            )));
+        }
+        lifecycle.active_load_operation_count = lifecycle
+            .active_load_operation_count
+            .checked_add(1)
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource active-load count overflowed",
+                )
+            })?;
+        Ok(VulkanCompiledResourceStoreLoadGuard { store: self })
     }
 
     fn resolve_selector_resource(
@@ -906,6 +1291,29 @@ impl VulkanCompiledResourceDeviceStore {
     }
 }
 
+impl Drop for VulkanCompiledResourceStoreLoadGuard<'_> {
+    fn drop(&mut self) {
+        let Ok(mut lifecycle) = self.store.lifecycle.lock() else {
+            return;
+        };
+        if lifecycle.active_load_operation_count == 0 {
+            debug_assert!(
+                false,
+                "compiled resource load guard released without an active load"
+            );
+        } else {
+            lifecycle.active_load_operation_count -= 1;
+        }
+        self.store.lifecycle_changed.notify_all();
+    }
+}
+
+impl Drop for VulkanCompiledResourceDeviceStore {
+    fn drop(&mut self) {
+        let _ = self.unload();
+    }
+}
+
 fn compiled_resource_upload_alignment(
     contract: &CompiledResourceResidencyContract,
     device: &VulkanComputeDevice,
@@ -940,6 +1348,12 @@ fn compiled_resource_upload_alignment(
         )));
     }
     Ok(alignment)
+}
+
+fn compiled_resource_vulkan_error_is_device_loss(
+    error: &VulkanError,
+) -> bool {
+    error.0.contains("ERROR_DEVICE_LOST")
 }
 
 fn compiled_resource_maximum_ranges_per_group(
@@ -1059,7 +1473,7 @@ fn compiled_resource_component_coverage_index(
         let group_ids = match &selector.mapping {
             CompiledResourceSelectorMapping::GroupTable {
                 atomic_group_ids,
-            } => atomic_group_ids.iter().cloned().collect::<Vec<_>>(),
+            } => atomic_group_ids.to_vec(),
             CompiledResourceSelectorMapping::PartitionTemplate {
                 partition_template_id,
             } => {

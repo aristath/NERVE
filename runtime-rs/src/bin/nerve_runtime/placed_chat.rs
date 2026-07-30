@@ -72,7 +72,7 @@ fn run_placed_chat(
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
 
-    run_chat_repl(
+    let chat_result = run_chat_repl(
         initial_prompt,
         chat_session,
         codec,
@@ -375,7 +375,26 @@ fn run_placed_chat(
                 resource_residency,
             })
         },
-    )
+    );
+    let shutdown = engine.shutdown();
+    print_runtime_shutdown(&shutdown);
+    match (chat_result, shutdown.complete) {
+        (Ok(()), true) => Ok(()),
+        (Err(error), true) => Err(Box::new(io::Error::other(format!(
+            "placed chat failed: {error}; teardown acknowledged on {}/{} physical devices with {} scheduler activations remaining",
+            shutdown.acknowledged_device_count,
+            shutdown.physical_device_count,
+            shutdown.scheduler_in_flight_activation_count,
+        )))),
+        (Ok(()), false) => Err(Box::new(io::Error::other(format!(
+            "placed chat teardown failed: {:?}",
+            shutdown.errors,
+        )))),
+        (Err(error), false) => Err(Box::new(io::Error::other(format!(
+            "placed chat failed: {error}; teardown also failed: {:?}",
+            shutdown.errors,
+        )))),
+    }
 }
 
 fn run_placed_prompt(
@@ -420,6 +439,8 @@ fn execute_placed_prompt_run(
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;
     let setup_time_ns = elapsed_nanos_u64(setup_start);
+    let run_result =
+        (|| -> Result<RuntimePlacedPromptRunReport, Box<dyn Error>> {
     let run_start = Instant::now();
     let selection_before = engine
         .stream("main")
@@ -587,7 +608,30 @@ fn execute_placed_prompt_run(
         ),
         selection_coverage,
         resource_residency,
+        shutdown: Default::default(),
     })
+        })();
+    let shutdown = engine.shutdown();
+    match (run_result, shutdown.complete) {
+        (Ok(mut report), true) => {
+            report.shutdown = shutdown;
+            Ok(report)
+        }
+        (Err(error), true) => Err(Box::new(io::Error::other(format!(
+            "placed prompt failed: {error}; teardown acknowledged on {}/{} physical devices with {} scheduler activations remaining",
+            shutdown.acknowledged_device_count,
+            shutdown.physical_device_count,
+            shutdown.scheduler_in_flight_activation_count,
+        )))),
+        (Ok(_), false) => Err(Box::new(io::Error::other(format!(
+            "placed prompt teardown failed: {:?}",
+            shutdown.errors,
+        )))),
+        (Err(error), false) => Err(Box::new(io::Error::other(format!(
+            "placed prompt failed: {error}; teardown also failed: {:?}",
+            shutdown.errors,
+        )))),
+    }
 }
 
 fn runtime_placed_transport_edge_reports(
@@ -664,6 +708,7 @@ fn print_placed_prompt_report(
         print_runtime_resource_residency(
             &report.resource_residency,
         );
+        print_runtime_shutdown(&report.shutdown);
         print_runtime_transport_edges(&report.transport.edges);
         print_speculative_profile(report);
         print_placed_component_timing_profile(&report.component_timing_summaries, 5);

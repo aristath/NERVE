@@ -379,6 +379,47 @@ fn print_runtime_resource_residency(
     }
 }
 
+fn print_runtime_shutdown(
+    report: &VulkanPlacedPromptEngineShutdownReport,
+) {
+    println!("shutdown:");
+    println!(
+        "  complete={} streams={} packages={} scheduler_in_flight={}",
+        report.complete,
+        report.stream_count,
+        report.package_count,
+        report.scheduler_in_flight_activation_count,
+    );
+    println!(
+        "  physical_devices_acknowledged={}/{} released_units={} released_payload_bytes={} cancelled_loads={}",
+        report.acknowledged_device_count,
+        report.physical_device_count,
+        report.released_unit_count,
+        report.released_payload_bytes,
+        report.cancelled_load_count,
+    );
+    for teardown in &report.resource_teardowns {
+        println!(
+            "  package={} scope={} physical_devices_acknowledged={}/{}",
+            teardown.package_id,
+            teardown.execution_scope,
+            teardown.acknowledged_device_count,
+            teardown.physical_device_count,
+        );
+        for device in &teardown.devices {
+            println!(
+                "  store={} physical_device={} acknowledged={} remaining_units={} remaining_payload_bytes={} error={:?}",
+                device.store_id,
+                device.physical_device_id,
+                device.acknowledged,
+                device.remaining_unit_count,
+                device.remaining_payload_bytes,
+                device.error,
+            );
+        }
+    }
+}
+
 fn token_id_digest(token_ids: &[u32]) -> String {
     use sha2::{Digest, Sha256};
 

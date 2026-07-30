@@ -889,6 +889,19 @@ mod resource_backing_store_tests {
         )
     }
 
+    fn process_file_descriptor_count() -> usize {
+        fs::read_dir("/proc/self/fd").unwrap().count()
+    }
+
+    fn process_named_thread_count(prefix: &str) -> usize {
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("comm"))
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .filter(|name| name.trim().starts_with(prefix))
+            .count()
+    }
+
     #[test]
     fn isolated_and_adjacent_ranges_are_verified_and_coalesced() {
         let (root, group) = group_with_ranges(vec![
@@ -1115,6 +1128,7 @@ mod resource_backing_store_tests {
         let mut missing_group = good_group.clone();
         missing_group.resources[0].ranges[0].artifact_path =
             "weights/missing.bin".to_string();
+        let short_group = good_group.clone();
         let store = CompiledResourceBackingStore::new(
             root.path(),
             CompiledResourceBackingStoreLimits {
@@ -1146,9 +1160,63 @@ mod resource_backing_store_tests {
                 .kind(),
             CompiledResourceBackingStoreErrorKind::Io
         );
+        fs::write(root.path().join("weights/a.bin"), b"abcd").unwrap();
+        assert_eq!(
+            store
+                .try_load(short_group)
+                .unwrap()
+                .wait()
+                .unwrap_err()
+                .kind(),
+            CompiledResourceBackingStoreErrorKind::Io
+        );
+        fs::write(root.path().join("weights/a.bin"), b"abcdefgh").unwrap();
         let loaded = store.try_load(good_group).unwrap().wait().unwrap();
         assert_eq!(&*loaded.resources[0].ranges[0].bytes, b"abcdefgh");
-        assert_eq!(store.statistics().failed_requests, 2);
+        assert_eq!(store.statistics().failed_requests, 3);
+    }
+
+    #[test]
+    fn repeated_backing_store_lifecycles_release_host_memory_workers_and_files() {
+        const CYCLE_COUNT: usize = 4;
+        const WORKER_COUNT: usize = 2;
+        let baseline_file_descriptors = process_file_descriptor_count();
+        let baseline_workers = process_named_thread_count("nerve-resource");
+
+        for _ in 0..CYCLE_COUNT {
+            let (root, group) =
+                group_with_ranges(vec![("weights/a.bin", 0, b"abcdefgh")]);
+            let store = CompiledResourceBackingStore::new(
+                root.path(),
+                CompiledResourceBackingStoreLimits {
+                    worker_count: WORKER_COUNT,
+                    queued_request_capacity: 2,
+                    maximum_ranges_per_group: 8,
+                    maximum_logical_bytes_per_group: 1024,
+                    maximum_retained_payload_bytes: 1024,
+                    maximum_coalesced_read_bytes: 1024,
+                    maximum_coalescing_gap_bytes: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                process_named_thread_count("nerve-resource"),
+                baseline_workers + WORKER_COUNT
+            );
+            let loaded = store.try_load(group).unwrap().wait().unwrap();
+            assert_eq!(store.retained_payload_bytes(), 8);
+            drop(loaded);
+            assert_eq!(store.retained_payload_bytes(), 0);
+            drop(store);
+            assert_eq!(
+                process_named_thread_count("nerve-resource"),
+                baseline_workers
+            );
+            assert_eq!(
+                process_file_descriptor_count(),
+                baseline_file_descriptors
+            );
+        }
     }
 
     #[test]
