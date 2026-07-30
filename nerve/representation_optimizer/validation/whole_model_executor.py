@@ -393,11 +393,6 @@ class ResidentWholeModelValidationBackend:
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:
-        if request.behavioral_contract["mode"] != "exact":
-            raise ModelCompileError(
-                "approximate whole-model validation requires a declared "
-                "metric comparator"
-            )
         comparison = request.check["comparison"]
         if comparison == {
             "output_mode": "fixture_semantics",
@@ -418,6 +413,11 @@ class ResidentWholeModelValidationBackend:
                     candidate_result,
                     "conversation.json",
                 ),
+            )
+        if request.behavioral_contract["mode"] != "exact":
+            raise ModelCompileError(
+                "approximate whole-model validation requires fixture-semantic "
+                "comparison"
             )
         if comparison != {
             "output_mode": "exact_digest",

@@ -34,6 +34,7 @@ from nerve.representation_optimizer.staging.contracts import (
 )
 from nerve.representation_optimizer.validation.component_executor import (
     ResidentComponentValidationBackend,
+    _compare_approximate_output_values,
 )
 from nerve.representation_optimizer.validation.contracts import (
     ValidationResidencyEvent,
@@ -474,6 +475,28 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
     assert comparison["metrics"][0]["error"] == 0.0
     assert mount["device_state_before_digest"] == _device_digest(b"idle")
     assert unmount["device_state_after_digest"] == _device_digest(b"idle")
+
+
+def test_approximate_output_comparator_measures_numeric_and_rank_error() -> None:
+    comparison = _compare_approximate_output_values(
+        {
+            "check": {
+                "metrics": [
+                    "normalized_rms_logit_error",
+                    "top_1_mismatch_rate",
+                    "top_32_mismatch_rate",
+                ]
+            }
+        },
+        (4.0, 3.0, 2.0, 1.0),
+        (3.5, 3.75, 2.0, 1.0),
+    )
+    metrics = {
+        metric["name"]: metric for metric in comparison["metrics"]
+    }
+    assert metrics["normalized_rms_logit_error"]["error"] > 0
+    assert metrics["top_1_mismatch_rate"]["error"] == 1.0
+    assert metrics["top_32_mismatch_rate"]["error"] == 0.0
 
 
 def _adapter_fixture(

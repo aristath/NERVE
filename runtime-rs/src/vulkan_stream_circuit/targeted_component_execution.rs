@@ -35,6 +35,8 @@ pub struct VulkanTargetedComponentExecutionReport {
     pub useful_units: usize,
     pub execution_ns: u64,
     pub output_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_values_f32_le_hex: Option<String>,
     pub state_digest: String,
     pub throughput_windows: Vec<VulkanTargetedComponentThroughputWindow>,
     pub resident_parameter_bytes: usize,
@@ -55,6 +57,21 @@ pub struct VulkanResidentTargetedComponentSession {
     mounted: VulkanMountedPlacedStreamCircuit,
     source_dispatch: VulkanMountedPlacedBoundDispatch,
     execution: VulkanTargetedComponentExecution,
+}
+
+pub enum VulkanResidentTargetedExecutionSession {
+    Component(VulkanResidentTargetedComponentSession),
+    OutputTransducer(VulkanResidentTargetedOutputTransducerSession),
+}
+
+pub struct VulkanResidentTargetedOutputTransducerSession {
+    component_id: String,
+    node_id: String,
+    resident_parameter_bytes: usize,
+    mounted: VulkanMountedPlacedStreamCircuit,
+    runner: VulkanResidentOutputTransducerRunner,
+    sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    capture_output_values: bool,
 }
 
 enum VulkanTargetedComponentExecution {
@@ -90,6 +107,333 @@ struct VulkanTargetedComponentRunCounters {
     queue_submission_count: usize,
     synchronization_wait_ns: u64,
     queue_wait_ns: u64,
+}
+
+impl VulkanResidentTargetedExecutionSession {
+    pub fn from_device_slice(
+        device: &VulkanComputeDevice,
+        slice: VulkanResidentModelPackageDeviceSlice,
+        component_id: impl AsRef<str>,
+        node_id: impl AsRef<str>,
+        phase: VulkanTargetedComponentExecutionPhase,
+        capture_output_values: bool,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        let component_id = component_id.as_ref();
+        if slice
+            .targeted_output
+            .as_ref()
+            .is_some_and(|output| output.spec.transducer_id == component_id)
+        {
+            return VulkanResidentTargetedOutputTransducerSession::from_device_slice(
+                device,
+                slice,
+                component_id,
+                node_id,
+                phase,
+                capture_output_values,
+            )
+            .map(Self::OutputTransducer);
+        }
+        VulkanResidentTargetedComponentSession::from_device_slice(
+            device,
+            slice,
+            component_id,
+            node_id,
+            phase,
+        )
+        .map(Self::Component)
+    }
+
+    pub fn execute(
+        &self,
+        device: &VulkanComputeDevice,
+        useful_units: usize,
+        seed: u32,
+        maximum_quantum_wait: Duration,
+    ) -> Result<VulkanTargetedComponentExecutionReport, VulkanResidentTokenModelPackageError> {
+        match self {
+            Self::Component(session) => {
+                session.execute(device, useful_units, seed, maximum_quantum_wait)
+            }
+            Self::OutputTransducer(session) => {
+                session.execute(device, useful_units, seed, maximum_quantum_wait)
+            }
+        }
+    }
+
+    pub fn resident_parameter_bytes(&self) -> usize {
+        match self {
+            Self::Component(session) => session.resident_parameter_bytes(),
+            Self::OutputTransducer(session) => session.resident_parameter_bytes(),
+        }
+    }
+
+    pub fn resident_transient_bytes(&self) -> usize {
+        match self {
+            Self::Component(session) => session.resident_transient_bytes(),
+            Self::OutputTransducer(session) => session.resident_transient_bytes(),
+        }
+    }
+}
+
+impl VulkanResidentTargetedOutputTransducerSession {
+    fn from_device_slice(
+        device: &VulkanComputeDevice,
+        slice: VulkanResidentModelPackageDeviceSlice,
+        component_id: &str,
+        node_id: impl AsRef<str>,
+        phase: VulkanTargetedComponentExecutionPhase,
+        capture_output_values: bool,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        if phase != VulkanTargetedComponentExecutionPhase::Decode {
+            return targeted_component_error(
+                "targeted output-transducer execution currently supports decode only",
+            );
+        }
+        let output = slice.targeted_output.as_ref().ok_or_else(|| {
+            targeted_component_error_value(
+                "resident device slice has no targeted output-transducer resources",
+            )
+        })?;
+        let node_id = node_id.as_ref();
+        if !output.spec.node_ids.iter().any(|candidate| candidate == node_id) {
+            return targeted_component_error(format!(
+                "targeted output transducer {component_id:?} has no node {node_id:?}"
+            ));
+        }
+        let resident_parameter_bytes = output.parameter_buffers.total_byte_capacity;
+        let mounted = slice.create_mounted_stream_circuit(device)?;
+        let runner = VulkanResidentOutputTransducerRunner::from_mounted_output_transducer(
+            device,
+            &mounted,
+            &output.parameter_buffers,
+            &output.embedding_norm_spirv_words,
+            &output.projection_spirv_words,
+            &output.spec,
+        )
+        .map_err(|error| {
+            targeted_component_error_value(format!(
+                "failed to mount targeted output transducer: {error}"
+            ))
+        })?;
+        Ok(Self {
+            component_id: component_id.to_string(),
+            node_id: node_id.to_string(),
+            resident_parameter_bytes,
+            mounted,
+            runner,
+            sequence_catalog: RefCell::new(BTreeMap::new()),
+            capture_output_values,
+        })
+    }
+
+    fn execute(
+        &self,
+        device: &VulkanComputeDevice,
+        useful_units: usize,
+        seed: u32,
+        maximum_quantum_wait: Duration,
+    ) -> Result<VulkanTargetedComponentExecutionReport, VulkanResidentTokenModelPackageError> {
+        if useful_units == 0 {
+            return targeted_component_error(
+                "targeted output-transducer useful work must be at least one unit",
+            );
+        }
+        if maximum_quantum_wait.is_zero() {
+            return targeted_component_error(
+                "targeted output-transducer quantum wait must be positive",
+            );
+        }
+        self.write_fixture(seed)?;
+        let counters =
+            self.execute_quanta(device, useful_units, maximum_quantum_wait)?;
+        let output_values = self
+            .runner
+            .read_logits_bytes(self.runner.logits_byte_capacity)
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to read targeted output logits: {error}"
+                ))
+            })?;
+        let output_digest = targeted_finalized_artifact_digest(
+            Sha256::digest(&output_values).as_slice(),
+        );
+        Ok(VulkanTargetedComponentExecutionReport {
+            component_id: self.component_id.clone(),
+            node_id: self.node_id.clone(),
+            op: "output_transducer".to_string(),
+            phase: "decode".to_string(),
+            activation_batch_width: 1,
+            useful_units,
+            execution_ns: counters.execution_ns,
+            output_digest,
+            output_values_f32_le_hex: self
+                .capture_output_values
+                .then(|| hex_bytes(&output_values)),
+            state_digest: targeted_finalized_artifact_digest(
+                Sha256::digest([]).as_slice(),
+            ),
+            throughput_windows: counters.windows,
+            resident_parameter_bytes: self.resident_parameter_bytes,
+            resident_transient_bytes: self.resident_transient_bytes(),
+            physical_dispatch_count: counters.physical_dispatch_count,
+            queue_submission_count: counters.queue_submission_count,
+            synchronization_wait_count: counters.queue_submission_count,
+            synchronization_wait_ns: counters.synchronization_wait_ns,
+            queue_wait_ns: counters.queue_wait_ns,
+        })
+    }
+
+    fn write_fixture(
+        &self,
+        seed: u32,
+    ) -> Result<(), VulkanResidentTokenModelPackageError> {
+        let input = self
+            .mounted
+            .boundary_io
+            .output_buffer(&self.runner.input_signal_id)
+            .ok_or_else(|| {
+                targeted_component_error_value(
+                    "targeted output transducer has no mounted input frame",
+                )
+            })?;
+        input
+            .buffer
+            .write_bytes(&targeted_fixture_bytes(
+                input.byte_capacity,
+                seed,
+                0,
+            ))
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to write targeted output-transducer input: {error}"
+                ))
+            })
+    }
+
+    fn execute_quanta(
+        &self,
+        device: &VulkanComputeDevice,
+        useful_units: usize,
+        maximum_quantum_wait: Duration,
+    ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
+        let quanta = targeted_execution_quanta(useful_units, 1)?;
+        let mut counters = VulkanTargetedComponentRunCounters {
+            execution_ns: 0,
+            windows: Vec::with_capacity(quanta.len()),
+            physical_dispatch_count: 0,
+            queue_submission_count: 0,
+            synchronization_wait_ns: 0,
+            queue_wait_ns: 0,
+        };
+        let mut start_unit = 0usize;
+        for (index, repetitions) in quanta.into_iter().enumerate() {
+            self.ensure_sequence(device, repetitions)?;
+            let catalog = self.sequence_catalog.borrow();
+            let sequence = catalog
+                .get(&repetitions)
+                .expect("targeted output sequence was inserted");
+            let wait_started = Instant::now();
+            let duration_ns = device
+                .run_timestamped_recorded_resident_kernel_sequence_for(
+                    sequence,
+                    maximum_quantum_wait,
+                )
+                .map_err(|error| {
+                    targeted_component_error_value(format!(
+                        "targeted output-transducer quantum failed: {error}"
+                    ))
+                })?;
+            let wait_ns = elapsed_nanoseconds(wait_started);
+            counters.execution_ns =
+                counters.execution_ns.saturating_add(duration_ns);
+            counters.synchronization_wait_ns = counters
+                .synchronization_wait_ns
+                .saturating_add(wait_ns);
+            counters.queue_wait_ns = counters
+                .queue_wait_ns
+                .saturating_add(wait_ns.saturating_sub(duration_ns));
+            let end_unit = start_unit + repetitions;
+            counters
+                .windows
+                .push(VulkanTargetedComponentThroughputWindow {
+                    index,
+                    start_unit,
+                    end_unit,
+                    duration_ns,
+                });
+            start_unit = end_unit;
+        }
+        counters.execution_ns = counters.execution_ns.max(1);
+        counters.physical_dispatch_count = useful_units
+            .checked_mul(self.runner.dispatch_count)
+            .ok_or_else(|| {
+                targeted_component_error_value(
+                    "targeted output-transducer dispatch count overflowed",
+                )
+            })?;
+        counters.queue_submission_count = counters.windows.len();
+        Ok(counters)
+    }
+
+    fn ensure_sequence(
+        &self,
+        device: &VulkanComputeDevice,
+        repetitions: usize,
+    ) -> Result<(), VulkanResidentTokenModelPackageError> {
+        if self.sequence_catalog.borrow().contains_key(&repetitions) {
+            return Ok(());
+        }
+        let sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to create targeted output-transducer sequence: {error}"
+                ))
+            })?;
+        let mut steps =
+            Vec::with_capacity(repetitions * self.runner.dispatch_count);
+        for _ in 0..repetitions {
+            steps.push(VulkanResidentKernelSequenceStep::new(
+                &self.runner.embedding_norm_dispatch,
+                &[],
+            ));
+            steps.push(VulkanResidentKernelSequenceStep::new(
+                &self.runner.tied_projection_dispatch,
+                &[],
+            ));
+        }
+        device
+            .record_resident_kernel_sequence(&sequence, &steps)
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to record targeted output-transducer sequence: {error}"
+                ))
+            })?;
+        self.sequence_catalog
+            .borrow_mut()
+            .insert(repetitions, sequence);
+        Ok(())
+    }
+
+    fn resident_parameter_bytes(&self) -> usize {
+        self.resident_parameter_bytes
+    }
+
+    fn resident_transient_bytes(&self) -> usize {
+        self.mounted
+            .buffers
+            .total_byte_capacity
+            .saturating_add(self.mounted.boundary_io.total_byte_capacity)
+            .saturating_add(self.mounted.edge_io.total_byte_capacity)
+            .saturating_add(
+                self.mounted.stream_control_buffer.byte_capacity(),
+            )
+            .saturating_add(
+                self.runner.normalized_frame_buffer.byte_capacity(),
+            )
+            .saturating_add(self.runner.logits_buffer.byte_capacity())
+    }
 }
 
 impl VulkanResidentTargetedComponentSession {
@@ -244,6 +588,7 @@ impl VulkanResidentTargetedComponentSession {
             useful_units,
             execution_ns: counters.execution_ns,
             output_digest,
+            output_values_f32_le_hex: None,
             state_digest,
             throughput_windows: counters.windows,
             resident_parameter_bytes: self.resident_parameter_bytes,
@@ -1032,6 +1377,13 @@ fn targeted_finalized_artifact_digest(payload: &[u8]) -> String {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
+}
+
+fn hex_bytes(payload: &[u8]) -> String {
+    payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn elapsed_nanoseconds(started: Instant) -> u64 {

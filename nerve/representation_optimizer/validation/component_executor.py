@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import math
+import struct
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from uuid import uuid4
@@ -17,6 +20,9 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
     ExecutorTransport,
 )
 from nerve.representation_optimizer.contracts import canonical_json_bytes
+from nerve.representation_optimizer.staging.contracts import (
+    staged_artifact_digest,
+)
 from nerve.representation_optimizer.validation.contracts import (
     VALIDATION_RESIDENCY_EVENT_SCHEMA,
     VALIDATION_ROLE_RESULT_SCHEMA,
@@ -142,6 +148,10 @@ class ResidentComponentValidationBackend:
             ),
             maximum_quantum_wait_ns=maximum_wait_ns,
             request_identity=request.to_json(),
+            capture_output_values=_optional_boolean(
+                check["controls"],
+                "capture_output_values",
+            ),
             cancel_requested=request.cancel_requested,
         )
         if self._stage_active:
@@ -169,19 +179,20 @@ class ResidentComponentValidationBackend:
         reference_result: Json,
         candidate_result: Json,
     ) -> Json:
-        if request.behavioral_contract["mode"] != "exact":
-            raise ModelCompileError(
-                "approximate component validation requires a declared "
-                "metric comparator"
+        if request.behavioral_contract["mode"] == "exact":
+            return compare_exact_role_results(
+                request.to_json(),
+                reference_result,
+                candidate_result,
+                divergence_diagnostic=(
+                    "candidate component output or transient state "
+                    "diverged from the exact implementation"
+                ),
             )
-        return compare_exact_role_results(
+        return _compare_approximate_output_values(
             request.to_json(),
-            reference_result,
-            candidate_result,
-            divergence_diagnostic=(
-                "candidate component output or transient state "
-                "diverged from the exact implementation"
-            ),
+            _output_values(self.trace_store, reference_result),
+            _output_values(self.trace_store, candidate_result),
         )
 
 class ResidentComponentValidationSession:
@@ -256,6 +267,15 @@ class ResidentComponentValidationSession:
             "output": {
                 "output_digest": report["output_digest"],
                 "op": report["op"],
+                **(
+                    {
+                        "output_values_f32_le_hex": report[
+                            "output_values_f32_le_hex"
+                        ]
+                    }
+                    if report.get("output_values_f32_le_hex") is not None
+                    else {}
+                ),
             },
             "state": {"state_digest": report["state_digest"]},
             "schedule": {
@@ -412,6 +432,127 @@ class ResidentComponentValidationSession:
         return ValidationResidencyEvent.from_json(document).to_json()
 
 
+def _output_values(
+    trace_store: ExecutorArtifactStore,
+    result: Json,
+) -> tuple[float, ...]:
+    refs = [
+        trace
+        for trace in result["traces"]
+        if str(trace["path"]).endswith("/output.json")
+    ]
+    if len(refs) != 1:
+        raise ModelCompileError(
+            "approximate component validation requires one output trace"
+        )
+    reference = refs[0]
+    payload = b"".join(trace_store.iter_file(reference["path"]))
+    if staged_artifact_digest(payload) != reference["digest"]:
+        raise ModelCompileError(
+            "approximate component output trace digest disagrees"
+        )
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ModelCompileError(
+            "approximate component output trace is not valid JSON"
+        ) from error
+    encoded = document.get("output_values_f32_le_hex")
+    if (
+        not isinstance(encoded, str)
+        or not encoded
+        or len(encoded) % 8 != 0
+    ):
+        raise ModelCompileError(
+            "approximate component output trace has no F32 values"
+        )
+    try:
+        raw = bytes.fromhex(encoded)
+    except ValueError as error:
+        raise ModelCompileError(
+            "approximate component output trace has invalid hex"
+        ) from error
+    values = tuple(value[0] for value in struct.iter_unpack("<f", raw))
+    if not values or any(not math.isfinite(value) for value in values):
+        raise ModelCompileError(
+            "approximate component output trace contains non-finite values"
+        )
+    return values
+
+
+def _compare_approximate_output_values(
+    request: Json,
+    reference: tuple[float, ...],
+    candidate: tuple[float, ...],
+) -> Json:
+    if len(reference) != len(candidate):
+        raise ModelCompileError(
+            "approximate component implementations emitted different output widths"
+        )
+    squared_reference = sum(value * value for value in reference)
+    squared_error = sum(
+        (candidate_value - reference_value) ** 2
+        for reference_value, candidate_value in zip(
+            reference,
+            candidate,
+            strict=True,
+        )
+    )
+    normalized_rms_error = math.sqrt(
+        squared_error / max(squared_reference, 1e-24)
+    )
+    top_count = min(32, len(reference))
+    reference_top = {
+        index
+        for _, index in sorted(
+            ((value, index) for index, value in enumerate(reference)),
+            reverse=True,
+        )[:top_count]
+    }
+    candidate_top = {
+        index
+        for _, index in sorted(
+            ((value, index) for index, value in enumerate(candidate)),
+            reverse=True,
+        )[:top_count]
+    }
+    measured = {
+        "normalized_rms_logit_error": (
+            normalized_rms_error,
+            "relative_rms",
+        ),
+        "top_32_mismatch_rate": (
+            1.0 - len(reference_top & candidate_top) / top_count,
+            "fraction",
+        ),
+        "top_1_mismatch_rate": (
+            float(
+                max(range(len(reference)), key=reference.__getitem__)
+                != max(range(len(candidate)), key=candidate.__getitem__)
+            ),
+            "fraction",
+        ),
+    }
+    metrics = []
+    for name in request["check"]["metrics"]:
+        try:
+            error, unit = measured[name]
+        except KeyError as failure:
+            raise ModelCompileError(
+                f"approximate component comparator cannot measure {name!r}"
+            ) from failure
+        metrics.append(
+            {
+                "name": name,
+                "reference_value": 0.0,
+                "candidate_value": error,
+                "error": error,
+                "unit": unit,
+            }
+        )
+    return {"metrics": metrics, "diagnostics": []}
+
+
 def _component_device(
     matched_conditions: Json,
     component_id: str,
@@ -454,4 +595,13 @@ def _positive_integer(value: object, label: str) -> int:
         or value <= 0
     ):
         raise ModelCompileError(f"{label} must be a positive integer")
+    return value
+
+
+def _optional_boolean(document: Json, field: str) -> bool:
+    value = document.get(field, False)
+    if not isinstance(value, bool):
+        raise ModelCompileError(
+            f"component validation control {field!r} must be boolean"
+        )
     return value

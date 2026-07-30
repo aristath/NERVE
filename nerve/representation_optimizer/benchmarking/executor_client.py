@@ -46,6 +46,7 @@ class ResidentExecutorMountSpec:
     dynamic_state_capacity_activations: int
     maximum_quantum_wait_ns: int
     request_identity: Json
+    capture_output_values: bool = False
     cancel_requested: Callable[[], bool] | None = None
 
 
@@ -143,6 +144,7 @@ class ResidentExecutorClient:
                 spec.dynamic_state_capacity_activations
             ),
             "maximum_quantum_wait_ns": spec.maximum_quantum_wait_ns,
+            "capture_output_values": spec.capture_output_values,
         }
         started = time.monotonic_ns()
         try:

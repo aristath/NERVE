@@ -10,6 +10,14 @@ struct VulkanResidentModelPackageDeviceSlicePlan {
     physical_residency_schedule: VulkanPhysicalResidencySchedule,
     loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,
     batch_kernels: Vec<VulkanResidentComponentBatchKernelArtifact>,
+    targeted_output: Option<VulkanResidentTargetedOutputTransducerPlan>,
+}
+
+struct VulkanResidentTargetedOutputTransducerPlan {
+    parameter_plan: VulkanPermanentParameterBufferPlan,
+    embedding_norm_spirv_words: Vec<u32>,
+    projection_spirv_words: Vec<u32>,
+    spec: VulkanResidentOutputTransducerSpec,
 }
 
 impl VulkanResidentModelPackageDeviceSlicePlan {
@@ -74,7 +82,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &runtime_model.component_executions,
         )?;
 
-        let (_resource_plan, _placement_plan, placed_plan) =
+        let (resource_plan, _placement_plan, placed_plan) =
             plan_resident_package_placed_stream_circuit_with_tensor_index(
                 device_id,
                 &runtime_model.placement,
@@ -131,6 +139,52 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &runtime_model.component_executions,
             &prepared_plan,
         )?;
+        let output_component_id = runtime_model
+            .package
+            .output_transducer
+            .spec
+            .transducer_id
+            .as_str();
+        let targeted_output = (
+            runtime_model
+                .placement
+                .device_for_component(output_component_id)
+                == device_id
+        )
+        .then(|| {
+            Ok(VulkanResidentTargetedOutputTransducerPlan {
+                parameter_plan:
+                    VulkanPermanentParameterBufferPlan::from_transducer_parameters_for(
+                        device_id,
+                        &resource_plan,
+                        Some(tensor_index),
+                        output_component_id,
+                    )
+                    .map_err(|error| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to plan targeted output-transducer parameters: {error}"
+                        ))
+                    })?,
+                embedding_norm_spirv_words:
+                    load_required_resident_model_package_shader(
+                        manifest_dir,
+                        &runtime_model
+                            .package
+                            .output_transducer
+                            .embedding_norm_shader_path,
+                    )?,
+                projection_spirv_words:
+                    load_required_resident_model_package_shader(
+                        manifest_dir,
+                        &runtime_model
+                            .package
+                            .output_transducer
+                            .projection_shader_path,
+                    )?,
+                spec: runtime_model.package.output_transducer.spec.clone(),
+            })
+        })
+        .transpose()?;
 
         Ok(Self {
             package_id: runtime_model.package.package_id.clone(),
@@ -144,6 +198,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             physical_residency_schedule,
             loaded_manifest,
             batch_kernels,
+            targeted_output,
         })
     }
 
@@ -217,6 +272,47 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                 buffers
             }
         });
+        let targeted_output = self
+            .targeted_output
+            .map(|output| {
+                let parameter_buffers = Arc::new(match parameter_pool {
+                    Some(pool) => output
+                        .parameter_plan
+                        .allocate_and_load_from_pool(tensor_index, pool)
+                        .map_err(|error| {
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to acquire pooled targeted output-transducer parameters: {error}"
+                            ))
+                        })?,
+                    None => {
+                        let buffers = output
+                            .parameter_plan
+                            .allocate_buffers(device)
+                            .map_err(|error| {
+                                VulkanResidentTokenModelPackageError::new(format!(
+                                    "failed to allocate targeted output-transducer parameters: {error}"
+                                ))
+                            })?;
+                        buffers
+                            .load_from_tensor_index(tensor_index)
+                            .map_err(|error| {
+                                VulkanResidentTokenModelPackageError::new(format!(
+                                    "failed to load targeted output-transducer parameters: {error}"
+                                ))
+                            })?;
+                        buffers
+                    }
+                });
+                Ok(VulkanResidentTargetedOutputTransducerResources {
+                    parameter_buffers,
+                    embedding_norm_spirv_words:
+                        output.embedding_norm_spirv_words,
+                    projection_spirv_words:
+                        output.projection_spirv_words,
+                    spec: output.spec,
+                })
+            })
+            .transpose()?;
 
         Ok(VulkanResidentModelPackageDeviceSlice {
             package_id: self.package_id,
@@ -235,6 +331,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             batch_kernels: self.batch_kernels,
             parameter_buffers,
             dynamic_resource_buffers: None,
+            targeted_output,
         })
     }
 }

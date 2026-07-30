@@ -38,4 +38,13 @@ pub struct VulkanResidentModelPackageDeviceSlice {
     batch_kernels: Vec<VulkanResidentComponentBatchKernelArtifact>,
     parameter_buffers: Arc<VulkanPermanentParameterBuffers>,
     dynamic_resource_buffers: Option<Arc<VulkanDynamicResourceBuffers>>,
+    targeted_output:
+        Option<VulkanResidentTargetedOutputTransducerResources>,
+}
+
+struct VulkanResidentTargetedOutputTransducerResources {
+    parameter_buffers: Arc<VulkanPermanentParameterBuffers>,
+    embedding_norm_spirv_words: Vec<u32>,
+    projection_spirv_words: Vec<u32>,
+    spec: VulkanResidentOutputTransducerSpec,
 }

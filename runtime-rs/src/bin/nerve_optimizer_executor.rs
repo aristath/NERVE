@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use nerve_runtime::{
     RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
     VulkanResidentBufferPool, VulkanResidentModelPackageDeviceSlice,
-    VulkanResidentModelPackageManifest, VulkanResidentTargetedComponentSession,
+    VulkanResidentModelPackageManifest, VulkanResidentTargetedExecutionSession,
     VulkanTargetedComponentExecutionPhase,
 };
 use serde::Deserialize;
@@ -36,6 +36,7 @@ enum ExecutorCommand {
         physical_device_id: String,
         dynamic_state_capacity_activations: usize,
         maximum_quantum_wait_ns: u64,
+        capture_output_values: bool,
     },
     Execute {
         schema: String,
@@ -65,6 +66,7 @@ struct MountCommand {
     physical_device_id: String,
     dynamic_state_capacity_activations: usize,
     maximum_quantum_wait: Duration,
+    capture_output_values: bool,
 }
 
 #[derive(Default)]
@@ -181,12 +183,13 @@ fn execute_session(
             Some(mount.dynamic_state_capacity_activations),
             &host.parameter_pool,
         )?;
-    let session = VulkanResidentTargetedComponentSession::from_device_slice(
+    let session = VulkanResidentTargetedExecutionSession::from_device_slice(
         &device,
         slice,
         &mount.component_id,
         &mount.physical_node_id,
         mount.phase,
+        mount.capture_output_values,
     )?;
     let mounted_digest = mounted_state_digest(
         &package_id,
@@ -437,6 +440,7 @@ impl MountCommand {
             physical_device_id,
             dynamic_state_capacity_activations,
             maximum_quantum_wait_ns,
+            capture_output_values,
         } = command
         else {
             return Err(invalid_input("an executor session must begin with mount").into());
@@ -500,6 +504,7 @@ impl MountCommand {
             physical_device_id,
             dynamic_state_capacity_activations,
             maximum_quantum_wait: Duration::from_nanos(maximum_quantum_wait_ns),
+            capture_output_values,
         })
     }
 }
@@ -610,6 +615,7 @@ mod tests {
             physical_device_id: format!("vulkan-uuid:{}", "0".repeat(32)),
             dynamic_state_capacity_activations: 64,
             maximum_quantum_wait_ns: 1_000_000_000,
+            capture_output_values: false,
         }
     }
 
