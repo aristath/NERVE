@@ -74,22 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 12. Prove the Qwen routed-expert implementation without Qwen special cases
-
-- Compile each main routed expert as one generic atomic group containing every
-  tensor and scale required by its gate/up/down execution.
-- Request exactly the groups selected by top-k routing.
-- Keep routers, shared experts, recurrent/attention machinery, norms, state, and
-  execution control in the always-resident spine.
-- Load MTP resources only when MTP execution is enabled; route MTP experts
-  through the same generic mechanism.
-- Confirm that no runtime type, module, command-line option, or package schema
-  mentions Qwen to implement the behavior.
-
-Completion requires exact eager-versus-demand agreement for routes, generated
-tokens, and persistent state across real multi-turn conversations with thinking
-enabled.
-
 ### 13. Integrate runtime placement and multi-device ownership
 
 - Make residency ownership explicit per physical device selected by the runtime
@@ -154,6 +138,14 @@ leaks.
   and final teardown.
 - Confirm that unselected experts never become resident, a repeated expert
   incurs no second transfer, and residency growth matches recorded selections.
+- Coalesce all misses reported by one checkpoint into bounded backing-store
+  reads, device uploads, stable-address publications, queue submissions, and
+  waits. A cold turn must not perform one transfer lifecycle per tensor member
+  or selected expert.
+- Keep the fully warm decode path on the GPU under demand-retained policy.
+  Resident feedback windows must continue across hits and interrupt at the
+  exact physical checkpoint only when a real miss requires host loading; a warm
+  scalar token must not drain a queue or wait on the host.
 - Test a workload whose package maximum exceeds available VRAM but whose
   observed working set fits, then test deterministic failure when a working set
   truly exceeds capacity.
