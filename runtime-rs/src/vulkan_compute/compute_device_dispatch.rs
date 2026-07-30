@@ -261,18 +261,34 @@ impl VulkanComputeDevice {
     pub fn create_resident_kernel_sequence(
         &self,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
-        self.create_resident_kernel_sequence_internal(false)
+        self.create_resident_kernel_sequence_internal(false, None)
     }
 
     pub fn create_timestamped_resident_kernel_sequence(
         &self,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
-        self.create_resident_kernel_sequence_internal(true)
+        self.create_resident_kernel_sequence_internal(true, None)
+    }
+
+    pub(crate) fn create_profiled_resident_kernel_sequence(
+        &self,
+        step_count: usize,
+    ) -> Result<VulkanResidentKernelSequence, VulkanError> {
+        let query_count = u32::try_from(step_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "resident kernel profile step count {step_count} overflows Vulkan query count"
+                ))
+            })?;
+        self.create_resident_kernel_sequence_internal(true, Some(query_count))
     }
 
     fn create_resident_kernel_sequence_internal(
         &self,
         timestamped: bool,
+        profiling_query_count: Option<u32>,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
         unsafe {
             let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -328,6 +344,29 @@ impl VulkanComputeDevice {
             } else {
                 None
             };
+            let profiling_timestamp_query_pool =
+                if let Some(query_count) = profiling_query_count {
+                    match self.device.create_query_pool(
+                        &vk::QueryPoolCreateInfo::default()
+                            .query_type(vk::QueryType::TIMESTAMP)
+                            .query_count(query_count),
+                        None,
+                    ) {
+                        Ok(query_pool) => Some((query_pool, query_count)),
+                        Err(error) => {
+                            if let Some(query_pool) = timestamp_query_pool {
+                                self.device.destroy_query_pool(query_pool, None);
+                            }
+                            self.device.destroy_fence(completion_fence, None);
+                            self.device.destroy_command_pool(command_pool, None);
+                            return Err(VulkanError(format!(
+                                "failed to create resident kernel profile timestamp pool: {error:?}"
+                            )));
+                        }
+                    }
+                } else {
+                    None
+                };
 
             Ok(VulkanResidentKernelSequence {
                 device: self.device.clone(),
@@ -336,6 +375,7 @@ impl VulkanComputeDevice {
                 completion_fence,
                 timestamp_period_ns: self.timestamp_period_ns,
                 timestamp_query_pool,
+                profiling_timestamp_query_pool,
                 recorded_input_copies: RefCell::new(None),
                 recorded_steps: RefCell::new(None),
                 recorded_snapshot_copies: RefCell::new(None),

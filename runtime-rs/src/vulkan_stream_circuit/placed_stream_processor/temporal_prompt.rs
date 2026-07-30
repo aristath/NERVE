@@ -432,6 +432,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             && pipeline_starts_at_input
             && pipeline_ends_at_output
             && runner.execution_graph.supports_deferred_completion()
+            && std::env::var_os("NERVE_VK_PERF_LOGGER").is_none()
         {
             VulkanComponentBatchCompletionMode::Deferred
         } else {

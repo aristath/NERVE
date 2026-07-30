@@ -375,6 +375,9 @@ impl Drop for VulkanResidentKernelDispatch {
 impl Drop for VulkanResidentKernelSequence {
     fn drop(&mut self) {
         unsafe {
+            if let Some((query_pool, _)) = self.profiling_timestamp_query_pool {
+                self.device.destroy_query_pool(query_pool, None);
+            }
             if let Some(query_pool) = self.timestamp_query_pool {
                 self.device.destroy_query_pool(query_pool, None);
             }

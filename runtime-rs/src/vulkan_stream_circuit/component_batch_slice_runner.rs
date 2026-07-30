@@ -785,10 +785,29 @@ impl VulkanResidentComponentBatchSliceRunner {
             {
                 continue;
             }
-            let sequence =
-                device
-                    .create_resident_kernel_sequence()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            let sequence = if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
+                let (step_start, step_end) = self
+                    .execution_units
+                    .iter()
+                    .filter_map(|unit| match unit {
+                        VulkanComponentBatchExecutionUnit::LocalComponent {
+                            step_start,
+                            step_end,
+                            ..
+                        } => Some((*step_start, *step_end)),
+                        VulkanComponentBatchExecutionUnit::DistributedDispatch { .. } => None,
+                    })
+                    .nth(sequence_index)
+                    .expect("component batch sequence maps to a local execution unit");
+                let step_count = self.steps[step_start..step_end]
+                    .iter()
+                    .filter(|step| step.lane_index.is_none_or(|lane| lane < shape_key))
+                    .count();
+                device.create_profiled_resident_kernel_sequence(step_count)
+            } else {
+                device.create_resident_kernel_sequence()
+            }
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             self.sequence_catalog
                 .borrow_mut()
                 .insert((sequence_index, shape_key), sequence);
@@ -1153,8 +1172,80 @@ impl VulkanResidentComponentBatchSliceRunner {
         .into_iter()
         .for_each(|measurement| measurements.push(measurement));
         debug_assert_eq!(sequence_index, sequence_shape_keys.len());
+        if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some()
+            && self.demand_residency.is_empty()
+            && !self.execution_units.iter().any(|unit| {
+                matches!(
+                    unit,
+                    VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
+                )
+            })
+        {
+            let mut sequence_index = 0usize;
+            for unit in &self.execution_units {
+                let VulkanComponentBatchExecutionUnit::LocalComponent {
+                    component_id,
+                    step_start,
+                    step_end,
+                } = unit
+                else {
+                    continue;
+                };
+                let shape_key = sequence_shape_keys[sequence_index];
+                let sequence = sequence_catalog
+                    .get(&(sequence_index, shape_key))
+                    .expect("component batch sequence shape was inserted");
+                let duration_ns = device
+                    .read_recorded_resident_kernel_sequence_duration_ns(sequence)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                eprintln!(
+                    "nerve Vulkan component batch: component={} duration_ms={:.3} width={}",
+                    component_id,
+                    duration_ns as f64 / 1_000_000.0,
+                    batch_width,
+                );
+                let active_steps = self.steps[*step_start..*step_end]
+                    .iter()
+                    .filter(|step| {
+                        step.lane_index
+                            .is_none_or(|lane| lane < batch_width)
+                    })
+                    .collect::<Vec<_>>();
+                let step_durations = device
+                    .read_recorded_resident_kernel_step_durations_ns(sequence)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                if step_durations.len() != active_steps.len() {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "component {component_id} produced {} step timings for {} active steps",
+                            step_durations.len(),
+                            active_steps.len()
+                        )),
+                    ));
+                }
+                for (step, duration_ns) in active_steps.iter().zip(step_durations) {
+                    eprintln!(
+                        "nerve Vulkan component step: component={} family={} duration_us={:.3} label={:?}",
+                        component_id,
+                        step.dispatch.execution_family(),
+                        duration_ns as f64 / 1_000.0,
+                        step.dispatch.semantic_label(),
+                    );
+                }
+                sequence_index += 1;
+            }
+        }
         let mut calibrator = self.quantum_calibrator.borrow_mut();
         for measurement in measurements {
+            if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
+                eprintln!(
+                    "nerve Vulkan execution quantum: duration_ms={:.3} regions={} components={} families={}",
+                    measurement.duration_ns as f64 / 1_000_000.0,
+                    measurement.region_count,
+                    measurement.component_ids.join(","),
+                    measurement.kernel_families.join(","),
+                );
+            }
             calibrator.observe_quantum(
                 shape_class_id,
                 measurement.cost,

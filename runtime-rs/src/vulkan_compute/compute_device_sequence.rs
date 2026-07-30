@@ -65,7 +65,7 @@ impl VulkanComputeDevice {
         }
     }
 
-    fn read_recorded_resident_kernel_sequence_duration_ns(
+    pub(crate) fn read_recorded_resident_kernel_sequence_duration_ns(
         &self,
         sequence: &VulkanResidentKernelSequence,
     ) -> Result<u64, VulkanError> {
@@ -97,6 +97,49 @@ impl VulkanComputeDevice {
             )));
         }
         Ok((elapsed_ns.round() as u64).max(1))
+    }
+
+    pub(crate) fn read_recorded_resident_kernel_step_durations_ns(
+        &self,
+        sequence: &VulkanResidentKernelSequence,
+    ) -> Result<Vec<u64>, VulkanError> {
+        let (query_pool, query_count) =
+            sequence.profiling_timestamp_query_pool.ok_or_else(|| {
+                VulkanError(
+                    "resident kernel sequence was not created with step profiling".to_string(),
+                )
+            })?;
+        let mut timestamps = vec![0_u64; query_count as usize];
+        unsafe {
+            self.device
+                .get_query_pool_results(
+                    query_pool,
+                    0,
+                    &mut timestamps,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to read resident kernel profile timestamps: {error:?}"
+                    ))
+                })?;
+        }
+        timestamps
+            .windows(2)
+            .map(|pair| {
+                let elapsed_ns = pair[1].wrapping_sub(pair[0]) as f64
+                    * f64::from(sequence.timestamp_period_ns);
+                if !elapsed_ns.is_finite()
+                    || elapsed_ns <= 0.0
+                    || elapsed_ns > u64::MAX as f64
+                {
+                    return Err(VulkanError(format!(
+                        "resident kernel step produced invalid device duration {elapsed_ns}"
+                    )));
+                }
+                Ok((elapsed_ns.round() as u64).max(1))
+            })
+            .collect()
     }
 
     pub fn submit_recorded_resident_kernel_sequence(
@@ -676,6 +719,36 @@ impl VulkanComputeDevice {
                     0,
                 );
             }
+            if !command_buffer_matches
+                && let Some((query_pool, query_count)) =
+                    sequence.profiling_timestamp_query_pool
+            {
+                let expected_query_count = u32::try_from(steps.len())
+                    .ok()
+                    .and_then(|count| count.checked_add(1))
+                    .ok_or_else(|| {
+                        VulkanError(
+                            "resident kernel profile timestamp count overflowed".to_string(),
+                        )
+                    })?;
+                if query_count != expected_query_count {
+                    return Err(VulkanError(format!(
+                        "resident kernel profile allocated {query_count} timestamps but recording requires {expected_query_count}"
+                    )));
+                }
+                self.device.cmd_reset_query_pool(
+                    sequence.command_buffer,
+                    query_pool,
+                    0,
+                    query_count,
+                );
+                self.device.cmd_write_timestamp(
+                    sequence.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    0,
+                );
+            }
 
             if !command_buffer_matches {
                 let has_conditions =
@@ -998,6 +1071,21 @@ impl VulkanComputeDevice {
                             u32::try_from(step_index + 1).map_err(|_| {
                                 VulkanError(
                                     "resident kernel timestamp index overflowed".to_string(),
+                                )
+                            })?,
+                        );
+                    }
+                    if let Some((query_pool, _)) =
+                        sequence.profiling_timestamp_query_pool
+                    {
+                        self.device.cmd_write_timestamp(
+                            sequence.command_buffer,
+                            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                            query_pool,
+                            u32::try_from(step_index + 1).map_err(|_| {
+                                VulkanError(
+                                    "resident kernel profile timestamp index overflowed"
+                                        .to_string(),
                                 )
                             })?,
                         );
