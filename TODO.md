@@ -74,21 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 15. Harden failure, teardown, and recovery behavior
-
-- Make partial reads, verification failures, upload failures, capacity failures,
-  device loss, and cancellation roll back without publishing partial groups.
-- Quiesce dependent work before releasing residency.
-- Release model residency one physical device at a time, destroy contexts only
-  after their allocations are gone, and explicitly acknowledge completion.
-- Verify used AMD devices return to the exact pre-workload idle baseline.
-- Demonstrate that a failed load does not poison unrelated resident resources or
-  streams.
-
-Completion requires adversarial fault-injection tests and repeated
-mount/use/unmount cycles without GPU, host-memory, file-descriptor, or scheduler
-leaks.
-
 ### 16. Qualify real usability and measure the result
 
 - Run Qwen3.6-35B-A3B in eager and demand-retained modes under matched placement,
