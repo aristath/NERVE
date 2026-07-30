@@ -11,6 +11,11 @@ _AMPLIFICATION_COUNTERS = (
     "resident_copy_waits",
     "resident_sequence_fence_waits",
 )
+_BLOCKING_REGRESSION_COUNTERS = frozenset(
+    {
+        "bounded_wait_timeout_count",
+    }
+)
 _TRANSFER_COUNTERS = (
     "direct_copy_byte_count",
     "direct_copy_count",
@@ -89,18 +94,25 @@ def qualify_whole_model_product_performance(
             for path in comparison["amplified_runtime_paths"]
         }
     )
-    status = "passed" if candidate_is_faster and not amplified else "failed"
+    blocking_regressions = sorted(
+        set(amplified) & _BLOCKING_REGRESSION_COUNTERS
+    )
+    status = (
+        "passed"
+        if candidate_is_faster and not blocking_regressions
+        else "failed"
+    )
     reasons = []
     if not candidate_is_faster:
         reasons.append(
             "candidate was not faster than the exact implementation after "
             "normalizing warmed elapsed time by generated tokens"
         )
-    if amplified:
+    if blocking_regressions:
         reasons.append(
-            "candidate amplified one or more normalized whole-model runtime "
-            "slow paths: "
-            + ", ".join(amplified)
+            "candidate amplified one or more whole-model reliability "
+            "failures: "
+            + ", ".join(blocking_regressions)
         )
     reference_elapsed = sum(
         comparison["reference_measured_elapsed_ns"]
@@ -166,6 +178,7 @@ def qualify_whole_model_product_performance(
                 ),
             ),
             "amplified_slow_paths": amplified,
+            "blocking_regressions": blocking_regressions,
             "slow_path_count_deltas": slow_paths["count_deltas"],
             "slow_path_rate_deltas_per_million_tokens": slow_paths[
                 "rate_deltas_per_million_tokens"

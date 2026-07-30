@@ -961,17 +961,7 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
                 candidate_measured_elapsed_ns=90,
                 candidate_bounded_wait_timeout_count=1,
             ),
-            "amplified",
-        ),
-        (
-            ValidationBehavior(
-                candidate_measured_elapsed_ns=90,
-                reference_speculative_proposed=8,
-                reference_speculative_accepted=8,
-                candidate_speculative_proposed=8,
-                candidate_speculative_accepted=4,
-            ),
-            "speculative.acceptance",
+            "reliability",
         ),
     ),
 )
@@ -1021,6 +1011,54 @@ def test_locally_faster_candidate_is_rejected_when_warmed_product_run_regresses(
         if candidate.candidate_id == fixture[2].candidate_id
     )
     assert lifecycle.state == CandidateState.REJECTED
+
+
+def test_faster_candidate_retains_nonblocking_runtime_diagnostics(
+    tmp_path: Path,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    adapter = FixtureValidationAdapter(
+        ValidationBehavior(
+            candidate_measured_elapsed_ns=80,
+            reference_speculative_proposed=8,
+            reference_speculative_accepted=8,
+            candidate_speculative_proposed=8,
+            candidate_speculative_accepted=4,
+        )
+    )
+    pre, adapter, _ = _prevalidate(
+        tmp_path,
+        fixture,
+        adapter=adapter,
+    )
+    benchmark = benchmark_candidate(
+        plan=fixture[4],
+        construction_record=fixture[3].record,
+        session=pre.session,
+        adapter=FixtureExecutionAdapter(),
+        workspace_root=tmp_path / "benchmark-workspace",
+    )
+    final = validate_benchmarked_candidate(
+        plan=fixture[5],
+        prebenchmark_record=pre.record,
+        benchmark_record=benchmark.record,
+        session=benchmark.session,
+        adapter=adapter,
+        workspace_root=tmp_path / "validation-workspace",
+    )
+
+    assert final.status == "passed"
+    stage = next(
+        stage
+        for stage in final.record.to_json()["stages"]
+        if stage["name"] == "whole_model_product_performance"
+    )
+    assert stage["status"] == "passed"
+    assert stage["reason"] is None
+    assert stage["metrics"]["blocking_regressions"] == []
+    assert "speculative.acceptance" in stage["metrics"][
+        "amplified_slow_paths"
+    ]
 
 
 def test_product_performance_discards_the_first_conversation_as_warmup(
