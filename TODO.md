@@ -74,33 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 16. Qualify real usability and measure the result
-
-- Run Qwen3.6-35B-A3B in eager and demand-retained modes under matched placement,
-  context, thinking, sampling, and MTP settings.
-- Use one warmup conversation followed by meaningful multi-turn prompts; allow
-  up to 65,536 generated tokens rather than imposing artificial tiny limits.
-- Compare startup latency, first-use stalls, prefill, decode, warm-turn
-  throughput, initial VRAM, high-water VRAM, working-set growth, output quality,
-  and final teardown.
-- Confirm that unselected experts never become resident, a repeated expert
-  incurs no second transfer, and residency growth matches recorded selections.
-- Coalesce all misses reported by one checkpoint into bounded backing-store
-  reads, device uploads, stable-address publications, queue submissions, and
-  waits. A cold turn must not perform one transfer lifecycle per tensor member
-  or selected expert.
-- Keep the fully warm decode path on the GPU under demand-retained policy.
-  Resident feedback windows must continue across hits and interrupt at the
-  exact physical checkpoint only when a real miss requires host loading; a warm
-  scalar token must not drain a queue or wait on the host.
-- Test a workload whose package maximum exceeds available VRAM but whose
-  observed working set fits, then test deterministic failure when a working set
-  truly exceeds capacity.
-
-Completion requires materially lower initial and observed VRAM than eager mode,
-identical behavior under deterministic settings, usable real conversations, and
-no material fully warm throughput regression.
-
 ### 17. Perform the final genericity and architecture review
 
 - Audit the compiler, package, runtime, Vulkan backend, scheduler, CLI, and TUI

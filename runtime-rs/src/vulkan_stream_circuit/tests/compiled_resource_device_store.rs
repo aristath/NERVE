@@ -191,6 +191,64 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             .to_string()
             .contains("physical allocation bytes")
     );
+    let over_capacity_store = VulkanCompiledResourceDeviceStore::new(
+        &device,
+        "amd-over-capacity-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
+        root.path(),
+        Arc::clone(&contract),
+        Arc::clone(&layout),
+        BTreeSet::from([selector_id.clone()]),
+        8,
+        256 * 1024,
+        8,
+        1,
+        128,
+        64,
+        layout.address_table_byte_count().unwrap(),
+    )
+    .unwrap();
+    over_capacity_store.mark_mount_complete().unwrap();
+    let over_capacity_owner =
+        DeviceResourceResidencyOwnerId::new("over-capacity-graph").unwrap();
+    over_capacity_store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            0,
+            over_capacity_owner.clone(),
+        )
+        .unwrap();
+    let fitting_working_set =
+        over_capacity_store.residency_report().unwrap();
+    assert_eq!(fitting_working_set.maximum_payload_bytes, 8);
+    assert_eq!(fitting_working_set.current_payload_bytes, 8);
+    assert_eq!(fitting_working_set.resident_unit_count, 1);
+    assert_eq!(fitting_working_set.addressable_unit_count, 2);
+    let capacity_error = over_capacity_store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            1,
+            over_capacity_owner,
+        )
+        .unwrap_err();
+    assert!(capacity_error.to_string().contains("capacity"));
+    let rejected_growth = over_capacity_store.residency_report().unwrap();
+    assert_eq!(rejected_growth.current_payload_bytes, 8);
+    assert_eq!(rejected_growth.resident_unit_count, 1);
+    assert_eq!(rejected_growth.failed_unit_count, 0);
+    assert_eq!(
+        over_capacity_store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 1,
+            byte_count: 8,
+            cancelled_load_count: 0,
+        }
+    );
+    drop(over_capacity_store);
+
     let store = VulkanCompiledResourceDeviceStore::new(
         &device,
         "amd-test",
