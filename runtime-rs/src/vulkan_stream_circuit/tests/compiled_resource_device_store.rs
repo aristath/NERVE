@@ -12,6 +12,26 @@ fn compiled_store_worker_thread_count() -> usize {
 }
 
 #[test]
+fn compiled_resource_backing_workers_follow_wave_width_without_oversubscribing_cores() {
+    assert_eq!(
+        compiled_resource_backing_worker_count_for_parallelism(8, 32),
+        8
+    );
+    assert_eq!(
+        compiled_resource_backing_worker_count_for_parallelism(32, 8),
+        8
+    );
+    assert_eq!(
+        compiled_resource_backing_worker_count_for_parallelism(1, 32),
+        1
+    );
+    assert_eq!(
+        compiled_resource_backing_worker_count_for_parallelism(0, 0),
+        1
+    );
+}
+
+#[test]
 fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let device =
         selected_test_vulkan_device().expect("selected Vulkan test device must open");

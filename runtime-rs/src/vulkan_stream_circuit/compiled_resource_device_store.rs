@@ -15,6 +15,26 @@ impl Display for VulkanCompiledResourceDeviceStoreError {
 
 impl Error for VulkanCompiledResourceDeviceStoreError {}
 
+fn compiled_resource_backing_worker_count_for_parallelism(
+    maximum_load_wave_group_count: usize,
+    available_parallelism: usize,
+) -> usize {
+    maximum_load_wave_group_count
+        .max(1)
+        .min(available_parallelism.max(1))
+}
+
+fn compiled_resource_backing_worker_count(
+    maximum_load_wave_group_count: usize,
+) -> usize {
+    compiled_resource_backing_worker_count_for_parallelism(
+        maximum_load_wave_group_count,
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+    )
+}
+
 struct VulkanCompiledResourceDeviceAddressState {
     transfer: VulkanResidentTransferStream,
     address_table: VulkanStableResourceAddressTable,
@@ -255,7 +275,9 @@ impl VulkanCompiledResourceDeviceStore {
         let backing_store = CompiledResourceBackingStore::new(
             package_root.clone(),
             CompiledResourceBackingStoreLimits {
-                worker_count: 2,
+                worker_count: compiled_resource_backing_worker_count(
+                    maximum_load_wave_group_count,
+                ),
                 queued_request_capacity:
                     maximum_load_wave_group_count,
                 maximum_ranges_per_group,
