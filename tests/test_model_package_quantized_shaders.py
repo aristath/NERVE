@@ -725,10 +725,21 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         / "sparse_moe_gate_up_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"
     ).read_text()
     router_shader = (tmp_path / "moe_topk_bf16_e256_k8.comp").read_text()
+    router_batch_shader = (
+        tmp_path / "moe_topk_batch1_bf16_e256_k8.comp"
+    ).read_text()
     reduce_shader = (tmp_path / "moe_reduce_bf16_h2048_k8_scale1.comp").read_text()
     assert "const uint NUM_EXPERTS = 256u;" in gate_up_shader
     assert "buffer SelectionTelemetry" in router_shader
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in router_shader
+    assert "shared float router_scores[NUM_EXPERTS];" in router_shader
+    assert "router_scores[expert] = read_router(expert);" in router_shader
+    assert "if (gl_NumSubgroups == 1u)" in router_shader
+    assert (
+        "router_scores[expert] = read_router(batch_index, expert);"
+        in router_batch_shader
+    )
+    assert "if (gl_NumSubgroups == 1u)" in router_batch_shader
     assert "const uint EXPERTS_PER_TOKEN = 8u;" in gate_up_shader
     assert "#extension GL_EXT_float_e4m3 : require" in gate_up_shader
     assert "uintBitsToFloate4m3EXT" in gate_up_shader

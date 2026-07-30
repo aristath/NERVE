@@ -60,6 +60,11 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert "const uint EXPERTS_PER_TOKEN = 8u;" in router
     assert "buffer SelectionTelemetry" in router
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in router
+    assert "shared float router_scores[NUM_EXPERTS];" in router
+    assert "router_scores[expert] = read_router(expert);" in router
+    assert "float score = router_scores[expert];" in router
+    assert "if (gl_NumSubgroups == 1u)" in router
+    assert "subgroup_best_scores[gl_SubgroupID]" in router
     assert "const uint INTERMEDIATE_SIZE = 512u;" in gate_up
     assert "const uint INTERMEDIATE_SIZE = 512u;" in down
     assert "const uint HIDDEN_SIZE = 1024u;" in reduce
@@ -231,9 +236,19 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
     assert "binding = 3) buffer SelectionTelemetry" in primary_source
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in primary_source
+    assert "shared float router_values[NUM_EXPERTS];" in primary_source
+    assert "router_values[expert] = router_logit(expert);" in primary_source
+    assert "float logit = router_values[expert];" in primary_source
+    assert "if (gl_NumSubgroups == 1u)" in primary_source
+    assert "subgroup_best_scores[gl_SubgroupID]" in primary_source
     assert "binding = 2) buffer ExpertRoutes" not in primary_source
     assert "gl_WorkGroupID.y" in batch_source
     assert "binding = 3) buffer SelectionTelemetry" in batch_source
+    assert (
+        "router_values[expert] = router_logit(batch_index, expert);"
+        in batch_source
+    )
+    assert "if (gl_NumSubgroups == 1u)" in batch_source
     reduce_source = (tmp_path / reduce_file).read_text()
     assert "const float ROUTED_SCALE = 2.5;" in reduce_source
     assert "f32_to_bf16(lo * ROUTED_SCALE)" in reduce_source

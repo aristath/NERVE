@@ -26,6 +26,7 @@ const bool NORMALIZE_SELECTED = {{NORMALIZE_SELECTED}} != 0;
 const float LOGIT_SOFTCAP = {{LOGIT_SOFTCAP}};
 
 shared uint top_indices[EXPERTS_PER_TOKEN];
+shared float router_values[NUM_EXPERTS];
 shared float subgroup_best_scores[64];
 shared uint subgroup_best_experts[64];
 
@@ -55,7 +56,7 @@ float sigmoid(float value) {
 }
 
 float selection_score(uint expert) {
-    float logit = router_logit(expert);
+    float logit = router_values[expert];
     float routed = ROUTER_SIGMOID ? sigmoid(logit) : logit;
     return routed + {{READ_SELECTION_BIAS}};
 }
@@ -69,6 +70,10 @@ bool already_selected(uint expert, uint count) {
 
 void main() {
     uint lane = gl_LocalInvocationID.x;
+    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+        router_values[expert] = router_logit(expert);
+    }
+    barrier();
 
     for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
         float best_score = -uintBitsToFloat(0x7f800000u);
@@ -90,45 +95,51 @@ void main() {
         uint subgroup_expert = subgroupMin(
             best_score == subgroup_score ? best_expert : 0xffffffffu
         );
-        if (subgroupElect()) {
-            subgroup_best_scores[gl_SubgroupID] = subgroup_score;
-            subgroup_best_experts[gl_SubgroupID] = subgroup_expert;
-        }
-        barrier();
-        if (lane == 0u) {
-            float route_score = -uintBitsToFloat(0x7f800000u);
-            uint route_expert = 0xffffffffu;
-            for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
-                float score = subgroup_best_scores[subgroup];
-                uint expert = subgroup_best_experts[subgroup];
-                if (
-                    score > route_score
-                    || (score == route_score && expert < route_expert)
-                ) {
-                    route_score = score;
-                    route_expert = expert;
-                }
+        if (gl_NumSubgroups == 1u) {
+            if (lane == 0u) {
+                top_indices[route] = subgroup_expert;
             }
-            top_indices[route] = route_expert;
+        } else {
+            if (subgroupElect()) {
+                subgroup_best_scores[gl_SubgroupID] = subgroup_score;
+                subgroup_best_experts[gl_SubgroupID] = subgroup_expert;
+            }
+            barrier();
+            if (lane == 0u) {
+                float route_score = -uintBitsToFloat(0x7f800000u);
+                uint route_expert = 0xffffffffu;
+                for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                    float score = subgroup_best_scores[subgroup];
+                    uint expert = subgroup_best_experts[subgroup];
+                    if (
+                        score > route_score
+                        || (score == route_score && expert < route_expert)
+                    ) {
+                        route_score = score;
+                        route_expert = expert;
+                    }
+                }
+                top_indices[route] = route_expert;
+            }
         }
         barrier();
     }
 
     if (lane == 0u) {
-        float maximum = router_logit(top_indices[0]);
+        float maximum = router_values[top_indices[0]];
         float denominator = 0.0;
         if (NORMALIZE_SELECTED) {
             for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
-                float logit = router_logit(top_indices[route]);
+                float logit = router_values[top_indices[route]];
                 denominator += ROUTER_SIGMOID ? sigmoid(logit) : exp(logit - maximum);
             }
         } else if (!ROUTER_SIGMOID) {
             maximum = -uintBitsToFloat(0x7f800000u);
             for (uint expert = 0u; expert < NUM_EXPERTS; expert++) {
-                maximum = max(maximum, router_logit(expert));
+                maximum = max(maximum, router_values[expert]);
             }
             for (uint expert = 0u; expert < NUM_EXPERTS; expert++) {
-                denominator += exp(router_logit(expert) - maximum);
+                denominator += exp(router_values[expert] - maximum);
             }
         }
 
@@ -143,7 +154,7 @@ void main() {
         }
         for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
             uint expert = top_indices[route];
-            float logit = router_logit(top_indices[route]);
+            float logit = router_values[expert];
             float weight = ROUTER_SIGMOID ? sigmoid(logit) : exp(logit - maximum);
             if (NORMALIZE_SELECTED || !ROUTER_SIGMOID) weight /= denominator;
             expert_routes.words[route] = (f32_to_bf16(weight) << 16u) | expert;
