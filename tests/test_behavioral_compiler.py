@@ -166,6 +166,74 @@ def test_exact_candidate_gate_proves_fused_parallel_ffn_projection() -> None:
     )
 
 
+def test_exact_candidate_gate_proves_contiguous_linear_swiglu() -> None:
+    source = {
+        "schema": "nerve.stream_circuit.v1",
+        "source": {"component_id": "layer_00"},
+        "boundary": {
+            "inputs": [{"id": "input", "source": "x"}],
+            "outputs": [{"id": "output", "source": "y"}],
+        },
+        "state_ports": [],
+        "parameters": {
+            "refs": {
+                "weight": {"tensor": "gate_up.weight"},
+                "scale": {"tensor": "gate_up.weight_scale_inv"},
+            }
+        },
+        "behavioral_error_contract": {"mode": "source_reference_circuit"},
+        "nodes": [
+            {
+                "id": "projection",
+                "op": "linear",
+                "inputs": ["x"],
+                "outputs": ["gate_up"],
+                "params": ["weight", "scale"],
+            },
+            {
+                "id": "split",
+                "op": "split",
+                "inputs": ["gate_up"],
+                "outputs": ["gate", "up"],
+                "attrs": {"part_width": 8},
+            },
+            {
+                "id": "activation",
+                "op": "silu_multiply",
+                "inputs": ["gate", "up"],
+                "outputs": ["y"],
+                "attrs": {"element_count": 8},
+            },
+        ],
+    }
+    candidate = deepcopy(source)
+    candidate["nodes"] = [
+        {
+            "id": "fused_swiglu",
+            "op": "contiguous_linear_swiglu",
+            "inputs": ["x"],
+            "outputs": ["y"],
+            "params": ["weight", "scale"],
+            "attrs": {
+                "compiled_from": ["projection", "split", "activation"],
+                "part_width": 8,
+                "weight_partition": "contiguous_gate_up",
+                "intermediate_rounding": "BF16",
+            },
+        }
+    ]
+
+    evidence = prove_exact_circuit_candidate(
+        component_id="layer_00", source=source, candidate=candidate
+    )
+
+    assert evidence["status"] == "passed"
+    assert (
+        evidence["rewrites"][0]["proof_contract"]
+        == "contiguous_linear_swiglu_exact_bf16.v1"
+    )
+
+
 def test_exact_candidate_gate_proves_fp8_parallel_linear_parameter_pairs() -> None:
     source = {
         "schema": "nerve.stream_circuit.v1",

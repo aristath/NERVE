@@ -849,6 +849,70 @@ def can_fuse_mixed_precision_parallel_linears(
     return bf16_output_words <= fp8_output_tiles
 
 
+def can_fuse_contiguous_linear_swiglu(
+    circuit: Json,
+    projection: Json,
+    split: Json,
+    activation: Json,
+    tensor_index: Json,
+) -> bool:
+    if (
+        projection.get("op") != "linear"
+        or split.get("op") != "split"
+        or activation.get("op") != "silu_multiply"
+        or len(projection.get("params", [])) != 2
+        or len(split.get("outputs", [])) != 2
+    ):
+        return False
+    split_attrs = split.get("attrs", {})
+    if split_attrs.get("part_widths") is not None:
+        try:
+            part_widths = [int(width) for width in split_attrs["part_widths"]]
+        except (TypeError, ValueError):
+            return False
+    else:
+        try:
+            part_width = int(split_attrs["part_width"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        part_widths = [part_width, part_width]
+    try:
+        element_count = int(activation.get("attrs", {}).get("element_count", 0))
+    except (TypeError, ValueError):
+        return False
+    if (
+        len(part_widths) != 2
+        or part_widths[0] != part_widths[1]
+        or part_widths[0] <= 0
+        or part_widths[0] % 8
+        or element_count != part_widths[0]
+    ):
+        return False
+    try:
+        shape = parameter_shape_for_node(circuit, projection, tensor_index)
+        block_rows, block_columns = fp8_block_shape_for_node(
+            circuit,
+            projection,
+            tensor_index,
+        )
+        dtype = parameter_dtype_for_node(circuit, projection, tensor_index)
+        layout = parameter_layout_for_node(circuit, projection, tensor_index)
+    except (KeyError, ModelCompileError):
+        return False
+    return (
+        len(shape) == 2
+        and int(shape[0]) == 2 * part_widths[0]
+        and int(shape[1]) > 0
+        and int(shape[1]) % block_columns == 0
+        and block_rows > 0
+        and block_rows % 2 == 0
+        and block_columns > 0
+        and block_columns % 4 == 0
+        and dtype == "F8_E4M3"
+        and layout == ROW_MAJOR_LAYOUT
+    )
+
+
 def physical_input_prequantization_spec(
     circuit: Json,
     node: Json,
@@ -947,6 +1011,7 @@ def _fp8_prequantization_spec(
         "parallel_linear_2way",
         "parallel_linear_3way",
         "parallel_linear_silu_multiply",
+        "contiguous_linear_swiglu",
     }:
         return None
     params = node.get("params", [])

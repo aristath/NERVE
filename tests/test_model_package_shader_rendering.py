@@ -61,6 +61,41 @@ def test_compiler_renders_mixed_precision_parallel_projection(
     assert "layout(push_constant) uniform BatchControl" in batch_source
 
 
+def test_compiler_renders_contiguous_fp8_swiglu_family(tmp_path: Path) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    scalar = (
+        "contiguous_linear_swiglu_prequant_fp8_e4m3_"
+        "b128x128_2048x512.comp"
+    )
+    batch = scalar.replace("_prequant_fp8_", "_prequant_batch4_fp8_")
+    cooperative = (
+        "contiguous_linear_swiglu_prequant_batch64_cooperative_"
+        "fp8_e4m3_m16n16k16_b128x128_2048x512.comp"
+    )
+
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {scalar, batch, cooperative},
+    )
+
+    scalar_source = (tmp_path / scalar).read_text()
+    assert "projection * OUTPUT_SIZE + row" in scalar_source
+    assert "layout(local_size_x = 1024" in scalar_source
+    assert "rounded_silu(gate_lo) * up_lo" in scalar_source
+
+    batch_source = (tmp_path / batch).read_text()
+    assert "const uint BATCH_TILE_WIDTH = 4u;" in batch_source
+    assert "batch_index * OUTPUT_WORDS" in batch_source
+
+    cooperative_source = (tmp_path / cooperative).read_text()
+    assert "const uint OUTPUT_SIZE = 512u;" in cooperative_source
+    assert "const uint OUTPUT_TILE = 2u * MATRIX_M;" in cooperative_source
+    assert "uint projection = gl_SubgroupID / OUTPUT_SUBTILES;" in cooperative_source
+    assert "projection * OUTPUT_SIZE" in cooperative_source
+    assert "coopMatMulAdd" in cooperative_source
+
+
 def test_compiler_renders_fp8_output_projection_shaders(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {

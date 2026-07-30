@@ -111,6 +111,14 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         "mixed_parallel_linear_4way_prequant_batch4_fp8_e4m3_"
         "b128x128_bf16_2048x8192_4096_32_32.comp"
     )
+    assert weight_shared_batch_shader_file(
+        "contiguous_linear_swiglu_prequant_fp8_e4m3_"
+        "b128x128_2048x512.comp",
+        tile_width=4,
+    ) == (
+        "contiguous_linear_swiglu_prequant_batch4_fp8_e4m3_"
+        "b128x128_2048x512.comp"
+    )
     assert (
         weight_shared_batch_shader_file("linear_bf16_1024x1024.comp")
         == "linear_batch16_bf16_1024x1024.comp"
@@ -263,6 +271,31 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
             shape=(16, 16, 16),
         )
         == 272
+    )
+    contiguous_swiglu_cooperative = cooperative_float8_e4m3_batch_shader_file(
+        "contiguous_linear_swiglu_prequant_fp8_e4m3_"
+        "b128x128_2048x512.comp",
+        shape=(16, 16, 16),
+    )
+    assert contiguous_swiglu_cooperative == (
+        "contiguous_linear_swiglu_prequant_batch64_cooperative_"
+        "fp8_e4m3_m16n16k16_b128x128_2048x512.comp"
+    )
+    assert (
+        cooperative_float8_e4m3_batch_shader_file(
+            "contiguous_linear_swiglu_prequant_fp8_e4m3_"
+            "b128x128_2048x520.comp",
+            shape=(16, 16, 16),
+        )
+        is None
+    )
+    assert (
+        cooperative_float8_e4m3_workgroup_count_x(
+            "contiguous_linear_swiglu_prequant_fp8_e4m3_"
+            "b128x128_2048x512.comp",
+            shape=(16, 16, 16),
+        )
+        == 16
     )
 
 

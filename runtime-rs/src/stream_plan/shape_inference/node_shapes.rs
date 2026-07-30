@@ -118,6 +118,16 @@ fn infer_node_output_shapes(
         "linear" | "linear_residual" | "linear_projection" | "parallel_linear_silu_multiply" => {
             infer_linear_output_shapes(component_id, node, signals, params, tensor_index)
         }
+        "contiguous_linear_swiglu" => {
+            if node.outputs.len() != 1 || node.params.len() != 2 {
+                return Err(CircuitPlanError(format!(
+                    "{} node {} contiguous SwiGLU requires one output and one FP8 weight/scale pair",
+                    component_id, node.id
+                )));
+            }
+            let part_width = attr_usize(node, "part_width").filter(|width| *width > 0);
+            Ok(vec![part_width.map(|width| vec![width])])
+        }
         "concatenate" => {
             let mut width = 0usize;
             for input in &node.inputs {

@@ -1091,6 +1091,52 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             ["weight", "weight_scale_inv"], optimized["nodes"][0]["params"]
         )
 
+    def test_fuses_contiguous_gate_up_projection_split_and_swiglu(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "gate_up_projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["gate_up"],
+                    "params": ["weight", "weight_scale_inv"],
+                },
+                {
+                    "id": "gate_up_split",
+                    "op": "split",
+                    "inputs": ["gate_up"],
+                    "outputs": ["gate", "up"],
+                    "attrs": {"part_width": 512},
+                },
+                {
+                    "id": "activation",
+                    "op": "silu_multiply",
+                    "inputs": ["gate", "up"],
+                    "outputs": ["activated"],
+                    "attrs": {"element_count": 512},
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_contiguous_linear_swiglu=lambda _projection, _split, _activation: True,
+        )
+
+        self.assertEqual(1, len(optimized["nodes"]))
+        fused = optimized["nodes"][0]
+        self.assertEqual("contiguous_linear_swiglu", fused["op"])
+        self.assertEqual(["normalized"], fused["inputs"])
+        self.assertEqual(["activated"], fused["outputs"])
+        self.assertEqual(["weight", "weight_scale_inv"], fused["params"])
+        self.assertEqual(
+            ["gate_up_projection", "gate_up_split", "activation"],
+            fused["attrs"]["compiled_from"],
+        )
+        self.assertEqual(512, fused["attrs"]["part_width"])
+        self.assertEqual("contiguous_gate_up", fused["attrs"]["weight_partition"])
+        self.assertEqual("BF16", fused["attrs"]["intermediate_rounding"])
+
     def test_fuses_adjacent_fp8_and_bf16_parallel_projections(self) -> None:
         circuit = {
             "nodes": [

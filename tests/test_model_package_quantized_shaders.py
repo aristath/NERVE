@@ -1,6 +1,7 @@
 from model_package_layout_common import *
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_tensors import (
+    can_fuse_contiguous_linear_swiglu,
     can_fuse_native_parallel_linears,
     physical_input_prequantization_spec,
 )
@@ -114,6 +115,71 @@ def test_parallel_linear_shader_selector_supports_fp8_weight_scale_pairs() -> No
         "parallel_linear_2way_fp8_e4m3_b128x128_5120x5120_1024.comp"
     )
     assert workgroup_count_x_for_node(circuit, node, tensor_index) == 320
+
+
+def test_contiguous_swiglu_fusion_requires_compatible_fp8_partition() -> None:
+    projection = {
+        "id": "gate_up",
+        "op": "linear",
+        "inputs": ["hidden"],
+        "outputs": ["projected"],
+        "params": ["weight", "weight_scale_inv"],
+    }
+    split = {
+        "id": "split",
+        "op": "split",
+        "inputs": ["projected"],
+        "outputs": ["gate", "up"],
+        "attrs": {"part_width": 512},
+    }
+    activation = {
+        "id": "activation",
+        "op": "silu_multiply",
+        "inputs": ["gate", "up"],
+        "outputs": ["activated"],
+        "attrs": {"element_count": 512},
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "weight": {"tensor": "weight"},
+                "weight_scale_inv": {"tensor": "weight_scale_inv"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "weight": {
+                "dtype": "F8_E4M3",
+                "shape": [1024, 2048],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "weight_scale_inv": {
+                "dtype": "BF16",
+                "shape": [8, 16],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+
+    assert can_fuse_contiguous_linear_swiglu(
+        circuit,
+        projection,
+        split,
+        activation,
+        tensor_index,
+    )
+
+    split["attrs"]["part_width"] = 510
+    activation["attrs"]["element_count"] = 510
+    tensor_index["tensors"]["weight"]["shape"][0] = 1020
+    assert not can_fuse_contiguous_linear_swiglu(
+        circuit,
+        projection,
+        split,
+        activation,
+        tensor_index,
+    )
 
 
 def test_linear_shader_selector_supports_internal_q8_0_weights() -> None:

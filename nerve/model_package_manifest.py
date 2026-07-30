@@ -469,6 +469,15 @@ def build_vulkan_resident_package_manifest(
                     tensor_index,
                 )
             ),
+            can_fuse_contiguous_linear_swiglu=lambda projection, split, activation, circuit=circuit: (
+                can_fuse_contiguous_linear_swiglu(
+                    circuit,
+                    projection,
+                    split,
+                    activation,
+                    tensor_index,
+                )
+            ),
             prequantization_spec=lambda node, circuit=circuit: (
                 physical_input_prequantization_spec(
                     circuit,

@@ -929,6 +929,36 @@ mod tests {
     }
 
     #[test]
+    fn infers_contiguous_linear_swiglu_output_shape_from_partition() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "fused_swiglu".to_string(),
+            op: "contiguous_linear_swiglu".to_string(),
+            inputs: vec!["hidden_fp8".to_string(), "hidden_scale".to_string()],
+            outputs: vec!["shared_hidden".to_string()],
+            params: vec!["gate_up_weight".to_string(), "gate_up_scale".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "part_width": 512,
+                "weight_partition": "contiguous_gate_up",
+                "intermediate_rounding": "BF16"
+            }),
+        };
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![512])]
+        );
+    }
+
+    #[test]
     fn plans_fixture_model_lowered_execution_graph_activation_schedule() {
         let graph =
             ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();

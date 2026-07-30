@@ -414,6 +414,28 @@ def cooperative_float8_e4m3_batch_shader_file(
             f"{input_size}x{output_size}.comp"
         )
 
+    contiguous_swiglu = re.fullmatch(
+        r"contiguous_linear_swiglu_prequant_fp8_e4m3_"
+        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if contiguous_swiglu is not None:
+        block_rows, block_columns, input_size, output_size = (
+            contiguous_swiglu.groups()
+        )
+        if (
+            int(block_columns) % k
+            or int(input_size) % int(block_columns)
+            or int(output_size) % (2 * m)
+        ):
+            return None
+        return (
+            "contiguous_linear_swiglu_prequant_"
+            f"batch{batch_tile_width}_cooperative_fp8_e4m3_"
+            f"m{m}n{n}k{k}_b{block_rows}x{block_columns}_"
+            f"{input_size}x{output_size}.comp"
+        )
+
     return None
 
 
@@ -422,6 +444,7 @@ def cooperative_float8_e4m3_workgroup_count_x(
     *,
     shape: tuple[int, int, int],
 ) -> int:
+    contiguous_swiglu_geometry = False
     linear = re.fullmatch(
         r"(?:linear|linear_residual)_prequant_fp8_e4m3_"
         r"b\d+x\d+_\d+x(\d+)\.comp",
@@ -444,16 +467,25 @@ def cooperative_float8_e4m3_workgroup_count_x(
                 r"b\d+x\d+_\d+x(\d+)\.comp",
                 shader_file,
             )
-            if fused_ffn is None:
-                raise ModelCompileError(
-                    f"shader {shader_file!r} has no cooperative FP8 batch geometry"
+            if fused_ffn is not None:
+                output_sizes = [int(fused_ffn.group(1))]
+            else:
+                contiguous_swiglu = re.fullmatch(
+                    r"contiguous_linear_swiglu_prequant_fp8_e4m3_"
+                    r"b\d+x\d+_\d+x(\d+)\.comp",
+                    shader_file,
                 )
-            output_sizes = [int(fused_ffn.group(1))]
+                if contiguous_swiglu is None:
+                    raise ModelCompileError(
+                        f"shader {shader_file!r} has no cooperative FP8 batch geometry"
+                    )
+                output_sizes = [int(contiguous_swiglu.group(1))]
+                contiguous_swiglu_geometry = True
     if not output_sizes:
         raise ModelCompileError(
             f"shader {shader_file!r} has no cooperative FP8 batch geometry"
         )
-    output_tile = 4 * shape[0]
+    output_tile = (2 if contiguous_swiglu_geometry else 4) * shape[0]
     output_size = max(output_sizes)
     return (output_size + output_tile - 1) // output_tile
 
@@ -635,6 +667,16 @@ def weight_shared_batch_shader_file(
         shader_file,
     )
     if mixed_parallel is not None:
+        return shader_file.replace(
+            "_prequant_fp8_e4m3_",
+            f"_prequant_batch{tile}_fp8_e4m3_",
+            1,
+        )
+    if re.fullmatch(
+        r"contiguous_linear_swiglu_prequant_fp8_e4m3_"
+        r"b\d+x\d+_\d+x\d+\.comp",
+        shader_file,
+    ):
         return shader_file.replace(
             "_prequant_fp8_e4m3_",
             f"_prequant_batch{tile}_fp8_e4m3_",

@@ -20,6 +20,7 @@ BEHAVIORAL_EMPIRICAL_EVIDENCE_SCHEMA = "nerve.behavioral_empirical_evidence.v1"
 CONTRACT_DIGEST_ALGORITHM = "nerve.json_tree_sha256.v1"
 EXACT_REWRITE_CONTRACTS = {
     "append_scaled_dot_product_attention": "append_attention_exact_bf16.v1",
+    "contiguous_linear_swiglu": "contiguous_linear_swiglu_exact_bf16.v1",
     "linear_residual": "linear_residual_exact_bf16.v1",
     "linear_split_3way": "linear_split_exact_bf16.v1",
     "linear_split_recurrent_depthwise_gate": "linear_recurrent_exact_bf16.v1",
@@ -36,6 +37,7 @@ EXACT_REWRITE_SOURCE_OPS = {
     "append_scaled_dot_product_attention": {
         ("append_state_update", "scaled_dot_product_attention")
     },
+    "contiguous_linear_swiglu": {("linear", "split", "silu_multiply")},
     "linear_residual": {("linear", "residual_add")},
     "linear_split_3way": {("linear", "split")},
     "linear_split_recurrent_depthwise_gate": {
@@ -781,6 +783,39 @@ def _validate_exact_rewrite_semantics(
                 len(node.get("params", [])) for node in region
             ],
             "branch_dtypes": ["F8_E4M3", "F8_E4M3", "BF16", "BF16"],
+        }
+    elif op == "contiguous_linear_swiglu":
+        projection, split, activation = region
+        _require_empty_attrs(component_id, op, [projection])
+        split_attrs = split.get("attrs", {})
+        activation_attrs = activation.get("attrs", {})
+        try:
+            if split_attrs.get("part_widths") is not None:
+                part_widths = [int(width) for width in split_attrs["part_widths"]]
+            else:
+                part_width = int(split_attrs.get("part_width", 0))
+                part_widths = [part_width, part_width]
+        except (TypeError, ValueError):
+            part_widths = []
+        if (
+            set(split_attrs) - {"layout", "part_width", "part_widths"}
+            or split_attrs.get("layout") not in {None, "contiguous"}
+            or len(part_widths) != 2
+            or part_widths[0] != part_widths[1]
+            or part_widths[0] <= 0
+            or part_widths[0] % 8
+            or activation_attrs != {"element_count": part_widths[0]}
+        ):
+            raise ModelCompileError(
+                f"candidate circuit {component_id!r} rewrite "
+                f"{candidate_node['id']!r} cannot prove contiguous SwiGLU "
+                "source attributes"
+            )
+        expected_attrs = {
+            "compiled_from": source_ids,
+            "part_width": part_widths[0],
+            "weight_partition": "contiguous_gate_up",
+            "intermediate_rounding": "BF16",
         }
     elif op == "linear_residual":
         _require_empty_attrs(component_id, op, region)

@@ -215,6 +215,46 @@ def shader_file_for_node(
             + "_".join(map(str, output_widths))
             + ".comp"
         )
+    if op == "contiguous_linear_swiglu":
+        attrs = node.get("attrs", {})
+        if (
+            len(node.get("inputs", [])) != 2
+            or len(node.get("outputs", [])) != 1
+            or len(node.get("params", [])) != 2
+            or attrs.get("weight_partition") != "contiguous_gate_up"
+            or attrs.get("intermediate_rounding") != "BF16"
+            or not uses_prequantized_fp8_input(node)
+        ):
+            raise ModelCompileError(
+                f"contiguous SwiGLU node {node['id']!r} has invalid bindings"
+            )
+        parameter_shape = parameter_shape_for_node(circuit, node, tensor_index)
+        part_width = int(attrs.get("part_width", 0))
+        if (
+            len(parameter_shape) != 2
+            or part_width <= 0
+            or part_width % 2
+            or int(parameter_shape[0]) != 2 * part_width
+            or int(parameter_shape[1]) <= 0
+            or parameter_dtype_for_node(circuit, node, tensor_index)
+            != "F8_E4M3"
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+        ):
+            raise ModelCompileError(
+                f"contiguous SwiGLU node {node['id']!r} has incompatible "
+                f"projection shape {parameter_shape}"
+            )
+        block_rows, block_columns = fp8_block_shape_for_node(
+            circuit,
+            node,
+            tensor_index,
+        )
+        input_width = int(parameter_shape[1])
+        return (
+            "contiguous_linear_swiglu_prequant_fp8_e4m3_"
+            f"b{block_rows}x{block_columns}_{input_width}x{part_width}.comp"
+        )
     if op in {"parallel_linear_2way", "parallel_linear_3way"}:
         expected_branch_count = 2 if op == "parallel_linear_2way" else 3
         branch_count = int(node["attrs"]["branch_count"])
@@ -1057,6 +1097,14 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
             // FP8_PREQUANT_TILE_ROWS
             for output_size in output_sizes
         )
+    if node["op"] == "contiguous_linear_swiglu":
+        part_width = int(node.get("attrs", {}).get("part_width", 0))
+        if part_width <= 0 or part_width % 8:
+            raise ModelCompileError(
+                f"contiguous SwiGLU node {node['id']!r} has invalid output width "
+                f"{part_width}"
+            )
+        return part_width // 8
     if node["op"] in {"parallel_linear_2way", "parallel_linear_3way"}:
         branch_count = int(node["attrs"]["branch_count"])
         branch_parameter_counts = [

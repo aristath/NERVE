@@ -579,7 +579,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or batch_tile_width != 4 * matrix_n
             or block_columns % matrix_k
             or input_size % block_columns
-            or output_size % 2
+            or output_size % (2 * matrix_m)
         ):
             raise ModelCompileError(
                 f"invalid cooperative FP8 linear shader shape {shader_file!r}"
@@ -795,6 +795,61 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             source_dir,
             (
                 "parallel_linear_silu_multiply_prequant_batch_"
+                "cooperative_fp8_e4m3.comp.template"
+            ),
+            {
+                "MATRIX_M": str(matrix_m),
+                "MATRIX_N": str(matrix_n),
+                "MATRIX_K": str(matrix_k),
+                "BLOCK_ROWS": str(block_rows),
+                "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
+                "OUTPUT_SIZE": str(output_size),
+            },
+        )
+
+    cooperative_contiguous_swiglu = re.fullmatch(
+        r"contiguous_linear_swiglu_prequant_batch(\d+)_cooperative_"
+        r"fp8_e4m3_m(\d+)n(\d+)k(\d+)_"
+        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if cooperative_contiguous_swiglu is not None:
+        (
+            batch_tile_width,
+            matrix_m,
+            matrix_n,
+            matrix_k,
+            block_rows,
+            block_columns,
+            input_size,
+            output_size,
+        ) = map(int, cooperative_contiguous_swiglu.groups())
+        if (
+            min(
+                batch_tile_width,
+                matrix_m,
+                matrix_n,
+                matrix_k,
+                block_rows,
+                block_columns,
+                input_size,
+                output_size,
+            )
+            <= 0
+            or batch_tile_width != 4 * matrix_n
+            or block_columns % matrix_k
+            or input_size % block_columns
+            or output_size % 2
+        ):
+            raise ModelCompileError(
+                f"invalid cooperative contiguous SwiGLU shader shape "
+                f"{shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "contiguous_linear_swiglu_prequant_batch_"
                 "cooperative_fp8_e4m3.comp.template"
             ),
             {
@@ -1491,6 +1546,51 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "INPUT_SIZE": str(input_size),
                 "OUTPUT_SIZE": str(output_size),
                 "OUTPUT_TILE_ROWS": str(FP8_PREQUANT_TILE_ROWS),
+            },
+        )
+
+    contiguous_swiglu = re.fullmatch(
+        r"contiguous_linear_swiglu_prequant"
+        r"(?:_batch(\d+))?_fp8_e4m3_"
+        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if contiguous_swiglu is not None:
+        batch_tile_width = (
+            int(contiguous_swiglu.group(1))
+            if contiguous_swiglu.group(1) is not None
+            else None
+        )
+        block_rows = int(contiguous_swiglu.group(2))
+        block_columns = int(contiguous_swiglu.group(3))
+        input_size = int(contiguous_swiglu.group(4))
+        output_size = int(contiguous_swiglu.group(5))
+        if (
+            (batch_tile_width is not None and batch_tile_width <= 0)
+            or block_rows <= 0
+            or block_columns != 128
+            or input_size <= 0
+            or input_size % block_columns
+            or output_size <= 0
+            or output_size % 8
+        ):
+            raise ModelCompileError(
+                f"invalid contiguous SwiGLU shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "contiguous_linear_swiglu_prequant_batch_fp8_e4m3.comp.template"
+                if batch_tile_width is not None
+                else "contiguous_linear_swiglu_prequant_fp8_e4m3.comp.template"
+            ),
+            {
+                "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
+                "BLOCK_ROWS": str(block_rows),
+                "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
+                "OUTPUT_SIZE": str(output_size),
+                "OUTPUT_TILE_ROWS": "8",
             },
         )
 

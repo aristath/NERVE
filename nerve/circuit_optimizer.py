@@ -31,6 +31,9 @@ def optimize_circuit_for_vulkan(
     can_fuse_mixed_precision_parallel_linears: (
         Callable[[Json, Json], bool] | None
     ) = None,
+    can_fuse_contiguous_linear_swiglu: (
+        Callable[[Json, Json, Json], bool] | None
+    ) = None,
     prequantization_spec: Callable[[Json], Json | None] | None = None,
     can_emit_representation: Callable[[Json, Json], bool] | None = None,
 ) -> Json:
@@ -108,6 +111,15 @@ def optimize_circuit_for_vulkan(
             for output in optimized.get("boundary", {}).get("outputs", [])
         },
     )
+    compiled_nodes = _fuse_contiguous_linear_swiglu_regions(
+        compiled_nodes,
+        consumer_counts,
+        can_fuse_contiguous_linear_swiglu,
+        {
+            output.get("source", output["id"])
+            for output in optimized.get("boundary", {}).get("outputs", [])
+        },
+    )
     lowered_nodes = _lower_prequantized_inputs(
         compiled_nodes,
         prequantization_spec,
@@ -118,6 +130,102 @@ def optimize_circuit_for_vulkan(
         can_fuse_mixed_precision_parallel_linears,
     )
     return optimized
+
+
+def _fuse_contiguous_linear_swiglu_regions(
+    nodes: list[Json],
+    consumer_counts: Counter[str],
+    can_fuse: Callable[[Json, Json, Json], bool] | None,
+    boundary_outputs: set[str],
+) -> list[Json]:
+    if can_fuse is None:
+        return nodes
+    fused_nodes: list[Json] = []
+    index = 0
+    while index < len(nodes):
+        projection = nodes[index]
+        split = nodes[index + 1] if index + 1 < len(nodes) else None
+        activation = nodes[index + 2] if index + 2 < len(nodes) else None
+        if (
+            split is None
+            or activation is None
+            or projection.get("op") != "linear"
+            or split.get("op") != "split"
+            or activation.get("op") != "silu_multiply"
+            or len(projection.get("inputs", [])) != 1
+            or len(projection.get("outputs", [])) != 1
+            or len(split.get("inputs", [])) != 1
+            or len(split.get("outputs", [])) != 2
+            or len(activation.get("inputs", [])) != 2
+            or len(activation.get("outputs", [])) != 1
+            or projection.get("state_reads")
+            or projection.get("state_writes")
+            or split.get("params")
+            or split.get("state_reads")
+            or split.get("state_writes")
+            or activation.get("params")
+            or activation.get("state_reads")
+            or activation.get("state_writes")
+        ):
+            fused_nodes.append(deepcopy(projection))
+            index += 1
+            continue
+
+        projection_output = projection["outputs"][0]
+        split_outputs = split["outputs"]
+        split_attrs = split.get("attrs", {})
+        if split_attrs.get("part_widths") is not None:
+            part_widths = [int(width) for width in split_attrs["part_widths"]]
+        else:
+            part_width = split_attrs.get("part_width")
+            part_widths = [int(part_width)] * 2 if part_width is not None else []
+        if (
+            split["inputs"] != [projection_output]
+            or activation["inputs"] != split_outputs
+            or consumer_counts[projection_output] != 1
+            or any(consumer_counts[signal] != 1 for signal in split_outputs)
+            or projection_output in boundary_outputs
+            or any(signal in boundary_outputs for signal in split_outputs)
+            or split_attrs.get("layout") not in {None, "contiguous"}
+            or len(part_widths) != 2
+            or part_widths[0] != part_widths[1]
+            or part_widths[0] <= 0
+            or part_widths[0] % 2
+            or int(activation.get("attrs", {}).get("element_count", 0))
+            != part_widths[0]
+            or not can_fuse(projection, split, activation)
+        ):
+            fused_nodes.append(deepcopy(projection))
+            index += 1
+            continue
+
+        fused_nodes.append(
+            {
+                "id": "__".join(
+                    (
+                        projection["id"],
+                        split["id"],
+                        activation["id"],
+                    )
+                ),
+                "op": "contiguous_linear_swiglu",
+                "inputs": deepcopy(projection["inputs"]),
+                "outputs": deepcopy(activation["outputs"]),
+                "params": deepcopy(projection["params"]),
+                "attrs": {
+                    "compiled_from": [
+                        *_source_node_ids(projection),
+                        *_source_node_ids(split),
+                        *_source_node_ids(activation),
+                    ],
+                    "part_width": part_widths[0],
+                    "weight_partition": "contiguous_gate_up",
+                    "intermediate_rounding": "BF16",
+                },
+            }
+        )
+        index += 3
+    return fused_nodes
 
 
 def _fuse_mixed_precision_parallel_linears(
