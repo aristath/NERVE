@@ -482,13 +482,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         queue_wait_count: usize::from(
                             route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
                         ),
-                        host_wait_count: usize::from(matches!(
-                            route,
-                            VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
-                                | VulkanPlacedEdgeTransferRoute::HostStaging
-                        )),
+                        host_wait_count: usize::from(
+                            route == VulkanPlacedEdgeTransferRoute::HostStaging,
+                        ),
                         queue_overlap_eligible: route.supports_queue_overlap(),
-                        overlap_submission_count: 0,
+                        overlap_submission_count: usize::from(route.supports_queue_overlap()),
                     });
             }
         }

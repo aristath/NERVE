@@ -92,10 +92,11 @@ impl VulkanComponentBatchEdgeTransfer {
                         &[],
                     )
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                destination_device
-                    .wait_resident_buffer_copy(destination_copy)
-                    .map(|()| VulkanPlacedEdgeTransferRoute::DeviceLocalStaging)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                // The destination circuit is submitted to the same queue immediately
+                // after this copy. Queue order plus the circuit's transfer-to-compute
+                // input barrier provides the dependency; its completion fence also
+                // proves this copy completed before the binding can be reused.
+                Ok(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging)
             }
         }
     }
