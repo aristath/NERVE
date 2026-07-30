@@ -16,6 +16,7 @@ const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
 const uint ROUTER_WORDS = (NUM_EXPERTS + 1u) / 2u;
 
 shared uint top_indices[EXPERTS_PER_TOKEN];
+shared float top_scores[EXPERTS_PER_TOKEN];
 shared float router_scores[NUM_EXPERTS];
 shared float subgroup_best_scores[64];
 shared uint subgroup_best_experts[64];
@@ -35,15 +36,6 @@ float read_router(uint batch_index, uint index) {
     return bf16_to_f32((index & 1u) == 0u ? packed : packed >> 16u);
 }
 
-bool already_selected(uint expert, uint count) {
-    for (uint index = 0u; index < count; index++) {
-        if (top_indices[index] == expert) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void main() {
     uint batch_index = gl_WorkGroupID.y;
     if (batch_index >= batch_control.batch_width) {
@@ -61,11 +53,8 @@ void main() {
         for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
             float score = router_scores[expert];
             if (
-                !already_selected(expert, route)
-                && (
-                    score > best_score
-                    || (score == best_score && expert < best_expert)
-                )
+                score > best_score
+                || (score == best_score && expert < best_expert)
             ) {
                 best_score = score;
                 best_expert = expert;
@@ -78,6 +67,9 @@ void main() {
         if (gl_NumSubgroups == 1u) {
             if (lane == 0u) {
                 top_indices[route] = subgroup_expert;
+                top_scores[route] = subgroup_score;
+                router_scores[subgroup_expert] =
+                    -uintBitsToFloat(0x7f800000u);
             }
         } else {
             if (subgroupElect()) {
@@ -100,30 +92,36 @@ void main() {
                     }
                 }
                 top_indices[route] = route_expert;
+                top_scores[route] = route_score;
+                router_scores[route_expert] =
+                    -uintBitsToFloat(0x7f800000u);
             }
         }
         barrier();
     }
 
     if (lane == 0u) {
-        float maximum = router_scores[top_indices[0]];
+        float maximum = top_scores[0];
         float denominator = 0.0;
         for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
-            denominator += exp(router_scores[top_indices[route]] - maximum);
+            denominator += exp(top_scores[route] - maximum);
         }
         for (uint route = 1u; route < EXPERTS_PER_TOKEN; route++) {
             uint expert = top_indices[route];
+            float score = top_scores[route];
             uint insertion = route;
             while (insertion > 0u && top_indices[insertion - 1u] > expert) {
                 top_indices[insertion] = top_indices[insertion - 1u];
+                top_scores[insertion] = top_scores[insertion - 1u];
                 insertion--;
             }
             top_indices[insertion] = expert;
+            top_scores[insertion] = score;
         }
         for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
             uint expert = top_indices[route];
             uint weight = f32_to_bf16(
-                exp(router_scores[expert] - maximum) / denominator
+                exp(top_scores[route] - maximum) / denominator
             );
             expert_routes.words[batch_index * EXPERTS_PER_TOKEN + route] =
                 (weight << 16u) | expert;

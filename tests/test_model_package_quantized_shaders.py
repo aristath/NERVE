@@ -799,12 +799,16 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "buffer SelectionTelemetry" in router_shader
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in router_shader
     assert "shared float router_scores[NUM_EXPERTS];" in router_shader
+    assert "shared float top_scores[EXPERTS_PER_TOKEN];" in router_shader
     assert "router_scores[expert] = read_router(expert);" in router_shader
+    assert "already_selected" not in router_shader
     assert "if (gl_NumSubgroups == 1u)" in router_shader
     assert (
         "router_scores[expert] = read_router(batch_index, expert);"
         in router_batch_shader
     )
+    assert "shared float top_scores[EXPERTS_PER_TOKEN];" in router_batch_shader
+    assert "already_selected" not in router_batch_shader
     assert "if (gl_NumSubgroups == 1u)" in router_batch_shader
     assert "const uint EXPERTS_PER_TOKEN = 8u;" in gate_up_shader
     assert "#extension GL_EXT_float_e4m3 : require" in gate_up_shader

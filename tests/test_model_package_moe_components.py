@@ -61,8 +61,12 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert "buffer SelectionTelemetry" in router
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in router
     assert "shared float router_scores[NUM_EXPERTS];" in router
+    assert "shared float top_scores[EXPERTS_PER_TOKEN];" in router
     assert "router_scores[expert] = read_router(expert);" in router
     assert "float score = router_scores[expert];" in router
+    assert "router_scores[subgroup_expert] =" in router
+    assert "already_selected" not in router
+    assert "top_scores[insertion] = top_scores[insertion - 1u];" in router
     assert "if (gl_NumSubgroups == 1u)" in router
     assert "subgroup_best_scores[gl_SubgroupID]" in router
     assert "const uint INTERMEDIATE_SIZE = 512u;" in gate_up
@@ -237,7 +241,11 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "binding = 3) buffer SelectionTelemetry" in primary_source
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in primary_source
     assert "shared float router_values[NUM_EXPERTS];" in primary_source
+    assert "shared uint selected_experts[NUM_EXPERTS];" in primary_source
     assert "router_values[expert] = router_logit(expert);" in primary_source
+    assert "selected_experts[expert] = 0u;" in primary_source
+    assert "selected_experts[expert] == 0u" in primary_source
+    assert "already_selected" not in primary_source
     assert "float logit = router_values[expert];" in primary_source
     assert "if (gl_NumSubgroups == 1u)" in primary_source
     assert "subgroup_best_scores[gl_SubgroupID]" in primary_source
@@ -248,6 +256,8 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
         "router_values[expert] = router_logit(batch_index, expert);"
         in batch_source
     )
+    assert "selected_experts[expert] = 0u;" in batch_source
+    assert "already_selected" not in batch_source
     assert "if (gl_NumSubgroups == 1u)" in batch_source
     reduce_source = (tmp_path / reduce_file).read_text()
     assert "const float ROUTED_SCALE = 2.5;" in reduce_source

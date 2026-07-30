@@ -26,6 +26,7 @@ const bool NORMALIZE_SELECTED = {{NORMALIZE_SELECTED}} != 0;
 const float LOGIT_SOFTCAP = {{LOGIT_SOFTCAP}};
 
 shared uint top_indices[EXPERTS_PER_TOKEN];
+shared uint selected_experts[NUM_EXPERTS];
 shared float router_values[NUM_EXPERTS];
 shared float subgroup_best_scores[64];
 shared uint subgroup_best_experts[64];
@@ -61,17 +62,11 @@ float selection_score(uint expert) {
     return routed + {{READ_SELECTION_BIAS}};
 }
 
-bool already_selected(uint expert, uint count) {
-    for (uint index = 0u; index < count; index++) {
-        if (top_indices[index] == expert) return true;
-    }
-    return false;
-}
-
 void main() {
     uint lane = gl_LocalInvocationID.x;
     for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
         router_values[expert] = router_logit(expert);
+        selected_experts[expert] = 0u;
     }
     barrier();
 
@@ -81,7 +76,7 @@ void main() {
         for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
             float score = selection_score(expert);
             if (
-                !already_selected(expert, route)
+                selected_experts[expert] == 0u
                 && (
                     score > best_score
                     || (score == best_score && expert < best_expert)
@@ -98,6 +93,7 @@ void main() {
         if (gl_NumSubgroups == 1u) {
             if (lane == 0u) {
                 top_indices[route] = subgroup_expert;
+                selected_experts[subgroup_expert] = 1u;
             }
         } else {
             if (subgroupElect()) {
@@ -120,6 +116,7 @@ void main() {
                     }
                 }
                 top_indices[route] = route_expert;
+                selected_experts[route_expert] = 1u;
             }
         }
         barrier();
