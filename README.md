@@ -54,12 +54,31 @@ NERVE is not a production inference engine yet. It is a real implementation of t
 - Runtime implementation selection after graph editing and placement, with
   exact fallback for uncovered compatible scopes and normal chat reporting of
   selected alternatives and representation-boundary cost.
+- Generic compiled-resource contracts that separate always-resident execution
+  structure from independently selectable immutable resource groups.
+- A demand-retained residency policy: selected resources are loaded from the
+  self-contained package on first access, atomically published to a stable
+  sparse Vulkan address space, reused entirely on the device, and released by
+  explicit package teardown.
+- Compact affine residency metadata for regular partitioned resources and a
+  group-table representation for irregular resources, so metadata and address
+  bookkeeping scale with structure rather than expanded tensor counts.
+- Physical-device resource stores with exact capacity accounting,
+  content-addressed sharing, single-flight loads, deterministic failures, and
+  placement-independent one- or multi-device execution.
+- Default chat reporting for resource selection, hits, misses, I/O, uploads,
+  memory watermarks, per-device stores, and acknowledged teardown.
 
 ### Important unfinished work
 
 - The Vulkan backend still has transitional fixed/circular resident state buffers in places. The scheduler has page/block-managed transient-state semantics, but resident Vulkan bindings still need to become truly page-backed before automatic prefix reuse can be wired into normal prompt admission.
 - Multi-stream activation batches are scheduled, but some placed Vulkan batch paths still execute activations sequentially internally.
 - FP8, INT4, MoE, MTP, prefill, and decode paths all need more real-model benchmarking and kernel work.
+- Demand-retained residency deliberately has no implicit eviction. If the
+  accessed working set exceeds exact device capacity, execution fails
+  deterministically. A future bounded-residency policy must be explicit,
+  measured, and separately selectable; it must not weaken demand-retained
+  semantics or silently page through host memory.
 - The representation-optimizer machinery is complete, but the built-in
   provider library covers only the alternative representations implemented so
   far. Additional representation families remain product and performance work,
@@ -93,7 +112,9 @@ Python compiler and CLI package.
 | `nerve/model_package_shaders.py` | Shader packaging. |
 | `nerve/model_package_shader_selection.py` | Shader selection. |
 | `nerve/model_package_shader_templates.py` | Shader template rendering. |
+| `nerve/model_package_sparse_projection_shaders.py` | Sparse BF16, FP8, and INT4 projection shader rendering. |
 | `nerve/model_package_shader_compiler.py` | SPIR-V artifact creation. |
+| `nerve/resource_residency.py` | Compiler-side addressable-resource discovery and compact residency contracts. |
 | `nerve/conversation_gate.py` | Canonical resident multi-turn correctness and performance gate. |
 | `nerve/representation_optimizer/` | Semantic scope enumeration, structural analysis, hardware targets, providers, isolated construction, matched benchmarking, behavioral validation, promotion, evidence storage, and package publication. |
 | `nerve/representation_optimizer/ARCHITECTURE.md` | Complete schemas and invariants for the behavioral representation optimizer. |
@@ -124,6 +145,9 @@ Rust runtime crate.
 | `runtime-rs/src/stream_prefix_cache.rs` | Backend-neutral prefix/state reuse primitives: prefix keys, retained cache entries, longest-compatible-prefix lookup, block-aligned insertion, restore, ref counts, and eviction. |
 | `runtime-rs/src/vulkan_compute/` | Vulkan device discovery, feature/capability handling, resident buffers, pipeline creation, dispatch, sequence submission, and buffer copies. |
 | `runtime-rs/src/vulkan_stream_circuit/` | Vulkan resident package loading, placement, device slices, resident plan buffers, dispatch binding, prompt streams, placed prompt engine, token runtime, sampler, speculative decode, batching, distributed execution, and reusable kernel/sequence machinery. |
+| `runtime-rs/src/vulkan_stream_circuit/compiled_resource_device_store.rs` | Per-physical-device resource lifetime, sharing, capacity, and single-flight load coordination. |
+| `runtime-rs/src/vulkan_stream_circuit/device_resource_residency.rs` | Stable sparse Vulkan resource arena, compact address mapping, atomic publication, and unload. |
+| `runtime-rs/src/vulkan_stream_circuit/resource_backing_store.rs` | Verified reads from self-contained compiled-resource payloads. |
 | `runtime-rs/src/implementation_selection/` | Target-predicate validation, compatible-scope enumeration, measured-cost selection, and exact/alternative implementation planning. |
 | `runtime-rs/shaders/` | GLSL compute shader templates and generated/compiled shader inputs for BF16, FP8, INT4, attention/state, recurrent/conv, sampler, MoE, and related runtime operations. |
 
@@ -335,6 +359,61 @@ captured in the report. Physical bindings are also printed in the normal chat
 readiness line, so a benchmark transcript identifies the devices it actually
 mounted.
 
+## Demand-retained compiled resources
+
+`--residency-policy demand-retained` changes parameter residency, not model
+semantics. The compiled package declares resources that may be selected
+independently and an always-resident execution spine. The runtime resolves
+placement against the physical devices selected for that run. Mounting reserves
+a stable sparse virtual address range but commits no device-local payload pages
+for unselected dynamic resources.
+
+Execution then follows one contract:
+
+```text
+GPU selection -> resident gate
+    hit  -> continue on the GPU
+    miss -> pause at the physical checkpoint
+         -> verified backing-store read
+         -> upload every member of the atomic group
+         -> publish residency
+         -> resume at the checkpoint
+```
+
+No token or completed component is replayed. A resident hit has no host round
+trip. The resource remains resident until explicit unload, and teardown
+acknowledges every physical-device store before the package is released.
+Regular partitioned resources use affine address metadata; genuinely irregular
+groups use compact tables. The mechanism is semantic and model-family neutral:
+the same path has been exercised with routed expert partitions and with an
+irregular, optional output-head package whose resource order differs from its
+compiled member order.
+
+The qualification run on 2026-07-29 used the compiled FP8
+Qwen3.6-35B-A3B package across two AMD Vulkan devices, 131,072-token context,
+65,536-token output allowance, thinking enabled, seed 0, and two MTP draft
+tokens. One discarded warmup and five retained-state conversation turns
+produced meaningful responses and correctly recalled Greece from an earlier
+turn. The five measured turns averaged:
+
+| Metric | Result |
+| --- | ---: |
+| Generated throughput | 42.420 tok/s |
+| Decode throughput | 49.152 tok/s |
+| Prefill throughput | 70.283 tok/s |
+| Initial device bytes | 6.701 GB |
+| Final/high-water device bytes | 36.184 GB |
+| Final selected payload | 29.448 GB |
+| Addressable dynamic payload | 33.022 GB |
+| Final resident resources | 9,360 / 10,496 |
+| Load failures | 0 |
+
+Both stores acknowledged teardown, released all 9,360 resources and 29.448 GB
+of payload, and both GPUs returned to their exact pre-run idle baseline. This
+proves demand-triggered loading and retained reuse; it does not claim that every
+prompt will touch a bounded subset. Workloads whose cumulative working set
+exceeds capacity need a future explicit bounded-residency policy.
+
 ## Concept to implementation
 
 The table below maps the language in [`CONCEPT.md`](CONCEPT.md) to the implementation that currently carries it.
@@ -352,6 +431,9 @@ The table below maps the language in [`CONCEPT.md`](CONCEPT.md) to the implement
 | Stream | `RuntimeStreamScheduler` stream state plus placed prompt streams |
 | Transient state | `stream_state.rs` and `stream_prefix_cache.rs` |
 | Permanent circuits | Package tensors, resident buffers, SPIR-V shaders, component executions |
+| Demand-resident resource | Package-declared immutable group plus stable sparse Vulkan placement |
+| Resource selection | Compiled semantic selection domain and GPU resident gate |
+| Physical resource store | Per-device shared, capacity-accounted compiled-resource store |
 | Input transducer | Package manifest `input_transducer` and Vulkan resident package loader |
 | Output transducer | Package manifest `output_transducer` and token output pipeline |
 | Sampler | Package sampler spec/kernels and runtime sampler config |

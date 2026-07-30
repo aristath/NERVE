@@ -501,6 +501,77 @@ The stream-circuit IR remains independent of Vulkan, but its entities must be ex
 
 Portability is part of the purpose of the engine rather than an afterthought. Vendor-specific backends may eventually exist, but they must not define the architecture or its behavioral model.
 
+## Demand-Resident Immutable Resources
+
+A compiled circuit does not require every immutable parameter to occupy
+device-local memory merely because it exists in the package. The compiler can
+separate:
+
+- an always-resident execution spine required by every activation; and
+- independently selectable immutable resource groups whose access is conditional.
+
+This separation follows execution semantics rather than source-file, tensor, or
+layer boundaries. A group can contain every tensor needed to evaluate one
+routed expert, one optional prediction head, one vocabulary partition, one
+adapter, one multimodal branch, or another conditionally selected
+implementation. Several tensors may form one atomic group, and one logical
+component may address many groups.
+
+Under **demand-retained residency**, mounting the package reserves stable
+addresses and installs compact selection metadata, but does not copy the
+dynamic payload into device memory. Execution selects a group using compiled
+semantics:
+
+```text
+selected resource
+    |
+    v
+device-resident availability gate
+    | hit                         | miss
+    v                             v
+continue execution          pause at checkpoint
+                                  |
+                                  v
+                          verify, read, and upload
+                                  |
+                                  v
+                         atomically publish group
+                                  |
+                                  v
+                         resume at checkpoint
+```
+
+A hit remains a GPU operation. A miss is explicit scheduler backpressure, not
+hidden driver paging: the affected activation pauses at a physical checkpoint
+and resumes there after publication without replaying a token or already
+completed component. A group becomes visible only when all its members have
+been verified and synchronized.
+
+The stable address space and physical backing are different objects. A backend
+may reserve a large sparse virtual buffer and commit pages only for accessed
+groups. Regular partitions should use affine address formulas; irregular
+resources can use compact tables. Metadata must describe the structure of the
+selection space rather than expand every possible tensor address when a formula
+can derive it.
+
+Residency belongs to a physical device and is shareable across compatible graph
+instances and streams. Mutable stream state and transient activations remain
+separate and are never folded into an immutable-resource store. Placement is
+still chosen at runtime: the same package can map all components to one device
+or split them across devices without recompilation.
+
+Demand-retained resources stay present until the model or its device slice is
+explicitly unloaded. There is no implicit eviction, CPU fallback, or silent
+oversubscription. If the cumulative accessed working set cannot fit, the
+request fails deterministically. Bounded residency with measured eviction may
+be useful for models far larger than device memory, but it is a distinct future
+policy with different latency and scheduling semantics.
+
+This mechanism is not specific to sparse MoE. Sparse experts are a valuable
+proof because their router exposes a natural conditional access boundary, but
+the contract applies to any compiled circuit with independently selectable
+immutable resources.
+
 ## KV as a Transient Layer
 
 In this architecture, KV is not best understood as a cache.

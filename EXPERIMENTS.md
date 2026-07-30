@@ -2642,6 +2642,64 @@ The replacement boundary is semantic. After verification, the compiler remains
 free to fuse the replacement with neighboring operations. This permits local
 experimentation without imposing local execution boundaries.
 
+## 77. Demand Residency as an Execution Primitive
+
+The compiled-resource experiment established a generic distinction between the
+address space of a model and the physical parameter pages currently present on
+a device. A self-contained package can expose conditional immutable resources
+without forcing them all into VRAM at mount time.
+
+The proven policy is demand-retained:
+
+1. keep the unconditional execution spine resident;
+2. let compiled device work select a resource;
+3. check availability through a device-resident gate;
+4. pause only the affected physical execution checkpoint on a miss;
+5. verify and upload the complete atomic resource group;
+6. publish the group only after synchronization;
+7. resume from the checkpoint; and
+8. retain the group until explicit teardown.
+
+Two metadata forms were sufficient without model-family rules:
+
+- affine partition templates for regular resource banks; and
+- compact group tables for resources with irregular members or layout.
+
+The Vulkan implementation reserves one stable sparse virtual arena per
+physical resource store and backs only accessed pages. This avoids buffer
+replacement and descriptor rewrites as the working set grows. It also makes
+very large address spaces cheap to describe: synthetic qualification exercised
+one million partitions without constructing one million runtime address
+records or allocating their full payload. A separate irregular optional-head
+package proved that compiled member order is not a runtime dependency.
+
+On 2026-07-29, the real qualification workload was an FP8
+Qwen3.6-35B-A3B package split over two AMD Vulkan devices. With a 131,072-token
+context, 65,536-token output allowance, thinking enabled, seed 0, and two MTP
+draft tokens, a discarded warmup followed by five real conversation turns
+averaged 42.420 generated tok/s and 49.152 decode tok/s. The final turn correctly
+recalled the country from an earlier question. Initial device allocation was
+6.701 GB; selected payload grew to 29.448 GB (9,360 of 10,496 resources) against
+33.022 GB of addressable dynamic payload. Every load succeeded, explicit
+teardown released every resource on both devices, and both devices returned to
+their exact idle baselines.
+
+The experiment proves that access-triggered parameter residency can coexist
+with a useful, retained-state execution stream and need not impose
+model-specific compiler or runtime structure. It also exposes the boundary of
+the policy: a sufficiently varied conversation may eventually select most
+resources. Demand-retained mode must then fail at exact capacity rather than
+pretend that memory is unbounded.
+
+The next policy worth exploring is **bounded residency**, where measured
+working-set behavior drives explicit eviction and prefetch. It must remain
+separate from demand-retained mode and should be attempted only if it can
+preserve three properties:
+
+- resident hits stay entirely on the device;
+- eviction cannot corrupt in-flight activations or shared streams; and
+- normal agentic workloads gain usable capacity without pathological latency.
+
 # References
 
 ## GPU architecture and APIs
