@@ -259,6 +259,67 @@ fn per_device_residency_rejects_capacity_before_atomic_loading_and_rolls_back() 
 }
 
 #[test]
+fn demand_retained_package_can_exceed_capacity_until_its_observed_working_set_does() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 100, 20,
+    )
+    .unwrap();
+    let descriptors = [
+        residency_descriptor('1', '2', 40),
+        residency_descriptor('3', '4', 40),
+        residency_descriptor('5', '6', 40),
+    ];
+    let declared_package_bytes = descriptors
+        .iter()
+        .map(|descriptor| descriptor.byte_count)
+        .sum::<usize>();
+    assert_eq!(declared_package_bytes, 120);
+    assert!(declared_package_bytes > 100 - 20);
+
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let mut leases = Vec::new();
+    for descriptor in &descriptors[..2] {
+        let permit = match manager
+            .request(descriptor.clone(), owner("model"))
+            .unwrap()
+        {
+            DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+            _ => panic!("first access to a fitting resource did not own its load"),
+        };
+        leases.push(
+            permit
+                .publish(resident_test_group(
+                    descriptor.clone(),
+                    SyncArc::clone(&drops),
+                ))
+                .unwrap(),
+        );
+    }
+    let fitting = manager.statistics().unwrap();
+    assert_eq!(fitting.dynamic_resident_bytes, 80);
+    assert_eq!(fitting.resident_group_count, 2);
+    assert_eq!(fitting.failed_group_count, 0);
+
+    let error = manager
+        .request(descriptors[2].clone(), owner("model"))
+        .err()
+        .expect("working-set growth beyond capacity must fail");
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::Capacity);
+    let failed_growth = manager.statistics().unwrap();
+    assert_eq!(failed_growth.dynamic_resident_bytes, 80);
+    assert_eq!(failed_growth.reserved_loading_bytes, 0);
+    assert_eq!(failed_growth.resident_group_count, 2);
+    assert_eq!(failed_growth.failed_group_count, 0);
+
+    drop(leases);
+    let released = manager.unload_owner(&owner("model")).unwrap();
+    assert_eq!(released.group_count, 2);
+    assert_eq!(released.byte_count, 80);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+    assert!(manager.directory().unwrap().is_empty());
+}
+
+#[test]
 fn per_device_residency_cancellation_and_failure_wake_waiters_cleanly() {
     let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
         "gpu0", 4096, 512,
