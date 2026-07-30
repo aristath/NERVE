@@ -84,12 +84,14 @@ impl VulkanDemandResidencyBatchSegment {
             else {
                 continue;
             };
-            if selection_span.distributed
-                || selection_span.step_start < step_start
+            if selection_span.step_start < step_start
                 || selection_span.step_end > step_end
             {
+                continue;
+            }
+            if selection_span.distributed {
                 return Err(demand_batch_error(format!(
-                    "batch residency checkpoint {:?} selection is outside its local execution segment",
+                    "batch residency checkpoint {:?} selects inside a distributed dispatch rather than at its owner-device boundary",
                     checkpoint.id
                 )));
             }

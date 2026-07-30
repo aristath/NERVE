@@ -111,34 +111,6 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
                         )
                     })?,
             );
-            let owner = DeviceResourceResidencyOwnerId::new(format!(
-                "{}:{device_id}:{execution_scope}",
-                context.runtime_model.package.package_id
-            ))
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to create speculative compiled resource owner: {error}"
-                    )),
-                )
-            })?;
-            if context.resource_residency_policy == ResourceResidencyPolicy::Eager {
-                store
-                    .load_all_for_components(
-                        device,
-                        &execution_scope,
-                        &component_ids,
-                        owner,
-                    )
-                    .map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "failed to load speculative decoder {:?} eager compiled resources: {error}",
-                                decoder.id
-                            )),
-                        )
-                    })?;
-            }
         }
         let device_slice = Arc::new(device_slice);
 

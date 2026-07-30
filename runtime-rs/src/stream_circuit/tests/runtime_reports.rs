@@ -517,6 +517,7 @@
             device_id: "gpu1".to_string(),
             context_window_activations: 16,
             hosted_components: vec!["layer_05".to_string(), "layer_06".to_string()],
+            internal_shard_components: vec!["layer_05".to_string()],
             local_edges: vec![RuntimeLocalEdgeBufferReport {
                 edge_index: 5,
                 signal: "hidden_state".to_string(),
@@ -544,6 +545,7 @@
                 byte_capacity: Some(4096),
             }],
             hosted_component_count: 2,
+            internal_shard_component_count: 1,
             incoming_edge_count: 1,
             outgoing_edge_count: 1,
             permanent_parameter_count: 12,
@@ -574,6 +576,8 @@
 
         assert_eq!(payload["device_id"], "gpu1");
         assert_eq!(payload["hosted_components"][0], "layer_05");
+        assert_eq!(payload["internal_shard_components"][0], "layer_05");
+        assert_eq!(payload["internal_shard_component_count"], 1);
         assert_eq!(payload["local_edges"][0]["byte_capacity"], 4096);
         assert_eq!(payload["incoming_edges"][0]["source_device_id"], "gpu0");
         assert_eq!(

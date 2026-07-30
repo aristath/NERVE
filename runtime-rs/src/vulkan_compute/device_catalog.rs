@@ -618,6 +618,7 @@ impl VulkanComputeDeviceCatalog {
                 transfer_queue_is_distinct,
                 buffer_device_address_supported,
                 api_version: physical_device_properties.api_version,
+                physical_device_id: permitted_device.physical_device_id.clone(),
                 device_name,
                 pci_address,
                 enabled_device_extensions,

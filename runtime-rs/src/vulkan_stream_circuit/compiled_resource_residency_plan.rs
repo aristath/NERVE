@@ -100,6 +100,7 @@ struct DeviceResourceSelection {
 
 fn plan_compiled_parameter_residency(
     runtime_model: &VulkanResidentRuntimeModel,
+    contract: &CompiledResourceResidencyContract,
     input_device_id: &str,
     output_device_id: &str,
     owner_device_ids: &[String],
@@ -109,27 +110,16 @@ fn plan_compiled_parameter_residency(
     BTreeMap<String, VulkanRuntimeParameterResidencyBytes>,
     VulkanRuntimeResidencyPlanError,
 > {
-    let contract = &runtime_model.package.resource_residency;
     if !contract.supported_policies.contains(&policy) {
         return Err(VulkanRuntimeResidencyPlanError(format!(
             "compiled package does not support {policy:?} residency"
         )));
     }
 
-    let resources = contract
-        .resources
-        .iter()
-        .map(|resource| (resource.id.as_str(), resource))
-        .collect::<BTreeMap<_, _>>();
     let groups = contract
         .atomic_groups
         .iter()
         .map(|group| (group.id.as_str(), group))
-        .collect::<BTreeMap<_, _>>();
-    let templates = contract
-        .partition_templates
-        .iter()
-        .map(|template| (template.id.as_str(), template))
         .collect::<BTreeMap<_, _>>();
     let mut selected = owner_device_ids
         .iter()
@@ -152,184 +142,274 @@ fn plan_compiled_parameter_residency(
                 "resource binding resolved to non-owner device {device_id:?}"
             ))
         })?;
-        match &binding.mapping {
-            CompiledResourceBindingMapping::AtomicGroup {
-                atomic_group_id,
-                resource_id,
-            } => {
-                let group = groups.get(atomic_group_id.as_str()).ok_or_else(|| {
-                    VulkanRuntimeResidencyPlanError(format!(
-                        "resource binding references unknown group {atomic_group_id:?}"
-                    ))
-                })?;
-                if group.lifetime == CompiledResourceLifetime::Dynamic {
-                    device
-                        .concrete_dynamic
-                        .extend(group.resource_ids.iter().cloned());
-                } else {
-                    device.concrete_always.insert(resource_id.clone());
-                }
-            }
-            CompiledResourceBindingMapping::PartitionTemplateMember {
-                partition_template_id,
-                ..
-            } => {
-                device
-                    .partition_templates
-                    .insert(partition_template_id.clone());
-            }
-        }
+        accumulate_compiled_resource_binding(device, binding, &groups)?;
     }
 
     selected
         .into_iter()
         .map(|(device_id, selection)| {
-            let mut always_resident_bytes = 0usize;
-            for resource_id in &selection.concrete_always {
-                let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
-                    VulkanRuntimeResidencyPlanError(format!(
-                        "residency plan references unknown resource {resource_id:?}"
-                    ))
-                })?;
-                always_resident_bytes = checked_residency_add(
-                    always_resident_bytes,
-                    compiled_resource_bytes(resource)?,
-                    "always-resident parameter bytes",
-                )?;
-            }
-
-            let mut maximum_dynamic_bytes = 0usize;
-            let mut staging_headroom_bytes = 0usize;
-            let mut staged_concrete_groups = BTreeSet::new();
-            for resource_id in &selection.concrete_dynamic {
-                let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
-                    VulkanRuntimeResidencyPlanError(format!(
-                        "residency plan references unknown dynamic resource {resource_id:?}"
-                    ))
-                })?;
-                maximum_dynamic_bytes = checked_residency_add(
-                    maximum_dynamic_bytes,
-                    compiled_resource_bytes(resource)?,
-                    "maximum dynamic parameter bytes",
-                )?;
-                for group in contract.atomic_groups.iter().filter(|group| {
-                    group.lifetime == CompiledResourceLifetime::Dynamic
-                        && group.resource_ids.contains(resource_id)
-                }) {
-                    staged_concrete_groups.insert(group.id.as_str());
-                }
-            }
-            for group_id in staged_concrete_groups {
-                let group = groups
-                    .get(group_id)
-                    .expect("selected group was indexed above");
-                let group_bytes = group.resource_ids.iter().try_fold(
-                    0usize,
-                    |total, resource_id| {
-                        let resource =
-                            resources.get(resource_id.as_str()).ok_or_else(|| {
-                                VulkanRuntimeResidencyPlanError(format!(
-                                    "dynamic group references unknown resource {resource_id:?}"
-                                ))
-                            })?;
-                        checked_residency_add(
-                            total,
-                            compiled_resource_bytes(resource)?,
-                            "dynamic atomic group bytes",
-                        )
-                    },
-                )?;
-                staging_headroom_bytes =
-                    staging_headroom_bytes.max(group_bytes);
-            }
-
-            let mut dynamic_members =
-                BTreeMap::<String, (usize, usize)>::new();
-            for template_id in &selection.partition_templates {
-                let template =
-                    templates.get(template_id.as_str()).ok_or_else(|| {
-                        VulkanRuntimeResidencyPlanError(format!(
-                            "residency plan references unknown partition template {template_id:?}"
-                        ))
-                    })?;
-                let mut group_bytes = 0usize;
-                for member in &template.member_templates {
-                    let member_bytes = member.range_templates.iter().try_fold(
-                        0usize,
-                        |total, range| {
-                            checked_residency_add(
-                                total,
-                                range.byte_count,
-                                "partition member bytes",
-                            )
-                        },
-                    )?;
-                    group_bytes = checked_residency_add(
-                        group_bytes,
-                        member_bytes,
-                        "partition atomic group bytes",
-                    )?;
-                    match dynamic_members
-                        .entry(member.resource_identity_seed.clone())
-                    {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert((template.partition_count, member_bytes));
-                        }
-                        std::collections::btree_map::Entry::Occupied(entry)
-                            if *entry.get()
-                                != (template.partition_count, member_bytes) =>
-                        {
-                            return Err(VulkanRuntimeResidencyPlanError(
-                                "shared partition resource has conflicting byte accounting"
-                                    .to_string(),
-                            ));
-                        }
-                        std::collections::btree_map::Entry::Occupied(_) => {}
-                    }
-                }
-                staging_headroom_bytes =
-                    staging_headroom_bytes.max(group_bytes);
-            }
-            for (partition_count, member_bytes) in
-                dynamic_members.into_values()
-            {
-                maximum_dynamic_bytes = checked_residency_add(
-                    maximum_dynamic_bytes,
-                    checked_residency_mul(
-                        partition_count,
-                        member_bytes,
-                        "maximum partition resource bytes",
-                    )?,
-                    "maximum dynamic parameter bytes",
-                )?;
-            }
-
-            let initial_dynamic_bytes = match policy {
-                ResourceResidencyPolicy::DemandRetained => 0,
-                ResourceResidencyPolicy::Eager => maximum_dynamic_bytes,
-            };
-            let current_resident_bytes = checked_residency_add(
-                always_resident_bytes,
-                initial_dynamic_bytes,
-                "initial current parameter bytes",
-            )?;
-            let maximum_addressable_bytes = checked_residency_add(
-                always_resident_bytes,
-                maximum_dynamic_bytes,
-                "maximum addressable parameter bytes",
-            )?;
-            Ok((
-                device_id,
-                VulkanRuntimeParameterResidencyBytes {
-                    always_resident_bytes,
-                    initial_dynamic_bytes,
-                    current_resident_bytes,
-                    maximum_addressable_bytes,
-                    staging_headroom_bytes,
-                },
-            ))
+            compiled_parameter_residency_bytes(contract, &selection, policy)
+                .map(|bytes| (device_id, bytes))
         })
         .collect()
+}
+
+fn plan_compiled_parameter_residency_for_device_set(
+    runtime_model: &VulkanResidentRuntimeModel,
+    contract: &CompiledResourceResidencyContract,
+    input_device_id: &str,
+    output_device_id: &str,
+    device_ids: &BTreeSet<String>,
+    mount_speculative_decoders: bool,
+    policy: ResourceResidencyPolicy,
+) -> Result<VulkanRuntimeParameterResidencyBytes, VulkanRuntimeResidencyPlanError> {
+    let groups = contract
+        .atomic_groups
+        .iter()
+        .map(|group| (group.id.as_str(), group))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = DeviceResourceSelection::default();
+    for binding in &contract.bindings {
+        let Some(device_id) = resource_binding_device(
+            runtime_model,
+            binding,
+            input_device_id,
+            output_device_id,
+            mount_speculative_decoders,
+        )?
+        else {
+            continue;
+        };
+        if !device_ids.contains(device_id) {
+            continue;
+        }
+        accumulate_compiled_resource_binding(
+            &mut selected,
+            binding,
+            &groups,
+        )?;
+    }
+    compiled_parameter_residency_bytes(contract, &selected, policy)
+}
+
+fn compiled_resource_selector_ids_for_device_set(
+    runtime_model: &VulkanResidentRuntimeModel,
+    contract: &CompiledResourceResidencyContract,
+    input_device_id: &str,
+    output_device_id: &str,
+    device_ids: &BTreeSet<String>,
+    mount_speculative_decoders: bool,
+) -> Result<BTreeSet<String>, VulkanRuntimeResidencyPlanError> {
+    let mut selector_ids = BTreeSet::new();
+    for selector in &contract.selectors {
+        let Some(device_id) = resource_component_device(
+            runtime_model,
+            &selector.execution_scope,
+            &selector.component_id,
+            input_device_id,
+            output_device_id,
+            mount_speculative_decoders,
+        )?
+        else {
+            continue;
+        };
+        if device_ids.contains(device_id) {
+            selector_ids.insert(selector.id.clone());
+        }
+    }
+    Ok(selector_ids)
+}
+
+fn accumulate_compiled_resource_binding(
+    selection: &mut DeviceResourceSelection,
+    binding: &CompiledResourceBinding,
+    groups: &BTreeMap<&str, &CompiledAtomicResidencyGroup>,
+) -> Result<(), VulkanRuntimeResidencyPlanError> {
+    match &binding.mapping {
+        CompiledResourceBindingMapping::AtomicGroup {
+            atomic_group_id,
+            resource_id,
+        } => {
+            let group = groups.get(atomic_group_id.as_str()).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "resource binding references unknown group {atomic_group_id:?}"
+                ))
+            })?;
+            if group.lifetime == CompiledResourceLifetime::Dynamic {
+                selection
+                    .concrete_dynamic
+                    .extend(group.resource_ids.iter().cloned());
+            } else {
+                selection.concrete_always.insert(resource_id.clone());
+            }
+        }
+        CompiledResourceBindingMapping::PartitionTemplateMember {
+            partition_template_id,
+            ..
+        } => {
+            selection
+                .partition_templates
+                .insert(partition_template_id.clone());
+        }
+    }
+    Ok(())
+}
+
+fn compiled_parameter_residency_bytes(
+    contract: &CompiledResourceResidencyContract,
+    selection: &DeviceResourceSelection,
+    policy: ResourceResidencyPolicy,
+) -> Result<VulkanRuntimeParameterResidencyBytes, VulkanRuntimeResidencyPlanError> {
+    let resources = contract
+        .resources
+        .iter()
+        .map(|resource| (resource.id.as_str(), resource))
+        .collect::<BTreeMap<_, _>>();
+    let groups = contract
+        .atomic_groups
+        .iter()
+        .map(|group| (group.id.as_str(), group))
+        .collect::<BTreeMap<_, _>>();
+    let templates = contract
+        .partition_templates
+        .iter()
+        .map(|template| (template.id.as_str(), template))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut always_resident_bytes = 0usize;
+    for resource_id in &selection.concrete_always {
+        let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "residency plan references unknown resource {resource_id:?}"
+            ))
+        })?;
+        always_resident_bytes = checked_residency_add(
+            always_resident_bytes,
+            compiled_resource_bytes(resource)?,
+            "always-resident parameter bytes",
+        )?;
+    }
+
+    let mut maximum_dynamic_bytes = 0usize;
+    let mut staging_headroom_bytes = 0usize;
+    let mut staged_concrete_groups = BTreeSet::new();
+    for resource_id in &selection.concrete_dynamic {
+        let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "residency plan references unknown dynamic resource {resource_id:?}"
+            ))
+        })?;
+        maximum_dynamic_bytes = checked_residency_add(
+            maximum_dynamic_bytes,
+            compiled_resource_bytes(resource)?,
+            "maximum dynamic parameter bytes",
+        )?;
+        for group in contract.atomic_groups.iter().filter(|group| {
+            group.lifetime == CompiledResourceLifetime::Dynamic
+                && group.resource_ids.contains(resource_id)
+        }) {
+            staged_concrete_groups.insert(group.id.as_str());
+        }
+    }
+    for group_id in staged_concrete_groups {
+        let group = groups
+            .get(group_id)
+            .expect("selected group was indexed above");
+        let group_bytes =
+            group
+                .resource_ids
+                .iter()
+                .try_fold(0usize, |total, resource_id| {
+                    let resource =
+                        resources.get(resource_id.as_str()).ok_or_else(|| {
+                            VulkanRuntimeResidencyPlanError(format!(
+                                "dynamic group references unknown resource {resource_id:?}"
+                            ))
+                        })?;
+                    checked_residency_add(
+                        total,
+                        compiled_resource_bytes(resource)?,
+                        "dynamic atomic group bytes",
+                    )
+                })?;
+        staging_headroom_bytes = staging_headroom_bytes.max(group_bytes);
+    }
+
+    let mut dynamic_members = BTreeMap::<String, (usize, usize)>::new();
+    for template_id in &selection.partition_templates {
+        let template = templates.get(template_id.as_str()).ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "residency plan references unknown partition template {template_id:?}"
+            ))
+        })?;
+        let mut group_bytes = 0usize;
+        for member in &template.member_templates {
+            let member_bytes =
+                member
+                    .range_templates
+                    .iter()
+                    .try_fold(0usize, |total, range| {
+                        checked_residency_add(
+                            total,
+                            range.byte_count,
+                            "partition member bytes",
+                        )
+                    })?;
+            group_bytes = checked_residency_add(
+                group_bytes,
+                member_bytes,
+                "partition atomic group bytes",
+            )?;
+            match dynamic_members.entry(member.resource_identity_seed.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((template.partition_count, member_bytes));
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if *entry.get() != (template.partition_count, member_bytes) =>
+                {
+                    return Err(VulkanRuntimeResidencyPlanError(
+                        "shared partition resource has conflicting byte accounting"
+                            .to_string(),
+                    ));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+        staging_headroom_bytes = staging_headroom_bytes.max(group_bytes);
+    }
+    for (partition_count, member_bytes) in dynamic_members.into_values() {
+        maximum_dynamic_bytes = checked_residency_add(
+            maximum_dynamic_bytes,
+            checked_residency_mul(
+                partition_count,
+                member_bytes,
+                "maximum partition resource bytes",
+            )?,
+            "maximum dynamic parameter bytes",
+        )?;
+    }
+
+    let initial_dynamic_bytes = match policy {
+        ResourceResidencyPolicy::DemandRetained => 0,
+        ResourceResidencyPolicy::Eager => maximum_dynamic_bytes,
+    };
+    let current_resident_bytes = checked_residency_add(
+        always_resident_bytes,
+        initial_dynamic_bytes,
+        "initial current parameter bytes",
+    )?;
+    let maximum_addressable_bytes = checked_residency_add(
+        always_resident_bytes,
+        maximum_dynamic_bytes,
+        "maximum addressable parameter bytes",
+    )?;
+    Ok(VulkanRuntimeParameterResidencyBytes {
+        always_resident_bytes,
+        initial_dynamic_bytes,
+        current_resident_bytes,
+        maximum_addressable_bytes,
+        staging_headroom_bytes,
+    })
 }
 
 fn resource_binding_device<'a>(
@@ -339,16 +419,34 @@ fn resource_binding_device<'a>(
     output_device_id: &'a str,
     mount_speculative_decoders: bool,
 ) -> Result<Option<&'a str>, VulkanRuntimeResidencyPlanError> {
-    if binding.execution_scope == "target" {
+    resource_component_device(
+        runtime_model,
+        &binding.execution_scope,
+        &binding.component_id,
+        input_device_id,
+        output_device_id,
+        mount_speculative_decoders,
+    )
+}
+
+fn resource_component_device<'a>(
+    runtime_model: &'a VulkanResidentRuntimeModel,
+    execution_scope: &str,
+    component_id: &str,
+    input_device_id: &'a str,
+    output_device_id: &'a str,
+    mount_speculative_decoders: bool,
+) -> Result<Option<&'a str>, VulkanRuntimeResidencyPlanError> {
+    if execution_scope == "target" {
         let component = runtime_model
             .circuit_graph
             .components
             .iter()
-            .find(|component| component.component_id == binding.component_id)
+            .find(|component| component.component_id == component_id)
             .ok_or_else(|| {
                 VulkanRuntimeResidencyPlanError(format!(
                     "resource binding references unknown target component {:?}",
-                    binding.component_id
+                    component_id
                 ))
             })?;
         return Ok(Some(match component.runtime_role {
@@ -371,13 +469,12 @@ fn resource_binding_device<'a>(
     }
 
     let decoder_id =
-        binding
-            .execution_scope
+        execution_scope
             .strip_prefix("draft:")
             .ok_or_else(|| {
                 VulkanRuntimeResidencyPlanError(format!(
                     "resource binding has unsupported execution scope {:?}",
-                    binding.execution_scope
+                    execution_scope
                 ))
             })?;
     let decoder = runtime_model
@@ -394,11 +491,11 @@ fn resource_binding_device<'a>(
         .circuit_graph
         .components
         .iter()
-        .any(|component| component.component_id == binding.component_id)
+        .any(|component| component.component_id == component_id)
     {
         return Err(VulkanRuntimeResidencyPlanError(format!(
             "resource binding references unknown draft component {:?}",
-            binding.component_id
+            component_id
         )));
     }
     Ok(mount_speculative_decoders.then_some(output_device_id))

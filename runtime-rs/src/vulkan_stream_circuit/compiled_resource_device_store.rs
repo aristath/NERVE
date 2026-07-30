@@ -24,6 +24,7 @@ struct VulkanCompiledResourceDeviceAddressState {
 
 pub struct VulkanCompiledResourceDeviceStore {
     device_id: String,
+    allowed_selector_ids: BTreeSet<String>,
     package_root: PathBuf,
     contract: Arc<CompiledResourceResidencyContract>,
     layout: Arc<VulkanCompiledResourceAddressLayout>,
@@ -43,6 +44,7 @@ impl VulkanCompiledResourceDeviceStore {
         package_root: impl Into<PathBuf>,
         contract: Arc<CompiledResourceResidencyContract>,
         layout: Arc<VulkanCompiledResourceAddressLayout>,
+        allowed_selector_ids: BTreeSet<String>,
         maximum_dynamic_payload_bytes: usize,
         available_dynamic_device_bytes: usize,
         maximum_group_byte_count: usize,
@@ -56,6 +58,7 @@ impl VulkanCompiledResourceDeviceStore {
             || maximum_ranges_per_group == 0
             || maximum_group_byte_count > maximum_dynamic_payload_bytes
             || layout.slot_count() == 0
+            || allowed_selector_ids.is_empty()
         {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
                 "compiled device-resource store has an invalid capacity or identity",
@@ -64,7 +67,33 @@ impl VulkanCompiledResourceDeviceStore {
         let upload_alignment =
             compiled_resource_upload_alignment(&contract, device)?;
         let maximum_group_resource_count =
-            compiled_resource_maximum_resources_per_group(&contract)?;
+            compiled_resource_maximum_resources_per_group_for_selectors(
+                &contract,
+                &allowed_selector_ids,
+            )?;
+        let maximum_addressable_resource_count = layout
+            .selectors
+            .iter()
+            .filter(|selector| {
+                allowed_selector_ids.contains(&selector.selector_id)
+            })
+            .flat_map(|selector| selector.resource_address_slots.iter())
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len();
+        if maximum_addressable_resource_count == 0
+            || allowed_selector_ids.iter().any(|selector_id| {
+                !layout
+                    .selectors
+                    .iter()
+                    .any(|selector| selector.selector_id == *selector_id)
+            })
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled device-resource store selector ownership is invalid",
+            ));
+        }
         let per_resource_alignment_slack =
             upload_alignment.checked_sub(1).ok_or_else(|| {
                 VulkanCompiledResourceDeviceStoreError::new(
@@ -73,8 +102,7 @@ impl VulkanCompiledResourceDeviceStore {
             })?;
         let maximum_allocation_byte_capacity = maximum_dynamic_payload_bytes
             .checked_add(
-                layout
-                    .slot_count()
+                maximum_addressable_resource_count
                     .checked_mul(per_resource_alignment_slack)
                     .ok_or_else(|| {
                         VulkanCompiledResourceDeviceStoreError::new(
@@ -174,6 +202,7 @@ impl VulkanCompiledResourceDeviceStore {
             })?;
         Ok(Self {
             device_id,
+            allowed_selector_ids,
             package_root,
             contract,
             layout,
@@ -193,6 +222,10 @@ impl VulkanCompiledResourceDeviceStore {
 
     pub fn device_id(&self) -> &str {
         &self.device_id
+    }
+
+    pub fn allowed_selector_ids(&self) -> &BTreeSet<String> {
+        &self.allowed_selector_ids
     }
 
     pub fn dynamic_buffers_for_components(
@@ -361,6 +394,7 @@ impl VulkanCompiledResourceDeviceStore {
             .filter(|selector| {
                 selector.execution_scope == execution_scope
                     && component_ids.contains(&selector.component_id)
+                    && self.allowed_selector_ids.contains(&selector.id)
             })
             .flat_map(|selector| {
                 (0..selector.resource_count)
@@ -369,6 +403,7 @@ impl VulkanCompiledResourceDeviceStore {
                     })
             })
             .collect::<Vec<_>>();
+        let selected = self.unique_selector_resources(selected)?;
         for (selector_id, resource_index) in &selected {
             self.load_selector_resource(
                 device,
@@ -378,6 +413,52 @@ impl VulkanCompiledResourceDeviceStore {
             )?;
         }
         Ok(selected.len())
+    }
+
+    pub fn load_all_allowed(
+        &self,
+        device: &VulkanComputeDevice,
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let selected = self
+            .contract
+            .selectors
+            .iter()
+            .filter(|selector| {
+                self.allowed_selector_ids.contains(&selector.id)
+            })
+            .flat_map(|selector| {
+                (0..selector.resource_count)
+                    .map(move |resource_index| {
+                        (selector.id.clone(), resource_index)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let selected = self.unique_selector_resources(selected)?;
+        for (selector_id, resource_index) in &selected {
+            self.load_selector_resource(
+                device,
+                selector_id,
+                *resource_index,
+                owner.clone(),
+            )?;
+        }
+        Ok(selected.len())
+    }
+
+    fn unique_selector_resources(
+        &self,
+        candidates: Vec<(String, usize)>,
+    ) -> Result<Vec<(String, usize)>, VulkanCompiledResourceDeviceStoreError> {
+        let mut selected_by_group = BTreeMap::new();
+        for (selector_id, resource_index) in candidates {
+            let group =
+                self.resolve_selector_resource(&selector_id, resource_index)?;
+            selected_by_group
+                .entry(group.id().to_string())
+                .or_insert((selector_id, resource_index));
+        }
+        Ok(selected_by_group.into_values().collect())
     }
 
     pub fn statistics(
@@ -429,7 +510,10 @@ impl VulkanCompiledResourceDeviceStore {
             .contract
             .selectors
             .iter()
-            .find(|selector| selector.id == selector_id)
+            .find(|selector| {
+                selector.id == selector_id
+                    && self.allowed_selector_ids.contains(&selector.id)
+            })
             .ok_or_else(|| {
                 VulkanCompiledResourceDeviceStoreError::new(format!(
                     "compiled resource selector {selector_id:?} is unknown"
@@ -546,27 +630,59 @@ fn compiled_resource_maximum_ranges_per_group(
         .try_fold(0usize, |maximum, count| count.map(|count| maximum.max(count)))
 }
 
-fn compiled_resource_maximum_resources_per_group(
+fn compiled_resource_maximum_resources_per_group_for_selectors(
     contract: &CompiledResourceResidencyContract,
+    selector_ids: &BTreeSet<String>,
 ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
     contract
-        .atomic_groups
+        .selectors
         .iter()
-        .filter(|group| group.lifetime == CompiledResourceLifetime::Dynamic)
-        .map(|group| group.resource_ids.len())
-        .chain(
-            contract
+        .filter(|selector| selector_ids.contains(&selector.id))
+        .map(|selector| match &selector.mapping {
+            CompiledResourceSelectorMapping::GroupTable {
+                atomic_group_ids,
+            } => atomic_group_ids
+                .iter()
+                .map(|group_id| {
+                    contract
+                        .atomic_groups
+                        .iter()
+                        .find(|group| group.id == *group_id)
+                        .map(|group| group.resource_ids.len())
+                        .ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(format!(
+                                "compiled selector {:?} references missing group {group_id:?}",
+                                selector.id
+                            ))
+                        })
+                })
+                .try_fold(0usize, |maximum, count| {
+                    count.map(|count| maximum.max(count))
+                }),
+            CompiledResourceSelectorMapping::PartitionTemplate {
+                partition_template_id,
+            } => contract
                 .partition_templates
                 .iter()
-                .map(|template| template.member_templates.len()),
-        )
+                .find(|template| template.id == *partition_template_id)
+                .map(|template| template.member_templates.len())
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "compiled selector {:?} references missing partition template {partition_template_id:?}",
+                        selector.id
+                    ))
+                }),
+        })
         .try_fold(0usize, |maximum, count| {
-            if count == 0 {
+            count.map(|count| maximum.max(count))
+        })
+        .and_then(|maximum| {
+            if maximum == 0 {
                 Err(VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled dynamic resource group is empty",
+                    "compiled device-resource store has no addressable group members",
                 ))
             } else {
-                Ok(maximum.max(count))
+                Ok(maximum)
             }
         })
 }

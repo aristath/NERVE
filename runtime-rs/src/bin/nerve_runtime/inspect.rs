@@ -379,6 +379,10 @@ fn inspect_device_slice(
     } else {
         println!("device_id={}", payload.device_id);
         println!("hosted_node_count={}", payload.hosted_component_count);
+        println!(
+            "internal_shard_component_count={}",
+            payload.internal_shard_component_count
+        );
         println!("incoming_edge_count={}", payload.incoming_edge_count);
         println!("outgoing_edge_count={}", payload.outgoing_edge_count);
         println!("dispatch_count={}", payload.dispatch_count);
@@ -472,9 +476,10 @@ fn inspect_placement(
         );
         for device in &payload.devices {
             println!(
-                "{} nodes={} incoming={} outgoing={} dispatches={}",
+                "{} nodes={} internal_shards={} incoming={} outgoing={} dispatches={}",
                 device.device_id,
                 device.hosted_component_count,
+                device.internal_shard_component_count,
                 device.incoming_edge_count,
                 device.outgoing_edge_count,
                 device.dispatch_count
@@ -493,6 +498,76 @@ fn inspect_device_slice_payload(
     device_id: &str,
     capacity: usize,
 ) -> Result<RuntimeDeviceSliceReport, Box<dyn Error>> {
+    let internal_shard_components = runtime_model
+        .placement
+        .component_shard_devices
+        .iter()
+        .filter(|(_, device_ids)| {
+            device_ids.iter().any(|candidate| candidate == device_id)
+        })
+        .map(|(component_id, _)| component_id.clone())
+        .collect::<Vec<_>>();
+    let hosted_components = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| {
+            runtime_model
+                .placement
+                .device_for_component(&component.component_id)
+                == device_id
+        })
+        .map(|component| component.component_id.clone())
+        .collect::<Vec<_>>();
+    if hosted_components.is_empty() {
+        if internal_shard_components.is_empty() {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "logical device {device_id:?} owns neither a graph component nor an internal shard"
+                ),
+            )));
+        }
+        return Ok(RuntimeDeviceSliceReport {
+            ok: true,
+            package_manifest: package_manifest.to_path_buf(),
+            device_name: device.device_name().to_string(),
+            device_id: device_id.to_string(),
+            context_window_activations: capacity,
+            hosted_components,
+            internal_shard_component_count:
+                internal_shard_components.len(),
+            internal_shard_components,
+            local_edges: Vec::new(),
+            incoming_edges: Vec::new(),
+            outgoing_edges: Vec::new(),
+            hosted_component_count: 0,
+            incoming_edge_count: 0,
+            outgoing_edge_count: 0,
+            permanent_parameter_count: 0,
+            permanent_parameter_bytes: 0,
+            reusable_kernel_word_count: 0,
+            loaded_kernel_artifact_count: 0,
+            dispatch_count: 0,
+            descriptor_count: 0,
+            model_boundary_descriptor_count: 0,
+            incoming_edge_descriptor_count: 0,
+            outgoing_edge_descriptor_count: 0,
+            tick_plan: RuntimeDeviceTickPlanReport {
+                stage_count: 0,
+                receive_stage_count: 0,
+                dispatch_stage_count: 0,
+                publish_stage_count: 0,
+                local_edge_read_count: 0,
+                local_edge_write_count: 0,
+                incoming_edge_read_count: 0,
+                outgoing_edge_write_count: 0,
+                model_input_read_count: 0,
+                model_output_write_count: 0,
+                can_execute: false,
+            },
+        });
+    }
     let slice = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
         device,
         manifest_dir,
@@ -521,6 +596,8 @@ fn inspect_device_slice_payload(
         device_id: slice.device_id,
         context_window_activations: capacity,
         hosted_components: resident_plan.hosted_component_ids.clone(),
+        internal_shard_component_count: internal_shard_components.len(),
+        internal_shard_components,
         local_edges: resident_plan
             .local_edges
             .iter()

@@ -70,7 +70,7 @@ fn runtime_residency_plan_uses_physical_transient_layout_without_opening_vulkan(
 }
 
 #[test]
-fn runtime_residency_plan_fails_closed_for_unplanned_internal_sharding() {
+fn runtime_residency_plan_keeps_internal_shards_out_of_component_ownership() {
     let runtime_model = fixture_model_runtime_model()
         .with_component_shard_devices(
             "layer_00",
@@ -85,7 +85,7 @@ fn runtime_residency_plan_fails_closed_for_unplanned_internal_sharding() {
         .load_runtime_tensor_index(&package_root)
         .unwrap();
 
-    let error = plan_vulkan_runtime_residency(
+    let plan = plan_vulkan_runtime_residency(
         &package_root,
         &runtime_model,
         &tensor_index,
@@ -93,9 +93,292 @@ fn runtime_residency_plan_fails_closed_for_unplanned_internal_sharding() {
         false,
         ResourceResidencyPolicy::Eager,
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("refuses internal component sharding"));
+    assert_eq!(plan.device_plans.len(), 1);
+    assert_eq!(
+        plan.device_plans[0].device_id,
+        RUNTIME_DEFAULT_LOGICAL_DEVICE_ID
+    );
+    assert!(
+        plan.device_plans[0]
+            .parameter_residency
+            .maximum_addressable_bytes
+            > 0
+    );
+}
+
+#[test]
+fn runtime_resource_contract_instantiates_duplicates_without_copying_resources() {
+    let mut manifest = fixture_model_package_manifest();
+    let dynamic_group_id =
+        manifest.resource_residency.atomic_groups[0].id.clone();
+    let dynamic_resource_ids = manifest.resource_residency.atomic_groups[0]
+        .resource_ids
+        .clone();
+    manifest.resource_residency.atomic_groups[0].lifetime =
+        CompiledResourceLifetime::Dynamic;
+    for resource in &mut manifest.resource_residency.resources {
+        if dynamic_resource_ids.contains(&resource.id) {
+            resource.lifetime = CompiledResourceLifetime::Dynamic;
+        }
+    }
+    let mut selector = CompiledResourceSelector {
+        id: String::new(),
+        execution_scope: "target".to_string(),
+        component_id: "layer_00".to_string(),
+        node_id: "operator_norm".to_string(),
+        domain_id: "test_domain".to_string(),
+        resource_count: 1,
+        selection_signal: "operator_norm_out".to_string(),
+        encoding: CompiledResourceSelectionEncoding {
+            element_type: CompiledResourceSelectionElementType::U32,
+            selection_count_per_activation: 1,
+            index_shift: 0,
+            index_mask: 1,
+        },
+        mapping: CompiledResourceSelectorMapping::GroupTable {
+            atomic_group_ids: vec![dynamic_group_id],
+        },
+    };
+    selector.id = package::compiled_selector_identity(&selector).unwrap();
+    let mut checkpoint = CompiledResidencyCheckpoint {
+        id: String::new(),
+        execution_scope: "target".to_string(),
+        component_id: "layer_00".to_string(),
+        after_node_id: "operator_norm".to_string(),
+        resume_node_id: "q_projection".to_string(),
+        selector_ids: vec![selector.id.clone()],
+    };
+    checkpoint.id =
+        package::compiled_checkpoint_identity(&checkpoint).unwrap();
+    manifest.resource_residency.selectors = vec![selector];
+    manifest.resource_residency.checkpoints = vec![checkpoint];
+    let package_root = tiny_model_dir();
+    let source_graph = manifest
+        .circuit_graph
+        .to_resolved_lowered_execution_graph(&package_root)
+        .unwrap();
+    let runtime_graph =
+        StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
+            .unwrap()
+            .duplicate_after_instance(
+                &source_graph,
+                "layer_00",
+                "layer_00_repeat",
+            )
+            .unwrap()
+            .with_instance_device("layer_00_repeat", "gpu1")
+            .unwrap();
+    let runtime_model = manifest
+        .clone()
+        .mount_runtime_graph(&runtime_graph)
+        .unwrap();
+    let source = &manifest.resource_residency;
+    let runtime =
+        instantiate_runtime_resource_contract(&runtime_model).unwrap();
+
+    assert_eq!(runtime.resources, source.resources);
+    assert_eq!(runtime.atomic_groups, source.atomic_groups);
+    assert_eq!(runtime.partition_templates, source.partition_templates);
+    assert_eq!(
+        runtime.bindings.len(),
+        source.bindings.len()
+            + source
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    binding.execution_scope == "target"
+                        && binding.component_id == "layer_00"
+                })
+                .count()
+    );
+    assert_eq!(
+        runtime.selectors.len(),
+        source.selectors.len()
+            + source
+                .selectors
+                .iter()
+                .filter(|selector| {
+                    selector.execution_scope == "target"
+                        && selector.component_id == "layer_00"
+                })
+                .count()
+    );
+    assert_eq!(
+        runtime.checkpoints.len(),
+        source.checkpoints.len()
+            + source
+                .checkpoints
+                .iter()
+                .filter(|checkpoint| {
+                    checkpoint.execution_scope == "target"
+                        && checkpoint.component_id == "layer_00"
+                })
+                .count()
+    );
+    assert_eq!(
+        runtime
+            .selectors
+            .iter()
+            .map(|selector| selector.component_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["layer_00", "layer_00_repeat"])
+    );
+    assert_eq!(
+        VulkanCompiledResourceAddressLayout::from_contract(&runtime)
+            .unwrap()
+            .slot_count(),
+        VulkanCompiledResourceAddressLayout::from_contract(source)
+            .unwrap()
+            .slot_count()
+    );
+
+    let tensor_index = runtime_model
+        .load_runtime_tensor_index(&package_root)
+        .unwrap();
+    let plan = plan_vulkan_runtime_residency(
+        &package_root,
+        &runtime_model,
+        &tensor_index,
+        16,
+        false,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.device_plans
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["gpu0", "gpu1"])
+    );
+    assert!(plan.device_plans.iter().all(|device| {
+        device.parameter_residency.initial_dynamic_bytes == 0
+            && device.parameter_residency.maximum_addressable_bytes > 0
+    }));
+}
+
+#[test]
+fn runtime_resource_contract_rewires_source_semantics_to_new_instance_ids() {
+    let manifest = fixture_model_package_manifest();
+    let package_root = tiny_model_dir();
+    let source_graph = manifest
+        .circuit_graph
+        .to_resolved_lowered_execution_graph(&package_root)
+        .unwrap();
+    let runtime_graph =
+        StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
+            .unwrap()
+            .with_signal_processor_chain(
+                &source_graph,
+                &[("rewired".to_string(), "layer_00".to_string())],
+            )
+            .unwrap();
+    let runtime_model = manifest.mount_runtime_graph(&runtime_graph).unwrap();
+    let runtime =
+        instantiate_runtime_resource_contract(&runtime_model).unwrap();
+
+    assert!(!runtime.bindings.is_empty());
+    assert!(!runtime
+        .bindings
+        .iter()
+        .any(|binding| binding.component_id == "layer_00"));
+    assert!(runtime
+        .bindings
+        .iter()
+        .any(|binding| binding.component_id == "rewired"));
+    assert!(!runtime
+        .selectors
+        .iter()
+        .any(|selector| selector.component_id == "layer_00"));
+    assert!(!runtime
+        .checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.component_id == "layer_00"));
+}
+
+#[test]
+fn compiled_resource_placement_coalesces_logical_aliases_on_one_physical_device() {
+    let device = selected_test_vulkan_device()
+        .expect("explicit AMD Vulkan test device must open");
+    let groups = group_compiled_resource_logical_devices_by_physical(&[
+        ("graph_a".to_string(), &device),
+        ("graph_b".to_string(), &device),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        groups,
+        vec![vec!["graph_a".to_string(), "graph_b".to_string()]]
+    );
+}
+
+#[test]
+fn compiled_resource_placement_rejects_distinct_logical_devices_for_one_physical_gpu() {
+    let first = selected_test_vulkan_device()
+        .expect("first explicit AMD Vulkan test device must open");
+    let second = selected_test_vulkan_device()
+        .expect("second explicit AMD Vulkan test device must open");
+    assert!(first.shares_physical_device_with(&second));
+    assert!(!first.shares_logical_device_with(&second));
+
+    let error = group_compiled_resource_logical_devices_by_physical(&[
+        ("graph_a".to_string(), &first),
+        ("graph_b".to_string(), &second),
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("through different Vulkan logical devices")
+    );
+}
+
+#[test]
+fn compiled_resource_placement_separates_distinct_physical_devices() {
+    let Some((owner, peer)) = selected_test_vulkan_device_pair() else {
+        panic!("explicit Vulkan owner and peer devices are required");
+    };
+    let groups = group_compiled_resource_logical_devices_by_physical(&[
+        ("graph_a".to_string(), owner.as_ref()),
+        ("graph_b".to_string(), peer.as_ref()),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        groups,
+        vec![
+            vec!["graph_a".to_string()],
+            vec!["graph_b".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn compiled_resource_cross_device_access_requires_an_explicit_choice() {
+    let request = VulkanCompiledResourceCrossDeviceAccessRequest {
+        selector_id: "selector".to_string(),
+        execution_physical_device_id:
+            "vulkan-uuid:11111111111111111111111111111111".to_string(),
+        resident_physical_device_ids: vec![
+            "vulkan-uuid:00000000000000000000000000000000".to_string(),
+        ],
+    };
+    let error =
+        require_explicit_compiled_resource_cross_device_choice(&request, None)
+            .unwrap_err();
+    assert!(error.to_string().contains("choose remote execution"));
+    assert_eq!(
+        require_explicit_compiled_resource_cross_device_choice(
+            &request,
+            Some(
+                VulkanCompiledResourceCrossDeviceAccessChoice::PeerTransfer,
+            ),
+        )
+        .unwrap(),
+        VulkanCompiledResourceCrossDeviceAccessChoice::PeerTransfer
+    );
 }
 
 #[test]

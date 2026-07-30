@@ -9,7 +9,8 @@ struct VulkanResidentComponentBatchSliceRunner {
         BTreeMap<VulkanResidentComponentBatchControlPayload, VulkanResidentBuffer>,
     steps: Vec<VulkanComponentBatchDispatchStep>,
     execution_units: Vec<VulkanComponentBatchExecutionUnit>,
-    demand_residency: Option<VulkanDemandResidencyBatchSegment>,
+    demand_residency:
+        BTreeMap<usize, VulkanDemandResidencyBatchSegment>,
     submission_template_catalog:
         RefCell<BTreeMap<(usize, usize), VulkanResidentQueueSubmissionTemplate>>,
     execution_shape_class_catalog: RefCell<BTreeMap<usize, String>>,
@@ -620,36 +621,35 @@ impl VulkanResidentComponentBatchSliceRunner {
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let demand_residency = match &slice.demand_residency_context {
             Some(context) => {
-                if execution_units.iter().any(|unit| {
-                    matches!(
-                        unit,
-                        VulkanComponentBatchExecutionUnit::DistributedDispatch {
-                            ..
-                        }
-                    )
-                }) {
-                    return Err(
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                            VulkanError(
-                                "demand-resident component batching cannot yet cross an internal distributed-dispatch boundary"
-                                    .to_string(),
-                            ),
-                        ),
-                    );
+                let mut segments = BTreeMap::new();
+                for (unit_index, unit) in execution_units.iter().enumerate() {
+                    let VulkanComponentBatchExecutionUnit::LocalComponent {
+                        step_start,
+                        step_end,
+                        ..
+                    } = unit
+                    else {
+                        continue;
+                    };
+                    if let Some(segment) =
+                        VulkanDemandResidencyBatchSegment::from_slice_steps(
+                            &slice.mounted,
+                            slice.package_slice.physical_residency_schedule(),
+                            &dispatch_spans,
+                            &signal_buffers,
+                            &signal_buffer_indices,
+                            *step_start,
+                            *step_end,
+                            lane_capacity,
+                            context.clone(),
+                        )?
+                    {
+                        segments.insert(unit_index, segment);
+                    }
                 }
-                VulkanDemandResidencyBatchSegment::from_slice_steps(
-                    &slice.mounted,
-                    slice.package_slice.physical_residency_schedule(),
-                    &dispatch_spans,
-                    &signal_buffers,
-                    &signal_buffer_indices,
-                    0,
-                    steps.len(),
-                    lane_capacity,
-                    context.clone(),
-                )?
+                segments
             }
-            None => None,
+            None => BTreeMap::new(),
         };
 
         Ok(Self {
@@ -858,15 +858,6 @@ impl VulkanResidentComponentBatchSliceRunner {
                 ))
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
-        if let Some(demand_residency) = &self.demand_residency {
-            return demand_residency.run(
-                device,
-                &self.steps,
-                batch_width,
-                stream_ticks,
-                dynamic_state_capacity_activations,
-            );
-        }
         let sequence_shape_keys = self.sequence_shape_keys(batch_width);
         self.ensure_sequence_shapes(device, &sequence_shape_keys)?;
         self.execution_shape_class_catalog
@@ -936,6 +927,56 @@ impl VulkanResidentComponentBatchSliceRunner {
                     } else {
                         Vec::new()
                     };
+                    if let Some(demand_residency) =
+                        self.demand_residency.get(&unit_index)
+                    {
+                        if local_submission_batch.pending_submission_count() > 0 {
+                            self.submit_and_wait_local_batch(
+                                std::mem::take(&mut local_submission_batch),
+                                shape_class_id,
+                                batch_width,
+                                local_group_index,
+                                shape_was_calibrated,
+                                true,
+                                timeline_value_offset,
+                            )?
+                            .into_iter()
+                            .for_each(|measurement| {
+                                measurements.push(measurement)
+                            });
+                            local_group_index += 1;
+                        }
+                        if !wait_points.is_empty() {
+                            device
+                                .submit_timeline_semaphore_bridge(
+                                    wait_points,
+                                    &[],
+                                )
+                                .map_err(
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                                )?;
+                            pending_owner_wait_points.clear();
+                        }
+                        demand_residency.run(
+                            device,
+                            &self.steps,
+                            batch_width,
+                            stream_ticks,
+                            dynamic_state_capacity_activations,
+                        )?;
+                        if !signal_points.is_empty() {
+                            device
+                                .submit_timeline_semaphore_bridge(
+                                    &[],
+                                    &signal_points,
+                                )
+                                .map_err(
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                                )?;
+                        }
+                        sequence_index += 1;
+                        continue;
+                    }
                     self.run_segment(
                         device,
                         batch_width,

@@ -68,6 +68,30 @@ pub fn plan_vulkan_runtime_residency(
     mount_speculative_decoders: bool,
     residency_policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
+    let resource_contract =
+        instantiate_runtime_resource_contract(runtime_model)
+            .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    plan_vulkan_runtime_residency_with_contract(
+        manifest_dir,
+        runtime_model,
+        tensor_index,
+        context_capacity_activations,
+        mount_speculative_decoders,
+        residency_policy,
+        &resource_contract,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_vulkan_runtime_residency_with_contract(
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    tensor_index: &TensorIndex,
+    context_capacity_activations: usize,
+    mount_speculative_decoders: bool,
+    residency_policy: ResourceResidencyPolicy,
+    resource_contract: &CompiledResourceResidencyContract,
+) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
     if context_capacity_activations == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
             "runtime residency context capacity must be positive".to_string(),
@@ -79,14 +103,6 @@ pub fn plan_vulkan_runtime_residency(
             runtime_model.package.max_context_activations
         )));
     }
-    if !runtime_model.placement.component_shard_devices.is_empty() {
-        return Err(VulkanRuntimeResidencyPlanError(
-            "runtime residency planning refuses internal component sharding until its \
-             hardware-dependent distributed allocation plan is supplied"
-                .to_string(),
-        ));
-    }
-
     let manifest_dir = manifest_dir.as_ref();
     let (input_component_id, output_component_id) = runtime_model
         .circuit_graph
@@ -132,6 +148,7 @@ pub fn plan_vulkan_runtime_residency(
     let mut parameter_residency_by_device =
         plan_compiled_parameter_residency(
             runtime_model,
+            resource_contract,
             &input_device_id,
             &output_device_id,
             &device_ids,

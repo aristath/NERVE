@@ -17,6 +17,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
         device: &VulkanComputeDevice,
         manifest_dir: &Path,
         runtime_model: &VulkanResidentRuntimeModel,
+        resource_contract: &CompiledResourceResidencyContract,
         tensor_index: &TensorIndex,
         device_id: &str,
         capacity: usize,
@@ -104,7 +105,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
         )?;
         let physical_residency_schedule =
             VulkanPhysicalResidencySchedule::from_prepared_dispatch_plan(
-                &runtime_model.package.resource_residency,
+                resource_contract,
                 runtime_model.execution_scope.clone(),
                 &prepared_plan,
             )

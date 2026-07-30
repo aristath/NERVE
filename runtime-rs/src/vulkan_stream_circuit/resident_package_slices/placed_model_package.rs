@@ -36,6 +36,8 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
     compiled_resource_device_stores:
         BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+    compiled_resource_physical_placements:
+        Vec<VulkanCompiledResourcePhysicalPlacement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +58,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
         self.compiled_resource_device_stores
             .get(device_id)
             .map(Arc::as_ref)
+    }
+
+    pub fn compiled_resource_physical_placements(
+        &self,
+    ) -> &[VulkanCompiledResourcePhysicalPlacement] {
+        &self.compiled_resource_physical_placements
     }
 
     pub fn resident_state_buffer(

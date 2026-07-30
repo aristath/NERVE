@@ -341,7 +341,7 @@ fn compiled_partition_group_identity_seed(
     )
 }
 
-fn compiled_selector_identity(
+pub(super) fn compiled_selector_identity(
     selector: &CompiledResourceSelector,
 ) -> io::Result<String> {
     resource_content_id(
@@ -359,7 +359,7 @@ fn compiled_selector_identity(
     )
 }
 
-fn compiled_checkpoint_identity(
+pub(super) fn compiled_checkpoint_identity(
     checkpoint: &CompiledResidencyCheckpoint,
 ) -> io::Result<String> {
     resource_content_id(

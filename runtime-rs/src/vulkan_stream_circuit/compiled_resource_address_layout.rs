@@ -315,22 +315,41 @@ impl VulkanCompiledResourceAddressLayout {
         execution_scope: &str,
         component_ids: &BTreeSet<String>,
     ) -> Result<usize, VulkanCompiledResourceAddressLayoutError> {
-        let address_table_bytes = self
-            .slot_count()
-            .checked_mul(32)
-            .ok_or_else(|| {
-                VulkanCompiledResourceAddressLayoutError(
-                    "compiled resource address-table byte count overflowed"
-                        .to_string(),
-                )
-            })?;
+        let address_table_bytes = self.address_table_byte_count()?;
+        self.parameter_slot_table_byte_count_for_components(
+            execution_scope,
+            component_ids,
+        )?
+        .checked_add(address_table_bytes)
+        .ok_or_else(|| {
+            VulkanCompiledResourceAddressLayoutError(
+                "compiled resource metadata byte count overflowed".to_string(),
+            )
+        })
+    }
+
+    pub fn address_table_byte_count(
+        &self,
+    ) -> Result<usize, VulkanCompiledResourceAddressLayoutError> {
+        self.slot_count().checked_mul(32).ok_or_else(|| {
+            VulkanCompiledResourceAddressLayoutError(
+                "compiled resource address-table byte count overflowed".to_string(),
+            )
+        })
+    }
+
+    pub fn parameter_slot_table_byte_count_for_components(
+        &self,
+        execution_scope: &str,
+        component_ids: &BTreeSet<String>,
+    ) -> Result<usize, VulkanCompiledResourceAddressLayoutError> {
         self.parameter_slot_tables
             .iter()
             .filter(|table| {
                 table.execution_scope == execution_scope
                     && component_ids.contains(&table.key.component_id)
             })
-            .try_fold(address_table_bytes, |total, table| {
+            .try_fold(0usize, |total, table| {
                 table
                     .slots
                     .len()

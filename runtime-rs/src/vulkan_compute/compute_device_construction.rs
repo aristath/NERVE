@@ -31,6 +31,10 @@ impl VulkanComputeDevice {
         &self.device_name
     }
 
+    pub fn physical_device_id(&self) -> &str {
+        &self.physical_device_id
+    }
+
     pub fn pci_address(&self) -> Option<&str> {
         self.pci_address.as_deref()
     }
@@ -126,6 +130,10 @@ impl VulkanComputeDevice {
 
     pub fn shares_logical_device_with(&self, other: &Self) -> bool {
         self.device.handle() == other.device.handle()
+    }
+
+    pub fn shares_physical_device_with(&self, other: &Self) -> bool {
+        self.physical_device_id == other.physical_device_id
     }
 
     pub fn has_distinct_transfer_queue(&self) -> bool {

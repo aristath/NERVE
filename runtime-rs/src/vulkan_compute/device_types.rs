@@ -8,6 +8,7 @@ pub struct VulkanComputeDevice {
     transfer_queue_is_distinct: bool,
     buffer_device_address_supported: bool,
     api_version: u32,
+    physical_device_id: String,
     device_name: String,
     pci_address: Option<String>,
     enabled_device_extensions: BTreeSet<String>,

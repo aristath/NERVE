@@ -76,10 +76,17 @@ impl VulkanResidentModelPackageDeviceSlice {
         let capacity = dynamic_state_capacity_activations
             .unwrap_or(runtime_model.package.max_context_activations);
         let tensor_index = runtime_model.load_runtime_tensor_index(manifest_dir)?;
+        let resource_contract =
+            instantiate_runtime_resource_contract(&runtime_model).map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to instantiate runtime resource contract: {error}"
+                ))
+            })?;
         let plan = VulkanResidentModelPackageDeviceSlicePlan::prepare(
             device,
             manifest_dir,
             &runtime_model,
+            &resource_contract,
             &tensor_index,
             device_id,
             capacity,

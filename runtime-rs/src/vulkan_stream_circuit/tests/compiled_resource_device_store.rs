@@ -17,7 +17,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let template_id = content_id('1');
     let member_seed = content_id('2');
     let selector_id = content_id('3');
-    let contract = CompiledResourceResidencyContract {
+    let mut contract = CompiledResourceResidencyContract {
         schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
         identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
         state_machine_schema:
@@ -93,6 +93,16 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         }],
         checkpoints: Vec::new(),
     };
+    let alias_selector_id = content_id('5');
+    let mut alias_selector = contract.selectors[0].clone();
+    alias_selector.id = alias_selector_id.clone();
+    alias_selector.component_id = "component_repeat".to_string();
+    contract.selectors.push(alias_selector);
+    let unowned_selector_id = content_id('6');
+    let mut unowned_selector = contract.selectors[0].clone();
+    unowned_selector.id = unowned_selector_id.clone();
+    unowned_selector.component_id = "other_component".to_string();
+    contract.selectors.push(unowned_selector);
     let contract = Arc::new(contract);
     let layout = Arc::new(
         VulkanCompiledResourceAddressLayout::from_contract(&contract)
@@ -104,6 +114,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         root.path(),
         Arc::clone(&contract),
         Arc::clone(&layout),
+        BTreeSet::from([
+            selector_id.clone(),
+            alias_selector_id.clone(),
+        ]),
         4096,
         4096,
         1024,
@@ -123,6 +137,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         root.path(),
         Arc::clone(&contract),
         Arc::clone(&layout),
+        BTreeSet::from([
+            selector_id.clone(),
+            alias_selector_id.clone(),
+        ]),
         4096,
         8192,
         1024,
@@ -138,6 +156,16 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .unwrap();
     let owner = DeviceResourceResidencyOwnerId::new("graph").unwrap();
 
+    let unowned_error = store
+        .load_selector_resource(
+            &device,
+            &unowned_selector_id,
+            0,
+            owner.clone(),
+        )
+        .unwrap_err();
+    assert!(unowned_error.to_string().contains("is unknown"));
+
     store
         .load_selector_resource(
             &device,
@@ -147,7 +175,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         )
         .unwrap();
     store
-        .load_selector_resource(&device, &selector_id, 0, owner)
+        .load_selector_resource(&device, &alias_selector_id, 0, owner)
         .unwrap();
 
     let stats = store.statistics().unwrap();
