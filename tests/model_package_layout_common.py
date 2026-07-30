@@ -30,6 +30,7 @@ from nerve.model_package import (
     spirv_capabilities,
     workgroup_count_x_for_node,
     weight_shared_batch_shader_file,
+    weight_shared_batch_workgroup_count_x,
     write_compiled_tensor,
 )
 

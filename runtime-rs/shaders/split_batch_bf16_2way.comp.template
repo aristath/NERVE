@@ -1,0 +1,37 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrames { uint words[]; } input_frames;
+layout(set = 0, binding = 1) buffer OutputAFrames { uint words[]; } output_a_frames;
+layout(set = 0, binding = 2) buffer OutputBFrames { uint words[]; } output_b_frames;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint PART_WORDS = {{PART_WIDTH}}u / 2u;
+const uint INPUT_FRAME_WORDS = PART_WORDS * 2u;
+
+void main() {
+    uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
+    uint batch_lane = gl_WorkGroupID.x;
+    uint batch_index = batch_start + batch_lane;
+    if (
+        batch_lane >= BATCH_TILE_WIDTH
+        || batch_index >= batch_control.batch_width
+    ) {
+        return;
+    }
+    for (
+        uint word = gl_LocalInvocationID.x;
+        word < PART_WORDS;
+        word += gl_WorkGroupSize.x
+    ) {
+        uint input_base = batch_index * INPUT_FRAME_WORDS;
+        uint output_index = batch_index * PART_WORDS + word;
+        output_a_frames.words[output_index] =
+            input_frames.words[input_base + word];
+        output_b_frames.words[output_index] =
+            input_frames.words[input_base + PART_WORDS + word];
+    }
+}

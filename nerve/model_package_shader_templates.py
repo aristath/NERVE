@@ -1316,14 +1316,18 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or input_size <= 0
             or input_size % 2
             or output_size <= 0
-            or output_size % 2
+            or (operation == "linear_residual" and output_size % 2)
         ):
             raise ModelCompileError(
                 f"invalid batched BF16 linear shader shape {shader_file!r}"
             )
         return render_shader_template(
             source_dir,
-            f"{operation}_batch_bf16.comp.template",
+            (
+                "linear_batch_bf16_odd.comp.template"
+                if output_size % 2
+                else f"{operation}_batch_bf16.comp.template"
+            ),
             {
                 "BATCH_TILE_WIDTH": str(batch_tile_width),
                 "INPUT_SIZE": str(input_size),
@@ -2008,9 +2012,19 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("ELEMENT_COUNT",),
         ),
         (
+            r"silu_multiply_batch(\d+)_bf16_(\d+)\.comp",
+            "silu_multiply_batch_bf16.comp.template",
+            ("BATCH_TILE_WIDTH", "ELEMENT_COUNT"),
+        ),
+        (
             r"sigmoid_scalar_multiply_bf16_(\d+)\.comp",
             "sigmoid_scalar_multiply_bf16.comp.template",
             ("HIDDEN_SIZE",),
+        ),
+        (
+            r"sigmoid_scalar_multiply_batch(\d+)_bf16_(\d+)\.comp",
+            "sigmoid_scalar_multiply_batch_bf16.comp.template",
+            ("BATCH_TILE_WIDTH", "HIDDEN_SIZE"),
         ),
         (
             r"linear_bf16_(\d+)x(\d+)\.comp",
@@ -2316,6 +2330,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("PART_WIDTH",),
         ),
         (
+            r"split_batch(\d+)_bf16_2x(\d+)\.comp",
+            "split_batch_bf16_2way.comp.template",
+            ("BATCH_TILE_WIDTH", "PART_WIDTH"),
+        ),
+        (
             r"split_bf16_3x(\d+)\.comp",
             "split_bf16_3way.comp.template",
             ("PART_WIDTH",),
@@ -2359,6 +2378,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             r"add_bf16_(\d+)\.comp",
             "add_bf16.comp.template",
             ("ELEMENT_COUNT",),
+        ),
+        (
+            r"add_batch(\d+)_bf16_(\d+)\.comp",
+            "add_batch_bf16.comp.template",
+            ("BATCH_TILE_WIDTH", "ELEMENT_COUNT"),
         ),
         (
             r"multiply_bf16_(\d+)\.comp",

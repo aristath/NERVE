@@ -1,0 +1,54 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer GateInputFrames { uint words[]; } gate_input_frames;
+layout(set = 0, binding = 1) readonly buffer UpInputFrames { uint words[]; } up_input_frames;
+layout(set = 0, binding = 2) buffer OutputFrames { uint words[]; } output_frames;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint FRAME_WORDS = ({{ELEMENT_COUNT}}u + 1u) / 2u;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float rounded_silu(float value) {
+    float activated = value / (1.0 + exp(-value));
+    return bf16_to_f32(f32_to_bf16(activated));
+}
+
+void main() {
+    uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
+    uint batch_lane = gl_WorkGroupID.x;
+    uint batch_index = batch_start + batch_lane;
+    if (
+        batch_lane >= BATCH_TILE_WIDTH
+        || batch_index >= batch_control.batch_width
+    ) {
+        return;
+    }
+    for (
+        uint word = gl_LocalInvocationID.x;
+        word < FRAME_WORDS;
+        word += gl_WorkGroupSize.x
+    ) {
+        uint index = batch_index * FRAME_WORDS + word;
+        uint gate = gate_input_frames.words[index];
+        uint up = up_input_frames.words[index];
+        float lo = rounded_silu(bf16_to_f32(gate))
+            * bf16_to_f32(up);
+        float hi = rounded_silu(bf16_to_f32(gate >> 16u))
+            * bf16_to_f32(up >> 16u);
+        output_frames.words[index] =
+            (f32_to_bf16(hi) << 16u) | f32_to_bf16(lo);
+    }
+}

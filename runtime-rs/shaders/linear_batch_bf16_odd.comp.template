@@ -1,0 +1,158 @@
+#version 450
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrames {
+    uint words[];
+} input_frames;
+layout(set = 0, binding = 1) buffer OutputFrames {
+    uint16_t values[];
+} output_frames;
+layout(set = 0, binding = 2) readonly buffer Weight {
+    uint words[];
+} weight;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+} batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint INPUT_SIZE = {{INPUT_SIZE}}u;
+const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
+const uint INPUT_WORDS = INPUT_SIZE / 2u;
+const uint OUTPUT_WORDS = (OUTPUT_SIZE + 1u) / 2u;
+
+shared float subgroup_lo[64];
+shared float subgroup_hi[64];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+void write_result(
+    uint batch_index,
+    uint output_word,
+    float lo,
+    float hi,
+    bool has_hi
+) {
+    uint frame_start = batch_index * OUTPUT_SIZE;
+    uint output_index = output_word * 2u;
+    output_frames.values[frame_start + output_index] =
+        uint16_t(f32_to_bf16(lo));
+    if (has_hi) {
+        output_frames.values[frame_start + output_index + 1u] =
+            uint16_t(f32_to_bf16(hi));
+    }
+}
+
+void main() {
+    uint output_word = gl_WorkGroupID.x / BATCH_TILE_WIDTH;
+    uint batch_lane = gl_WorkGroupID.x % BATCH_TILE_WIDTH;
+    uint batch_index =
+        gl_WorkGroupID.y * BATCH_TILE_WIDTH + batch_lane;
+    if (
+        output_word >= OUTPUT_WORDS
+        || batch_index >= batch_control.batch_width
+    ) {
+        return;
+    }
+
+    uint lane = gl_LocalInvocationID.x;
+    uint lo_row = output_word * 2u;
+    uint hi_row = lo_row + 1u;
+    uint input_offset = batch_index * INPUT_WORDS;
+    uint lo_weight_offset = lo_row * INPUT_WORDS;
+    uint hi_weight_offset = hi_row * INPUT_WORDS;
+    bool has_hi = hi_row < OUTPUT_SIZE;
+
+    float lo_sum = 0.0;
+    float hi_sum = 0.0;
+    for (
+        uint column_word = lane;
+        column_word < INPUT_WORDS;
+        column_word += gl_WorkGroupSize.x
+    ) {
+        uint input_pair = input_frames.words[input_offset + column_word];
+        float input_lo = bf16_to_f32(input_pair);
+        float input_hi = bf16_to_f32(input_pair >> 16u);
+        uint lo_weight_pair =
+            weight.words[lo_weight_offset + column_word];
+        lo_sum = fma(
+            input_lo,
+            bf16_to_f32(lo_weight_pair),
+            lo_sum
+        );
+        lo_sum = fma(
+            input_hi,
+            bf16_to_f32(lo_weight_pair >> 16u),
+            lo_sum
+        );
+        if (has_hi) {
+            uint hi_weight_pair =
+                weight.words[hi_weight_offset + column_word];
+            hi_sum = fma(
+                input_lo,
+                bf16_to_f32(hi_weight_pair),
+                hi_sum
+            );
+            hi_sum = fma(
+                input_hi,
+                bf16_to_f32(hi_weight_pair >> 16u),
+                hi_sum
+            );
+        }
+    }
+
+    lo_sum = subgroupAdd(lo_sum);
+    hi_sum = subgroupAdd(hi_sum);
+    if (gl_NumSubgroups == 1u) {
+        if (gl_SubgroupInvocationID == 0u) {
+            write_result(
+                batch_index,
+                output_word,
+                lo_sum,
+                hi_sum,
+                has_hi
+            );
+        }
+        return;
+    }
+
+    if (gl_SubgroupInvocationID == 0u) {
+        subgroup_lo[gl_SubgroupID] = lo_sum;
+        subgroup_hi[gl_SubgroupID] = hi_sum;
+    }
+    barrier();
+
+    if (lane == 0u) {
+        float lo_total = 0.0;
+        float hi_total = 0.0;
+        for (
+            uint subgroup = 0u;
+            subgroup < gl_NumSubgroups;
+            subgroup++
+        ) {
+            lo_total += subgroup_lo[subgroup];
+            hi_total += subgroup_hi[subgroup];
+        }
+        write_result(
+            batch_index,
+            output_word,
+            lo_total,
+            hi_total,
+            has_hi
+        );
+    }
+}

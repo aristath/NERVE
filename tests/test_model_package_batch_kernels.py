@@ -112,6 +112,10 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == "linear_batch4_bf16_1024x1024.comp"
     )
     assert (
+        weight_shared_batch_shader_file("linear_bf16_2048x1.comp", tile_width=4)
+        == "linear_batch4_bf16_2048x1.comp"
+    )
+    assert (
         weight_shared_batch_shader_file("linear_residual_bf16_1024x1024.comp")
         == "linear_residual_batch16_bf16_1024x1024.comp"
     )
@@ -124,6 +128,46 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     assert (
         weight_shared_batch_shader_file("split_bf16_2x16x256_head_interleaved.comp")
         == "split_batch16_bf16_2x16x256_head_interleaved.comp"
+    )
+    assert (
+        weight_shared_batch_shader_file("split_bf16_2x512.comp")
+        == "split_batch16_bf16_2x512.comp"
+    )
+    assert weight_shared_batch_shader_file("split_bf16_2x511.comp") is None
+    assert (
+        weight_shared_batch_shader_file("silu_multiply_bf16_512.comp")
+        == "silu_multiply_batch16_bf16_512.comp"
+    )
+    assert (
+        weight_shared_batch_shader_file("sigmoid_scalar_multiply_bf16_2048.comp")
+        == "sigmoid_scalar_multiply_batch16_bf16_2048.comp"
+    )
+    assert (
+        weight_shared_batch_shader_file("add_bf16_2048.comp")
+        == "add_batch16_bf16_2048.comp"
+    )
+    for lane_parallel_shader in (
+        "linear_bf16_2048x1.comp",
+        "split_bf16_2x512.comp",
+        "silu_multiply_bf16_512.comp",
+        "sigmoid_scalar_multiply_bf16_2048.comp",
+        "add_bf16_2048.comp",
+    ):
+        assert (
+            weight_shared_batch_workgroup_count_x(
+                lane_parallel_shader,
+                tile_width=4,
+                scalar_workgroup_count_x=1,
+            )
+            == 4
+        )
+    assert (
+        weight_shared_batch_workgroup_count_x(
+            "linear_bf16_1024x4096.comp",
+            tile_width=4,
+            scalar_workgroup_count_x=2048,
+        )
+        == 2048
     )
     assert (
         weight_shared_batch_shader_file("sigmoid_multiply_bf16.comp")
@@ -548,6 +592,7 @@ def test_compiler_selects_cooperative_bfloat16_projection_kernels() -> None:
     assert cooperative_bfloat16_batch_shader_file(
         "linear_residual_int4_ct_sbf16_g128_5120x17408.comp"
     ) == ("linear_residual_batch64_cooperative_int4_ct_sbf16_g128_5120x17408.comp")
+    assert cooperative_bfloat16_batch_shader_file("linear_bf16_2048x1.comp") is None
     assert (
         cooperative_bfloat16_workgroup_count_x(
             "linear_residual_int4_ct_sbf16_g128_5120x17408.comp"
@@ -640,6 +685,26 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
                 }
             ],
         }
+
+
+def test_lane_parallel_batch_kernels_expose_one_workgroup_per_lane() -> None:
+    spec = component_kernel_spec(
+        execution_index=0,
+        node={"id": "gate", "op": "linear"},
+        circuit={},
+        shader_file="linear_bf16_2048x1.comp",
+        local_size_x=64,
+        workgroup_count_x=1,
+    )
+
+    assert spec["batch_mode"] == "weight_shared"
+    assert [
+        implementation["lane_tile_width"]
+        for implementation in spec["batch_implementations"]
+    ] == [2, 4, 8, 16]
+    for implementation in spec["batch_implementations"]:
+        tile_width = implementation["lane_tile_width"]
+        assert implementation["stages"][0]["workgroup_count_x"] == tile_width
 
 
 def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
@@ -770,13 +835,37 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
         "parallel_linear_batch16_2way_bf16_1024x2560_2560.comp",
         "parallel_linear_silu_multiply_batch16_fp8_e4m3_b128x128_5120x17408.comp",
         "linear_batch16_bf16_1024x4096.comp",
+        "linear_batch16_bf16_2048x1.comp",
         "linear_residual_batch16_bf16_4096x1024.comp",
         "parallel_linear_silu_multiply_batch16_bf16_1024x4096.comp",
         "split_batch16_bf16_2x16x256_head_interleaved.comp",
+        "split_batch16_bf16_2x512.comp",
+        "silu_multiply_batch16_bf16_512.comp",
+        "sigmoid_scalar_multiply_batch16_bf16_2048.comp",
+        "add_batch16_bf16_2048.comp",
         "sigmoid_multiply_batch16_bf16.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    odd_linear_source = (
+        tmp_path / "linear_batch16_bf16_2048x1.comp"
+    ).read_text()
+    assert "uint16_t values[]" in odd_linear_source
+    assert "batch_index * OUTPUT_SIZE" in odd_linear_source
+    assert "output_frames.words" not in odd_linear_source
+    assert "gl_WorkGroupID.x / BATCH_TILE_WIDTH" in odd_linear_source
+    even_linear_source = (
+        tmp_path / "linear_batch16_bf16_1024x4096.comp"
+    ).read_text()
+    assert "uint words[]" in even_linear_source
+    assert "output_frames.words" in even_linear_source
+    scalar_gate_source = (
+        tmp_path / "sigmoid_scalar_multiply_batch16_bf16_2048.comp"
+    ).read_text()
+    assert "uint16_t values[]" in scalar_gate_source
+    assert "gate_logits.values[batch_index]" in scalar_gate_source
+    assert "uint batch_lane = gl_WorkGroupID.x;" in scalar_gate_source
 
     for shader_file in shader_files:
         source = (tmp_path / shader_file).read_text()

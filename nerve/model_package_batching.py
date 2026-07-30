@@ -248,6 +248,13 @@ def cooperative_bfloat16_batch_shader_file(shader_file: str) -> str | None:
     )
     if linear is not None:
         operation, input_size, output_size = linear.groups()
+        if (
+            int(input_size) <= 0
+            or int(input_size) % 2
+            or int(output_size) <= 0
+            or int(output_size) % 2
+        ):
+            return None
         return f"{operation}_batch64_cooperative_bf16_{input_size}x{output_size}.comp"
     parallel = re.fullmatch(
         r"parallel_linear_[23]way_bf16_\d+x.+\.comp",
@@ -594,6 +601,23 @@ def weight_shared_batch_shader_file(
             f"sigmoid_multiply_quantize_batch{tile}_fp8_e4m3_",
             1,
         )
+    if re.fullmatch(r"add_bf16_\d+\.comp", shader_file):
+        return shader_file.replace("add_bf16_", f"add_batch{tile}_bf16_", 1)
+    if re.fullmatch(r"silu_multiply_bf16_\d+\.comp", shader_file):
+        return shader_file.replace(
+            "silu_multiply_bf16_",
+            f"silu_multiply_batch{tile}_bf16_",
+            1,
+        )
+    if re.fullmatch(r"sigmoid_scalar_multiply_bf16_\d+\.comp", shader_file):
+        return shader_file.replace(
+            "sigmoid_scalar_multiply_bf16_",
+            f"sigmoid_scalar_multiply_batch{tile}_bf16_",
+            1,
+        )
+    contiguous_split = re.fullmatch(r"split_bf16_2x(\d+)\.comp", shader_file)
+    if contiguous_split is not None and int(contiguous_split.group(1)) % 2 == 0:
+        return shader_file.replace("split_bf16_", f"split_batch{tile}_bf16_", 1)
     prequant_fp8 = re.fullmatch(
         r"(linear|linear_bias|linear_residual)_prequant_fp8_e4m3_"
         r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
@@ -720,7 +744,11 @@ def weight_shared_batch_shader_file(
     )
     if bf16 is not None:
         operation, input_size, output_size = bf16.groups()
-        if int(input_size) % 2 == 0 and int(output_size) % 2 == 0:
+        if (
+            int(input_size) % 2 == 0
+            and int(output_size) > 0
+            and (operation == "linear" or int(output_size) % 2 == 0)
+        ):
             return f"{operation}_batch{tile}_bf16_{input_size}x{output_size}.comp"
     parallel = re.fullmatch(
         r"parallel_linear_[23]way_bf16_(\d+)x.+\.comp",
@@ -808,3 +836,35 @@ def weight_shared_batch_shader_file(
                 f"{input_size}x{output_size}.comp"
             )
     return None
+
+
+def weight_shared_batch_workgroup_count_x(
+    shader_file: str,
+    *,
+    tile_width: int,
+    scalar_workgroup_count_x: int,
+) -> int:
+    if tile_width <= 0 or scalar_workgroup_count_x <= 0:
+        raise ValueError("batch and scalar workgroup counts must be positive")
+    lane_parallel = (
+        re.fullmatch(r"add_bf16_\d+\.comp", shader_file) is not None
+        or re.fullmatch(r"silu_multiply_bf16_\d+\.comp", shader_file) is not None
+        or re.fullmatch(
+            r"sigmoid_scalar_multiply_bf16_\d+\.comp",
+            shader_file,
+        )
+        is not None
+        or re.fullmatch(r"split_bf16_2x\d+\.comp", shader_file) is not None
+    )
+    bf16_linear = re.fullmatch(
+        r"linear_bf16_\d+x(\d+)\.comp",
+        shader_file,
+    )
+    lane_parallel = lane_parallel or (
+        bf16_linear is not None and int(bf16_linear.group(1)) % 2 == 1
+    )
+    return (
+        scalar_workgroup_count_x * tile_width
+        if lane_parallel
+        else scalar_workgroup_count_x
+    )

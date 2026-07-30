@@ -1208,7 +1208,11 @@ def component_kernel_spec(
                         persistent_batch_control_stage(
                             exact_shader_file,
                             local_size_x,
-                            workgroup_count_x,
+                            weight_shared_batch_workgroup_count_x(
+                                shader_file,
+                                tile_width=tile_width,
+                                scalar_workgroup_count_x=workgroup_count_x,
+                            ),
                         )
                     ],
                 }

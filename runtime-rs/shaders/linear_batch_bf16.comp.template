@@ -15,7 +15,7 @@ const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
 const uint INPUT_SIZE = {{INPUT_SIZE}}u;
 const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
 const uint INPUT_WORDS = INPUT_SIZE / 2u;
-const uint OUTPUT_WORDS = OUTPUT_SIZE / 2u;
+const uint OUTPUT_WORDS = (OUTPUT_SIZE + 1u) / 2u;
 
 shared float subgroup_lo[BATCH_TILE_WIDTH][64];
 shared float subgroup_hi[BATCH_TILE_WIDTH][64];
@@ -33,9 +33,15 @@ uint read_weight(uint output_word, uint column_word, uint row_offset) {
     return weight.words[index];
 }
 
-void write_result(uint batch_index, uint output_word, float lo, float hi) {
+void write_result(
+    uint batch_index,
+    uint output_word,
+    float lo,
+    float hi,
+    bool has_hi
+) {
     output_frames.words[batch_index * OUTPUT_WORDS + output_word] =
-        (f32_to_bf16(hi) << 16u) | f32_to_bf16(lo);
+        ((has_hi ? f32_to_bf16(hi) : 0u) << 16u) | f32_to_bf16(lo);
 }
 
 void main() {
@@ -43,6 +49,7 @@ void main() {
     uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
     uint lane = gl_LocalInvocationID.x;
     if (output_word >= OUTPUT_WORDS) return;
+    bool has_hi = output_word * 2u + 1u < OUTPUT_SIZE;
 
     float lo_sum[BATCH_TILE_WIDTH];
     float hi_sum[BATCH_TILE_WIDTH];
@@ -52,7 +59,9 @@ void main() {
     }
     for (uint column_word = lane; column_word < INPUT_WORDS; column_word += 64u) {
         uint lo_weight = read_weight(output_word, column_word, 0u);
-        uint hi_weight = read_weight(output_word, column_word, 1u);
+        uint hi_weight = has_hi
+            ? read_weight(output_word, column_word, 1u)
+            : 0u;
         float lo_weight_lo = bf16_to_f32(lo_weight);
         float lo_weight_hi = bf16_to_f32(lo_weight >> 16u);
         float hi_weight_lo = bf16_to_f32(hi_weight);
@@ -65,8 +74,18 @@ void main() {
             float input_hi = bf16_to_f32(input_pair >> 16u);
             lo_sum[batch_lane] = fma(input_lo, lo_weight_lo, lo_sum[batch_lane]);
             lo_sum[batch_lane] = fma(input_hi, lo_weight_hi, lo_sum[batch_lane]);
-            hi_sum[batch_lane] = fma(input_lo, hi_weight_lo, hi_sum[batch_lane]);
-            hi_sum[batch_lane] = fma(input_hi, hi_weight_hi, hi_sum[batch_lane]);
+            if (has_hi) {
+                hi_sum[batch_lane] = fma(
+                    input_lo,
+                    hi_weight_lo,
+                    hi_sum[batch_lane]
+                );
+                hi_sum[batch_lane] = fma(
+                    input_hi,
+                    hi_weight_hi,
+                    hi_sum[batch_lane]
+                );
+            }
         }
     }
 
@@ -79,7 +98,13 @@ void main() {
             for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; batch_lane++) {
                 uint batch_index = batch_start + batch_lane;
                 if (batch_index < batch_control.batch_width) {
-                    write_result(batch_index, output_word, lo_sum[batch_lane], hi_sum[batch_lane]);
+                    write_result(
+                        batch_index,
+                        output_word,
+                        lo_sum[batch_lane],
+                        hi_sum[batch_lane],
+                        has_hi
+                    );
                 }
             }
         }
@@ -102,7 +127,13 @@ void main() {
                 lo_total += subgroup_lo[batch_lane][subgroup];
                 hi_total += subgroup_hi[batch_lane][subgroup];
             }
-            write_result(batch_index, output_word, lo_total, hi_total);
+            write_result(
+                batch_index,
+                output_word,
+                lo_total,
+                hi_total,
+                has_hi
+            );
         }
     }
 }
