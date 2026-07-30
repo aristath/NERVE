@@ -41,6 +41,8 @@ struct VulkanDemandResidencyDispatchChain {
     command_indirect_offsets: Vec<Option<usize>>,
     first_gate_command_index: usize,
     indirect_dispatches: Arc<VulkanResidentBuffer>,
+    enabled_indirect_dispatch_bytes: Vec<u8>,
+    indirect_dispatches_enabled: Cell<bool>,
     missing_queue: VulkanGpuResidencyMissQueue,
     gates: Vec<VulkanDemandResidencyGateRuntime>,
     full_sequence: VulkanResidentKernelSequence,
@@ -340,8 +342,29 @@ impl VulkanDemandResidencyDispatchChain {
             Arc::new(device.create_resident_buffer(next_indirect_offset).map_err(
                 VulkanMountedPlacedResidentKernelDispatchError::Vulkan,
             )?);
+        let mut enabled_indirect_dispatch_bytes = vec![0; next_indirect_offset];
+        for (command_index, command) in commands
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(first_gate_command_index + 1)
+        {
+            let byte_offset = command_indirect_offsets[command_index]
+                .expect("every demand command after a gate is indirect");
+            let dimensions = demand_command_dimensions(
+                command,
+                dispatches,
+                prefix_dispatches,
+                suffix_dispatches,
+            )?;
+            for (axis, dimension) in dimensions.into_iter().enumerate() {
+                let axis_offset = byte_offset + axis * size_of::<u32>();
+                enabled_indirect_dispatch_bytes[axis_offset..axis_offset + size_of::<u32>()]
+                    .copy_from_slice(&dimension.to_le_bytes());
+            }
+        }
         indirect_dispatches
-            .write_bytes(&vec![0; indirect_dispatches.byte_capacity()])
+            .write_bytes(&enabled_indirect_dispatch_bytes)
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let missing_capacity = gate_specs
             .iter()
@@ -425,6 +448,8 @@ impl VulkanDemandResidencyDispatchChain {
             command_indirect_offsets,
             first_gate_command_index,
             indirect_dispatches,
+            enabled_indirect_dispatch_bytes,
+            indirect_dispatches_enabled: Cell::new(true),
             missing_queue,
             gates,
             full_sequence,
@@ -445,6 +470,12 @@ impl VulkanDemandResidencyDispatchChain {
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        if !self.indirect_dispatches_enabled.get() {
+            self.indirect_dispatches
+                .write_bytes(&self.enabled_indirect_dispatch_bytes)
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+            self.indirect_dispatches_enabled.set(true);
+        }
         self.run_from_gate(
             device,
             None,
@@ -462,8 +493,10 @@ impl VulkanDemandResidencyDispatchChain {
                 .notification_epoch()
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
             if notification_epoch == self.observed_notification_epoch.get() {
+                self.indirect_dispatches_enabled.set(true);
                 return Ok(());
             }
+            self.indirect_dispatches_enabled.set(false);
             let missing = self
                 .missing_queue
                 .snapshot()
@@ -602,9 +635,14 @@ impl VulkanDemandResidencyDispatchChain {
         let gate_push_constants = self
             .gates
             .iter()
-            .map(|gate| {
+            .enumerate()
+            .map(|(gate_index, gate)| {
                 gate.gate
-                    .push_constants(gate.selection_count, gate.checkpoint_tag)
+                    .push_constants(
+                        gate.selection_count,
+                        gate.checkpoint_tag,
+                        resume_gate_index == Some(gate_index),
+                    )
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;

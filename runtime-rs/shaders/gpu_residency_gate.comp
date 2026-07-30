@@ -37,6 +37,7 @@ layout(set = 0, binding = 7) readonly buffer GateConfiguration {
 layout(push_constant) uniform GateControl {
     uint selection_count;
     uint checkpoint_tag;
+    uint restore_downstream;
 } control;
 
 const uint ADDRESS_RECORD_WORDS = 8u;
@@ -183,10 +184,14 @@ void main() {
     resolved_addresses.words[5] = control.checkpoint_tag;
     resolved_addresses.words[6] = 0u;
     resolved_addresses.words[7] = 0u;
-    write_indirect_dispatches(all_resident);
+    if (!all_resident) {
+        write_indirect_dispatches(false);
+    } else if (control.restore_downstream != 0u) {
+        write_indirect_dispatches(true);
+    }
 
     memoryBarrierBuffer();
-    if (missing_count != 0u) {
+    if (missing_count != 0u || invalid_selection != 0u) {
         uint capacity = configuration.words[3];
         uint publishable = min(missing_count, capacity - min(pending, capacity));
         missing_requests.words[0] = published + publishable;

@@ -1,4 +1,4 @@
-const VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT: u32 = 8;
+const VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT: u32 = 12;
 const VULKAN_GPU_RESIDENCY_GATE_GROUP_RECORD_WORD_COUNT: usize = 2;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
@@ -426,6 +426,7 @@ impl VulkanGpuResidencyGate {
         &self,
         selection_count: usize,
         checkpoint_tag: u32,
+        restore_downstream: bool,
     ) -> Result<[u8; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize], VulkanError>
     {
         if selection_count == 0 || selection_count > self.config.maximum_selection_count {
@@ -441,7 +442,8 @@ impl VulkanGpuResidencyGate {
                 .map_err(|_| VulkanError("GPU residency selection count exceeds u32".to_string()))?
                 .to_le_bytes(),
         );
-        bytes[4..].copy_from_slice(&checkpoint_tag.to_le_bytes());
+        bytes[4..8].copy_from_slice(&checkpoint_tag.to_le_bytes());
+        bytes[8..12].copy_from_slice(&u32::from(restore_downstream).to_le_bytes());
         Ok(bytes)
     }
 

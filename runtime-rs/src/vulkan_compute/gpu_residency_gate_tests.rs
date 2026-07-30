@@ -495,8 +495,8 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
         .unwrap();
     let full_sequence = device.create_resident_kernel_sequence().unwrap();
     let resume_sequence = device.create_resident_kernel_sequence().unwrap();
-    let first_control = first_gate.push_constants(1, 11).unwrap();
-    let second_control = second_gate.push_constants(1, 22).unwrap();
+    let first_control = first_gate.push_constants(1, 11, true).unwrap();
+    let second_control = second_gate.push_constants(1, 22, true).unwrap();
     let increment = 1u32.to_le_bytes();
     device
         .record_resident_kernel_sequence(
@@ -711,7 +711,7 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
         .create_timestamped_resident_kernel_sequence()
         .unwrap();
     let element_count = u32::try_from(ELEMENT_COUNT).unwrap().to_le_bytes();
-    let gate_control = gate.push_constants(1, 7).unwrap();
+    let gate_control = gate.push_constants(1, 7, true).unwrap();
     device
         .record_resident_kernel_sequence(
             &eager_sequence,
@@ -823,7 +823,7 @@ fn run_gpu_residency_gate_sequence(
     checkpoint_tag: u32,
 ) {
     let gate_control = gate
-        .push_constants(selection_count, checkpoint_tag)
+        .push_constants(selection_count, checkpoint_tag, true)
         .unwrap();
     device
         .record_resident_kernel_sequence(
