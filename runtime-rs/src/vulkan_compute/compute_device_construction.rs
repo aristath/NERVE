@@ -147,4 +147,8 @@ impl VulkanComputeDevice {
     pub fn supports_buffer_device_address(&self) -> bool {
         self.buffer_device_address_supported
     }
+
+    pub fn supports_sparse_buffer_residency(&self) -> bool {
+        self.sparse_buffer_residency_supported
+    }
 }

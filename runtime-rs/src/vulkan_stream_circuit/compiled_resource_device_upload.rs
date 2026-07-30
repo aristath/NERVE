@@ -246,7 +246,6 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
         ));
     }
     let mut batch_slots = BTreeSet::new();
-    let mut prepared_groups = Vec::with_capacity(requests.len());
     for request in requests {
         let loaded_descriptor =
             device_resource_descriptor_from_loaded_group(request.loaded)
@@ -284,19 +283,48 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
             }
         }
 
+    }
+    let allocation_byte_counts = requests
+        .iter()
+        .map(|request| {
+            request
+                .descriptor
+                .resources
+                .iter()
+                .map(|resource| resource.byte_count)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let allocation_requests = requests
+        .iter()
+        .zip(&allocation_byte_counts)
+        .map(|(request, byte_counts)| {
+            (request.resource_slots, byte_counts.as_slice())
+        })
+        .collect::<Vec<_>>();
+    let allocation_groups =
+        arena.allocate_groups(device, &allocation_requests, alignment)?;
+    let mut prepared_groups = Vec::with_capacity(requests.len());
+    for ((request, group_allocations), byte_counts) in requests
+        .iter()
+        .zip(allocation_groups)
+        .zip(&allocation_byte_counts)
+    {
         let mut allocations =
             Vec::with_capacity(request.loaded.resources.len());
-        for (resource, resource_descriptor) in request
+        for ((resource, resource_descriptor), allocation) in request
             .loaded
             .resources
             .iter()
             .zip(&request.descriptor.resources)
+            .zip(group_allocations)
         {
-            let allocation = Arc::new(arena.allocate(
-                device,
-                resource_descriptor.byte_count,
-                alignment,
-            )?);
+            if allocation.byte_count() != resource_descriptor.byte_count {
+                return Err(VulkanError(
+                    "stable resource allocation differs from its descriptor"
+                        .to_string(),
+                ));
+            }
             let mut byte_offset = allocation.buffer_byte_offset();
             let mut ranges = Vec::with_capacity(resource.ranges.len());
             for range in &resource.ranges {
@@ -330,6 +358,7 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
             }
             allocations.push((allocation, ranges));
         }
+        debug_assert_eq!(allocations.len(), byte_counts.len());
         prepared_groups.push(allocations);
     }
 

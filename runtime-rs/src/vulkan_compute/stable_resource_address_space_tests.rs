@@ -42,6 +42,138 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
 }
 
 #[test]
+fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!(
+            "skipping sparse stable resource test: explicit Vulkan device unset"
+        );
+        return;
+    };
+    let Some(shader) = compile_stable_resource_shader(
+        "sparse_visibility",
+        STABLE_RESOURCE_VISIBILITY_SHADER,
+    ) else {
+        eprintln!("skipping sparse stable resource test: no GLSL compiler");
+        return;
+    };
+    let device =
+        VulkanComputeDevice::new_for_physical_device_index(device_index)
+            .unwrap();
+    assert!(device.supports_sparse_buffer_residency());
+    let layouts = [
+        VulkanStableResourceGroupLayout {
+            resource_slots: vec![0, 1],
+            resource_byte_counts: vec![1024, 2048],
+        },
+        VulkanStableResourceGroupLayout {
+            resource_slots: vec![2],
+            resource_byte_counts: vec![4096],
+        },
+    ];
+    let arena = VulkanStableResourceArena::new_sparse(
+        &device,
+        VulkanStableResourceArenaConfig::new(
+            64 * 1024,
+            512 * 1024,
+            256,
+        )
+        .unwrap(),
+        &layouts,
+    )
+    .unwrap();
+    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+
+    let later_group = arena
+        .allocate_groups(&device, &[(&[2], &[4096])], 256)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let earlier_group = arena
+        .allocate_groups(
+            &device,
+            &[(&[0, 1], &[1024, 2048])],
+            256,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        earlier_group[0].buffer_byte_offset()
+            < later_group[0].buffer_byte_offset()
+    );
+    assert_eq!(earlier_group[0].device_address() % 256, 0);
+    assert_eq!(earlier_group[1].device_address() % 256, 0);
+    let stats = arena.stats().unwrap();
+    assert_eq!(stats.allocated_byte_count, 7168);
+    assert_eq!(stats.active_allocation_count, 3);
+    assert_eq!(stats.chunk_count, 2);
+    assert!(stats.committed_byte_capacity >= stats.allocated_byte_count);
+    assert!(stats.committed_byte_capacity <= 512 * 1024);
+
+    let first_values = (0..256u32)
+        .map(|value| value.wrapping_mul(5).wrapping_add(13))
+        .collect::<Vec<_>>();
+    let first_bytes = stable_resource_u32_bytes(&first_values);
+    let mut transfer = device
+        .create_resident_transfer_stream(2, 64 * 1024)
+        .unwrap();
+    let ticket = transfer
+        .submit(&[
+            VulkanResidentBufferWriteRange::new(
+                earlier_group[0].buffer(),
+                earlier_group[0].buffer_byte_offset(),
+                &first_bytes,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+    transfer.wait(&ticket).unwrap();
+
+    let mut table =
+        VulkanStableResourceAddressTable::new(&device, &mut transfer, 3)
+            .unwrap();
+    let publications = table
+        .publish_group(
+            &mut transfer,
+            &[(0, Arc::clone(&earlier_group[0]))],
+        )
+        .unwrap();
+    let output = device.create_resident_buffer(16).unwrap();
+    output.write_bytes(&[0; 16]).unwrap();
+    let dispatch = device
+        .create_resident_kernel_dispatch(
+            &shader,
+            &[
+                VulkanResidentKernelBufferBinding::new(
+                    0,
+                    table.buffer(),
+                    table.byte_capacity(),
+                )
+                .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(1, &output, 16)
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+            ],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    device
+        .run_resident_kernel_dispatch(&dispatch, &0u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
+        vec![13, first_values[255], 1, 1]
+    );
+    table.clear_group(&mut transfer, &publications).unwrap();
+    drop(earlier_group);
+    drop(later_group);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    arena.release_backing().unwrap();
+    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+}
+
+#[test]
 fn stable_resource_free_ranges_coalesce_on_both_sides() {
     let mut free_ranges = BTreeMap::from([(0, 64), (96, 32)]);
     release_stable_resource_range(&mut free_ranges, 64, 32);

@@ -380,6 +380,14 @@ impl VulkanComputeDeviceCatalog {
                 physical_device_supports_modern_submission(instance, physical_device);
             let buffer_device_address_supported = enabled_shader_features
                 .contains(&VulkanShaderFeature::BufferDeviceAddress);
+            let core_features =
+                instance.get_physical_device_features(physical_device);
+            let sparse_buffer_residency_supported =
+                core_features.sparse_binding == vk::TRUE
+                    && core_features.sparse_residency_buffer == vk::TRUE
+                    && queue_family
+                        .queue_flags
+                        .contains(vk::QueueFlags::SPARSE_BINDING);
             if !timeline_semaphore_supported || !synchronization2_supported {
                 return Err(VulkanError(format!(
                     "Vulkan device {device_name:?} does not support the required timeline-semaphore and synchronization2 execution contract"
@@ -397,6 +405,10 @@ impl VulkanComputeDeviceCatalog {
                 ),
                 shader_int64: bool32(
                     enabled_shader_features.contains(&VulkanShaderFeature::ShaderInt64),
+                ),
+                sparse_binding: bool32(sparse_buffer_residency_supported),
+                sparse_residency_buffer: bool32(
+                    sparse_buffer_residency_supported,
                 ),
                 ..Default::default()
             };
@@ -639,6 +651,7 @@ impl VulkanComputeDeviceCatalog {
                 transfer_queue,
                 transfer_queue_is_distinct,
                 buffer_device_address_supported,
+                sparse_buffer_residency_supported,
                 api_version: physical_device_properties.api_version,
                 physical_device_id: permitted_device.physical_device_id.clone(),
                 device_name,

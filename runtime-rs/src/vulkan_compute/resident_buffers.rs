@@ -11,7 +11,12 @@ impl VulkanResidentBuffer {
         let pointer = unsafe {
             self.device
                 .map_memory(
-                    self.memory,
+                    self.memory.ok_or_else(|| {
+                        VulkanError(
+                            "sparse resident buffers cannot be persistently mapped"
+                                .to_string(),
+                        )
+                    })?,
                     0,
                     self.byte_capacity,
                     vk::MemoryMapFlags::empty(),
@@ -130,7 +135,19 @@ impl VulkanResidentBuffer {
                 "offset resident buffer writes require persistent mapping".to_string(),
             ))
         } else if self.memory_access.is_directly_mappable() {
-            unsafe { write_byte_memory(&self.device, self.memory, byte_len, input) }
+            unsafe {
+                write_byte_memory(
+                    &self.device,
+                    self.memory.ok_or_else(|| {
+                        VulkanError(
+                            "directly mappable resident buffer has no bound memory"
+                                .to_string(),
+                        )
+                    })?,
+                    byte_len,
+                    input,
+                )
+            }
         } else {
             unsafe {
                 write_device_local_bytes(
@@ -170,7 +187,19 @@ impl VulkanResidentBuffer {
                     .to_vec(),
             )
         } else if offset == 0 && self.memory_access.is_directly_mappable() {
-            unsafe { read_byte_memory(&self.device, self.memory, byte_len, len) }
+            unsafe {
+                read_byte_memory(
+                    &self.device,
+                    self.memory.ok_or_else(|| {
+                        VulkanError(
+                            "directly mappable resident buffer has no bound memory"
+                                .to_string(),
+                        )
+                    })?,
+                    byte_len,
+                    len,
+                )
+            }
         } else if offset != 0 {
             Err(VulkanError(
                 "offset resident buffer reads require persistent mapping".to_string(),
@@ -275,9 +304,21 @@ impl Drop for VulkanResidentBuffer {
     fn drop(&mut self) {
         unsafe {
             if self.persistent_mapping_requires_unmap {
-                self.device.unmap_memory(self.memory);
+                if let Some(memory) = self.memory {
+                    self.device.unmap_memory(memory);
+                }
             }
             self.device.destroy_buffer(self.buffer, None);
+            if let Some(memory) = self.memory {
+                self.device.free_memory(memory, None);
+            }
+        }
+    }
+}
+
+impl Drop for VulkanSparseResidentMemoryBlock {
+    fn drop(&mut self) {
+        unsafe {
             self.device.free_memory(self.memory, None);
         }
     }

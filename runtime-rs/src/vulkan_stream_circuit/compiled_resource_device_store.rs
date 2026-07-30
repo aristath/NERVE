@@ -257,16 +257,27 @@ impl VulkanCompiledResourceDeviceStore {
             layout.slot_count(),
         )
         .map_err(compiled_device_store_vulkan_error)?;
-        let arena = VulkanStableResourceArena::new(
+        let sparse_group_layouts =
+            compiled_resource_sparse_group_layouts(
+                &contract,
+                &layout,
+                &allowed_selector_ids,
+            )?;
+        let arena = VulkanStableResourceArena::new_sparse(
             device,
             VulkanStableResourceArenaConfig::new(
                 initial_chunk_byte_capacity,
-                maximum_allocation_byte_capacity,
+                available_dynamic_device_bytes,
                 upload_alignment,
             )
             .map_err(compiled_device_store_vulkan_error)?,
+            &sparse_group_layouts,
         )
         .map_err(compiled_device_store_vulkan_error)?;
+        let maximum_allocation_byte_capacity = arena
+            .maximum_backed_byte_capacity()
+            .map_err(compiled_device_store_vulkan_error)?
+            .min(available_dynamic_device_bytes);
         let package_root = package_root.into();
         let coverage_index = compiled_resource_component_coverage_index(
             &contract,
@@ -1266,6 +1277,9 @@ impl VulkanCompiledResourceDeviceStore {
             state.publications.clear();
         }
         drop(state);
+        self.arena
+            .release_backing()
+            .map_err(compiled_device_store_vulkan_error)?;
         let residency = self
             .manager
             .snapshot()
@@ -1533,6 +1547,130 @@ fn compiled_resource_upload_alignment(
         )));
     }
     Ok(alignment)
+}
+
+fn compiled_resource_sparse_group_layouts(
+    contract: &CompiledResourceResidencyContract,
+    layout: &VulkanCompiledResourceAddressLayout,
+    allowed_selector_ids: &BTreeSet<String>,
+) -> Result<
+    Vec<VulkanStableResourceGroupLayout>,
+    VulkanCompiledResourceDeviceStoreError,
+> {
+    let mut byte_counts_by_slot = BTreeMap::new();
+    for slot in &layout.slots {
+        let byte_count = match (
+            &slot.partition_template_id,
+            &slot.resource_identity_seed,
+        ) {
+            (Some(template_id), Some(identity_seed)) => {
+                let template = contract
+                    .partition_templates
+                    .iter()
+                    .find(|template| template.id == *template_id)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "sparse resource layout references a missing partition template",
+                        )
+                    })?;
+                let member = template
+                    .member_templates
+                    .iter()
+                    .find(|member| {
+                        member.resource_identity_seed == *identity_seed
+                    })
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "sparse resource layout references a missing partition member",
+                        )
+                    })?;
+                member.range_templates.iter().try_fold(
+                    0usize,
+                    |total, range| {
+                        total.checked_add(range.byte_count).ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "sparse partition resource byte count overflowed",
+                            )
+                        })
+                    },
+                )?
+            }
+            (None, None) => {
+                let resource = contract
+                    .resources
+                    .iter()
+                    .find(|resource| resource.id == slot.resource_id)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "sparse resource layout references a missing concrete resource",
+                        )
+                    })?;
+                resource.ranges.iter().try_fold(
+                    0usize,
+                    |total, range| {
+                        total.checked_add(range.byte_count).ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "sparse concrete resource byte count overflowed",
+                            )
+                        })
+                    },
+                )?
+            }
+            _ => {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "sparse resource address slot has incomplete partition identity",
+                ));
+            }
+        };
+        if byte_count == 0
+            || byte_counts_by_slot.insert(slot.slot, byte_count).is_some()
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "sparse resource address slot is empty or duplicated",
+            ));
+        }
+    }
+    let mut groups = BTreeMap::new();
+    for selector in layout.selectors.iter().filter(|selector| {
+        allowed_selector_ids.contains(&selector.selector_id)
+    }) {
+        for slots in &selector.resource_address_slots {
+            let byte_counts = slots
+                .iter()
+                .map(|slot| {
+                    byte_counts_by_slot.get(slot).copied().ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "sparse resource group references an unknown address slot",
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(previous) =
+                groups.insert(slots.clone(), byte_counts.clone())
+                && previous != byte_counts
+            {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "sparse resource group has conflicting byte layouts",
+                ));
+            }
+        }
+    }
+    if groups.is_empty() {
+        return Err(VulkanCompiledResourceDeviceStoreError::new(
+            "compiled resource store has no sparse resource groups",
+        ));
+    }
+    Ok(groups
+        .into_iter()
+        .map(
+            |(resource_slots, resource_byte_counts)| {
+                VulkanStableResourceGroupLayout {
+                    resource_slots,
+                    resource_byte_counts,
+                }
+            },
+        )
+        .collect())
 }
 
 fn compiled_resource_vulkan_error_is_device_loss(

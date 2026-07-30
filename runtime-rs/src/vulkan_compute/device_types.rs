@@ -7,6 +7,7 @@ pub struct VulkanComputeDevice {
     transfer_queue: vk::Queue,
     transfer_queue_is_distinct: bool,
     buffer_device_address_supported: bool,
+    sparse_buffer_residency_supported: bool,
     api_version: u32,
     physical_device_id: String,
     device_name: String,
@@ -252,7 +253,7 @@ struct VulkanStoragePipeline {
 pub struct VulkanResidentBuffer {
     device: ash::Device,
     buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
+    memory: Option<vk::DeviceMemory>,
     memory_access: VulkanResidentMemoryAccess,
     byte_capacity: vk::DeviceSize,
     device_address: Option<vk::DeviceAddress>,
@@ -260,6 +261,31 @@ pub struct VulkanResidentBuffer {
     persistent_mapping_requires_unmap: bool,
     _shared_host_allocation: Option<Arc<VulkanSharedHostAllocation>>,
     _shared_device_memory_identity: Option<Arc<VulkanSharedDeviceMemoryIdentity>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanSparseResidentBufferRequirements {
+    pub byte_alignment: usize,
+    pub memory_type_index: u32,
+}
+
+pub struct VulkanSparseResidentMemoryBlock {
+    device: ash::Device,
+    memory: vk::DeviceMemory,
+    byte_capacity: usize,
+}
+
+impl VulkanSparseResidentMemoryBlock {
+    pub fn byte_capacity(&self) -> usize {
+        self.byte_capacity
+    }
+}
+
+pub struct VulkanSparseResidentBufferBind<'a> {
+    pub resource_byte_offset: usize,
+    pub byte_count: usize,
+    pub memory: &'a VulkanSparseResidentMemoryBlock,
+    pub memory_byte_offset: usize,
 }
 
 /// Page-aligned host memory imported into multiple Vulkan devices. GPUs access
