@@ -15,7 +15,7 @@ struct VulkanDemandResidencyGateSpec {
     selection_count: usize,
     selection_index_shift: u32,
     selection_index_mask: u32,
-    address_slots_by_resource_index: Vec<Vec<usize>>,
+    address_mapping: VulkanCompiledSelectorAddressMapping,
     selection_buffer: Arc<VulkanResidentBuffer>,
 }
 
@@ -198,9 +198,7 @@ impl VulkanDemandResidencySegment {
                     selection_count: selector.encoding.selection_count_per_activation,
                     selection_index_shift: selector.encoding.index_shift,
                     selection_index_mask: selector.encoding.index_mask,
-                    address_slots_by_resource_index: selector_layout
-                        .resource_address_slots
-                        .clone(),
+                    address_mapping: selector_layout.mapping.clone(),
                     selection_buffer,
                 });
             }
@@ -355,6 +353,24 @@ impl VulkanDemandResidencyDispatchChain {
             let checkpoint_tag = u32::try_from(gate_index + 1).map_err(|_| {
                 demand_dispatch_error("demand gate count exceeds u32")
             })?;
+            let address_mapping = match &spec.address_mapping {
+                VulkanCompiledSelectorAddressMapping::GroupTable {
+                    resource_address_slots,
+                    resource_address_slot_offsets,
+                } => VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots: resource_address_slots.clone(),
+                    resource_address_slot_offsets:
+                        resource_address_slot_offsets.clone(),
+                },
+                VulkanCompiledSelectorAddressMapping::PartitionTemplate {
+                    member_slot_bases,
+                    resource_count,
+                    ..
+                } => VulkanGpuResidencyAddressMapping::Partitioned {
+                    member_slot_bases: member_slot_bases.clone(),
+                    resource_count: *resource_count,
+                },
+            };
             let gate = VulkanGpuResidencyGate::new(
                 device,
                 &gate_shader,
@@ -369,9 +385,7 @@ impl VulkanDemandResidencyDispatchChain {
                     selection_lane_stride_words: spec.selection_count,
                     selection_index_shift: spec.selection_index_shift,
                     selection_index_mask: spec.selection_index_mask,
-                    address_slots_by_resource_index: spec
-                        .address_slots_by_resource_index
-                        .clone(),
+                    address_mapping,
                 },
             )
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;

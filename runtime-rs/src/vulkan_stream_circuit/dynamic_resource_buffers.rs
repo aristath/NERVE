@@ -63,10 +63,9 @@ impl VulkanDynamicResourceBuffers {
                     || component_ids.contains(&table.key.component_id))
         }) {
             let words = table
-                .slots
-                .iter()
+                .slots()
                 .map(|slot| {
-                    u32::try_from(*slot).map_err(|_| {
+                    u32::try_from(slot).map_err(|_| {
                         VulkanError(format!(
                             "dynamic resource parameter slot {slot} exceeds u32"
                         ))

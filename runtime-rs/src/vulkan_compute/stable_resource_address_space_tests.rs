@@ -1,19 +1,16 @@
 #[test]
 fn stable_resource_address_contract_validates_alignment_and_layout() {
     assert!(
-        VulkanStableResourceArenaConfig::new(4096, 8192, 8).is_ok()
+        VulkanStableResourceArenaConfig::new(8192, 8).is_ok()
     );
     assert!(
-        VulkanStableResourceArenaConfig::new(0, 8192, 8).is_err()
+        VulkanStableResourceArenaConfig::new(0, 8).is_err()
     );
     assert!(
-        VulkanStableResourceArenaConfig::new(8192, 4096, 8).is_err()
+        VulkanStableResourceArenaConfig::new(8192, 4).is_err()
     );
     assert!(
-        VulkanStableResourceArenaConfig::new(4096, 8192, 4).is_err()
-    );
-    assert!(
-        VulkanStableResourceArenaConfig::new(4096, 8192, 24).is_err()
+        VulkanStableResourceArenaConfig::new(8192, 24).is_err()
     );
     assert_eq!(
         std::mem::size_of::<VulkanStableResourceAddressRecord>(),
@@ -61,19 +58,18 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
             .unwrap();
     assert!(device.supports_sparse_buffer_residency());
     let layouts = [
-        VulkanStableResourceGroupLayout {
+        VulkanStableResourceGroupLayout::Explicit {
             resource_slots: vec![0, 1],
             resource_byte_counts: vec![1024, 2048],
         },
-        VulkanStableResourceGroupLayout {
+        VulkanStableResourceGroupLayout::Explicit {
             resource_slots: vec![2],
             resource_byte_counts: vec![4096],
         },
     ];
-    let arena = VulkanStableResourceArena::new_sparse(
+    let arena = VulkanStableResourceArena::new(
         &device,
         VulkanStableResourceArenaConfig::new(
-            64 * 1024,
             512 * 1024,
             256,
         )
@@ -169,49 +165,89 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
     drop(earlier_group);
     drop(later_group);
     assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    let retry_group = arena
+        .allocate_groups(
+            &device,
+            &[(&[0, 1], &[1024, 2048])],
+            256,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let retry_stats = arena.stats().unwrap();
+    assert_eq!(
+        retry_stats.committed_byte_capacity,
+        stats.committed_byte_capacity
+    );
+    assert_eq!(retry_stats.chunk_count, stats.chunk_count);
+    assert_eq!(retry_stats.allocated_byte_count, 3072);
+    assert_eq!(retry_stats.active_allocation_count, 2);
+    drop(retry_group);
     arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 
 #[test]
-fn stable_resource_free_ranges_coalesce_on_both_sides() {
-    let mut free_ranges = BTreeMap::from([(0, 64), (96, 32)]);
-    release_stable_resource_range(&mut free_ranges, 64, 32);
-    assert_eq!(free_ranges, BTreeMap::from([(0, 128)]));
+fn sparse_partition_layout_scales_to_one_million_addressable_groups() {
+    const PARTITION_COUNT: usize = 1_000_000;
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!(
+            "skipping sparse partition scale test: explicit Vulkan device unset"
+        );
+        return;
+    };
+    let device =
+        VulkanComputeDevice::new_for_physical_device_index(device_index)
+            .unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(
+            256 * 1024,
+            256,
+        )
+        .unwrap(),
+        &[VulkanStableResourceGroupLayout::Partitioned {
+            member_slot_bases: vec![0, PARTITION_COUNT],
+            resource_byte_counts: vec![8, 8],
+            partition_count: PARTITION_COUNT,
+        }],
+    )
+    .unwrap();
 
-    let mut disjoint = BTreeMap::from([(0, 16), (64, 16)]);
-    release_stable_resource_range(&mut disjoint, 32, 16);
-    assert_eq!(
-        disjoint,
-        BTreeMap::from([(0, 16), (32, 16), (64, 16)])
-    );
-}
-
-#[test]
-fn stable_resource_chunk_growth_is_lazy_logarithmic_and_capacity_bounded() {
-    assert_eq!(
-        next_stable_resource_chunk_capacity(4096, 0, 65_536, 1024).unwrap(),
-        4096
-    );
-    assert_eq!(
-        next_stable_resource_chunk_capacity(4096, 4096, 61_440, 1024).unwrap(),
-        4096
-    );
-    assert_eq!(
-        next_stable_resource_chunk_capacity(4096, 8192, 57_344, 1024).unwrap(),
-        8192
-    );
-    assert_eq!(
-        next_stable_resource_chunk_capacity(4096, 16_384, 49_152, 20_000).unwrap(),
-        20_000
-    );
-    assert_eq!(
-        next_stable_resource_chunk_capacity(4096, 36_384, 29_152, 1024).unwrap(),
-        29_152
-    );
+    let first_slots = [0, PARTITION_COUNT];
+    let last_slots = [PARTITION_COUNT - 1, 2 * PARTITION_COUNT - 1];
+    let byte_counts = [8, 8];
+    let groups = arena
+        .allocate_groups(
+            &device,
+            &[
+                (&first_slots, &byte_counts),
+                (&last_slots, &byte_counts),
+            ],
+            256,
+        )
+        .unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].len(), 2);
+    assert_eq!(groups[1].len(), 2);
     assert!(
-        next_stable_resource_chunk_capacity(4096, 4096, 1024, 2048).is_err()
+        groups[1][0].buffer_byte_offset()
+            > groups[0][1].buffer_byte_offset()
     );
+    let stats = arena.stats().unwrap();
+    assert_eq!(stats.active_allocation_count, 4);
+    assert_eq!(stats.allocated_byte_count, 32);
+    assert_eq!(stats.chunk_count, 1);
+    let maximum_backed = arena.maximum_backed_byte_capacity().unwrap();
+    assert_eq!(maximum_backed % PARTITION_COUNT, 0);
+    let sparse_page_bytes = maximum_backed / PARTITION_COUNT;
+    assert!(sparse_page_bytes >= 256);
+    assert!(sparse_page_bytes.is_power_of_two());
+    assert_eq!(stats.committed_byte_capacity, 2 * sparse_page_bytes);
+
+    drop(groups);
+    arena.release_backing().unwrap();
+    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 
 #[test]
@@ -241,8 +277,26 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
         .unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(16 * 1024, 32 * 1024, 8)
+        VulkanStableResourceArenaConfig::new(32 * 1024, 8)
             .unwrap(),
+        &[
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![1],
+                resource_byte_counts: vec![1024],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![3],
+                resource_byte_counts: vec![2048],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![2],
+                resource_byte_counts: vec![4096],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![0],
+                resource_byte_counts: vec![128],
+            },
+        ],
     )
     .unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
@@ -257,19 +311,26 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
         .is_err()
     );
     drop(undersized_transfer);
-    let first = Arc::new(arena.allocate(&device, 1024, 256).unwrap());
-    let second = Arc::new(arena.allocate(&device, 2048, 512).unwrap());
+    let first = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[1], &[1024])], 8)
+            .unwrap()[0][0],
+    );
+    let second = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[3], &[2048])], 8)
+            .unwrap()[0][0],
+    );
     assert_eq!(first.device_address() % 256, 0);
     assert_eq!(second.device_address() % 512, 0);
     assert_ne!(first.device_address(), second.device_address());
-    assert_eq!(
-        arena.stats().unwrap(),
-        VulkanStableResourceArenaStats {
-            committed_byte_capacity: 16 * 1024,
-            allocated_byte_count: 3072,
-            active_allocation_count: 2,
-            chunk_count: 1,
-        }
+    let initial_stats = arena.stats().unwrap();
+    assert_eq!(initial_stats.allocated_byte_count, 3072);
+    assert_eq!(initial_stats.active_allocation_count, 2);
+    assert_eq!(initial_stats.chunk_count, 2);
+    assert!(
+        initial_stats.committed_byte_capacity
+            >= initial_stats.allocated_byte_count
     );
 
     let first_values = (0..256u32)
@@ -342,12 +403,20 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
 
     let first_address = first.device_address();
     let second_address = second.device_address();
-    let third = Arc::new(arena.allocate(&device, 4096, 1024).unwrap());
+    let third = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[2], &[4096])], 8)
+            .unwrap()[0][0],
+    );
     assert_eq!(third.device_address() % 1024, 0);
     assert_eq!(first.device_address(), first_address);
     assert_eq!(second.device_address(), second_address);
     let before_failure = arena.stats().unwrap();
-    assert!(arena.allocate(&device, 20 * 1024, 256).is_err());
+    assert!(
+        arena
+            .allocate_groups(&device, &[(&[99], &[20 * 1024])], 8)
+            .is_err()
+    );
     assert_eq!(arena.stats().unwrap(), before_failure);
 
     let output = device.create_resident_buffer(16).unwrap();
@@ -402,8 +471,11 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
         vec![0xdead_beef, 0, 0, 2]
     );
 
-    let table_retained =
-        Arc::new(arena.allocate(&device, 128, 64).unwrap());
+    let table_retained = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[0], &[128])], 8)
+            .unwrap()[0][0],
+    );
     let retained_publication = table
         .publish_group(
             &mut transfer,
@@ -431,6 +503,7 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
     drop(third);
     drop(second);
     drop(first);
+    arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 
@@ -472,14 +545,20 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
         &device,
         VulkanStableResourceArenaConfig::new(
             2 * BYTE_COUNT,
-            2 * BYTE_COUNT,
             256,
         )
         .unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0],
+            resource_byte_counts: vec![BYTE_COUNT],
+        }],
     )
     .unwrap();
-    let source =
-        Arc::new(arena.allocate(&device, BYTE_COUNT, 256).unwrap());
+    let source = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[0], &[BYTE_COUNT])], 256)
+            .unwrap()[0][0],
+    );
     let source_values = (0..ELEMENT_COUNT as u32)
         .map(|value| value.rotate_left(7) ^ 0xa5a5_5a5a)
         .collect::<Vec<_>>();
@@ -628,6 +707,8 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
     );
     table.clear_group(&mut transfer, &publications).unwrap();
     drop(source);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 

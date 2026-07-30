@@ -46,6 +46,7 @@ const uint RESOLVED_HEADER_WORDS = 8u;
 const uint RESOLVED_RECORD_WORDS = 8u;
 const uint MISSING_HEADER_WORDS = 4u;
 const uint MISSING_RECORD_WORDS = 2u;
+const uint GROUP_TABLE_MAPPING = 0u;
 
 uint selected_resource(uint selection_index) {
     uint lane = selection_index / configuration.words[5];
@@ -80,6 +81,29 @@ bool address_slot_is_resident(uint slot) {
         && address_nonzero != 0u
         && byte_count_nonzero != 0u
         && generation_nonzero != 0u;
+}
+
+uint resource_member_count(uint resource_index) {
+    if (configuration.words[7] != GROUP_TABLE_MAPPING) {
+        return configuration.words[8];
+    }
+    return resource_groups.words[
+        resource_index * GROUP_RECORD_WORDS + 1u
+    ];
+}
+
+uint resource_member_slot(
+    uint resource_index,
+    uint member_index
+) {
+    if (configuration.words[7] != GROUP_TABLE_MAPPING) {
+        return resource_address_slots.words[member_index]
+            + resource_index;
+    }
+    uint first_member = resource_groups.words[
+        resource_index * GROUP_RECORD_WORDS
+    ];
+    return resource_address_slots.words[first_member + member_index];
 }
 
 void copy_resolved_address(
@@ -143,12 +167,10 @@ void main() {
         if ((previous_seen & seen_bit) != 0u) continue;
         atomicAdd(resolved_addresses.words[1], 1u);
 
-        uint group_record = resource_index * GROUP_RECORD_WORDS;
-        uint first_member = resource_groups.words[group_record];
-        uint member_count = resource_groups.words[group_record + 1u];
+        uint member_count = resource_member_count(resource_index);
         bool resident = true;
         for (uint member = 0u; member < member_count; member += 1u) {
-            uint slot = resource_address_slots.words[first_member + member];
+            uint slot = resource_member_slot(resource_index, member);
             resident = resident && address_slot_is_resident(slot);
         }
         if (!resident) {
@@ -169,7 +191,7 @@ void main() {
                 atomicOr(resolved_addresses.words[4], 1u);
                 break;
             }
-            uint slot = resource_address_slots.words[first_member + member];
+            uint slot = resource_member_slot(resource_index, member);
             copy_resolved_address(
                 resolved_index,
                 resource_index,

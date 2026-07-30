@@ -4,7 +4,21 @@ const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT: usize = 4;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT: usize = 2;
-const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 7;
+const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 9;
+const VULKAN_GPU_RESIDENCY_GATE_GROUP_TABLE_MAPPING: u32 = 0;
+const VULKAN_GPU_RESIDENCY_GATE_PARTITIONED_MAPPING: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VulkanGpuResidencyAddressMapping {
+    GroupTable {
+        resource_address_slots: Vec<usize>,
+        resource_address_slot_offsets: Vec<usize>,
+    },
+    Partitioned {
+        member_slot_bases: Vec<usize>,
+        resource_count: usize,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanGpuResidencyGateConfig {
@@ -13,7 +27,7 @@ pub struct VulkanGpuResidencyGateConfig {
     pub selection_lane_stride_words: usize,
     pub selection_index_shift: u32,
     pub selection_index_mask: u32,
-    pub address_slots_by_resource_index: Vec<Vec<usize>>,
+    pub address_mapping: VulkanGpuResidencyAddressMapping,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +52,7 @@ pub struct VulkanGpuResidencyMissQueue {
 }
 
 pub struct VulkanGpuResidencyGate {
-    config: VulkanGpuResidencyGateConfig,
+    maximum_selection_count: usize,
     _selection_buffer: Arc<VulkanResidentBuffer>,
     _address_table_buffer: Arc<VulkanResidentBuffer>,
     _configuration: Arc<VulkanResidentBuffer>,
@@ -100,12 +114,10 @@ impl VulkanGpuResidencyGateConfig {
                 "GPU residency gate selection bit field is invalid".to_string(),
             ));
         }
-        if self.address_slots_by_resource_index.is_empty() {
-            return Err(VulkanError(
-                "GPU residency gate must address at least one selectable resource".to_string(),
-            ));
-        }
-        let maximum_resource_index = self.address_slots_by_resource_index.len() - 1;
+        let resource_count = self
+            .address_mapping
+            .validate(address_table_slot_count)?;
+        let maximum_resource_index = resource_count - 1;
         if u32::try_from(maximum_resource_index).map_or(true, |index| {
             index & self.selection_index_mask != index
         }) {
@@ -113,28 +125,6 @@ impl VulkanGpuResidencyGateConfig {
                 "GPU residency gate selection mask {:#010x} cannot represent resource index {maximum_resource_index}",
                 self.selection_index_mask
             )));
-        }
-        for (resource_index, slots) in
-            self.address_slots_by_resource_index.iter().enumerate()
-        {
-            if slots.is_empty() {
-                return Err(VulkanError(format!(
-                    "GPU residency gate resource {resource_index} has no address slots"
-                )));
-            }
-            let mut unique = BTreeSet::new();
-            for slot in slots {
-                if *slot >= address_table_slot_count {
-                    return Err(VulkanError(format!(
-                        "GPU residency gate resource {resource_index} uses address slot {slot}, but the table has {address_table_slot_count} slots"
-                    )));
-                }
-                if !unique.insert(*slot) {
-                    return Err(VulkanError(format!(
-                        "GPU residency gate resource {resource_index} repeats address slot {slot}"
-                    )));
-                }
-            }
         }
         if missing_request_capacity == 0
             || missing_request_capacity < self.maximum_selection_count
@@ -149,17 +139,211 @@ impl VulkanGpuResidencyGateConfig {
     }
 
     fn maximum_resolved_address_count(&self) -> Result<usize, VulkanError> {
-        let maximum_members = self
-            .address_slots_by_resource_index
-            .iter()
-            .map(Vec::len)
-            .max()
-            .expect("validated resource map is non-empty");
+        let maximum_members =
+            self.address_mapping.maximum_resource_member_count();
         self.maximum_selection_count
             .checked_mul(maximum_members)
             .ok_or_else(|| {
                 VulkanError("GPU residency resolved-address capacity overflowed".to_string())
             })
+    }
+}
+
+impl VulkanGpuResidencyAddressMapping {
+    fn resource_count(&self) -> usize {
+        match self {
+            Self::GroupTable {
+                resource_address_slot_offsets,
+                ..
+            } => resource_address_slot_offsets.len().saturating_sub(1),
+            Self::Partitioned { resource_count, .. } => *resource_count,
+        }
+    }
+
+    fn maximum_resource_member_count(&self) -> usize {
+        match self {
+            Self::GroupTable {
+                resource_address_slot_offsets,
+                ..
+            } => resource_address_slot_offsets
+                .windows(2)
+                .map(|bounds| bounds[1].saturating_sub(bounds[0]))
+                .max()
+                .unwrap_or(0),
+            Self::Partitioned {
+                member_slot_bases,
+                ..
+            } => member_slot_bases.len(),
+        }
+    }
+
+    fn validate(
+        &self,
+        address_table_slot_count: usize,
+    ) -> Result<usize, VulkanError> {
+        match self {
+            Self::GroupTable {
+                resource_address_slots,
+                resource_address_slot_offsets,
+            } => {
+                if resource_address_slot_offsets.len() < 2
+                    || resource_address_slot_offsets[0] != 0
+                    || resource_address_slot_offsets.last().copied()
+                        != Some(resource_address_slots.len())
+                    || resource_address_slot_offsets
+                        .windows(2)
+                        .any(|bounds| bounds[0] >= bounds[1])
+                {
+                    return Err(VulkanError(
+                        "GPU residency gate group table is empty or invalid"
+                            .to_string(),
+                    ));
+                }
+                for (resource_index, bounds) in
+                    resource_address_slot_offsets.windows(2).enumerate()
+                {
+                    let mut unique = BTreeSet::new();
+                    for slot in &resource_address_slots[bounds[0]..bounds[1]] {
+                        if *slot >= address_table_slot_count {
+                            return Err(VulkanError(format!(
+                                "GPU residency gate resource {resource_index} uses address slot {slot}, but the table has {address_table_slot_count} slots"
+                            )));
+                        }
+                        if !unique.insert(*slot) {
+                            return Err(VulkanError(format!(
+                                "GPU residency gate resource {resource_index} repeats address slot {slot}"
+                            )));
+                        }
+                    }
+                }
+                Ok(resource_address_slot_offsets.len() - 1)
+            }
+            Self::Partitioned {
+                member_slot_bases,
+                resource_count,
+            } => {
+                if *resource_count == 0 || member_slot_bases.is_empty() {
+                    return Err(VulkanError(
+                        "GPU residency gate partition mapping is empty"
+                            .to_string(),
+                    ));
+                }
+                let mut ranges = member_slot_bases
+                    .iter()
+                    .map(|base| {
+                        base.checked_add(*resource_count)
+                            .map(|end| (*base, end))
+                            .ok_or_else(|| {
+                                VulkanError(
+                                    "GPU residency partition slot range overflowed"
+                                        .to_string(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                ranges.sort_unstable();
+                for range in &ranges {
+                    if range.1 > address_table_slot_count {
+                        return Err(VulkanError(format!(
+                            "GPU residency partition address range {}..{} exceeds the table's {address_table_slot_count} slots",
+                            range.0, range.1
+                        )));
+                    }
+                }
+                if ranges
+                    .windows(2)
+                    .any(|pair| pair[0].1 > pair[1].0)
+                {
+                    return Err(VulkanError(
+                        "GPU residency partition member address ranges overlap"
+                            .to_string(),
+                    ));
+                }
+                Ok(*resource_count)
+            }
+        }
+    }
+
+    fn gpu_tables(
+        &self,
+    ) -> Result<(Vec<u32>, Vec<u32>, u32, u32), VulkanError> {
+        match self {
+            Self::GroupTable {
+                resource_address_slots,
+                resource_address_slot_offsets,
+            } => {
+                let mut group_words = Vec::with_capacity(
+                    (resource_address_slot_offsets.len() - 1)
+                        * VULKAN_GPU_RESIDENCY_GATE_GROUP_RECORD_WORD_COUNT,
+                );
+                for bounds in resource_address_slot_offsets.windows(2) {
+                    group_words.push(u32::try_from(bounds[0]).map_err(
+                        |_| {
+                            VulkanError(
+                                "GPU residency address-slot offset exceeds u32"
+                                    .to_string(),
+                            )
+                        },
+                    )?);
+                    group_words.push(
+                        u32::try_from(bounds[1] - bounds[0]).map_err(
+                            |_| {
+                                VulkanError(
+                                    "GPU residency resource member count exceeds u32"
+                                        .to_string(),
+                                )
+                            },
+                        )?,
+                    );
+                }
+                let slot_words = resource_address_slots
+                    .iter()
+                    .map(|slot| {
+                        u32::try_from(*slot).map_err(|_| {
+                            VulkanError(
+                                "GPU residency address slot exceeds u32"
+                                    .to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((
+                    group_words,
+                    slot_words,
+                    VULKAN_GPU_RESIDENCY_GATE_GROUP_TABLE_MAPPING,
+                    0,
+                ))
+            }
+            Self::Partitioned {
+                member_slot_bases,
+                ..
+            } => {
+                let member_count =
+                    u32::try_from(member_slot_bases.len()).map_err(|_| {
+                        VulkanError(
+                            "GPU residency partition member count exceeds u32"
+                                .to_string(),
+                        )
+                    })?;
+                let slot_words = member_slot_bases
+                    .iter()
+                    .map(|slot| {
+                        u32::try_from(*slot).map_err(|_| {
+                            VulkanError(
+                                "GPU residency partition slot base exceeds u32"
+                                    .to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((
+                    vec![0, member_count],
+                    slot_words,
+                    VULKAN_GPU_RESIDENCY_GATE_PARTITIONED_MAPPING,
+                    member_count,
+                ))
+            }
+        }
     }
 }
 
@@ -195,10 +379,17 @@ impl VulkanGpuResidencyGate {
             ));
         }
 
+        let (
+            resource_group_words,
+            resource_address_slot_words,
+            mapping_kind,
+            partition_member_count,
+        ) = config.address_mapping.gpu_tables()?;
+        let resource_count = config.address_mapping.resource_count();
         let configuration_words = vec![
             config.selection_index_shift,
             config.selection_index_mask,
-            u32::try_from(config.address_slots_by_resource_index.len()).map_err(|_| {
+            u32::try_from(resource_count).map_err(|_| {
                 VulkanError("GPU residency resource count exceeds u32".to_string())
             })?,
             u32::try_from(missing_queue.capacity()).map_err(|_| {
@@ -213,6 +404,8 @@ impl VulkanGpuResidencyGate {
             u32::try_from(config.selection_lane_stride_words).map_err(|_| {
                 VulkanError("GPU residency selection lane stride exceeds u32".to_string())
             })?,
+            mapping_kind,
+            partition_member_count,
         ];
         debug_assert_eq!(
             configuration_words.len(),
@@ -222,36 +415,6 @@ impl VulkanGpuResidencyGate {
             device.create_resident_buffer(words_byte_count(configuration_words.len())?)?,
         );
         configuration.write_bytes(&u32_words_bytes(&configuration_words))?;
-
-        let mut resource_group_words = Vec::with_capacity(
-            config.address_slots_by_resource_index.len()
-                * VULKAN_GPU_RESIDENCY_GATE_GROUP_RECORD_WORD_COUNT,
-        );
-        let mut resource_address_slot_words = Vec::new();
-        for slots in &config.address_slots_by_resource_index {
-            resource_group_words.push(
-                u32::try_from(resource_address_slot_words.len()).map_err(|_| {
-                    VulkanError(
-                        "GPU residency address-slot offset exceeds u32".to_string(),
-                    )
-                })?,
-            );
-            resource_group_words.push(u32::try_from(slots.len()).map_err(|_| {
-                VulkanError("GPU residency resource member count exceeds u32".to_string())
-            })?);
-            resource_address_slot_words.extend(
-                slots
-                    .iter()
-                    .map(|slot| {
-                        u32::try_from(*slot).map_err(|_| {
-                            VulkanError(
-                                "GPU residency address slot exceeds u32".to_string(),
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-        }
 
         let resource_group_records = Arc::new(
             device.create_resident_buffer(words_byte_count(resource_group_words.len())?)?,
@@ -272,10 +435,8 @@ impl VulkanGpuResidencyGate {
                     "GPU residency resolved record capacity overflowed".to_string(),
                 )
             })?;
-        let seen_resource_word_count = config
-            .address_slots_by_resource_index
-            .len()
-            .div_ceil(u32::BITS as usize);
+        let seen_resource_word_count =
+            resource_count.div_ceil(u32::BITS as usize);
         let resolved_word_count = VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT
             .checked_add(
                 resolved_record_word_count,
@@ -358,7 +519,7 @@ impl VulkanGpuResidencyGate {
             Some("gpu_residency_gate".to_string()),
         )?;
         Ok(Self {
-            config,
+            maximum_selection_count: config.maximum_selection_count,
             _selection_buffer: selection_buffer,
             _address_table_buffer: address_table_buffer,
             _configuration: configuration,
@@ -382,10 +543,12 @@ impl VulkanGpuResidencyGate {
         restore_downstream: bool,
     ) -> Result<[u8; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize], VulkanError>
     {
-        if selection_count == 0 || selection_count > self.config.maximum_selection_count {
+        if selection_count == 0
+            || selection_count > self.maximum_selection_count
+        {
             return Err(VulkanError(format!(
                 "GPU residency gate selection count {selection_count} is outside 1..={}",
-                self.config.maximum_selection_count
+                self.maximum_selection_count
             )));
         }
         let mut bytes =

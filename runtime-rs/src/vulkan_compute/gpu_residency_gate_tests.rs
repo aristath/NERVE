@@ -12,7 +12,10 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
         selection_lane_stride_words: 2,
         selection_index_shift: 0,
         selection_index_mask: 0xffff,
-        address_slots_by_resource_index: vec![vec![0, 1], vec![2, 3]],
+        address_mapping: VulkanGpuResidencyAddressMapping::GroupTable {
+            resource_address_slots: vec![0, 1, 2, 3],
+            resource_address_slot_offsets: vec![0, 2, 4],
+        },
     };
     assert!(valid.validate(8, 4, 4).is_ok());
 
@@ -49,17 +52,51 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0x1;
-    invalid.address_slots_by_resource_index =
-        vec![vec![0], vec![1], vec![2]];
+    invalid.address_mapping =
+        VulkanGpuResidencyAddressMapping::GroupTable {
+            resource_address_slots: vec![0, 1, 2],
+            resource_address_slot_offsets: vec![0, 1, 2, 3],
+        };
     assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
-    invalid.address_slots_by_resource_index[0].push(1);
+    if let VulkanGpuResidencyAddressMapping::GroupTable {
+        resource_address_slots,
+        ..
+    } = &mut invalid.address_mapping
+    {
+        resource_address_slots[1] = 0;
+    }
     assert!(invalid.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
-    invalid.address_slots_by_resource_index[0].push(4);
+    if let VulkanGpuResidencyAddressMapping::GroupTable {
+        resource_address_slots,
+        ..
+    } = &mut invalid.address_mapping
+    {
+        resource_address_slots[0] = 4;
+    }
     assert!(invalid.validate(8, 4, 4).is_err());
+
+    let partitioned = VulkanGpuResidencyGateConfig {
+        address_mapping:
+            VulkanGpuResidencyAddressMapping::Partitioned {
+                member_slot_bases: vec![0, 4],
+                resource_count: 4,
+            },
+        ..valid.clone()
+    };
+    assert!(partitioned.validate(8, 8, 4).is_ok());
+    let overlapping = VulkanGpuResidencyGateConfig {
+        address_mapping:
+            VulkanGpuResidencyAddressMapping::Partitioned {
+                member_slot_bases: vec![0, 3],
+                resource_count: 4,
+            },
+        ..valid.clone()
+    };
+    assert!(overlapping.validate(8, 8, 4).is_err());
 
     assert!(valid.validate(8, 4, 1).is_err());
     assert!(valid.validate(4, 4, 4).is_err());
@@ -74,8 +111,8 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
         return;
     };
     let gate_shader =
-        compile_gpu_residency_gate_shader(GPU_RESIDENCY_GATE_SHADER)
-            .expect("GPU residency gate test requires a GLSL compiler");
+        vulkan_gpu_residency_gate_spirv_words()
+            .expect("embedded GPU residency gate shader must be valid");
     let downstream_shader = compile_gpu_residency_gate_shader(
         GPU_RESIDENCY_GATE_DOWNSTREAM_SHADER,
     )
@@ -89,11 +126,28 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
         .unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(4096, 8192, 256).unwrap(),
+        VulkanStableResourceArenaConfig::new(8192, 256).unwrap(),
+        &[
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![0],
+                resource_byte_counts: vec![64],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![1],
+                resource_byte_counts: vec![64],
+            },
+        ],
     )
     .unwrap();
-    let first = Arc::new(arena.allocate(&device, 64, 256).unwrap());
-    let second = Arc::new(arena.allocate(&device, 64, 256).unwrap());
+    let allocations = arena
+        .allocate_groups(
+            &device,
+            &[(&[0], &[64]), (&[1], &[64])],
+            256,
+        )
+        .unwrap();
+    let first = Arc::clone(&allocations[0][0]);
+    let second = Arc::clone(&allocations[1][0]);
     let first_bytes = (0u8..64).collect::<Vec<_>>();
     let second_bytes = (64u8..128).collect::<Vec<_>>();
     let upload = transfer
@@ -151,7 +205,11 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
             selection_lane_stride_words: 8,
             selection_index_shift: 0,
             selection_index_mask: 0xffff,
-            address_slots_by_resource_index: vec![vec![0], vec![1]],
+            address_mapping:
+                VulkanGpuResidencyAddressMapping::Partitioned {
+                    member_slot_bases: vec![0],
+                    resource_count: 2,
+                },
         },
     )
     .unwrap();
@@ -336,6 +394,9 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
     drop(table);
     drop(second);
     drop(first);
+    drop(allocations);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 
@@ -360,11 +421,28 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
         .unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(4096, 8192, 256).unwrap(),
+        VulkanStableResourceArenaConfig::new(8192, 256).unwrap(),
+        &[
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![0],
+                resource_byte_counts: vec![64],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![1],
+                resource_byte_counts: vec![64],
+            },
+        ],
     )
     .unwrap();
-    let first = Arc::new(arena.allocate(&device, 64, 256).unwrap());
-    let second = Arc::new(arena.allocate(&device, 64, 256).unwrap());
+    let allocations = arena
+        .allocate_groups(
+            &device,
+            &[(&[0], &[64]), (&[1], &[64])],
+            256,
+        )
+        .unwrap();
+    let first = Arc::clone(&allocations[0][0]);
+    let second = Arc::clone(&allocations[1][0]);
     let upload = transfer
         .submit(&[
             VulkanResidentBufferWriteRange::new(
@@ -408,7 +486,11 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
             selection_lane_stride_words: 1,
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
-            address_slots_by_resource_index: vec![vec![0]],
+            address_mapping:
+                VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots: vec![0],
+                    resource_address_slot_offsets: vec![0, 1],
+                },
         },
     )
     .unwrap();
@@ -426,7 +508,11 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
             selection_lane_stride_words: 1,
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
-            address_slots_by_resource_index: vec![vec![1]],
+            address_mapping:
+                VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots: vec![1],
+                    resource_address_slot_offsets: vec![0, 1],
+                },
         },
     )
     .unwrap();
@@ -568,6 +654,9 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
     drop(table);
     drop(second);
     drop(first);
+    drop(allocations);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 
@@ -600,14 +689,20 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
         &device,
         VulkanStableResourceArenaConfig::new(
             BYTE_COUNT + 256,
-            BYTE_COUNT + 256,
             256,
         )
         .unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0],
+            resource_byte_counts: vec![BYTE_COUNT],
+        }],
     )
     .unwrap();
-    let source =
-        Arc::new(arena.allocate(&device, BYTE_COUNT, 256).unwrap());
+    let source = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[0], &[BYTE_COUNT])], 256)
+            .unwrap()[0][0],
+    );
     let source_values = (0..ELEMENT_COUNT as u32)
         .map(|value| value.rotate_left(7) ^ 0xa5a5_5a5a)
         .collect::<Vec<_>>();
@@ -651,7 +746,11 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
             selection_lane_stride_words: 1,
             selection_index_shift: 0,
             selection_index_mask: u32::MAX,
-            address_slots_by_resource_index: vec![vec![0]],
+            address_mapping:
+                VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots: vec![0],
+                    resource_address_slot_offsets: vec![0, 1],
+                },
         },
     )
     .unwrap();
@@ -782,6 +881,8 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
         .unwrap();
     drop(table);
     drop(source);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
 }
 

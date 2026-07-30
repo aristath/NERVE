@@ -677,7 +677,11 @@ fn stable_resource_upload_capacity_failure_rolls_back_every_allocation_and_publi
         device.create_resident_transfer_stream(1, 64).unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(8, 8, 8).unwrap(),
+        VulkanStableResourceArenaConfig::new(8, 8).unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0, 1],
+            resource_byte_counts: vec![8, 8],
+        }],
     )
     .unwrap();
     let mut address_table =
@@ -700,7 +704,14 @@ fn stable_resource_upload_capacity_failure_rolls_back_every_allocation_and_publi
         Err(error) => error,
     };
 
-    assert!(error.0.contains("committed bytes remain"), "{error}");
+    assert!(
+        error.0.contains(
+            "sparse stable resources need "
+        ) && error.0.contains(
+            " additional physical bytes, but 0 of 8 bytes are already committed"
+        ),
+        "{error}"
+    );
     assert_eq!(
         arena.stats().unwrap(),
         VulkanStableResourceArenaStats::default()
@@ -711,6 +722,7 @@ fn stable_resource_upload_capacity_failure_rolls_back_every_allocation_and_publi
     );
     drop(loaded);
     assert_eq!(backing_store.retained_payload_bytes(), 0);
+    arena.release_backing().unwrap();
 }
 
 #[test]
@@ -888,8 +900,19 @@ fn external_compiled_group_uses_stable_address_slots_and_explicit_retirement() {
         .unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(capacity, capacity, alignment)
-            .unwrap(),
+        VulkanStableResourceArenaConfig::new(
+            capacity.max(128 * 1024 * 1024),
+            alignment,
+        )
+        .unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: (0..descriptor.resources.len()).collect(),
+            resource_byte_counts: descriptor
+                .resources
+                .iter()
+                .map(|resource| resource.byte_count)
+                .collect(),
+        }],
     )
     .unwrap();
     let mut table = VulkanStableResourceAddressTable::new(
@@ -937,6 +960,8 @@ fn external_compiled_group_uses_stable_address_slots_and_explicit_retirement() {
     );
 
     upload.retire(&mut transfer, &mut table).unwrap();
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    arena.release_backing().unwrap();
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
     assert!(
         (0..table.slot_count())

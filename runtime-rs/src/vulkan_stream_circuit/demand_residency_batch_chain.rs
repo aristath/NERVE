@@ -7,7 +7,7 @@ struct VulkanDemandResidencyBatchGateSpec {
     selection_lane_stride_words: usize,
     selection_index_shift: u32,
     selection_index_mask: u32,
-    address_slots_by_resource_index: Vec<Vec<usize>>,
+    address_mapping: VulkanCompiledSelectorAddressMapping,
     selection_buffer: Arc<VulkanResidentBuffer>,
 }
 
@@ -242,9 +242,7 @@ impl VulkanDemandResidencyBatchSegment {
                     selection_lane_stride_words,
                     selection_index_shift: selector.encoding.index_shift,
                     selection_index_mask: selector.encoding.index_mask,
-                    address_slots_by_resource_index: selector_layout
-                        .resource_address_slots
-                        .clone(),
+                    address_mapping: selector_layout.mapping.clone(),
                     selection_buffer,
                 });
             }
@@ -424,6 +422,24 @@ impl VulkanDemandResidencyBatchChain {
                         "demand batch active selection count overflowed",
                     )
                 })?;
+            let address_mapping = match &spec.address_mapping {
+                VulkanCompiledSelectorAddressMapping::GroupTable {
+                    resource_address_slots,
+                    resource_address_slot_offsets,
+                } => VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots: resource_address_slots.clone(),
+                    resource_address_slot_offsets:
+                        resource_address_slot_offsets.clone(),
+                },
+                VulkanCompiledSelectorAddressMapping::PartitionTemplate {
+                    member_slot_bases,
+                    resource_count,
+                    ..
+                } => VulkanGpuResidencyAddressMapping::Partitioned {
+                    member_slot_bases: member_slot_bases.clone(),
+                    resource_count: *resource_count,
+                },
+            };
             let gate = VulkanGpuResidencyGate::new(
                 device,
                 &gate_shader,
@@ -438,9 +454,7 @@ impl VulkanDemandResidencyBatchChain {
                     selection_lane_stride_words: spec.selection_lane_stride_words,
                     selection_index_shift: spec.selection_index_shift,
                     selection_index_mask: spec.selection_index_mask,
-                    address_slots_by_resource_index: spec
-                        .address_slots_by_resource_index
-                        .clone(),
+                    address_mapping,
                 },
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;

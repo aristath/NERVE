@@ -519,8 +519,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
 
         let mut compiled_resource_device_stores = BTreeMap::new();
         let mut compiled_resource_physical_placements = Vec::new();
-        let mut planned_slot_physical_device_ids =
-            BTreeMap::<usize, BTreeSet<String>>::new();
+        let mut planned_selector_physical_placements =
+            Vec::<(VulkanCompiledSelectorAddressMapping, String)>::new();
         for (physical_group_index, slice_indices) in
             physical_slice_groups.into_iter().enumerate()
         {
@@ -705,16 +705,16 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )
             })?;
             let addressable_slot_count = compiled_resource_layout
-                .selectors
-                .iter()
-                .filter(|selector| {
-                    allowed_selector_ids.contains(&selector.selector_id)
-                })
-                .flat_map(|selector| selector.resource_address_slots.iter())
-                .flatten()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .len();
+                .addressable_slot_count_for_selectors(
+                    &allowed_selector_ids,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(
+                            error.to_string(),
+                        ),
+                    )
+                })?;
             let maximum_alignment_padding = addressable_slot_count
                 .checked_mul(upload_alignment.saturating_sub(1))
                 .ok_or_else(|| {
@@ -855,20 +855,28 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     .expect(
                         "owned selector was validated against the address layout",
                     );
-                let slots = selector_layout
-                    .resource_address_slots
+                let previously_resident_physical_device_ids =
+                    planned_selector_physical_placements
                     .iter()
-                    .flatten()
-                    .copied()
-                    .collect::<BTreeSet<_>>();
-                let previously_resident_physical_device_ids = slots
-                    .iter()
-                    .filter_map(|slot| {
-                        planned_slot_physical_device_ids.get(slot)
+                    .map(|(mapping, device_id)| {
+                        selector_layout
+                            .mapping
+                            .overlaps(mapping)
+                            .map(|overlaps| {
+                                overlaps.then(|| device_id.clone())
+                            })
                     })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(
+                                error.to_string(),
+                            ),
+                        )
+                    })?
+                    .into_iter()
                     .flatten()
-                    .filter(|device_id| *device_id != &physical_device_id)
-                    .cloned()
+                    .filter(|device_id| device_id != &physical_device_id)
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>();
@@ -899,12 +907,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
                             })?,
                         )
                     };
-                for slot in slots {
-                    planned_slot_physical_device_ids
-                        .entry(slot)
-                        .or_default()
-                        .insert(physical_device_id.clone());
-                }
+                planned_selector_physical_placements.push((
+                    selector_layout.mapping.clone(),
+                    physical_device_id.clone(),
+                ));
                 selector_placements.push(
                     VulkanCompiledResourceSelectorPhysicalPlacement {
                         selector_id: selector_id.clone(),

@@ -142,11 +142,6 @@ impl VulkanCompiledResourceDeviceStore {
         }
         let upload_alignment =
             compiled_resource_upload_alignment(&contract, device)?;
-        let maximum_group_resource_count =
-            compiled_resource_maximum_resources_per_group_for_selectors(
-                &contract,
-                &allowed_selector_ids,
-            )?;
         let maximum_load_wave_group_count = contract
             .selectors
             .iter()
@@ -168,16 +163,12 @@ impl VulkanCompiledResourceDeviceStore {
             ));
         }
         let maximum_addressable_resource_count = layout
-            .selectors
-            .iter()
-            .filter(|selector| {
-                allowed_selector_ids.contains(&selector.selector_id)
-            })
-            .flat_map(|selector| selector.resource_address_slots.iter())
-            .flatten()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .len();
+            .addressable_slot_count_for_selectors(&allowed_selector_ids)
+            .map_err(|error| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "compiled resource address layout is invalid: {error}"
+                ))
+            })?;
         if maximum_addressable_resource_count == 0
             || allowed_selector_ids.iter().any(|selector_id| {
                 !layout
@@ -216,21 +207,6 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resources require up to {maximum_allocation_byte_capacity} physical allocation bytes for {maximum_dynamic_payload_bytes} payload bytes, but only {available_dynamic_device_bytes} device bytes are available"
             )));
         }
-        let initial_chunk_byte_capacity = maximum_group_byte_count
-            .checked_add(
-                maximum_group_resource_count
-                    .checked_mul(per_resource_alignment_slack)
-                    .ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "compiled resource group alignment capacity overflowed",
-                        )
-                    })?,
-            )
-            .ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled resource group allocation capacity overflowed",
-                )
-            })?;
         let address_table_byte_count = layout
             .slot_count()
             .checked_mul(32)
@@ -263,10 +239,9 @@ impl VulkanCompiledResourceDeviceStore {
                 &layout,
                 &allowed_selector_ids,
             )?;
-        let arena = VulkanStableResourceArena::new_sparse(
+        let arena = VulkanStableResourceArena::new(
             device,
             VulkanStableResourceArenaConfig::new(
-                initial_chunk_byte_capacity,
                 available_dynamic_device_bytes,
                 upload_alignment,
             )
@@ -467,7 +442,11 @@ impl VulkanCompiledResourceDeviceStore {
                     })?;
             let resource_slots = self
                 .layout
-                .resource_slots_for_ids(&descriptor.resource_ids)
+                .resource_slots_for_selection(
+                    selector_id,
+                    *resource_index,
+                    &descriptor.resource_ids,
+                )
                 .map_err(|error| {
                     VulkanCompiledResourceDeviceStoreError::new(format!(
                         "compiled resource address layout is invalid: {error}"
@@ -1557,120 +1536,198 @@ fn compiled_resource_sparse_group_layouts(
     Vec<VulkanStableResourceGroupLayout>,
     VulkanCompiledResourceDeviceStoreError,
 > {
-    let mut byte_counts_by_slot = BTreeMap::new();
-    for slot in &layout.slots {
-        let byte_count = match (
-            &slot.partition_template_id,
-            &slot.resource_identity_seed,
-        ) {
-            (Some(template_id), Some(identity_seed)) => {
+    let resource_byte_count =
+        |resource: &CompiledImmutableResource,
+         label: &str|
+         -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+            let byte_count = resource.ranges.iter().try_fold(
+                0usize,
+                |total, range| {
+                    total.checked_add(range.byte_count).ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "sparse {label} resource byte count overflowed"
+                        ))
+                    })
+                },
+            )?;
+            if byte_count == 0 {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    format!("sparse {label} resource is empty"),
+                ));
+            }
+            Ok(byte_count)
+        };
+    let mut explicit_groups = BTreeMap::new();
+    let mut partitioned_groups = BTreeMap::new();
+    for selector_layout in layout.selectors.iter().filter(|selector| {
+        allowed_selector_ids.contains(&selector.selector_id)
+    }) {
+        let selector = contract
+            .selectors
+            .iter()
+            .find(|selector| selector.id == selector_layout.selector_id)
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "sparse address layout references a missing selector",
+                )
+            })?;
+        match (&selector.mapping, &selector_layout.mapping) {
+            (
+                CompiledResourceSelectorMapping::GroupTable {
+                    atomic_group_ids,
+                },
+                VulkanCompiledSelectorAddressMapping::GroupTable { .. },
+            ) => {
+                for (resource_index, group_id) in
+                    atomic_group_ids.iter().enumerate()
+                {
+                    let group = contract
+                        .atomic_groups
+                        .iter()
+                        .find(|group| group.id == *group_id)
+                        .ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "sparse selector references a missing atomic group",
+                            )
+                        })?;
+                    let slots = selector_layout
+                        .mapping
+                        .resource_slots(resource_index)
+                        .ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "sparse atomic group has no address slots",
+                            )
+                        })?;
+                    let byte_counts = group
+                        .resource_ids
+                        .iter()
+                        .map(|resource_id| {
+                            contract
+                                .resources
+                                .iter()
+                                .find(|resource| {
+                                    resource.id == *resource_id
+                                })
+                                .ok_or_else(|| {
+                                    VulkanCompiledResourceDeviceStoreError::new(
+                                        "sparse atomic group references a missing resource",
+                                    )
+                                })
+                                .and_then(|resource| {
+                                    resource_byte_count(resource, "concrete")
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(previous) =
+                        explicit_groups.insert(slots, byte_counts.clone())
+                        && previous != byte_counts
+                    {
+                        return Err(
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "sparse atomic group has conflicting byte layouts",
+                            ),
+                        );
+                    }
+                }
+            }
+            (
+                CompiledResourceSelectorMapping::PartitionTemplate {
+                    partition_template_id,
+                },
+                VulkanCompiledSelectorAddressMapping::PartitionTemplate {
+                    member_slot_bases,
+                    resource_count,
+                    ..
+                },
+            ) => {
                 let template = contract
                     .partition_templates
                     .iter()
-                    .find(|template| template.id == *template_id)
-                    .ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "sparse resource layout references a missing partition template",
-                        )
-                    })?;
-                let member = template
-                    .member_templates
-                    .iter()
-                    .find(|member| {
-                        member.resource_identity_seed == *identity_seed
+                    .find(|template| {
+                        template.id == *partition_template_id
                     })
                     .ok_or_else(|| {
                         VulkanCompiledResourceDeviceStoreError::new(
-                            "sparse resource layout references a missing partition member",
+                            "sparse selector references a missing partition template",
                         )
                     })?;
-                member.range_templates.iter().try_fold(
-                    0usize,
-                    |total, range| {
-                        total.checked_add(range.byte_count).ok_or_else(|| {
-                            VulkanCompiledResourceDeviceStoreError::new(
-                                "sparse partition resource byte count overflowed",
-                            )
-                        })
-                    },
-                )?
-            }
-            (None, None) => {
-                let resource = contract
-                    .resources
-                    .iter()
-                    .find(|resource| resource.id == slot.resource_id)
-                    .ok_or_else(|| {
+                if template.partition_count != *resource_count {
+                    return Err(
                         VulkanCompiledResourceDeviceStoreError::new(
-                            "sparse resource layout references a missing concrete resource",
-                        )
-                    })?;
-                resource.ranges.iter().try_fold(
-                    0usize,
-                    |total, range| {
-                        total.checked_add(range.byte_count).ok_or_else(|| {
-                            VulkanCompiledResourceDeviceStoreError::new(
-                                "sparse concrete resource byte count overflowed",
-                            )
-                        })
-                    },
-                )?
+                            "sparse partition selector count differs from its address layout",
+                        ),
+                    );
+                }
+                let byte_counts = template
+                    .member_templates
+                    .iter()
+                    .map(|member| {
+                        let byte_count = member
+                            .range_templates
+                            .iter()
+                            .try_fold(0usize, |total, range| {
+                                total.checked_add(range.byte_count).ok_or_else(
+                                    || {
+                                        VulkanCompiledResourceDeviceStoreError::new(
+                                            "sparse partition resource byte count overflowed",
+                                        )
+                                    },
+                                )
+                            })?;
+                        if byte_count == 0 {
+                            return Err(
+                                VulkanCompiledResourceDeviceStoreError::new(
+                                    "sparse partition resource is empty",
+                                ),
+                            );
+                        }
+                        Ok(byte_count)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let key =
+                    (member_slot_bases.clone(), template.partition_count);
+                if let Some(previous) =
+                    partitioned_groups.insert(key, byte_counts.clone())
+                    && previous != byte_counts
+                {
+                    return Err(
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "sparse partition group has conflicting byte layouts",
+                        ),
+                    );
+                }
             }
             _ => {
                 return Err(VulkanCompiledResourceDeviceStoreError::new(
-                    "sparse resource address slot has incomplete partition identity",
-                ));
-            }
-        };
-        if byte_count == 0
-            || byte_counts_by_slot.insert(slot.slot, byte_count).is_some()
-        {
-            return Err(VulkanCompiledResourceDeviceStoreError::new(
-                "sparse resource address slot is empty or duplicated",
-            ));
-        }
-    }
-    let mut groups = BTreeMap::new();
-    for selector in layout.selectors.iter().filter(|selector| {
-        allowed_selector_ids.contains(&selector.selector_id)
-    }) {
-        for slots in &selector.resource_address_slots {
-            let byte_counts = slots
-                .iter()
-                .map(|slot| {
-                    byte_counts_by_slot.get(slot).copied().ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "sparse resource group references an unknown address slot",
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Some(previous) =
-                groups.insert(slots.clone(), byte_counts.clone())
-                && previous != byte_counts
-            {
-                return Err(VulkanCompiledResourceDeviceStoreError::new(
-                    "sparse resource group has conflicting byte layouts",
+                    "sparse selector contract and address mapping differ",
                 ));
             }
         }
     }
-    if groups.is_empty() {
+    if explicit_groups.is_empty() && partitioned_groups.is_empty() {
         return Err(VulkanCompiledResourceDeviceStoreError::new(
             "compiled resource store has no sparse resource groups",
         ));
     }
-    Ok(groups
+    let mut groups = explicit_groups
         .into_iter()
-        .map(
-            |(resource_slots, resource_byte_counts)| {
-                VulkanStableResourceGroupLayout {
+        .map(|(resource_slots, resource_byte_counts)| {
+            VulkanStableResourceGroupLayout::Explicit {
                     resource_slots,
                     resource_byte_counts,
                 }
-            },
-        )
-        .collect())
+        })
+        .collect::<Vec<_>>();
+    groups.extend(partitioned_groups.into_iter().map(
+        |((member_slot_bases, partition_count), resource_byte_counts)| {
+            VulkanStableResourceGroupLayout::Partitioned {
+                member_slot_bases,
+                resource_byte_counts,
+                partition_count,
+            }
+        },
+    ));
+    Ok(groups)
 }
 
 fn compiled_resource_vulkan_error_is_device_loss(
@@ -1720,63 +1777,6 @@ fn compiled_resource_maximum_ranges_per_group(
                 })
         }))
         .try_fold(0usize, |maximum, count| count.map(|count| maximum.max(count)))
-}
-
-fn compiled_resource_maximum_resources_per_group_for_selectors(
-    contract: &CompiledResourceResidencyContract,
-    selector_ids: &BTreeSet<String>,
-) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-    contract
-        .selectors
-        .iter()
-        .filter(|selector| selector_ids.contains(&selector.id))
-        .map(|selector| match &selector.mapping {
-            CompiledResourceSelectorMapping::GroupTable {
-                atomic_group_ids,
-            } => atomic_group_ids
-                .iter()
-                .map(|group_id| {
-                    contract
-                        .atomic_groups
-                        .iter()
-                        .find(|group| group.id == *group_id)
-                        .map(|group| group.resource_ids.len())
-                        .ok_or_else(|| {
-                            VulkanCompiledResourceDeviceStoreError::new(format!(
-                                "compiled selector {:?} references missing group {group_id:?}",
-                                selector.id
-                            ))
-                        })
-                })
-                .try_fold(0usize, |maximum, count| {
-                    count.map(|count| maximum.max(count))
-                }),
-            CompiledResourceSelectorMapping::PartitionTemplate {
-                partition_template_id,
-            } => contract
-                .partition_templates
-                .iter()
-                .find(|template| template.id == *partition_template_id)
-                .map(|template| template.member_templates.len())
-                .ok_or_else(|| {
-                    VulkanCompiledResourceDeviceStoreError::new(format!(
-                        "compiled selector {:?} references missing partition template {partition_template_id:?}",
-                        selector.id
-                    ))
-                }),
-        })
-        .try_fold(0usize, |maximum, count| {
-            count.map(|count| maximum.max(count))
-        })
-        .and_then(|maximum| {
-            if maximum == 0 {
-                Err(VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled device-resource store has no addressable group members",
-                ))
-            } else {
-                Ok(maximum)
-            }
-        })
 }
 
 fn compiled_resource_component_coverage_index(

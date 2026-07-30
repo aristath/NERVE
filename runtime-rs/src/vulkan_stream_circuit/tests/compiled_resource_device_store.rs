@@ -396,7 +396,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
         .collect::<Vec<_>>();
-    let selected_slot = layout.selectors[0].resource_address_slots[0][0];
+    let selected_slot = layout.selectors[0]
+        .mapping
+        .resource_slots(0)
+        .unwrap()[0];
     assert_eq!(address_words[selected_slot * 8 + 6], 1);
     assert_ne!(
         address_words[selected_slot * 8]
