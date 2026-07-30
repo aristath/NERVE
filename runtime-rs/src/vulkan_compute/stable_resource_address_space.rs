@@ -466,23 +466,45 @@ fn sparse_stable_resource_placement_for_slots(
     if let Some(placement) = state.placements.get(sorted_slots) {
         return Ok(placement.clone());
     }
-    for partitioned in &state.partitioned_placements {
+    'partitioned_layout: for partitioned in
+        &state.partitioned_placements
+    {
         if requested_slots.len() != partitioned.member_slot_bases.len() {
             continue;
         }
-        let Some(partition_index) = requested_slots[0]
-            .checked_sub(partitioned.member_slot_bases[0])
-            .filter(|index| *index < partitioned.partition_count)
-        else {
-            continue;
-        };
-        if requested_slots
-            .iter()
-            .zip(&partitioned.member_slot_bases)
-            .any(|(slot, base)| *slot != *base + partition_index)
-        {
-            continue;
+        let mut partition_index = None;
+        let mut requested_member_indices =
+            Vec::with_capacity(requested_slots.len());
+        let mut seen_member_indices = BTreeSet::new();
+        for slot in requested_slots {
+            let Some((member_index, selected_partition_index)) =
+                partitioned
+                    .member_slot_bases
+                    .iter()
+                    .enumerate()
+                    .find_map(|(member_index, base)| {
+                        slot.checked_sub(*base)
+                            .filter(|index| {
+                                *index < partitioned.partition_count
+                            })
+                            .map(|index| (member_index, index))
+                    })
+            else {
+                continue 'partitioned_layout;
+            };
+            if !seen_member_indices.insert(member_index)
+                || partition_index
+                    .is_some_and(|index| {
+                        index != selected_partition_index
+                    })
+            {
+                continue 'partitioned_layout;
+            }
+            partition_index = Some(selected_partition_index);
+            requested_member_indices.push(member_index);
         }
+        let partition_index =
+            partition_index.expect("partition layout has requested members");
         let group_byte_offset = partitioned
             .group_byte_capacity
             .checked_mul(partition_index)
@@ -494,15 +516,31 @@ fn sparse_stable_resource_placement_for_slots(
                     "partitioned sparse resource placement overflowed".to_string(),
                 )
             })?;
-        let resource_byte_offsets = partitioned
-            .resource_byte_offsets
+        let resource_byte_offsets = requested_member_indices
             .iter()
-            .map(|offset| group_byte_offset + offset)
+            .map(|member_index| {
+                group_byte_offset
+                    .checked_add(
+                        partitioned.resource_byte_offsets[*member_index],
+                    )
+                    .ok_or_else(|| {
+                        VulkanError(
+                            "partitioned sparse member offset overflowed"
+                                .to_string(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let resource_byte_counts = requested_member_indices
+            .iter()
+            .map(|member_index| {
+                partitioned.resource_byte_counts[*member_index]
+            })
             .collect();
         return Ok(VulkanSparseStableResourcePlacement {
             resource_slots: requested_slots.to_vec(),
             resource_byte_offsets,
-            resource_byte_counts: partitioned.resource_byte_counts.clone(),
+            resource_byte_counts,
             group_byte_offset,
             group_byte_capacity: partitioned.group_byte_capacity,
         });

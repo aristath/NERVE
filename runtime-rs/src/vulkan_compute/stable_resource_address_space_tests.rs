@@ -208,21 +208,22 @@ fn sparse_partition_layout_scales_to_one_million_addressable_groups() {
         .unwrap(),
         &[VulkanStableResourceGroupLayout::Partitioned {
             member_slot_bases: vec![0, PARTITION_COUNT],
-            resource_byte_counts: vec![8, 8],
+            resource_byte_counts: vec![8, 16],
             partition_count: PARTITION_COUNT,
         }],
     )
     .unwrap();
 
-    let first_slots = [0, PARTITION_COUNT];
+    let first_slots = [PARTITION_COUNT, 0];
     let last_slots = [PARTITION_COUNT - 1, 2 * PARTITION_COUNT - 1];
-    let byte_counts = [8, 8];
+    let first_byte_counts = [16, 8];
+    let last_byte_counts = [8, 16];
     let groups = arena
         .allocate_groups(
             &device,
             &[
-                (&first_slots, &byte_counts),
-                (&last_slots, &byte_counts),
+                (&first_slots, &first_byte_counts),
+                (&last_slots, &last_byte_counts),
             ],
             256,
         )
@@ -230,13 +231,15 @@ fn sparse_partition_layout_scales_to_one_million_addressable_groups() {
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0].len(), 2);
     assert_eq!(groups[1].len(), 2);
+    assert_eq!(groups[0][0].byte_count(), 16);
+    assert_eq!(groups[0][1].byte_count(), 8);
     assert!(
         groups[1][0].buffer_byte_offset()
             > groups[0][1].buffer_byte_offset()
     );
     let stats = arena.stats().unwrap();
     assert_eq!(stats.active_allocation_count, 4);
-    assert_eq!(stats.allocated_byte_count, 32);
+    assert_eq!(stats.allocated_byte_count, 48);
     assert_eq!(stats.chunk_count, 1);
     let maximum_backed = arena.maximum_backed_byte_capacity().unwrap();
     assert_eq!(maximum_backed % PARTITION_COUNT, 0);
