@@ -41,6 +41,13 @@ struct VulkanComponentBatchEdgeTransfer {
 }
 
 impl VulkanComponentBatchEdgeTransfer {
+    fn supports_deferred_completion(&self) -> bool {
+        matches!(
+            self.binding,
+            VulkanComponentBatchEdgeTransferBinding::DeviceLocalStaging { .. }
+        )
+    }
+
     fn run(
         &self,
     ) -> Result<VulkanPlacedEdgeTransferRoute, VulkanResidentInProcessPlacedRuntimeError> {

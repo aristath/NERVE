@@ -418,12 +418,37 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 )),
             ));
         }
+        let pipeline_starts_at_input = runner
+            .pipeline
+            .first()
+            .and_then(|index| self.device_slices.get(*index))
+            .is_some_and(|slice| slice.device_id == self.model.input_device_id);
+        let pipeline_ends_at_output = runner
+            .pipeline
+            .last()
+            .and_then(|index| self.device_slices.get(*index))
+            .is_some_and(|slice| slice.device_id == self.model.output_device_id);
+        let completion_mode = if capture_causal_state_snapshots
+            && pipeline_starts_at_input
+            && pipeline_ends_at_output
+            && runner.execution_graph.supports_deferred_completion()
+        {
+            VulkanComponentBatchCompletionMode::Deferred
+        } else {
+            VulkanComponentBatchCompletionMode::Blocking
+        };
         let input_device = devices.get(&self.model.input_device_id).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                 device_id: self.model.input_device_id.clone(),
             }
         })?;
-        runner.input_embedding.run(input_device, input_token_ids)?;
+        if completion_mode == VulkanComponentBatchCompletionMode::Deferred {
+            runner
+                .input_embedding
+                .submit_deferred(input_device, input_token_ids)?;
+        } else {
+            runner.input_embedding.run(input_device, input_token_ids)?;
+        }
 
         let mut transport_stats = VulkanPlacedEdgeTransportStats::default();
         for (pipeline_index, device_index) in runner.pipeline.iter().copied().enumerate() {
@@ -436,6 +461,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 input_token_ids,
                 start_stream_tick,
                 capacity,
+                completion_mode,
             )?;
             if let Some(next_device_index) = runner.pipeline.get(pipeline_index + 1).copied() {
                 let [outgoing] = slice.mounted.edge_io.outgoing_buffers.as_slice() else {

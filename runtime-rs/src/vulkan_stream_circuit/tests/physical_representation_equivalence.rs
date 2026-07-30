@@ -119,6 +119,7 @@ fn run_fixture_layer_00_causal_batch(
             token_ids,
             0,
             u32::try_from(DYNAMIC_STATE_CAPACITY).unwrap(),
+            VulkanComponentBatchCompletionMode::Blocking,
         )
         .unwrap();
     assert!(runner.commit_causal_state_prefix(token_ids.len()).unwrap());

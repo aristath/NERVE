@@ -210,6 +210,16 @@ fn component_batch_static_state_write_indices(
 }
 
 impl VulkanResidentComponentBatchSliceRunner {
+    fn supports_deferred_completion(&self) -> bool {
+        self.demand_residency.is_empty()
+            && !self.execution_units.iter().any(|unit| {
+                matches!(
+                    unit,
+                    VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
+                )
+            })
+    }
+
     fn new(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         device: &VulkanComputeDevice,
@@ -797,6 +807,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         input_token_ids: &[u32],
         start_stream_tick: u64,
         dynamic_state_capacity_activations: u32,
+        completion_mode: VulkanComponentBatchCompletionMode,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let stream_ticks = consecutive_component_batch_stream_ticks(
             start_stream_tick,
@@ -811,6 +822,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             devices,
             owner_device_id,
             distributed_dispatches,
+            completion_mode,
         )
     }
 
@@ -838,6 +850,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             devices,
             owner_device_id,
             distributed_dispatches,
+            VulkanComponentBatchCompletionMode::Blocking,
         )
     }
 
@@ -852,6 +865,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         owner_device_id: &str,
         distributed_dispatches: &VulkanDistributedComponentBatchRunners,
+        completion_mode: VulkanComponentBatchCompletionMode,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let batch_width = input_token_ids.len();
         if batch_width == 0 || batch_width > self.lane_capacity {
@@ -921,6 +935,18 @@ impl VulkanResidentComponentBatchSliceRunner {
         let mut local_group_index = 0usize;
         let mut measurements = Vec::new();
         let mut local_submission_batch = VulkanResidentQueueSubmissionBatch::new();
+        let completion_mode = if completion_mode == VulkanComponentBatchCompletionMode::Deferred
+            && self.demand_residency.is_empty()
+            && !self.execution_units.iter().any(|unit| {
+                matches!(
+                    unit,
+                    VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
+                )
+            }) {
+            VulkanComponentBatchCompletionMode::Deferred
+        } else {
+            VulkanComponentBatchCompletionMode::Blocking
+        };
         let dependency_value = self
             .execution_units
             .iter()
@@ -954,7 +980,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 } => {
                     if let Some(demand_residency) = self.demand_residency.get(&unit_index) {
                         if local_submission_batch.pending_submission_count() > 0 {
-                            self.submit_and_wait_local_batch(
+                            self.submit_local_batch(
                                 std::mem::take(&mut local_submission_batch),
                                 shape_class_id,
                                 batch_width,
@@ -962,6 +988,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 shape_was_calibrated,
                                 true,
                                 timeline_value_offset,
+                                completion_mode,
                             )?
                             .into_iter()
                             .for_each(|measurement| measurements.push(measurement));
@@ -1056,7 +1083,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     }
                     sequence_index += 1;
                     if flush_after_segment {
-                        self.submit_and_wait_local_batch(
+                        self.submit_local_batch(
                             std::mem::replace(
                                 &mut local_submission_batch,
                                 VulkanResidentQueueSubmissionBatch::new(),
@@ -1067,6 +1094,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                             shape_was_calibrated,
                             true,
                             timeline_value_offset,
+                            completion_mode,
                         )?
                         .into_iter()
                         .for_each(|measurement| measurements.push(measurement));
@@ -1112,7 +1140,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 ),
             ));
         }
-        self.submit_and_wait_local_batch(
+        self.submit_local_batch(
             local_submission_batch,
             shape_class_id,
             batch_width,
@@ -1120,6 +1148,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             shape_was_calibrated,
             true,
             timeline_value_offset,
+            completion_mode,
         )?
         .into_iter()
         .for_each(|measurement| measurements.push(measurement));
@@ -1242,7 +1271,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         }
     }
 
-    fn submit_and_wait_local_batch<'a>(
+    fn submit_local_batch<'a>(
         &'a self,
         submission_batch: VulkanResidentQueueSubmissionBatch<'a>,
         shape_class_id: &str,
@@ -1251,6 +1280,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         shape_was_calibrated: bool,
         reusable: bool,
         timeline_value_offset: u64,
+        completion_mode: VulkanComponentBatchCompletionMode,
     ) -> Result<
         Vec<VulkanResidentExecutionQuantumMeasurement>,
         VulkanResidentInProcessPlacedRuntimeError,
@@ -1265,6 +1295,12 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .borrow()
                 .get(&template_key)
         {
+            if completion_mode == VulkanComponentBatchCompletionMode::Deferred {
+                return template
+                    .submit_with_timeline_value_offset(timeline_value_offset)
+                    .map(|_| Vec::new())
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop);
+            }
             return template
                 .submit_calibrated_quanta_and_wait(timeline_value_offset)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop);

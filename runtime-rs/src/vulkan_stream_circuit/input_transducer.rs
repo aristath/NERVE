@@ -290,6 +290,23 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
         device: &VulkanComputeDevice,
         token_ids: &[u32],
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.submit(device, token_ids, true)
+    }
+
+    fn submit_deferred(
+        &self,
+        device: &VulkanComputeDevice,
+        token_ids: &[u32],
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.submit(device, token_ids, false)
+    }
+
+    fn submit(
+        &self,
+        device: &VulkanComputeDevice,
+        token_ids: &[u32],
+        wait_for_completion: bool,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         if token_ids.is_empty() || token_ids.len() > self.batch_capacity {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError(format!(
@@ -324,18 +341,27 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
         let sequence = sequence_guard
             .as_ref()
             .expect("batched input sequence was inserted");
-        if sequence.has_recorded_commands() {
+        if !sequence.has_recorded_commands() {
             device
-                .run_recorded_resident_kernel_sequence(sequence)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-        } else {
-            device
-                .run_resident_kernel_sequence(
+                .record_resident_kernel_sequence(
                     sequence,
                     &[VulkanResidentKernelSequenceStep::new(
                         &self.dispatch,
                         &[],
                     )],
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
+        if wait_for_completion {
+            device
+                .run_recorded_resident_kernel_sequence(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        } else {
+            device
+                .submit_recorded_resident_kernel_sequence_unfenced_with_timeline_semaphores(
+                    sequence,
+                    &[],
+                    &[],
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
         }

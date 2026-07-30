@@ -8,6 +8,12 @@ enum VulkanComponentBatchSignalKey {
     OutgoingEdge(usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanComponentBatchCompletionMode {
+    Blocking,
+    Deferred,
+}
+
 struct VulkanComponentBatchSignalBuffer {
     frame_byte_capacity: usize,
     buffer: Arc<VulkanResidentBuffer>,

@@ -334,6 +334,16 @@ impl VulkanResidentPlacedComponentBatchRunner {
         Ok(true)
     }
 
+    fn supports_deferred_completion(&self) -> bool {
+        self.slices
+            .iter()
+            .all(VulkanResidentComponentBatchSliceRunner::supports_deferred_completion)
+            && self
+                .edge_transfers
+                .iter()
+                .all(VulkanComponentBatchEdgeTransfer::supports_deferred_completion)
+    }
+
     fn transfer_edge(
         &self,
         source_device_index: usize,
@@ -365,6 +375,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         input_token_ids: &[u32],
         start_stream_tick: u64,
         dynamic_state_capacity_activations: u32,
+        completion_mode: VulkanComponentBatchCompletionMode,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let device = devices.get(owner_device_id).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -380,6 +391,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             input_token_ids,
             start_stream_tick,
             dynamic_state_capacity_activations,
+            completion_mode,
         )
     }
 
