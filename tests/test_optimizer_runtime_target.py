@@ -769,6 +769,40 @@ def test_balanced_placement_excludes_processor_boundary_components(
     }
 
 
+def test_balanced_placement_attaches_output_to_last_processor_device(
+    tmp_path: Path,
+) -> None:
+    target = _target(("0000:03:00.0", "0000:07:00.0"))
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(10, 100, 100, 10),
+    )
+    manifest = json.loads(package.read_bytes())
+    manifest["circuit_graph"]["components"][0]["runtime_role"] = (
+        "input_transducer"
+    )
+    manifest["circuit_graph"]["components"][3]["runtime_role"] = (
+        "output_transducer"
+    )
+    first, second = (
+        _device_id("0000:03:00.0"),
+        _device_id("0000:07:00.0"),
+    )
+
+    placement = balanced_component_placement(
+        package.parent,
+        manifest,
+        (first, second),
+    )
+
+    assert placement == {
+        "component_1": first,
+        "component_2": second,
+        "component_3": second,
+    }
+
+
 def _target(
     pci_addresses: tuple[str, ...],
     *,

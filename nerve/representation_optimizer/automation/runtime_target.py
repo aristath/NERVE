@@ -432,7 +432,12 @@ def runtime_implementation_fingerprint(runtime_root: Path) -> str:
     inputs = [
         *(
             (relative, runtime_root / relative)
-            for relative in ("Cargo.lock", "Cargo.toml", "build.rs")
+            for relative in (
+                "Cargo.lock",
+                "Cargo.toml",
+                "build.rs",
+                "shaders/gpu_residency_gate.comp",
+            )
         ),
         *(
             (
@@ -719,6 +724,7 @@ def balanced_component_placement(
         for name, metadata in tensor_index["tensors"].items()
     }
     weighted: list[tuple[str, int]] = []
+    output_transducer_ids: list[str] = []
     for component in components:
         if not isinstance(component, dict):
             raise ModelCompileError("compiled component graph is malformed")
@@ -734,6 +740,8 @@ def balanced_component_placement(
             raise ModelCompileError(
                 "compiled component placement contract is malformed"
             )
+        if runtime_role == "output_transducer":
+            output_transducer_ids.append(component_id)
         if runtime_role != "signal_processor":
             continue
         names = {
@@ -752,8 +760,18 @@ def balanced_component_placement(
             "compiled package has no independently placeable signal processors"
         )
     if len(device_ids) == 1:
-        return {component_id: device_ids[0] for component_id, _ in weighted}
-    return _contiguous_weighted_partition(weighted, device_ids)
+        placement = {
+            component_id: device_ids[0]
+            for component_id, _ in weighted
+        }
+    else:
+        placement = _contiguous_weighted_partition(weighted, device_ids)
+    output_device = placement[weighted[-1][0]]
+    placement.update(
+        (component_id, output_device)
+        for component_id in output_transducer_ids
+    )
+    return placement
 
 
 def _build_target(
