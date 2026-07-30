@@ -119,6 +119,17 @@ pub enum VulkanMountedPlacedResidentKernelDispatchError {
         tensor: String,
         byte_count: Option<usize>,
     },
+    MissingDynamicResourceBuffers {
+        dispatch_index: usize,
+        binding: usize,
+    },
+    MissingDynamicResourceParameterSlots {
+        dispatch_index: usize,
+        binding: usize,
+        component_id: String,
+        node_id: String,
+        selection_signal: String,
+    },
     PermanentParameterBufferUnavailable {
         dispatch_index: usize,
         binding: usize,
@@ -271,6 +282,23 @@ impl Display for VulkanMountedPlacedResidentKernelDispatchError {
             } => write!(
                 f,
                 "dispatch {dispatch_index} descriptor {binding} references missing mounted permanent parameter {param_id:?} tensor {tensor:?} ({byte_count:?} bytes)"
+            ),
+            Self::MissingDynamicResourceBuffers {
+                dispatch_index,
+                binding,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} requires dynamic resource buffers that are not mounted"
+            ),
+            Self::MissingDynamicResourceParameterSlots {
+                dispatch_index,
+                binding,
+                component_id,
+                node_id,
+                selection_signal,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} references missing dynamic resource parameter slots for {component_id}.{node_id} signal {selection_signal:?}"
             ),
             Self::PermanentParameterBufferUnavailable {
                 dispatch_index,

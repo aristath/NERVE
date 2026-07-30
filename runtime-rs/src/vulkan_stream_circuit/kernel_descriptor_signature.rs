@@ -14,6 +14,7 @@ pub struct VulkanKernelDescriptorSlotSignature {
 pub enum VulkanKernelDescriptorResourceClass {
     SignalBuffer,
     ParameterBuffer,
+    DynamicResourceBuffer,
     StateBuffer,
     SelectionTelemetryBuffer,
 }
@@ -95,6 +96,10 @@ impl VulkanKernelDescriptorResourceClass {
         match resource {
             VulkanKernelDescriptorResource::Signal(_) => Self::SignalBuffer,
             VulkanKernelDescriptorResource::Parameter(_) => Self::ParameterBuffer,
+            VulkanKernelDescriptorResource::DynamicResourceAddressTable(_)
+            | VulkanKernelDescriptorResource::DynamicResourceParameterSlots(_) => {
+                Self::DynamicResourceBuffer
+            }
             VulkanKernelDescriptorResource::State { .. } => Self::StateBuffer,
             VulkanKernelDescriptorResource::SelectionTelemetry(_) => {
                 Self::SelectionTelemetryBuffer
@@ -127,6 +132,8 @@ fn descriptor_resource_byte_capacity(resource: &VulkanKernelDescriptorResource) 
             VulkanSignalResource::ActivationSlot { bytes, .. } => *bytes,
         },
         VulkanKernelDescriptorResource::Parameter(parameter) => parameter.byte_count,
+        VulkanKernelDescriptorResource::DynamicResourceAddressTable(_)
+        | VulkanKernelDescriptorResource::DynamicResourceParameterSlots(_) => None,
         VulkanKernelDescriptorResource::State { binding, .. } => {
             match (binding.static_bytes, binding.bytes_per_activation) {
                 (Some(static_bytes), Some(bytes_per_activation)) => {
@@ -147,6 +154,8 @@ fn descriptor_resource_shape(resource: &VulkanKernelDescriptorResource) -> Optio
     match resource {
         VulkanKernelDescriptorResource::Parameter(parameter) => parameter.shape.clone(),
         VulkanKernelDescriptorResource::Signal(_)
+        | VulkanKernelDescriptorResource::DynamicResourceAddressTable(_)
+        | VulkanKernelDescriptorResource::DynamicResourceParameterSlots(_)
         | VulkanKernelDescriptorResource::State { .. }
         | VulkanKernelDescriptorResource::SelectionTelemetry(_) => None,
     }

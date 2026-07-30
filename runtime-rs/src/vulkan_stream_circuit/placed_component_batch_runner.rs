@@ -471,6 +471,8 @@ fn component_batch_bindings<'a>(
         let access = match descriptor.usage {
             VulkanKernelDescriptorUsage::InputSignal
             | VulkanKernelDescriptorUsage::Parameter
+            | VulkanKernelDescriptorUsage::DynamicResourceAddressTable
+            | VulkanKernelDescriptorUsage::DynamicResourceParameterSlots
             | VulkanKernelDescriptorUsage::StateRead => VulkanResidentKernelBufferAccess::Read,
             VulkanKernelDescriptorUsage::OutputSignal | VulkanKernelDescriptorUsage::StateWrite => {
                 VulkanResidentKernelBufferAccess::Write
@@ -524,6 +526,55 @@ fn component_batch_bindings<'a>(
                         parameter.buffer.as_ref(),
                         parameter.byte_capacity,
                     )
+                }
+                VulkanBoundDescriptorTarget::DynamicResourceAddressTable {
+                    ..
+                } => {
+                    let resources =
+                        mounted.dynamic_resource_buffers.as_ref().ok_or_else(
+                            || {
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(
+                                        "component batch has no dynamic resource buffers"
+                                            .to_string(),
+                                    ),
+                                )
+                            },
+                        )?;
+                    let buffer = resources.address_table();
+                    (buffer, buffer.byte_capacity())
+                }
+                VulkanBoundDescriptorTarget::DynamicResourceParameterSlots {
+                    component_id,
+                    node_id,
+                    selection_signal,
+                    ..
+                } => {
+                    let resources =
+                        mounted.dynamic_resource_buffers.as_ref().ok_or_else(
+                            || {
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(
+                                        "component batch has no dynamic resource buffers"
+                                            .to_string(),
+                                    ),
+                                )
+                            },
+                        )?;
+                    let buffer = resources
+                        .parameter_slots(
+                            component_id,
+                            node_id,
+                            selection_signal,
+                        )
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                VulkanError(format!(
+                                    "component batch has no dynamic resource parameter slots for {component_id}.{node_id} signal {selection_signal:?}"
+                                )),
+                            )
+                        })?;
+                    (buffer, buffer.byte_capacity())
                 }
                 VulkanBoundDescriptorTarget::StreamStateBuffer {
                     buffer_index,

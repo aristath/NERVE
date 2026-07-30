@@ -2,13 +2,20 @@
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference2 : require
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer HiddenFrames { uint words[]; } hidden_frames;
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
 layout(set = 0, binding = 2) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
-layout(set = 0, binding = 3) readonly buffer ExpertInputWeight { uint words[]; } expert_input_weight;
+layout(set = 0, binding = 3) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
+layout(set = 0, binding = 4) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
+    uint words[];
+};
 
 layout(push_constant) uniform BatchControl {
     uint batch_width;
@@ -30,6 +37,8 @@ const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
 const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint EXPERT_INPUT_ROWS = INTERMEDIATE_SIZE * 2u;
 const uint EXPERT_INPUT_WORDS = EXPERT_INPUT_ROWS * HIDDEN_WORDS;
+const uint ADDRESS_RECORD_WORDS = 8u;
+const uint UNBOUND_PARAMETER_SLOT = 0xffffffffu;
 
 shared float subgroup_gate_lo[64];
 shared float subgroup_gate_hi[64];
@@ -47,7 +56,7 @@ uint f32_to_bf16(float value) {
 float round_bf16(float value) { return bf16_to_f32(f32_to_bf16(value)); }
 
 void accumulate_row_pair(
-    uint expert,
+    DynamicU32Buffer expert_input_weight,
     uint row,
     uint column_word,
     float input_lo,
@@ -55,7 +64,7 @@ void accumulate_row_pair(
     inout float lo,
     inout float hi
 ) {
-    uint lo_offset = (expert * EXPERT_INPUT_ROWS + row) * HIDDEN_WORDS;
+    uint lo_offset = row * HIDDEN_WORDS;
     uint hi_offset = lo_offset + HIDDEN_WORDS;
     uint lo_weight = expert_input_weight.words[lo_offset + column_word];
     uint hi_weight = expert_input_weight.words[hi_offset + column_word];
@@ -63,6 +72,17 @@ void accumulate_row_pair(
     lo = fma(input_hi, bf16_to_f32(lo_weight >> 16u), lo);
     hi = fma(input_lo, bf16_to_f32(hi_weight), hi);
     hi = fma(input_hi, bf16_to_f32(hi_weight >> 16u), hi);
+}
+
+uint dynamic_parameter_slot(uint expert) {
+    return dynamic_parameter_slots.words[expert];
+}
+
+DynamicU32Buffer dynamic_parameter(uint expert) {
+    uint record = dynamic_parameter_slot(expert) * ADDRESS_RECORD_WORDS;
+    uint64_t address = uint64_t(dynamic_resource_addresses.words[record])
+        | (uint64_t(dynamic_resource_addresses.words[record + 1u]) << 32u);
+    return DynamicU32Buffer(address);
 }
 
 void main() {
@@ -96,14 +116,10 @@ void main() {
     if (expert >= NUM_EXPERTS) {
         return;
     }
-    uint expert_start = batch_control.expert_start;
-    uint expert_count = route_native
-        ? batch_control.expert_count
-        : expert_input_weight.words.length() / EXPERT_INPUT_WORDS;
-    if (expert < expert_start || expert >= expert_start + expert_count) {
+    if (dynamic_parameter_slot(expert) == UNBOUND_PARAMETER_SLOT) {
         return;
     }
-    expert -= expert_start;
+    DynamicU32Buffer expert_input_weight = dynamic_parameter(expert);
 
     uint lane = gl_LocalInvocationID.x;
     uint first = word * 2u;
@@ -116,9 +132,17 @@ void main() {
         uint input_pair = hidden_frames.words[input_offset + column_word];
         float input_lo = bf16_to_f32(input_pair);
         float input_hi = bf16_to_f32(input_pair >> 16u);
-        accumulate_row_pair(expert, first, column_word, input_lo, input_hi, gate_lo, gate_hi);
         accumulate_row_pair(
-            expert,
+            expert_input_weight,
+            first,
+            column_word,
+            input_lo,
+            input_hi,
+            gate_lo,
+            gate_hi
+        );
+        accumulate_row_pair(
+            expert_input_weight,
             INTERMEDIATE_SIZE + first,
             column_word,
             input_lo,

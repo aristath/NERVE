@@ -150,6 +150,7 @@ pub struct VulkanBoundDispatchPlan {
     pub total_descriptor_count: usize,
     pub boundary_descriptor_count: usize,
     pub permanent_parameter_descriptor_count: usize,
+    pub dynamic_resource_descriptor_count: usize,
     pub stream_state_descriptor_count: usize,
     pub activation_slot_descriptor_count: usize,
     pub selection_telemetry_descriptor_count: usize,
@@ -162,6 +163,7 @@ impl VulkanBoundDispatchPlan {
     ) -> Result<Self, VulkanBoundDispatchPlanError> {
         let mut boundary_descriptor_count = 0usize;
         let mut permanent_parameter_descriptor_count = 0usize;
+        let mut dynamic_resource_descriptor_count = 0usize;
         let mut stream_state_descriptor_count = 0usize;
         let mut activation_slot_descriptor_count = 0usize;
         let mut selection_telemetry_descriptor_count = 0usize;
@@ -179,6 +181,14 @@ impl VulkanBoundDispatchPlan {
                     }
                     VulkanBoundDescriptorTarget::PermanentParameter { .. } => {
                         permanent_parameter_descriptor_count += 1;
+                    }
+                    VulkanBoundDescriptorTarget::DynamicResourceAddressTable {
+                        ..
+                    }
+                    | VulkanBoundDescriptorTarget::DynamicResourceParameterSlots {
+                        ..
+                    } => {
+                        dynamic_resource_descriptor_count += 1;
                     }
                     VulkanBoundDescriptorTarget::StreamStateBuffer { .. }
                     | VulkanBoundDescriptorTarget::StreamStateView { .. } => {
@@ -219,6 +229,7 @@ impl VulkanBoundDispatchPlan {
 
         let total_descriptor_count = boundary_descriptor_count
             + permanent_parameter_descriptor_count
+            + dynamic_resource_descriptor_count
             + stream_state_descriptor_count
             + activation_slot_descriptor_count
             + selection_telemetry_descriptor_count;
@@ -228,6 +239,7 @@ impl VulkanBoundDispatchPlan {
             total_descriptor_count,
             boundary_descriptor_count,
             permanent_parameter_descriptor_count,
+            dynamic_resource_descriptor_count,
             stream_state_descriptor_count,
             activation_slot_descriptor_count,
             selection_telemetry_descriptor_count,

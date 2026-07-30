@@ -2,6 +2,11 @@ fn descriptor_bindings_for_kernel(
     kernel: &VulkanKernelInterface,
 ) -> Vec<VulkanKernelDescriptorBinding> {
     let mut bindings = Vec::new();
+    let selected_parameter_ids = kernel
+        .selected_parameter_accesses
+        .iter()
+        .flat_map(|access| access.parameter_ids.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
 
     for input in &kernel.inputs {
         push_descriptor_binding(
@@ -20,11 +25,32 @@ fn descriptor_bindings_for_kernel(
         );
     }
     for parameter in &kernel.parameters {
+        if selected_parameter_ids.contains(parameter.param_id.as_str()) {
+            continue;
+        }
         push_descriptor_binding(
             &mut bindings,
             VulkanKernelDescriptorUsage::Parameter,
             parameter.param_id.clone(),
             VulkanKernelDescriptorResource::Parameter(parameter.clone()),
+        );
+    }
+    for access in &kernel.selected_parameter_accesses {
+        push_descriptor_binding(
+            &mut bindings,
+            VulkanKernelDescriptorUsage::DynamicResourceAddressTable,
+            format!("{}.resource_addresses", access.selection_signal),
+            VulkanKernelDescriptorResource::DynamicResourceAddressTable(
+                access.clone(),
+            ),
+        );
+        push_descriptor_binding(
+            &mut bindings,
+            VulkanKernelDescriptorUsage::DynamicResourceParameterSlots,
+            format!("{}.parameter_slots", access.selection_signal),
+            VulkanKernelDescriptorResource::DynamicResourceParameterSlots(
+                access.clone(),
+            ),
         );
     }
     for state in &kernel.state_reads {
@@ -397,6 +423,17 @@ fn bind_node(
                 encoding: domain.encoding.clone(),
             }
         }),
+        selected_parameter_accesses: node
+            .selected_parameter_accesses
+            .iter()
+            .map(|access| VulkanSelectedParameterAccessBinding {
+                component_id: circuit.component_id.clone(),
+                node_id: node.id.clone(),
+                selection_signal: access.selection_signal.clone(),
+                partition_axis: access.partition_axis,
+                parameter_ids: access.parameter_ids.clone(),
+            })
+            .collect(),
     })
 }
 

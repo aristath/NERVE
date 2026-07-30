@@ -71,6 +71,7 @@ pub struct VulkanKernelInterface {
     pub state_writes: Vec<VulkanStateBinding>,
     pub state_views: Vec<VulkanSignalBinding>,
     pub selection_domain: Option<VulkanSelectionDomainBinding>,
+    pub selected_parameter_accesses: Vec<VulkanSelectedParameterAccessBinding>,
     pub stream_metadata: VulkanKernelStreamMetadata,
 }
 
@@ -98,6 +99,7 @@ impl VulkanKernelInterface {
             state_writes: node.state_writes.clone(),
             state_views,
             selection_domain: node.selection_domain.clone(),
+            selected_parameter_accesses: node.selected_parameter_accesses.clone(),
             stream_metadata: VulkanKernelStreamMetadata::for_op(&node.op),
         }
     }
@@ -279,6 +281,8 @@ pub enum VulkanKernelDescriptorUsage {
     InputSignal,
     OutputSignal,
     Parameter,
+    DynamicResourceAddressTable,
+    DynamicResourceParameterSlots,
     StateRead,
     StateWrite,
     StateView,

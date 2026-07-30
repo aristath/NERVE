@@ -183,6 +183,54 @@ fn sparse_moe_kernels_receive_an_explicit_expert_start() {
 }
 
 #[test]
+fn selected_parameters_lower_to_generic_dynamic_resource_descriptors() {
+    let node = VulkanNodeBinding {
+        node_index: 7,
+        node_id: "selected_compute".to_string(),
+        op: "generic_compute".to_string(),
+        specialization: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        parameters: ["bank", "scale"]
+            .into_iter()
+            .map(|param_id| VulkanParameterBinding {
+                param_id: param_id.to_string(),
+                tensor: format!("tensor.{param_id}"),
+                byte_count: Some(128),
+                shape: Some(vec![4, 32]),
+            })
+            .collect(),
+        state_reads: Vec::new(),
+        state_writes: Vec::new(),
+        selection_domain: None,
+        selected_parameter_accesses: vec![
+            VulkanSelectedParameterAccessBinding {
+                component_id: "component".to_string(),
+                node_id: "selected_compute".to_string(),
+                selection_signal: "selected".to_string(),
+                partition_axis: 0,
+                parameter_ids: vec!["bank".to_string(), "scale".to_string()],
+            },
+        ],
+    };
+    let kernel = VulkanKernelInterface::from_node_binding("component", &node);
+    let descriptors = descriptor_bindings_for_kernel(&kernel);
+
+    assert_eq!(descriptors.len(), 2);
+    assert_eq!(
+        descriptors[0].usage,
+        VulkanKernelDescriptorUsage::DynamicResourceAddressTable
+    );
+    assert_eq!(
+        descriptors[1].usage,
+        VulkanKernelDescriptorUsage::DynamicResourceParameterSlots
+    );
+    assert!(descriptors.iter().all(|descriptor| {
+        descriptor.usage != VulkanKernelDescriptorUsage::Parameter
+    }));
+}
+
+#[test]
 fn fused_head_norm_rope_kernel_receives_stream_control_metadata() {
     let metadata = VulkanKernelStreamMetadata::for_op("parallel_head_norm_rope_2way");
 

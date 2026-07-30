@@ -2,13 +2,20 @@
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference2 : require
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer ExpertIntermediates { uint words[]; } expert_intermediates;
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
 layout(set = 0, binding = 2) buffer ExpertOutputs { uint words[]; } expert_outputs;
-layout(set = 0, binding = 3) readonly buffer ExpertOutputWeight { uint words[]; } expert_output_weight;
+layout(set = 0, binding = 3) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
+layout(set = 0, binding = 4) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
+    uint words[];
+};
 
 layout(push_constant) uniform BatchControl {
     uint batch_width;
@@ -29,6 +36,8 @@ const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
 const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
 const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint EXPERT_OUTPUT_WORDS = HIDDEN_SIZE * INTERMEDIATE_WORDS;
+const uint ADDRESS_RECORD_WORDS = 8u;
+const uint UNBOUND_PARAMETER_SLOT = 0xffffffffu;
 
 shared float subgroup_lo[64];
 shared float subgroup_hi[64];
@@ -42,6 +51,17 @@ uint f32_to_bf16(float value) {
 }
 
 float round_bf16(float value) { return bf16_to_f32(f32_to_bf16(value)); }
+
+uint dynamic_parameter_slot(uint expert) {
+    return dynamic_parameter_slots.words[expert];
+}
+
+DynamicU32Buffer dynamic_parameter(uint expert) {
+    uint record = dynamic_parameter_slot(expert) * ADDRESS_RECORD_WORDS;
+    uint64_t address = uint64_t(dynamic_resource_addresses.words[record])
+        | (uint64_t(dynamic_resource_addresses.words[record + 1u]) << 32u);
+    return DynamicU32Buffer(address);
+}
 
 void main() {
     uint group = gl_WorkGroupID.x;
@@ -75,20 +95,16 @@ void main() {
     if (expert >= NUM_EXPERTS) {
         return;
     }
-    uint expert_start = batch_control.expert_start;
-    uint expert_count = route_native
-        ? batch_control.expert_count
-        : expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS;
-    if (expert < expert_start || expert >= expert_start + expert_count) {
+    if (dynamic_parameter_slot(expert) == UNBOUND_PARAMETER_SLOT) {
         return;
     }
-    expert -= expert_start;
+    DynamicU32Buffer expert_output_weight = dynamic_parameter(expert);
     float route_weight = bf16_to_f32(packed_route >> 16u);
 
     uint lane = gl_LocalInvocationID.x;
     uint lo_row = word * 2u;
     uint hi_row = lo_row + 1u;
-    uint lo_offset = (expert * HIDDEN_SIZE + lo_row) * INTERMEDIATE_WORDS;
+    uint lo_offset = lo_row * INTERMEDIATE_WORDS;
     uint hi_offset = lo_offset + INTERMEDIATE_WORDS;
     uint input_offset = batch_index * EXPERT_FRAME_WORDS
         + route * INTERMEDIATE_WORDS;

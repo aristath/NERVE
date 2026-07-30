@@ -146,6 +146,7 @@ impl VulkanResidentModelPackageDeviceSlice {
             local_edge_overrides,
             edge_endpoint_overrides,
             stream_control_override,
+            None,
         )
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(

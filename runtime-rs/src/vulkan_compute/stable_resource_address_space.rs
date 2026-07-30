@@ -416,6 +416,10 @@ impl VulkanStableResourceAddressTable {
         &self.buffer
     }
 
+    pub fn shared_buffer(&self) -> Arc<VulkanResidentBuffer> {
+        Arc::clone(&self.buffer)
+    }
+
     pub fn byte_capacity(&self) -> usize {
         self.buffer.byte_capacity()
     }

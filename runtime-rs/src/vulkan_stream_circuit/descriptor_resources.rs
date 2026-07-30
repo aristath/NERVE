@@ -2,6 +2,8 @@
 pub enum VulkanKernelDescriptorResource {
     Signal(VulkanSignalBinding),
     Parameter(VulkanParameterBinding),
+    DynamicResourceAddressTable(VulkanSelectedParameterAccessBinding),
+    DynamicResourceParameterSlots(VulkanSelectedParameterAccessBinding),
     State {
         component_id: String,
         binding: VulkanStateBinding,
@@ -195,6 +197,17 @@ pub enum VulkanDescriptorResourceAddress {
         tensor: String,
         byte_count: Option<usize>,
     },
+    DynamicResourceAddressTable {
+        component_id: String,
+        node_id: String,
+        selection_signal: String,
+    },
+    DynamicResourceParameterSlots {
+        component_id: String,
+        node_id: String,
+        selection_signal: String,
+        parameter_ids: Vec<String>,
+    },
     ActivationSlot {
         component_id: String,
         signal_id: String,
@@ -282,6 +295,21 @@ fn resolve_descriptor_resource(
                 param_id: parameter.param_id.clone(),
                 tensor: parameter.tensor.clone(),
                 byte_count: resident.byte_count,
+            })
+        }
+        VulkanKernelDescriptorResource::DynamicResourceAddressTable(access) => {
+            Ok(VulkanDescriptorResourceAddress::DynamicResourceAddressTable {
+                component_id: access.component_id.clone(),
+                node_id: access.node_id.clone(),
+                selection_signal: access.selection_signal.clone(),
+            })
+        }
+        VulkanKernelDescriptorResource::DynamicResourceParameterSlots(access) => {
+            Ok(VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
+                component_id: access.component_id.clone(),
+                node_id: access.node_id.clone(),
+                selection_signal: access.selection_signal.clone(),
+                parameter_ids: access.parameter_ids.clone(),
             })
         }
         VulkanKernelDescriptorResource::State { component_id, binding } => {

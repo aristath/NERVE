@@ -155,6 +155,7 @@ pub struct VulkanMountedPlacedStreamCircuit {
     pub boundary_io: VulkanModelBoundaryBuffers,
     pub edge_io: VulkanPlacedEdgeIoBuffers,
     pub stream_control_buffer: Arc<VulkanResidentBuffer>,
+    pub dynamic_resource_buffers: Option<Arc<VulkanDynamicResourceBuffers>>,
 }
 
 impl VulkanMountedPlacedStreamCircuit {
@@ -226,6 +227,7 @@ impl VulkanMountedPlacedStreamCircuit {
             &[],
             edge_endpoint_overrides,
             stream_control_override,
+            None,
         )
     }
 
@@ -239,6 +241,9 @@ impl VulkanMountedPlacedStreamCircuit {
         local_edge_overrides: &[VulkanPlacedLocalEdgeBufferOverride],
         edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
         stream_control_override: Option<Arc<VulkanResidentBuffer>>,
+        dynamic_resource_buffers: Option<
+            Arc<VulkanDynamicResourceBuffers>,
+        >,
     ) -> Result<Self, VulkanStreamCircuitMountError> {
         let buffers = placed_plan
             .placed_resident_plan
@@ -290,6 +295,7 @@ impl VulkanMountedPlacedStreamCircuit {
             boundary_io,
             edge_io,
             stream_control_buffer,
+            dynamic_resource_buffers,
         })
     }
 
@@ -618,6 +624,8 @@ impl VulkanMountedPlacedStreamCircuit {
         let access = match descriptor.usage {
             VulkanKernelDescriptorUsage::InputSignal
             | VulkanKernelDescriptorUsage::Parameter
+            | VulkanKernelDescriptorUsage::DynamicResourceAddressTable
+            | VulkanKernelDescriptorUsage::DynamicResourceParameterSlots
             | VulkanKernelDescriptorUsage::StateRead => VulkanResidentKernelBufferAccess::Read,
             VulkanKernelDescriptorUsage::OutputSignal | VulkanKernelDescriptorUsage::StateWrite => {
                 VulkanResidentKernelBufferAccess::Write
@@ -659,6 +667,50 @@ impl VulkanMountedPlacedStreamCircuit {
                     allocation.buffer.as_ref(),
                     allocation.byte_capacity,
                 ))
+            }
+            VulkanBoundDescriptorTarget::DynamicResourceAddressTable {
+                ..
+            } => {
+                let resources = self.dynamic_resource_buffers.as_ref().ok_or(
+                    VulkanMountedPlacedResidentKernelDispatchError::
+                        MissingDynamicResourceBuffers {
+                            dispatch_index: dispatch.dispatch_index,
+                            binding: descriptor.binding,
+                        },
+                )?;
+                let buffer = resources.address_table();
+                Ok((buffer, buffer.byte_capacity()))
+            }
+            VulkanBoundDescriptorTarget::DynamicResourceParameterSlots {
+                component_id,
+                node_id,
+                selection_signal,
+                ..
+            } => {
+                let resources = self.dynamic_resource_buffers.as_ref().ok_or(
+                    VulkanMountedPlacedResidentKernelDispatchError::
+                        MissingDynamicResourceBuffers {
+                            dispatch_index: dispatch.dispatch_index,
+                            binding: descriptor.binding,
+                        },
+                )?;
+                let buffer = resources
+                    .parameter_slots(
+                        component_id,
+                        node_id,
+                        selection_signal,
+                    )
+                    .ok_or_else(|| {
+                        VulkanMountedPlacedResidentKernelDispatchError::
+                            MissingDynamicResourceParameterSlots {
+                                dispatch_index: dispatch.dispatch_index,
+                                binding: descriptor.binding,
+                                component_id: component_id.clone(),
+                                node_id: node_id.clone(),
+                                selection_signal: selection_signal.clone(),
+                            }
+                    })?;
+                Ok((buffer, buffer.byte_capacity()))
             }
             VulkanBoundDescriptorTarget::BoundaryInput { signal_id }
             | VulkanBoundDescriptorTarget::BoundaryOutput { signal_id } => Err(

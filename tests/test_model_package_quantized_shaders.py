@@ -732,8 +732,11 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "const uint EXPERTS_PER_TOKEN = 8u;" in gate_up_shader
     assert "#extension GL_EXT_float_e4m3 : require" in gate_up_shader
     assert "uintBitsToFloate4m3EXT" in gate_up_shader
-    assert "ExpertInputScaleInv" in gate_up_shader
-    assert "ExpertOutputScaleInv" in down_shader
+    assert "buffer DynamicResourceAddresses" in gate_up_shader
+    assert "buffer DynamicParameterSlots" in gate_up_shader
+    assert "GL_EXT_buffer_reference2" in gate_up_shader
+    assert "DynamicU32Buffer expert_input_scale_inv" in gate_up_shader
+    assert "DynamicU32Buffer expert_output_scale_inv" in down_shader
     assert "const uint TILE_ROWS = 32u;" in gate_up_shader
     assert "const uint TILE_ROWS = 64u;" in down_shader
     assert "layout(local_size_x = 512" in down_shader

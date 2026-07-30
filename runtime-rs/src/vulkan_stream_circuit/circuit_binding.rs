@@ -189,6 +189,7 @@ pub struct VulkanNodeBinding {
     pub state_reads: Vec<VulkanStateBinding>,
     pub state_writes: Vec<VulkanStateBinding>,
     pub selection_domain: Option<VulkanSelectionDomainBinding>,
+    pub selected_parameter_accesses: Vec<VulkanSelectedParameterAccessBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,6 +200,15 @@ pub struct VulkanSelectionDomainBinding {
     pub resource_count: usize,
     pub selection_signal: String,
     pub encoding: PlannedSelectionEncoding,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanSelectedParameterAccessBinding {
+    pub component_id: String,
+    pub node_id: String,
+    pub selection_signal: String,
+    pub partition_axis: usize,
+    pub parameter_ids: Vec<String>,
 }
 
 impl VulkanNodeBinding {

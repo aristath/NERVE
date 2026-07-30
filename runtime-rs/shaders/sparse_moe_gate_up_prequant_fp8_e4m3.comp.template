@@ -3,8 +3,10 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_float_e4m3 : require
 #extension GL_EXT_spirv_intrinsics : require
+#extension GL_EXT_buffer_reference2 : require
 
 spirv_instruction(
     extensions = ["SPV_VALVE_mixed_float_dot_product"],
@@ -19,9 +21,13 @@ layout(set = 0, binding = 0) readonly buffer QuantizedHidden { uint words[]; } q
 layout(set = 0, binding = 1) readonly buffer HiddenScales { float values[]; } hidden_scales;
 layout(set = 0, binding = 2) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
 layout(set = 0, binding = 3) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
-layout(set = 0, binding = 4) readonly buffer ExpertInputWeight { uint words[]; } expert_input_weight;
-layout(set = 0, binding = 5) readonly buffer ExpertInputScaleInv { uint words[]; } expert_input_scale_inv;
+layout(set = 0, binding = 4) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
+layout(set = 0, binding = 5) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
 layout(push_constant) uniform DispatchControl { uint expert_start; } dispatch_control;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
+    uint words[];
+};
 
 const uint BLOCK_ROWS = {{BLOCK_ROWS}}u;
 const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
@@ -39,6 +45,9 @@ const uint EXPERT_INPUT_ROWS = INTERMEDIATE_SIZE * 2u;
 const uint EXPERT_INPUT_WORDS = EXPERT_INPUT_ROWS * HIDDEN_SIZE / 4u;
 const uint SCALE_ROWS = (EXPERT_INPUT_ROWS + BLOCK_ROWS - 1u) / BLOCK_ROWS;
 const uint SCALE_COLUMNS = HIDDEN_BLOCKS;
+const uint ADDRESS_RECORD_WORDS = 8u;
+const uint DYNAMIC_PARAMETER_COUNT = 2u;
+const uint UNBOUND_PARAMETER_SLOT = 0xffffffffu;
 
 shared float activated_rows[TILE_ROWS];
 
@@ -56,9 +65,27 @@ float read_bf16_word(uint packed, uint index) {
     return bf16_to_f32(packed >> ((index & 1u) * 16u));
 }
 
-float read_scale(uint expert, uint row, uint block) {
-    uint index = (expert * SCALE_ROWS + row / BLOCK_ROWS) * SCALE_COLUMNS + block;
-    return read_bf16_word(expert_input_scale_inv.words[index >> 1u], index);
+uint dynamic_parameter_slot(uint expert, uint parameter) {
+    return dynamic_parameter_slots.words[
+        expert * DYNAMIC_PARAMETER_COUNT + parameter
+    ];
+}
+
+uint64_t dynamic_parameter_address(uint slot) {
+    uint record = slot * ADDRESS_RECORD_WORDS;
+    return uint64_t(dynamic_resource_addresses.words[record])
+        | (uint64_t(dynamic_resource_addresses.words[record + 1u]) << 32u);
+}
+
+DynamicU32Buffer dynamic_parameter(uint expert, uint parameter) {
+    return DynamicU32Buffer(dynamic_parameter_address(
+        dynamic_parameter_slot(expert, parameter)
+    ));
+}
+
+float read_scale(DynamicU32Buffer scale, uint row, uint block) {
+    uint index = (row / BLOCK_ROWS) * SCALE_COLUMNS + block;
+    return read_bf16_word(scale.words[index >> 1u], index);
 }
 
 fe4m3vec4 read_fp8x4(uint packed) {
@@ -70,9 +97,9 @@ fe4m3vec4 read_fp8x4(uint packed) {
     ));
 }
 
-fe4m3vec4 read_weightx4(uint expert, uint row, uint word) {
-    uint index = (expert * EXPERT_INPUT_ROWS + row) * HIDDEN_FP8_WORDS + word;
-    return read_fp8x4(expert_input_weight.words[index]);
+fe4m3vec4 read_weightx4(DynamicU32Buffer weight, uint row, uint word) {
+    uint index = row * HIDDEN_FP8_WORDS + word;
+    return read_fp8x4(weight.words[index]);
 }
 
 void main() {
@@ -86,12 +113,14 @@ void main() {
     if (expert >= NUM_EXPERTS) {
         return;
     }
-    uint expert_start = dispatch_control.expert_start;
-    uint expert_count = expert_input_weight.words.length() / EXPERT_INPUT_WORDS;
-    if (expert < expert_start || expert >= expert_start + expert_count) {
+    if (
+        dynamic_parameter_slot(expert, 0u) == UNBOUND_PARAMETER_SLOT
+        || dynamic_parameter_slot(expert, 1u) == UNBOUND_PARAMETER_SLOT
+    ) {
         return;
     }
-    expert -= expert_start;
+    DynamicU32Buffer expert_input_weight = dynamic_parameter(expert, 0u);
+    DynamicU32Buffer expert_input_scale_inv = dynamic_parameter(expert, 1u);
 
     uint first_row = tile * TILE_ROWS;
     for (
@@ -112,18 +141,26 @@ void main() {
                 float activation_scale = hidden_scales.values[block];
                 fe4m3vec4 hidden = read_fp8x4(quantized_hidden.words[word]);
                 gate = fma(
-                    fp8_dot4_acc32(hidden, read_weightx4(expert, row, word), 0.0),
-                    activation_scale * read_scale(expert, row, block),
+                    fp8_dot4_acc32(hidden, read_weightx4(expert_input_weight, row, word), 0.0),
+                    activation_scale * read_scale(expert_input_scale_inv, row, block),
                     gate
                 );
                 up = fma(
                     fp8_dot4_acc32(
                         hidden,
-                        read_weightx4(expert, INTERMEDIATE_SIZE + row, word),
+                        read_weightx4(
+                            expert_input_weight,
+                            INTERMEDIATE_SIZE + row,
+                            word
+                        ),
                         0.0
                     ),
                     activation_scale
-                        * read_scale(expert, INTERMEDIATE_SIZE + row, block),
+                        * read_scale(
+                            expert_input_scale_inv,
+                            INTERMEDIATE_SIZE + row,
+                            block
+                        ),
                     up
                 );
             }

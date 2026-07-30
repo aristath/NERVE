@@ -68,6 +68,9 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert "for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++)" in reduce
     assert "route < NUM_EXPERTS" not in gate_up
     assert "route < NUM_EXPERTS" not in down
+    assert "buffer DynamicResourceAddresses" in gate_up
+    assert "buffer DynamicParameterSlots" in down
+    assert "GL_EXT_buffer_reference2" in gate_up
     assert all(
         "{{" not in (tmp_path / shader_file).read_text() for shader_file in shader_files
     )
@@ -350,7 +353,9 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
         in down_source
     )
     assert "const uint GROUP_SIZE = 32u;" in gate_source
-    assert "expert_input_scales.words[index >> 1u]" in gate_source
+    assert "expert_scales.words[index >> 1u]" in gate_source
+    assert "buffer DynamicResourceAddresses" in gate_source
+    assert "buffer DynamicParameterSlots" in down_source
     assert "route_weight" in down_source
     assert "gl_WorkGroupID.y" in batch_source
     assert "layout(push_constant) uniform BatchControl" in batch_source

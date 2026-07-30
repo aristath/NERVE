@@ -91,6 +91,7 @@ SPIRV_CAPABILITY_VULKAN_FEATURE_REQUIREMENTS = {
     6915: "shader_mixed_float_dot_product_float8_acc_float32",
     5345: "vulkan_memory_model",
     5346: "vulkan_memory_model_device_scope",
+    5347: "buffer_device_address",
     6022: "cooperative_matrix",
 }
 KNOWN_VULKAN_FEATURES = frozenset(SPIRV_CAPABILITY_VULKAN_FEATURE_REQUIREMENTS.values())

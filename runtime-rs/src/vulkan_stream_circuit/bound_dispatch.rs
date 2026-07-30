@@ -150,6 +150,17 @@ pub enum VulkanBoundDescriptorTarget {
         tensor: String,
         byte_count: Option<usize>,
     },
+    DynamicResourceAddressTable {
+        component_id: String,
+        node_id: String,
+        selection_signal: String,
+    },
+    DynamicResourceParameterSlots {
+        component_id: String,
+        node_id: String,
+        selection_signal: String,
+        parameter_ids: Vec<String>,
+    },
     ActivationSlot {
         buffer_index: usize,
         component_id: String,
@@ -212,6 +223,26 @@ impl VulkanBoundDescriptorTarget {
                 param_id: param_id.clone(),
                 tensor: tensor.clone(),
                 byte_count: *byte_count,
+            }),
+            VulkanDescriptorResourceAddress::DynamicResourceAddressTable {
+                component_id,
+                node_id,
+                selection_signal,
+            } => Ok(Self::DynamicResourceAddressTable {
+                component_id: component_id.clone(),
+                node_id: node_id.clone(),
+                selection_signal: selection_signal.clone(),
+            }),
+            VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
+                component_id,
+                node_id,
+                selection_signal,
+                parameter_ids,
+            } => Ok(Self::DynamicResourceParameterSlots {
+                component_id: component_id.clone(),
+                node_id: node_id.clone(),
+                selection_signal: selection_signal.clone(),
+                parameter_ids: parameter_ids.clone(),
             }),
             VulkanDescriptorResourceAddress::ActivationSlot {
                 component_id,

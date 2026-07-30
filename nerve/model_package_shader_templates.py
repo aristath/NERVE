@@ -2953,15 +2953,13 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 f"invalid INT4 sparse expert geometry {shader_file!r}"
             )
         read_scale_body = (
-            "    vec2 values = unpackHalf2x16(expert_"
-            f"{'input' if stage == 'gate_up' else 'output'}"
-            "_scales.words[index >> 1u]);\n"
+            "    vec2 values = unpackHalf2x16("
+            "expert_scales.words[index >> 1u]);\n"
             "    return (index & 1u) == 0u ? values.x : values.y;"
             if scale_dtype == "f16"
             else (
-                "    return read_bf16_word(expert_"
-                f"{'input' if stage == 'gate_up' else 'output'}"
-                "_scales.words[index >> 1u], index);"
+                "    return read_bf16_word("
+                "expert_scales.words[index >> 1u], index);"
             )
         )
         return render_shader_template(
