@@ -10,7 +10,7 @@ struct VulkanResidentComponentBatchSliceRunner {
     steps: Vec<VulkanComponentBatchDispatchStep>,
     execution_units: Vec<VulkanComponentBatchExecutionUnit>,
     demand_residency:
-        BTreeMap<usize, VulkanDemandResidencyBatchSegment>,
+        BTreeMap<usize, VulkanDemandResidencyBatchExecutionSegment>,
     submission_template_catalog:
         RefCell<BTreeMap<(usize, usize), VulkanResidentQueueSubmissionTemplate>>,
     execution_shape_class_catalog: RefCell<BTreeMap<usize, String>>,
@@ -29,6 +29,11 @@ enum VulkanComponentBatchExecutionUnit {
     DistributedDispatch {
         dispatch_index: usize,
     },
+}
+
+struct VulkanDemandResidencyBatchExecutionSegment {
+    unit_end: usize,
+    segment: VulkanDemandResidencyBatchSegment,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +145,32 @@ fn component_batch_execution_units_for_distributed_groups(
         VulkanComponentBatchExecutionUnit::LocalComponent { .. } => true,
     });
     Ok(execution_units)
+}
+
+fn component_batch_local_execution_unit_ranges(
+    execution_units: &[VulkanComponentBatchExecutionUnit],
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut unit_start = 0usize;
+    while unit_start < execution_units.len() {
+        if matches!(
+            execution_units[unit_start],
+            VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
+        ) {
+            unit_start += 1;
+            continue;
+        }
+        let mut unit_end = unit_start + 1;
+        while matches!(
+            execution_units.get(unit_end),
+            Some(VulkanComponentBatchExecutionUnit::LocalComponent { .. })
+        ) {
+            unit_end += 1;
+        }
+        ranges.push((unit_start, unit_end));
+        unit_start = unit_end;
+    }
+    ranges
 }
 
 fn component_batch_static_state_write_indices(
@@ -622,14 +653,21 @@ impl VulkanResidentComponentBatchSliceRunner {
         let demand_residency = match &slice.demand_residency_context {
             Some(context) => {
                 let mut segments = BTreeMap::new();
-                for (unit_index, unit) in execution_units.iter().enumerate() {
+                for (unit_start, unit_end) in
+                    component_batch_local_execution_unit_ranges(&execution_units)
+                {
                     let VulkanComponentBatchExecutionUnit::LocalComponent {
                         step_start,
-                        step_end,
                         ..
-                    } = unit
+                    } = &execution_units[unit_start]
                     else {
-                        continue;
+                        unreachable!("local execution range starts with a local component");
+                    };
+                    let VulkanComponentBatchExecutionUnit::LocalComponent {
+                        step_end, ..
+                    } = &execution_units[unit_end - 1]
+                    else {
+                        unreachable!("local execution range ends with a local component");
                     };
                     if let Some(segment) =
                         VulkanDemandResidencyBatchSegment::from_slice_steps(
@@ -644,7 +682,13 @@ impl VulkanResidentComponentBatchSliceRunner {
                             context.clone(),
                         )?
                     {
-                        segments.insert(unit_index, segment);
+                        segments.insert(
+                            unit_start,
+                            VulkanDemandResidencyBatchExecutionSegment {
+                                unit_end,
+                                segment,
+                            },
+                        );
                     }
                 }
                 segments
@@ -892,13 +936,77 @@ impl VulkanResidentComponentBatchSliceRunner {
             .map(|value| value - 1)
             .unwrap_or_default();
         let mut pending_owner_wait_points = Vec::new();
+        let mut demand_covered_until = 0usize;
         for (unit_index, unit) in self.execution_units.iter().enumerate() {
+            if unit_index < demand_covered_until {
+                debug_assert!(matches!(
+                    unit,
+                    VulkanComponentBatchExecutionUnit::LocalComponent { .. }
+                ));
+                sequence_index += 1;
+                continue;
+            }
             match unit {
                 VulkanComponentBatchExecutionUnit::LocalComponent {
                     component_id,
                     step_start,
                     step_end,
                 } => {
+                    if let Some(demand_residency) = self.demand_residency.get(&unit_index) {
+                        if local_submission_batch.pending_submission_count() > 0 {
+                            self.submit_and_wait_local_batch(
+                                std::mem::take(&mut local_submission_batch),
+                                shape_class_id,
+                                batch_width,
+                                local_group_index,
+                                shape_was_calibrated,
+                                true,
+                                timeline_value_offset,
+                            )?
+                            .into_iter()
+                            .for_each(|measurement| measurements.push(measurement));
+                            local_group_index += 1;
+                        }
+                        if !pending_owner_wait_points.is_empty() {
+                            device
+                                .submit_timeline_semaphore_bridge(
+                                    &pending_owner_wait_points,
+                                    &[],
+                                )
+                                .map_err(
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                                )?;
+                            pending_owner_wait_points.clear();
+                        }
+                        let signal_points =
+                            match self.execution_units.get(demand_residency.unit_end) {
+                                Some(VulkanComponentBatchExecutionUnit::DistributedDispatch {
+                                    dispatch_index,
+                                }) => distributed_dispatches.owner_ready_signal_points(
+                                    owner_device_id,
+                                    *dispatch_index,
+                                    1,
+                                )?,
+                                _ => Vec::new(),
+                            };
+                        demand_residency.segment.run(
+                            device,
+                            &self.steps,
+                            batch_width,
+                            stream_ticks,
+                            dynamic_state_capacity_activations,
+                        )?;
+                        if !signal_points.is_empty() {
+                            device
+                                .submit_timeline_semaphore_bridge(&[], &signal_points)
+                                .map_err(
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                                )?;
+                        }
+                        demand_covered_until = demand_residency.unit_end;
+                        sequence_index += 1;
+                        continue;
+                    }
                     let flush_after_segment = self
                         .execution_units
                         .get(unit_index + 1)
@@ -927,56 +1035,6 @@ impl VulkanResidentComponentBatchSliceRunner {
                     } else {
                         Vec::new()
                     };
-                    if let Some(demand_residency) =
-                        self.demand_residency.get(&unit_index)
-                    {
-                        if local_submission_batch.pending_submission_count() > 0 {
-                            self.submit_and_wait_local_batch(
-                                std::mem::take(&mut local_submission_batch),
-                                shape_class_id,
-                                batch_width,
-                                local_group_index,
-                                shape_was_calibrated,
-                                true,
-                                timeline_value_offset,
-                            )?
-                            .into_iter()
-                            .for_each(|measurement| {
-                                measurements.push(measurement)
-                            });
-                            local_group_index += 1;
-                        }
-                        if !wait_points.is_empty() {
-                            device
-                                .submit_timeline_semaphore_bridge(
-                                    wait_points,
-                                    &[],
-                                )
-                                .map_err(
-                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-                                )?;
-                            pending_owner_wait_points.clear();
-                        }
-                        demand_residency.run(
-                            device,
-                            &self.steps,
-                            batch_width,
-                            stream_ticks,
-                            dynamic_state_capacity_activations,
-                        )?;
-                        if !signal_points.is_empty() {
-                            device
-                                .submit_timeline_semaphore_bridge(
-                                    &[],
-                                    &signal_points,
-                                )
-                                .map_err(
-                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-                                )?;
-                        }
-                        sequence_index += 1;
-                        continue;
-                    }
                     self.run_segment(
                         device,
                         batch_width,

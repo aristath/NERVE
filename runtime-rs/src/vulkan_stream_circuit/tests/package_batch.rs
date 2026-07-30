@@ -231,6 +231,31 @@ fn component_batch_execution_submits_only_distributed_group_leaders() {
 }
 
 #[test]
+fn component_batch_demand_execution_keeps_contiguous_local_units_in_one_range() {
+    let local = |component_id: &str, step_start: usize, step_end: usize| {
+        VulkanComponentBatchExecutionUnit::LocalComponent {
+            component_id: component_id.to_string(),
+            step_start,
+            step_end,
+        }
+    };
+    let units = vec![
+        local("embedding", 0, 2),
+        local("layer_00", 2, 7),
+        local("layer_01", 7, 12),
+        VulkanComponentBatchExecutionUnit::DistributedDispatch { dispatch_index: 9 },
+        local("layer_02", 12, 17),
+        local("layer_03", 17, 22),
+        VulkanComponentBatchExecutionUnit::DistributedDispatch { dispatch_index: 21 },
+    ];
+
+    assert_eq!(
+        component_batch_local_execution_unit_ranges(&units),
+        vec![(0, 3), (4, 6)]
+    );
+}
+
+#[test]
 fn component_batch_execution_rejects_noncontiguous_dispatch_steps() {
     let spans = vec![
         VulkanComponentBatchDispatchSpan {
