@@ -529,6 +529,28 @@ def _derive_runtime_predicate(
     ]
     regimes = [workload["regime"] for workload in workloads]
     target = candidate["target_predicate"]
+    compatible_profiles = tuple(
+        profile
+        for profile in hardware_profiles
+        if (
+            target.get("capability_class") is None
+            or profile["capability_class"]
+            == target["capability_class"]
+        )
+        and (
+            target.get("device_kind") is None
+            or profile["hardware_identity"]["device_kind"]
+            == target["device_kind"]
+        )
+        and (
+            target.get("api") is None
+            or profile["provenance"]["api"] == target["api"]
+        )
+    )
+    if not compatible_profiles:
+        raise ModelCompileError(
+            "promotion target has no benchmarked compatible device"
+        )
     envelope = target.get("execution_envelope")
     if envelope is None:
         phases = sorted(
@@ -574,16 +596,32 @@ def _derive_runtime_predicate(
             envelope,
             "source_retained_phases",
         )
-    boundaries = {
-        str(regime["boundary_mode"]) for regime in regimes
-    }
-    device_count = len(expected_devices)
-    if boundaries == {"local"} and device_count == 1:
-        placement_mode = "local"
-    elif boundaries == {"cross_device"} or device_count > 1:
+    qualified_cross_device = any(
+        check["regime"]["boundary_mode"] == "cross_device"
+        and "alternative_placements" in check["coverage"]
+        for check in validation_plan.to_json()["checks"]
+    )
+    device_count = len(compatible_profiles)
+    if required_interconnects := _optional_string_list(
+        target,
+        "required_interconnects",
+    ):
+        if device_count < 2:
+            raise ModelCompileError(
+                "promotion target requires a distributed interconnect but "
+                "fewer than two compatible devices were benchmarked"
+            )
         placement_mode = "distributed"
-    else:
+        minimum_device_count = 2
+        maximum_device_count = device_count
+    elif qualified_cross_device and device_count > 1:
         placement_mode = "either"
+        minimum_device_count = 1
+        maximum_device_count = device_count
+    else:
+        placement_mode = "local"
+        minimum_device_count = 1
+        maximum_device_count = 1
     required_processes = _optional_string_list(
         target,
         "required_processes",
@@ -592,27 +630,23 @@ def _derive_runtime_predicate(
         target,
         "required_features",
     )
-    required_interconnects = _optional_string_list(
-        target,
-        "required_interconnects",
-    )
     _require_runtime_hardware_capabilities(
-        hardware_profiles=hardware_profiles,
+        hardware_profiles=compatible_profiles,
         required_processes=required_processes,
         required_features=required_features,
         required_interconnects=required_interconnects,
     )
     return create_runtime_implementation_predicate(
         capability_classes=(
-            profile["capability_class"] for profile in hardware_profiles
+            profile["capability_class"] for profile in compatible_profiles
         ),
         device_kinds=(
             profile["hardware_identity"]["device_kind"]
-            for profile in hardware_profiles
+            for profile in compatible_profiles
         ),
         apis=(
             profile["provenance"]["api"]
-            for profile in hardware_profiles
+            for profile in compatible_profiles
         ),
         required_processes=required_processes,
         required_features=required_features,
@@ -629,8 +663,8 @@ def _derive_runtime_predicate(
             _validated_speculative_draft_token_counts(validation_plan)
         ),
         placement_mode=placement_mode,
-        minimum_device_count=device_count,
-        maximum_device_count=device_count,
+        minimum_device_count=minimum_device_count,
+        maximum_device_count=maximum_device_count,
         required_interconnects=required_interconnects,
     )
 
@@ -666,10 +700,12 @@ def _require_runtime_hardware_capabilities(
     required_features: tuple[str, ...],
     required_interconnects: tuple[str, ...],
 ) -> None:
-    available_processes: set[str] = set()
-    available_features: set[str] = set()
+    missing_processes_by_device: dict[str, list[str]] = {}
+    missing_features_by_device: dict[str, list[str]] = {}
     available_interconnects: set[str] = set()
     for profile in hardware_profiles:
+        available_processes: set[str] = set()
+        available_features: set[str] = set()
         for process in profile["processes"]:
             if (
                 process["availability"] != "available"
@@ -689,6 +725,19 @@ def _require_runtime_hardware_capabilities(
         available_features.update(
             str(value) for value in profile["capability_extensions"]
         )
+        device_id = str(
+            profile["hardware_identity"]["stable_device_id"]
+        )
+        missing_processes = sorted(
+            set(required_processes) - available_processes
+        )
+        missing_features = sorted(
+            set(required_features) - available_features
+        )
+        if missing_processes:
+            missing_processes_by_device[device_id] = missing_processes
+        if missing_features:
+            missing_features_by_device[device_id] = missing_features
         for interconnect in profile["interconnects"]:
             if interconnect["availability"] != "available":
                 continue
@@ -702,21 +751,19 @@ def _require_runtime_hardware_capabilities(
             available_interconnects.update(
                 str(value) for value in interconnect["operations"]
             )
-    missing_processes = sorted(
-        set(required_processes) - available_processes
-    )
-    missing_features = sorted(
-        set(required_features) - available_features
-    )
     missing_interconnects = sorted(
         set(required_interconnects) - available_interconnects
     )
-    if missing_processes or missing_features or missing_interconnects:
+    if (
+        missing_processes_by_device
+        or missing_features_by_device
+        or missing_interconnects
+    ):
         raise ModelCompileError(
             "promotion target predicate is not mountable on its benchmarked "
             "hardware profiles: "
-            f"missing processes={missing_processes}, "
-            f"features={missing_features}, "
+            f"missing processes={missing_processes_by_device}, "
+            f"features={missing_features_by_device}, "
             f"interconnects={missing_interconnects}"
         )
 

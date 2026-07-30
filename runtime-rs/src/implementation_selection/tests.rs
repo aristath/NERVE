@@ -74,22 +74,15 @@ fn profile(
 }
 
 fn predicate(profiles: &[&HardwareProcessProfile], mode: &str) -> RuntimeImplementationPredicate {
-    let mut counts = BTreeMap::new();
-    for profile in profiles {
-        *counts
-            .entry(profile.capability_class.clone())
-            .or_insert(0usize) += 1;
-    }
     RuntimeImplementationPredicate {
         schema: RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA.to_string(),
         predicate_id: "runtime_predicate_fixture".to_string(),
         hardware: RuntimeHardwarePredicate {
-            capability_class_counts: counts
+            capability_classes: profiles
+                .iter()
+                .map(|profile| profile.capability_class.clone())
+                .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
-                .map(|(capability_class, count)| RuntimeCapabilityClassCount {
-                    capability_class,
-                    count,
-                })
                 .collect(),
             device_kinds: profiles
                 .iter()
@@ -536,8 +529,19 @@ fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
     assert!(
         predicate(&[&cpu, &gpu_a], "distributed")
             .mismatch_reasons(&execution, &[&gpu_a_device, &gpu_b_device],)
+            .is_empty()
+    );
+    let mut unsupported_gpu = gpu_b.clone();
+    unsupported_gpu.capability_class = "hardware_capability_unsupported".to_string();
+    let unsupported_gpu_device = selection_device("gpu1", unsupported_gpu);
+    let mut flexible_gpu_predicate = predicate(&[&gpu_a], "local");
+    flexible_gpu_predicate.placement.mode = "either".to_string();
+    flexible_gpu_predicate.placement.maximum_device_count = 2;
+    assert!(
+        flexible_gpu_predicate
+            .mismatch_reasons(&execution, &[&gpu_a_device, &unsupported_gpu_device],)
             .iter()
-            .any(|reason| reason.contains("multiplicities"))
+            .any(|reason| reason.contains("capability classes"))
     );
     let mut different_speculative_mode = execution.clone();
     different_speculative_mode.speculative_draft_tokens = 0;

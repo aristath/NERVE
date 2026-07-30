@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 import json
 from pathlib import Path
 
@@ -258,36 +257,28 @@ def validate_published_implementation_registry(
                 profile["profile_digest"]
                 for profile in hardware_profile_provenance
             ]
-            and [
+            and set(hardware_predicate["capability_classes"]).issubset(
                 {
-                    "capability_class": capability_class,
-                    "count": count,
+                    profile["capability_class"]
+                    for profile in loaded_profiles
                 }
-                for capability_class, count in sorted(
-                    Counter(
-                        profile["capability_class"]
-                        for profile in loaded_profiles
-                    ).items()
-                )
-            ]
-            == hardware_predicate["capability_class_counts"]
-            and sorted(
+            )
+            and set(hardware_predicate["device_kinds"]).issubset(
                 {
                     profile["hardware_identity"]["device_kind"]
                     for profile in loaded_profiles
                 }
             )
-            == hardware_predicate["device_kinds"]
-            and sorted(
+            and set(hardware_predicate["apis"]).issubset(
                 {
                     profile["provenance"]["api"]
                     for profile in loaded_profiles
                 }
             )
-            == hardware_predicate["apis"]
-            and placement_predicate["minimum_device_count"]
-            == len(loaded_profiles)
-            == placement_predicate["maximum_device_count"]
+            and 1
+            <= placement_predicate["minimum_device_count"]
+            <= placement_predicate["maximum_device_count"]
+            <= len(loaded_profiles)
             and benchmark_plan.matched_conditions["devices"]
             == sorted(
                 (

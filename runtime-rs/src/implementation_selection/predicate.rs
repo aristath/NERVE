@@ -11,7 +11,7 @@ impl RuntimeImplementationPredicate {
             ));
         }
         if self.predicate_id.is_empty()
-            || self.hardware.capability_class_counts.is_empty()
+            || self.hardware.capability_classes.is_empty()
             || self.hardware.device_kinds.is_empty()
             || self.hardware.apis.is_empty()
             || self.execution.phases.is_empty()
@@ -21,6 +21,7 @@ impl RuntimeImplementationPredicate {
         for values in [
             &self.hardware.device_kinds,
             &self.hardware.apis,
+            &self.hardware.capability_classes,
             &self.hardware.required_processes,
             &self.hardware.required_features,
             &self.execution.phases,
@@ -65,35 +66,11 @@ impl RuntimeImplementationPredicate {
                     .to_string(),
             );
         }
-        let classes = self
-            .hardware
-            .capability_class_counts
-            .iter()
-            .map(|count| count.capability_class.as_str())
-            .collect::<Vec<_>>();
-        if !strictly_sorted_unique(&classes)
-            || self
-                .hardware
-                .capability_class_counts
-                .iter()
-                .any(|count| count.count == 0)
+        let measured_device_count = self.placement.maximum_device_count;
+        if self.placement.minimum_device_count == 0
+            || self.placement.minimum_device_count > measured_device_count
         {
-            return Err(
-                "runtime capability-class counts must be nonzero, sorted, and unique".to_string(),
-            );
-        }
-        let measured_device_count = self
-            .hardware
-            .capability_class_counts
-            .iter()
-            .map(|count| count.count)
-            .sum::<usize>();
-        if self.placement.minimum_device_count != measured_device_count
-            || self.placement.maximum_device_count != measured_device_count
-        {
-            return Err(
-                "runtime device count must match measured capability multiplicities".to_string(),
-            );
+            return Err("runtime device-count range is invalid".to_string());
         }
         for range in [
             self.execution.activation_batch,
@@ -227,22 +204,19 @@ impl RuntimeImplementationPredicate {
             _ => {}
         }
 
-        let actual_capabilities =
-            unique_devices
-                .values()
-                .fold(BTreeMap::<&str, usize>::new(), |mut counts, profile| {
-                    *counts.entry(profile.capability_class.as_str()).or_default() += 1;
-                    counts
-                });
-        let required_capabilities = self
+        let actual_capabilities = unique_devices
+            .values()
+            .map(|profile| profile.capability_class.as_str())
+            .collect::<BTreeSet<_>>();
+        let allowed_capabilities = self
             .hardware
-            .capability_class_counts
+            .capability_classes
             .iter()
-            .map(|count| (count.capability_class.as_str(), count.count))
-            .collect::<BTreeMap<_, _>>();
-        if actual_capabilities != required_capabilities {
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !actual_capabilities.is_subset(&allowed_capabilities) {
             reasons.push(format!(
-                "capability multiplicities {actual_capabilities:?} do not match {required_capabilities:?}"
+                "capability classes {actual_capabilities:?} are outside {allowed_capabilities:?}"
             ));
         }
 
@@ -345,9 +319,5 @@ impl RuntimeImplementationPredicate {
 }
 
 fn sorted_unique(values: &[String]) -> bool {
-    values.windows(2).all(|pair| pair[0] < pair[1])
-}
-
-fn strictly_sorted_unique(values: &[&str]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
 }

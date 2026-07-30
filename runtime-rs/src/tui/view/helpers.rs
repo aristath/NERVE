@@ -235,10 +235,7 @@ mod tests {
                         "schema": crate::RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
                         "predicate_id": "runtime_predicate_fixture",
                         "hardware": {
-                            "capability_class_counts": [{
-                                "capability_class": "gpu_fixture",
-                                "count": 1
-                            }],
+                            "capability_classes": ["gpu_fixture"],
                             "device_kinds": ["gpu"],
                             "apis": ["vulkan"],
                             "required_processes": [],

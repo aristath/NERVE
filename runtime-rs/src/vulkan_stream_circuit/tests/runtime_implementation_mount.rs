@@ -237,12 +237,8 @@ fn runtime_implementation_test_predicate(
             crate::RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA.to_string(),
         predicate_id: "runtime_predicate_fixture".to_string(),
         hardware: crate::RuntimeHardwarePredicate {
-            capability_class_counts: vec![
-                crate::RuntimeCapabilityClassCount {
-                    capability_class:
-                        "hardware_capability_fixture".to_string(),
-                    count: 1,
-                },
+            capability_classes: vec![
+                "hardware_capability_fixture".to_string(),
             ],
             device_kinds: vec!["gpu".to_string()],
             apis: vec!["vulkan".to_string()],

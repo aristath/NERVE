@@ -605,13 +605,8 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
     predicate = prepared.runtime_predicate.to_json()
 
     assert predicate["hardware"] == {
-        "capability_class_counts": [
-            {
-                "capability_class": qualified.profile[
-                    "capability_class"
-                ],
-                "count": 1,
-            }
+        "capability_classes": [
+            qualified.profile["capability_class"]
         ],
         "device_kinds": ["gpu"],
         "apis": ["vulkan"],
@@ -634,7 +629,7 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
         "speculative_draft_token_counts": [0],
     }
     assert predicate["placement"] == {
-        "mode": "either",
+        "mode": "local",
         "minimum_device_count": 1,
         "maximum_device_count": 1,
         "required_interconnects": [],
@@ -836,11 +831,9 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
     )
     second_predicate = create_runtime_implementation_predicate(
         capability_classes=(
-            count["capability_class"]
-            for count in first["runtime_predicate"]["hardware"][
-                "capability_class_counts"
+            first["runtime_predicate"]["hardware"][
+                "capability_classes"
             ]
-            for _ in range(count["count"])
         ),
         device_kinds=first["runtime_predicate"]["hardware"][
             "device_kinds"

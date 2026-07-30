@@ -34,18 +34,11 @@ pub struct RuntimeImplementationPredicate {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeHardwarePredicate {
-    pub capability_class_counts: Vec<RuntimeCapabilityClassCount>,
+    pub capability_classes: Vec<String>,
     pub device_kinds: Vec<String>,
     pub apis: Vec<String>,
     pub required_processes: Vec<String>,
     pub required_features: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeCapabilityClassCount {
-    pub capability_class: String,
-    pub count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
