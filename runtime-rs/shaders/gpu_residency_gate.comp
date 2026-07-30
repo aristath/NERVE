@@ -45,11 +45,14 @@ const uint RESOLVED_HEADER_WORDS = 8u;
 const uint RESOLVED_RECORD_WORDS = 8u;
 const uint MISSING_HEADER_WORDS = 4u;
 const uint MISSING_RECORD_WORDS = 2u;
-const uint CONFIG_HEADER_WORDS = 6u;
+const uint CONFIG_HEADER_WORDS = 8u;
 const uint CONFIG_DISPATCH_WORDS = 4u;
 
 uint selected_resource(uint selection_index) {
-    return (selections.words[selection_index] >> configuration.words[0])
+    uint lane = selection_index / configuration.words[6];
+    uint lane_selection = selection_index % configuration.words[6];
+    uint selection_word = lane * configuration.words[7] + lane_selection;
+    return (selections.words[selection_word] >> configuration.words[0])
         & configuration.words[1];
 }
 
@@ -169,6 +172,9 @@ void main() {
     }
 
     bool all_resident = missing_count == 0u && invalid_selection == 0u;
+    if (invalid_selection != 0u) {
+        missing_requests.words[2] = 1u;
+    }
     resolved_addresses.words[0] = all_resident ? 1u : 0u;
     resolved_addresses.words[1] = selected_count;
     resolved_addresses.words[2] = resolved_count;

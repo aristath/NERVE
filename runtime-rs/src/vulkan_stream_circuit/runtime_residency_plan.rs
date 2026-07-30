@@ -474,6 +474,7 @@ fn speculative_decoder_runtime_model(
     package.component_executions = decoder.component_executions.clone();
     package.speculative_decoders.clear();
     VulkanResidentRuntimeModel {
+        execution_scope: format!("draft:{}", decoder.id),
         package,
         runtime_graph: target.runtime_graph.clone(),
         placement: StreamCircuitPlacementSpec::new(device_id),

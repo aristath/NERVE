@@ -9,6 +9,7 @@ pub struct VulkanResidentSpeculativeDecoderModelPackage {
     input_embedding_spirv_words: Vec<u32>,
     output_norm_spirv_words: Vec<u32>,
     output_projection_spirv_words: Vec<u32>,
+    demand_residency_context: Option<VulkanDemandResidencyExecutionContext>,
 }
 
 struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
@@ -21,6 +22,7 @@ struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
     input_embedding_spirv_words: &'a [u32],
     compiled_resource_device_stores:
         &'a BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+    resource_residency_policy: ResourceResidencyPolicy,
 }
 
 fn speculative_decoder_additional_parameter_tensors<'a>(
@@ -120,21 +122,23 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
                     )),
                 )
             })?;
-            store
-                .load_all_for_components(
-                    device,
-                    &execution_scope,
-                    &component_ids,
-                    owner,
-                )
-                .map_err(|error| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "failed to load speculative decoder {:?} eager compiled resources: {error}",
-                            decoder.id
-                        )),
+            if context.resource_residency_policy == ResourceResidencyPolicy::Eager {
+                store
+                    .load_all_for_components(
+                        device,
+                        &execution_scope,
+                        &component_ids,
+                        owner,
                     )
-                })?;
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to load speculative decoder {:?} eager compiled resources: {error}",
+                                decoder.id
+                            )),
+                        )
+                    })?;
+            }
         }
         let device_slice = Arc::new(device_slice);
 
@@ -176,6 +180,38 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
         input_embedding_spec.output_signal_id =
             decoder.input_adapter.token_embedding_signal_id.clone();
 
+        let demand_residency_context =
+            if context.resource_residency_policy == ResourceResidencyPolicy::DemandRetained {
+                let store = context
+                    .compiled_resource_device_stores
+                    .get(device_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "speculative decoder {:?} has no demand resource store on device {device_id:?}",
+                                decoder.id
+                            )),
+                        )
+                    })?;
+                Some(VulkanDemandResidencyExecutionContext {
+                    execution_scope: format!("draft:{}", decoder.id),
+                    contract: Arc::clone(&store.contract),
+                    layout: Arc::clone(&store.layout),
+                    store,
+                    owner: DeviceResourceResidencyOwnerId::new(format!(
+                        "{}:{device_id}:draft:{}",
+                        context.runtime_model.package.package_id, decoder.id
+                    ))
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(error.to_string()),
+                        )
+                    })?,
+                })
+            } else {
+                None
+            };
         Ok(Self {
             id: decoder.id.clone(),
             device_id: device_id.to_string(),
@@ -187,6 +223,7 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
             input_embedding_spirv_words: context.input_embedding_spirv_words.to_vec(),
             output_norm_spirv_words,
             output_projection_spirv_words,
+            demand_residency_context,
         })
     }
 

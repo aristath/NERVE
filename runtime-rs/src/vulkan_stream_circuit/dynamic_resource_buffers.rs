@@ -21,6 +21,7 @@ impl VulkanDynamicResourceBindingKey {
 
 pub struct VulkanDynamicResourceBuffers {
     address_table: Arc<VulkanResidentBuffer>,
+    address_table_slot_count: usize,
     parameter_slots:
         BTreeMap<VulkanDynamicResourceBindingKey, Arc<VulkanResidentBuffer>>,
 }
@@ -81,18 +82,24 @@ impl VulkanDynamicResourceBuffers {
             buffer.write_bytes(&bytes)?;
             parameter_slots.insert(table.key.clone(), buffer);
         }
-        Self::new(device, address_table.shared_buffer(), parameter_slots)
+        Self::new(
+            device,
+            address_table.shared_buffer(),
+            address_table.slot_count(),
+            parameter_slots,
+        )
     }
 
     pub fn new(
         device: &VulkanComputeDevice,
         address_table: Arc<VulkanResidentBuffer>,
+        address_table_slot_count: usize,
         parameter_slots: BTreeMap<
             VulkanDynamicResourceBindingKey,
             Arc<VulkanResidentBuffer>,
         >,
     ) -> Result<Self, VulkanError> {
-        if address_table.byte_capacity() == 0 {
+        if address_table.byte_capacity() == 0 || address_table_slot_count == 0 {
             return Err(VulkanError(
                 "dynamic resource address table must not be empty".to_string(),
             ));
@@ -123,12 +130,21 @@ impl VulkanDynamicResourceBuffers {
         }
         Ok(Self {
             address_table,
+            address_table_slot_count,
             parameter_slots,
         })
     }
 
     pub fn address_table(&self) -> &VulkanResidentBuffer {
         &self.address_table
+    }
+
+    pub fn shared_address_table(&self) -> Arc<VulkanResidentBuffer> {
+        Arc::clone(&self.address_table)
+    }
+
+    pub fn address_table_slot_count(&self) -> usize {
+        self.address_table_slot_count
     }
 
     pub fn parameter_slots(

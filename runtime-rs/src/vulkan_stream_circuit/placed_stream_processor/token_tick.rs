@@ -270,7 +270,26 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         VulkanResidentInProcessPlacedRuntimeError,
     > {
         let mut tick_slices = self.prepared_token_tick_slices_for_device(device, stream_tick, tail);
-        self.run_prepared_token_tick_slices_deferred(&mut tick_slices, transport, device, None)
+        if self.model.resource_residency_policy
+            == ResourceResidencyPolicy::DemandRetained
+        {
+            run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_distributed(
+                &mut tick_slices,
+                transport,
+                &self.activation_schedule,
+                Some(&self.distributed_dispatch_runners),
+                Some(&self.edge_synchronizations),
+                VulkanPlacedSubmissionContext::SYNCHRONOUS,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Tick)
+        } else {
+            self.run_prepared_token_tick_slices_deferred(
+                &mut tick_slices,
+                transport,
+                device,
+                None,
+            )
+        }
     }
 
     fn run_prepared_token_id_stream_tick_in_process_with_transport(
@@ -338,12 +357,29 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 device_id: self.model.output_device_id.clone(),
             }
         })?;
-        self.run_prepared_token_tick_slices_deferred(
-            &mut tick_slices,
-            transport,
-            output_device.as_ref(),
-            Some(devices),
-        )
+        if self.model.resource_residency_policy
+            == ResourceResidencyPolicy::DemandRetained
+        {
+            run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_distributed(
+                &mut tick_slices,
+                transport,
+                &self.activation_schedule,
+                Some(&self.distributed_dispatch_runners),
+                Some(&self.edge_synchronizations),
+                VulkanPlacedSubmissionContext {
+                    participant_devices: Some(devices),
+                    ..VulkanPlacedSubmissionContext::SYNCHRONOUS
+                },
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Tick)
+        } else {
+            self.run_prepared_token_tick_slices_deferred(
+                &mut tick_slices,
+                transport,
+                output_device.as_ref(),
+                Some(devices),
+            )
+        }
     }
 
     fn run_prepared_token_id_stream_tick_on_bound_devices_in_process_with_transport(

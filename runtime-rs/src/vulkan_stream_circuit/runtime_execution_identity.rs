@@ -2,6 +2,7 @@ fn canonical_runtime_execution_identity(
     runtime_model: &VulkanResidentRuntimeModel,
     dynamic_state_capacity_activations: usize,
     speculative_decoders_enabled: bool,
+    resource_residency_policy: ResourceResidencyPolicy,
 ) -> Result<String, VulkanResidentTokenModelPackageError> {
     let mut instances = runtime_model.runtime_graph.instances.clone();
     instances.sort_by(|left, right| left.instance_id.cmp(&right.instance_id));
@@ -48,9 +49,11 @@ fn canonical_runtime_execution_identity(
             },
         },
         "component_executions": component_executions,
+        "execution_scope": runtime_model.execution_scope,
         "implementation_selection": runtime_model.implementation_selection,
         "state_capacity_activations": dynamic_state_capacity_activations,
         "speculative_decoders_enabled": speculative_decoders_enabled,
+        "resource_residency_policy": resource_residency_policy,
     });
     let bytes = serde_json::to_vec(&identity).map_err(|error| {
         VulkanResidentTokenModelPackageError::new(format!(
@@ -78,14 +81,38 @@ mod runtime_execution_identity_tests {
         right.component_executions.reverse();
 
         assert_eq!(
-            canonical_runtime_execution_identity(&left, 4096, false).unwrap(),
-            canonical_runtime_execution_identity(&right, 4096, false).unwrap()
+            canonical_runtime_execution_identity(
+                &left,
+                4096,
+                false,
+                ResourceResidencyPolicy::Eager,
+            )
+            .unwrap(),
+            canonical_runtime_execution_identity(
+                &right,
+                4096,
+                false,
+                ResourceResidencyPolicy::Eager,
+            )
+            .unwrap()
         );
 
         left.runtime_graph.instances[0].device_id = "gpu1".to_string();
         assert_ne!(
-            canonical_runtime_execution_identity(&left, 4096, false).unwrap(),
-            canonical_runtime_execution_identity(&right, 4096, false).unwrap()
+            canonical_runtime_execution_identity(
+                &left,
+                4096,
+                false,
+                ResourceResidencyPolicy::Eager,
+            )
+            .unwrap(),
+            canonical_runtime_execution_identity(
+                &right,
+                4096,
+                false,
+                ResourceResidencyPolicy::Eager,
+            )
+            .unwrap()
         );
     }
 
@@ -94,17 +121,45 @@ mod runtime_execution_identity_tests {
         let model = tests::tiny_fixture_model_runtime_model_with_placement(
             StreamCircuitPlacementSpec::new("gpu0"),
         );
-        let base = canonical_runtime_execution_identity(&model, 4096, false).unwrap();
+        let base = canonical_runtime_execution_identity(
+            &model,
+            4096,
+            false,
+            ResourceResidencyPolicy::Eager,
+        )
+        .unwrap();
         assert_ne!(
             base,
-            canonical_runtime_execution_identity(&model, 8192, false).unwrap()
+            canonical_runtime_execution_identity(
+                &model,
+                8192,
+                false,
+                ResourceResidencyPolicy::Eager,
+            )
+            .unwrap()
         );
 
         let mut changed_kernel = model.clone();
         changed_kernel.component_executions[0].kernels[0].local_size_x += 1;
         assert_ne!(
             base,
-            canonical_runtime_execution_identity(&changed_kernel, 4096, false).unwrap()
+            canonical_runtime_execution_identity(
+                &changed_kernel,
+                4096,
+                false,
+                ResourceResidencyPolicy::Eager,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            base,
+            canonical_runtime_execution_identity(
+                &model,
+                4096,
+                false,
+                ResourceResidencyPolicy::DemandRetained,
+            )
+            .unwrap()
         );
     }
 }

@@ -49,9 +49,10 @@ use crate::tensor_storage::TensorStorage;
 use crate::vulkan::{DEFAULT_COMPUTE_LOCAL_SIZE_X, DEFAULT_SPIRV_ENTRY_POINT, read_spirv_words};
 use crate::vulkan_compute::{
     VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT, VulkanComputeDevice, VulkanError,
-    VulkanResidentBuffer, VulkanResidentBufferCopy, VulkanResidentBufferCopyBatch,
-    VulkanResidentBufferPool, VulkanResidentBufferPoolKey, VulkanResidentBufferRangeCopy,
-    VulkanResidentBufferReadRange, VulkanResidentBufferWriteRange,
+    VulkanGpuResidencyGate, VulkanGpuResidencyGateConfig, VulkanGpuResidencyIndirectDispatch,
+    VulkanGpuResidencyMissQueue, VulkanResidentBuffer, VulkanResidentBufferCopy,
+    VulkanResidentBufferCopyBatch, VulkanResidentBufferPool, VulkanResidentBufferPoolKey,
+    VulkanResidentBufferRangeCopy, VulkanResidentBufferReadRange, VulkanResidentBufferWriteRange,
     VulkanResidentExecutionQuantumMeasurement, VulkanResidentKernelBufferAccess,
     VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
@@ -62,7 +63,7 @@ use crate::vulkan_compute::{
     VulkanStableResourceAllocation, VulkanStableResourceArena, VulkanStableResourceArenaConfig,
     VulkanSubgroupOperation, VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
     VulkanTimelineSemaphoreReplayState, record_vulkan_execution_quantum_measurement,
-    vulkan_spirv_requirements,
+    vulkan_gpu_residency_gate_spirv_words, vulkan_spirv_requirements,
 };
 #[cfg(test)]
 use crate::vulkan_compute::{
@@ -159,6 +160,8 @@ include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_store.rs");
+include!("vulkan_stream_circuit/demand_residency_dispatch_chain.rs");
+include!("vulkan_stream_circuit/demand_residency_batch_chain.rs");
 include!("vulkan_stream_circuit/resident_package_resource_loading.rs");
 include!("vulkan_stream_circuit/resident_package_kernel_loading.rs");
 include!("vulkan_stream_circuit/token_engine_codec.rs");

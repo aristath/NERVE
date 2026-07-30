@@ -8,6 +8,7 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
     sampler: VulkanResidentSamplerRunner,
     output_synchronization: VulkanResidentPlacedOutputTimelineSynchronization,
     resident_feedback_loop: Option<VulkanResidentInProcessPlacedFeedbackLoop>,
+    speculative_target_frame_history: Option<VulkanResidentSpeculativeTargetFrameHistory>,
     activation_schedule: VulkanMountedPlacedResidentInProcessSchedule,
     device_slices: Vec<VulkanResidentInProcessPlacedStreamProcessorDevice>,
     execution_quantum_calibrators:

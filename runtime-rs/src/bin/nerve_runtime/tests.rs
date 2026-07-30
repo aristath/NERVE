@@ -11,6 +11,7 @@ mod tests {
     use tokenizers::{AddedToken, Tokenizer};
 
     use nerve_runtime::{
+        ResourceResidencyPolicy,
         RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
         VulkanComputeDeviceInfo, VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
         VulkanResidentTokenTextCodecError, chat_transcript_codec,
@@ -52,6 +53,37 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "--device may only be supplied once");
+    }
+
+    #[test]
+    fn residency_policy_is_an_explicit_normal_runtime_control() {
+        let demand = parse_args_from(
+            ["--residency-policy", "demand-retained"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(
+            demand.resource_residency_policy,
+            ResourceResidencyPolicy::DemandRetained
+        );
+
+        let eager = parse_args_from(std::iter::empty()).unwrap();
+        assert_eq!(
+            eager.resource_residency_policy,
+            ResourceResidencyPolicy::Eager
+        );
+
+        let error = parse_args_from(
+            ["--residency-policy", "automatic"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "invalid --residency-policy \"automatic\"; expected eager or demand-retained"
+        );
     }
 
     #[test]

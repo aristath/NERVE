@@ -283,16 +283,8 @@ fn print_runtime_selection_coverage_stats(
     );
     println!("  selection_count={}", stats.selection_count);
     for domain in &stats.domains {
-        let selected = domain
-            .selected_resources
-            .iter()
-            .map(|resource| {
-                format!("{}:{}", resource.resource_id, resource.selection_count)
-            })
-            .collect::<Vec<_>>()
-            .join(",");
         println!(
-            "  domain={}.{}.{} scope={} selected={}/{} selections={} resources=[{}]",
+            "  domain={}.{}.{} scope={} selected={}/{} selections={}",
             domain.component_id,
             domain.node_id,
             domain.domain_id,
@@ -300,7 +292,6 @@ fn print_runtime_selection_coverage_stats(
             domain.selected_resource_count,
             domain.resource_count,
             domain.selection_count,
-            selected,
         );
     }
 }
@@ -313,29 +304,13 @@ fn print_runtime_selection_phase_coverage_stats(
     }
     println!("selection_phases:");
     for (phase, report) in phases {
-        let domains = report
-            .domains
-            .iter()
-            .map(|domain| {
-                format!(
-                    "{}@{}/{}/{}:{}/{}",
-                    domain.execution_scope,
-                    domain.component_id,
-                    domain.node_id,
-                    domain.domain_id,
-                    domain.selected_resource_count,
-                    domain.resource_count,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
         println!(
-            "  phase={} selected={}/{} selections={} domains=[{}]",
+            "  phase={} selected={}/{} selections={} domains={}",
             phase,
             report.selected_resource_count,
             report.addressable_resource_count,
             report.selection_count,
-            domains,
+            report.domain_count,
         );
     }
 }
@@ -514,6 +489,8 @@ Options:
   --max-new-tokens <N>       Generation stop condition, independent of context size. Default: 65536
   --speculative-draft-tokens <N>
                              MTP draft tokens proposed per verification cycle. Default: 0 (disabled).
+  --residency-policy <POLICY>
+                             Parameter residency: eager or demand-retained. Default: eager.
   --context-size <N>         Runtime transient-state window. Default: auto, up to the model maximum.
   --vulkan-device-index <N>  Use Vulkan physical device index N as the default local target.
   --seed <U32>               Explicit sampler randomness seed. Default: 0

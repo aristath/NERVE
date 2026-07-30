@@ -120,17 +120,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             truncate_speculative_verification_at_stop(&mut verification, stop_token_ids);
             if verification.committed_target_tick_count < target_inputs.len() {
-                let verification_capacity =
-                    self.causal_block_lane_capacity(target_inputs.len())?;
-                let committed_from_snapshot = self
-                    .temporal_block_executions
-                    .borrow()
-                    .get(&(verification_capacity, true))
-                    .expect("speculative causal target window was initialized")
-                    .execution_graph
-                    .commit_causal_state_prefix(
-                        verification.committed_target_tick_count,
-                    )?;
+                let committed_from_snapshot = self.commit_causal_verification_prefix(
+                    target_inputs.len(),
+                    verification.committed_target_tick_count,
+                )?;
                 if !committed_from_snapshot {
                     self.restore_verification_baseline()?;
                     self.sampler
@@ -171,29 +164,16 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
             let catch_up_start = Instant::now();
             decoder.restore_baseline()?;
-            let verification_capacity =
-                self.causal_block_lane_capacity(target_inputs.len())?;
-            let causal_verification = self.temporal_block_executions.borrow();
-            let normalized_target_frames = &causal_verification
-                .get(&(verification_capacity, true))
-                .expect("speculative causal target window was initialized")
-                .speculative_target_output
-                .as_ref()
-                .expect("speculative causal target output was initialized")
-                .norm
-                .normalized_frames_buffer;
             let catch_up_input_token_ids = std::iter::once(initial_token_id)
                 .chain(draft_token_ids.iter().copied())
                 .take(verification.committed_target_tick_count)
                 .collect::<Vec<_>>();
-            decoder.run_catch_up_window(
+            self.catch_up_speculative_decoder_after_verification(
+                decoder,
                 draft_device.as_ref(),
                 &catch_up_input_token_ids,
                 start_stream_tick,
-                normalized_target_frames,
-                self.model
-                    .output_transducer_spec
-                    .normalized_frame_byte_capacity,
+                target_inputs.len(),
             )?;
             let draft_catch_up_time_ns =
                 u64::try_from(catch_up_start.elapsed().as_nanos()).unwrap_or(u64::MAX);

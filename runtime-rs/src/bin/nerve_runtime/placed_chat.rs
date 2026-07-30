@@ -44,7 +44,7 @@ fn run_placed_chat(
                 speculative_draft_tokens: args.speculative_draft_tokens,
             },
         )?;
-    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config_and_residency_policy(
         bound_devices.devices.clone(),
         manifest_dir,
         runtime_model,
@@ -52,6 +52,7 @@ fn run_placed_chat(
         args.random_seed,
         args.speculative_draft_tokens,
         sampler_runtime_config(args),
+        args.resource_residency_policy,
     )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;
@@ -206,7 +207,10 @@ fn run_placed_chat(
                 selection_after_generation.report();
             let selection_coverage =
                 selection_after.delta_since(&selection_before)?.report();
+            let selection_counter_digest = selection_after.digest();
             let cumulative_selection_coverage = selection_after.report();
+            let resident_state_digest =
+                engine.stream_resident_state_digest("main")?;
             let submitted_run = transaction
                 .generation_run
                 .engine_run
@@ -310,10 +314,15 @@ fn run_placed_chat(
                     .run
                     .transport_stats,
             );
+            let generated_token_digest =
+                token_id_digest(&transaction.generated_token_ids);
             Ok(RuntimeChatTurn {
                 generated_token_ids: transaction.generated_token_ids,
                 canonical_committed_token_ids:
                     transaction.canonical_committed_token_ids,
+                generated_token_digest,
+                selection_counter_digest,
+                resident_state_digest,
                 streamed: true,
                 timing,
                 sustained_decode:
@@ -384,7 +393,7 @@ fn execute_placed_prompt_run(
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let placement = runtime_model_placement(manifest_dir, &runtime_model)?;
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
-    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config(
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config_and_residency_policy(
         bound_devices.devices.clone(),
         manifest_dir,
         runtime_model,
@@ -392,6 +401,7 @@ fn execute_placed_prompt_run(
         args.random_seed,
         args.speculative_draft_tokens,
         sampler_runtime_config(args),
+        args.resource_residency_policy,
     )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;

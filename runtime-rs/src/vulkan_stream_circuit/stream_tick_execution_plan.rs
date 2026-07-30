@@ -35,6 +35,59 @@ struct VulkanMountedPlacedDistributedDispatchDependencies {
 }
 
 impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
+    fn uses_demand_residency(&self) -> bool {
+        self.dispatch_segments
+            .iter()
+            .any(|segment| segment.demand_residency.is_some())
+    }
+
+    fn run_single_segment_demand_resident(
+        &self,
+        device: &VulkanComputeDevice,
+        control: VulkanMountedPlacedStreamControl,
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        sequence_variant: u8,
+    ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        if self.dispatch_segments.len() != 1
+            || self.distributed_dispatch_count != 0
+            || self.tick_plan.receive_stage_count != 0
+            || self.tick_plan.publish_stage_count != 0
+        {
+            return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                VulkanError(
+                    "single-segment demand execution requires one local dispatch segment"
+                        .to_string(),
+                ),
+            ));
+        }
+        let segment = self
+            .dispatch_segments
+            .first()
+            .expect("one demand segment was validated");
+        if segment.demand_residency.is_none() {
+            return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                VulkanError(
+                    "single-segment demand execution was requested for an eager segment"
+                        .to_string(),
+                ),
+            ));
+        }
+        segment.submit_with_stream_control_and_timeline_semaphores(
+            device,
+            control,
+            prefix_dispatches,
+            suffix_dispatches,
+            sequence_variant,
+            None,
+            &[],
+            &[],
+            &[],
+            true,
+            None,
+        )
+    }
+
     pub fn from_tick_plan(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
@@ -81,6 +134,29 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
         distributed_dispatch_groups: &[Vec<usize>],
+    ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
+        Self::from_tick_plan_with_distributed_dispatch_groups_and_demand(
+            device,
+            mounted,
+            mounted_bound_plan,
+            loaded_manifest,
+            tick_plan,
+            distributed_dispatch_groups,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_tick_plan_with_distributed_dispatch_groups_and_demand(
+        device: &VulkanComputeDevice,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
+        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        tick_plan: VulkanMountedPlacedStreamTickPlan,
+        distributed_dispatch_groups: &[Vec<usize>],
+        physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
+        demand_context: Option<&VulkanDemandResidencyExecutionContext>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         if tick_plan.device_id != mounted.device_id() {
             return Err(
@@ -129,6 +205,8 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                     mounted_bound_plan,
                     loaded_manifest,
                     &tick_plan.stages[start..end],
+                    physical_residency_schedule,
+                    demand_context,
                 )?,
             );
         }

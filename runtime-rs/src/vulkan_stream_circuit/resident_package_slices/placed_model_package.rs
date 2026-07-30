@@ -1,6 +1,8 @@
 pub struct VulkanResidentInProcessPlacedModelPackage {
     pub package_id: String,
+    pub execution_scope: String,
     pub runtime_execution_identity: String,
+    pub resource_residency_policy: ResourceResidencyPolicy,
     pub input_device_id: String,
     pub output_device_id: String,
     pub dynamic_state_capacity_activations: usize,

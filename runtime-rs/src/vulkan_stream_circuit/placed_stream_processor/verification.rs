@@ -43,16 +43,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             return Ok(());
         }
         let history = self
-            .resident_feedback_loop
+            .speculative_target_frame_history
             .as_ref()
-            .and_then(|feedback_loop| {
-                feedback_loop
-                    .speculative_target_frame_history
-                    .as_ref()
-            })
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "resident feedback did not mount speculative target-frame history".to_string(),
+                    "processor did not mount speculative target-frame history".to_string(),
                 ))
             })?;
         if planned_tick_count == 0 || planned_tick_count > history.lane_copies.len() {
@@ -164,6 +159,19 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if input_token_ids.is_empty() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
+        self.run_batched_causal_verification_window(
+            devices,
+            input_token_ids,
+            start_stream_tick,
+        )
+    }
+
+    fn run_batched_causal_verification_window(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+    ) -> Result<Vec<u32>, VulkanResidentInProcessPlacedRuntimeError> {
         self.run_causal_component_block(
             devices,
             input_token_ids,
@@ -223,6 +231,63 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(batch_tokens)
+    }
+
+    fn commit_causal_verification_prefix(
+        &self,
+        target_tick_count: usize,
+        committed_tick_count: usize,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        let verification_capacity =
+            self.causal_block_lane_capacity(target_tick_count)?;
+        self.temporal_block_executions
+            .borrow()
+            .get(&(verification_capacity, true))
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative causal target window was not initialized".to_string(),
+                ))
+            })?
+            .execution_graph
+            .commit_causal_state_prefix(committed_tick_count)
+    }
+
+    fn catch_up_speculative_decoder_after_verification(
+        &self,
+        decoder: &VulkanResidentSpeculativeDecoderProcessor,
+        draft_device: &VulkanComputeDevice,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        target_tick_count: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let verification_capacity =
+            self.causal_block_lane_capacity(target_tick_count)?;
+        let causal_verification = self.temporal_block_executions.borrow();
+        let normalized_target_frames = &causal_verification
+            .get(&(verification_capacity, true))
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative causal target window was not initialized".to_string(),
+                ))
+            })?
+            .speculative_target_output
+            .as_ref()
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative causal target output was not initialized".to_string(),
+                ))
+            })?
+            .norm
+            .normalized_frames_buffer;
+        decoder.run_catch_up_window(
+            draft_device,
+            input_token_ids,
+            start_stream_tick,
+            normalized_target_frames,
+            self.model
+                .output_transducer_spec
+                .normalized_frame_byte_capacity,
+        )
     }
 
     fn commit_speculative_feedback_control(

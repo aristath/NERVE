@@ -14,6 +14,33 @@ pub struct VulkanSelectionTelemetryDomainSnapshot {
 }
 
 impl VulkanSelectionTelemetrySnapshot {
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut digest = Sha256::new();
+        digest.update((self.domains.len() as u64).to_le_bytes());
+        for domain in &self.domains {
+            for identity_part in [
+                domain.execution_scope.as_bytes(),
+                domain.component_id.as_bytes(),
+                domain.node_id.as_bytes(),
+                domain.domain_id.as_bytes(),
+            ] {
+                digest.update((identity_part.len() as u64).to_le_bytes());
+                digest.update(identity_part);
+            }
+            digest.update((domain.resource_count as u64).to_le_bytes());
+            digest.update((domain.selection_counts.len() as u64).to_le_bytes());
+            for selection_count in &domain.selection_counts {
+                digest.update(selection_count.to_le_bytes());
+            }
+        }
+        format!(
+            "nerve.runtime.selection_counters_sha256.v1:{:x}",
+            digest.finalize()
+        )
+    }
+
     pub fn delta_since(
         &self,
         previous: &Self,
@@ -268,6 +295,19 @@ mod selection_telemetry_tests {
                 selection_counts: counts.to_vec(),
             }],
         }
+    }
+
+    #[test]
+    fn selection_telemetry_digest_covers_identity_order_and_every_counter() {
+        let baseline = snapshot(&[1, 2, 3]);
+        assert_eq!(baseline.digest(), baseline.clone().digest());
+
+        let counter_change = snapshot(&[1, 3, 2]);
+        assert_ne!(baseline.digest(), counter_change.digest());
+
+        let mut identity_change = baseline.clone();
+        identity_change.domains[0].execution_scope = "draft".to_string();
+        assert_ne!(baseline.digest(), identity_change.digest());
     }
 
     #[test]

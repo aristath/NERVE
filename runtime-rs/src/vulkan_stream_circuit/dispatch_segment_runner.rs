@@ -10,6 +10,7 @@ pub struct VulkanMountedPlacedResidentDispatchSegmentRunner {
     sequences: RefCell<BTreeMap<u8, VulkanResidentKernelSequence>>,
     feedback_sequences: RefCell<Vec<VulkanResidentKernelSequence>>,
     feedback_indirect: Option<VulkanResidentFeedbackIndirectSequence>,
+    demand_residency: Option<VulkanDemandResidencySegment>,
 }
 
 impl VulkanMountedPlacedResidentDispatchSegmentRunner {
@@ -19,6 +20,8 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
         stages: &[VulkanMountedPlacedStreamTickStage],
+        physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
+        demand_context: Option<&VulkanDemandResidencyExecutionContext>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         let start_stage_index = stages
             .first()
@@ -80,6 +83,24 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             });
         }
 
+        let demand_residency = match (physical_residency_schedule, demand_context) {
+            (Some(schedule), Some(context)) => VulkanDemandResidencySegment::from_segment(
+                mounted,
+                mounted_bound_plan,
+                schedule,
+                &dispatches,
+                context.clone(),
+            )?,
+            (None, None) => None,
+            _ => {
+                return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                    VulkanError(
+                        "demand residency requires both an execution context and physical schedule"
+                            .to_string(),
+                    ),
+                ));
+            }
+        };
         Ok(Self {
             start_stage_index,
             end_stage_index,
@@ -94,6 +115,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             )])),
             feedback_sequences: RefCell::new(Vec::new()),
             feedback_indirect: None,
+            demand_residency,
         })
     }
 
@@ -148,6 +170,36 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         signal_completion: bool,
         submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        if let Some(demand) = &self.demand_residency {
+            if feedback_lane.is_some()
+                || !snapshot_copies.is_empty()
+                || submission_batch.is_some()
+                || !signal_completion
+            {
+                return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                    VulkanError(
+                        "demand-resident execution requires a synchronous checkpoint boundary"
+                            .to_string(),
+                    ),
+                ));
+            }
+            self.stream_control_buffer
+                .write_bytes_at(
+                    VULKAN_STREAM_CONTROL_METADATA_OFFSET,
+                    &stream_control_metadata_bytes(control),
+                )
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+            return demand.run(
+                device,
+                &self.dispatches,
+                control,
+                prefix_dispatches,
+                suffix_dispatches,
+                sequence_variant,
+                wait_points,
+                signal_points,
+            );
+        }
         if let Some(feedback_lane) = feedback_lane {
             while self.feedback_sequences.borrow().len() <= feedback_lane {
                 let sequence = device
@@ -375,6 +427,20 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         sequence_variant: u8,
         feedback_lane: Option<usize>,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        if self.demand_residency.is_some() {
+            if feedback_lane.is_some() {
+                return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                    VulkanError(
+                        "demand-resident execution cannot wait on a feedback sequence lane"
+                            .to_string(),
+                    ),
+                ));
+            }
+            // Demand execution resolves every miss and waits for its final
+            // resumed sequence before submission returns. There is no
+            // separately outstanding segment sequence to wait on here.
+            return Ok(());
+        }
         if let Some(feedback_lane) = feedback_lane {
             let feedback_sequences = self.feedback_sequences.borrow();
             let sequence = feedback_sequences
@@ -411,6 +477,27 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 &stream_control_metadata_bytes(control),
             )
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+
+        if let Some(demand) = &self.demand_residency {
+            let execution_start = capture_execution_trace.then(Instant::now);
+            demand.run(
+                device,
+                &self.dispatches,
+                control,
+                prefix_dispatches,
+                suffix_dispatches,
+                sequence_variant,
+                &[],
+                &[],
+            )?;
+            return Ok(execution_start
+                .map(|start| {
+                    let execution_time_ns =
+                        u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    self.completed_component_runs(execution_time_ns)
+                })
+                .unwrap_or_default());
+        }
 
         if !self.sequences.borrow().contains_key(&sequence_variant) {
             let sequence = device

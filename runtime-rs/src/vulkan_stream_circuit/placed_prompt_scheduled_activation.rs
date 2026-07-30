@@ -189,7 +189,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
         };
         if self.speculative_draft_tokens > 0
             && self.processor.speculative_decoder_count() > 0
-            && self.speculative_execution_policy.should_use_speculative()
         {
             return self
                 .run_runtime_scheduler_activation_with_output(activation, on_output_event)
@@ -323,7 +322,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             && completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
             && completion.executed_tick_count > 0
             && pending.generated_tokens < pending.max_tokens;
-        if can_continue && !self.speculative_execution_policy.should_use_speculative() {
+        if can_continue && self.speculative_draft_tokens == 0 {
             let remaining = pending.max_tokens - pending.generated_tokens;
             if let Some(window) = self.submit_resident_feedback_window_limited(remaining)? {
                 self.active_input_event

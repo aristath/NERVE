@@ -237,6 +237,7 @@ impl VulkanResidentModelPackageManifest {
         circuit_graph.components = components;
         validate_generation_execution_contract(&self, &circuit_graph)?;
         Ok(VulkanResidentRuntimeModel {
+            execution_scope: "target".to_string(),
             package: self,
             runtime_graph,
             placement,

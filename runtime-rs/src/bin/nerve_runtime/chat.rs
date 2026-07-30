@@ -2,6 +2,9 @@
 struct RuntimeChatTurn {
     generated_token_ids: Vec<u32>,
     canonical_committed_token_ids: Vec<u32>,
+    generated_token_digest: String,
+    selection_counter_digest: String,
+    resident_state_digest: String,
     streamed: bool,
     timing: RuntimePromptTimingReport,
     sustained_decode: RuntimeSustainedDecodeReport,
@@ -257,6 +260,16 @@ where
                 &turn.cumulative_selection_coverage,
             );
             print_runtime_transport_edges(&turn.transport_edges);
+            println!("determinism:");
+            println!(
+                "  generated_tokens={}",
+                turn.generated_token_digest
+            );
+            println!(
+                "  selection_counters={}",
+                turn.selection_counter_digest
+            );
+            println!("  resident_state={}", turn.resident_state_digest);
             chat_session.commit_assistant_turn(
                 input_text,
                 &assistant_content,
@@ -266,6 +279,20 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+fn token_id_digest(token_ids: &[u32]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update((token_ids.len() as u64).to_le_bytes());
+    for token_id in token_ids {
+        digest.update(token_id.to_le_bytes());
+    }
+    format!(
+        "nerve.runtime.token_ids_sha256.v1:{:x}",
+        digest.finalize()
+    )
 }
 
 fn assistant_content_token_ids<'a>(

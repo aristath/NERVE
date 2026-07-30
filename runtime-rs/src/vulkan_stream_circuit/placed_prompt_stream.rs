@@ -12,7 +12,6 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     active_input_event: Option<VulkanResidentInProcessPlacedActivePromptEvent>,
     pending_input_events: VecDeque<VulkanResidentTokenInputEvent>,
     speculative_draft_tokens: usize,
-    speculative_execution_policy: VulkanSpeculativeExecutionPolicy,
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
@@ -62,22 +61,46 @@ impl VulkanResidentInProcessPlacedPromptStream {
     pub fn from_runtime_model_for_bound_devices_with_sampler_config(
         devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
         manifest_dir: impl AsRef<Path>,
-        mut runtime_model: VulkanResidentRuntimeModel,
+        runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
         random_seed: u32,
         speculative_draft_tokens: usize,
         sampler_config: VulkanResidentSamplerRuntimeConfig,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        Self::from_runtime_model_for_bound_devices_with_sampler_config_and_residency_policy(
+            devices,
+            manifest_dir,
+            runtime_model,
+            dynamic_state_capacity_activations,
+            random_seed,
+            speculative_draft_tokens,
+            sampler_config,
+            ResourceResidencyPolicy::Eager,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_runtime_model_for_bound_devices_with_sampler_config_and_residency_policy(
+        devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
+        manifest_dir: impl AsRef<Path>,
+        mut runtime_model: VulkanResidentRuntimeModel,
+        dynamic_state_capacity_activations: Option<usize>,
+        random_seed: u32,
+        speculative_draft_tokens: usize,
+        sampler_config: VulkanResidentSamplerRuntimeConfig,
+        resource_residency_policy: ResourceResidencyPolicy,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         runtime_model.package.sampler.spec = sampler_config
             .apply_to(&runtime_model.package.sampler.spec)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let package = Arc::new(
-            VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices(
+            VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_residency_policy(
                 &devices,
                 manifest_dir,
                 runtime_model,
                 dynamic_state_capacity_activations,
                 speculative_draft_tokens > 0,
+                resource_residency_policy,
             )?,
         );
         let mut stream = Self::new(package, devices, random_seed)?;
@@ -111,7 +134,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: 0,
-            speculative_execution_policy: VulkanSpeculativeExecutionPolicy::default(),
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -151,7 +173,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.session.transport = VulkanInProcessPlacedEdgeTransport::new();
         self.package = package;
         self.processor = processor;
-        self.speculative_execution_policy = VulkanSpeculativeExecutionPolicy::default();
         self.resident_feedback_template_catalog.clear();
         self.pending_scheduler_activation = None;
         Ok(())
@@ -188,7 +209,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
-            speculative_execution_policy: self.speculative_execution_policy.clone(),
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -228,8 +248,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.session.transport.reset_tick_state();
         self.active_input_event = None;
         self.pending_input_events.clear();
-        self.speculative_execution_policy =
-            VulkanSpeculativeExecutionPolicy::default();
         self.pending_scheduler_activation = None;
         Ok(zeroed)
     }
@@ -330,7 +348,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let Some(input_event) = self.pending_input_events.pop_front() else {
             return Ok(false);
         };
-        self.speculative_execution_policy.begin_input_event();
         self.active_input_event = Some(VulkanResidentInProcessPlacedActivePromptEvent::new(
             input_event,
             self.session.next_stream_tick,
@@ -689,9 +706,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
         if self.speculative_draft_tokens == 0 || self.processor.speculative_decoder_count() == 0 {
             return Ok(false);
         }
-        if !self.speculative_execution_policy.should_use_speculative() {
-            return Ok(false);
-        }
         let Some(active) = self.active_input_event.as_ref() else {
             return Ok(false);
         };
@@ -724,8 +738,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
             draft_token_count,
             &stop_token_ids,
         )?;
-        self.speculative_execution_policy
-            .observe_speculative_cycle(&cycle);
         self.active_input_event
             .as_mut()
             .expect("speculative feedback cycle requires an active input event")
@@ -1040,14 +1052,6 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 elapsed_time_ns,
                 completion.stop_reason != VULKAN_FEEDBACK_STOP_REASON_NONE,
             );
-        if completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
-            && completion.executed_tick_count == planned_tick_count
-        {
-            self.speculative_execution_policy.observe_resident_window(
-                elapsed_time_ns,
-                completion.sampled_tick_count,
-            );
-        }
         Ok(completion)
     }
 

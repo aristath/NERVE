@@ -803,6 +803,11 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             .ok_or_else(|| VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
                 stream_id: stream_ids[0].clone(),
             })?;
+        if first_stream.processor.model.resource_residency_policy
+            == ResourceResidencyPolicy::DemandRetained
+        {
+            return Ok(None);
+        }
         let first_devices = first_stream.devices.clone();
         for stream_id in &stream_ids[1..] {
             let stream = self.streams.get(stream_id).ok_or_else(|| {

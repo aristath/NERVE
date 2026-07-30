@@ -1,4 +1,4 @@
-fn run_qwen_layer_00_causal_batch(
+fn run_fixture_layer_00_causal_batch(
     device: Rc<VulkanComputeDevice>,
     manifest_path: &Path,
     input_frames: &[u8],
@@ -64,6 +64,7 @@ fn run_qwen_layer_00_causal_batch(
         mounted,
         mounted_bound,
         resident_execution_plan,
+        demand_residency_context: None,
     };
     let devices = BTreeMap::from([("gpu0".to_string(), device)]);
     let quantum_calibrators = BTreeMap::from([(
@@ -197,13 +198,13 @@ fn fused_pairpacked_rms_norm_preserves_complete_causal_batch() {
     let device = Rc::new(
         selected_test_vulkan_device().expect("selected Vulkan test device must open"),
     );
-    let (reference_output, reference_state) = run_qwen_layer_00_causal_batch(
+    let (reference_output, reference_state) = run_fixture_layer_00_causal_batch(
         device.clone(),
         &reference_manifest_path,
         &input_frames,
         &token_ids,
     );
-    let (candidate_output, candidate_state) = run_qwen_layer_00_causal_batch(
+    let (candidate_output, candidate_state) = run_fixture_layer_00_causal_batch(
         device,
         &candidate_manifest_path,
         &input_frames,

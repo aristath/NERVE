@@ -26,6 +26,7 @@ pub struct VulkanResidentModelPackageManifest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VulkanResidentRuntimeModel {
+    pub execution_scope: String,
     pub package: VulkanResidentModelPackageManifest,
     pub runtime_graph: StreamCircuitRuntimeGraph,
     pub placement: StreamCircuitPlacementSpec,

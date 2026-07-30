@@ -47,6 +47,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             runtime_model,
             dynamic_state_capacity_activations,
             true,
+            ResourceResidencyPolicy::Eager,
             None,
             |_| Ok(device),
         )
@@ -64,6 +65,35 @@ impl VulkanResidentInProcessPlacedModelPackage {
             runtime_model,
             dynamic_state_capacity_activations,
             mount_speculative_decoders,
+            ResourceResidencyPolicy::Eager,
+            None,
+            |device_id| {
+                devices
+                    .get(device_id)
+                    .map(|device| device.as_ref())
+                    .ok_or_else(
+                        || VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: device_id.to_string(),
+                        },
+                    )
+            },
+        )
+    }
+
+    pub fn from_runtime_model_for_bound_devices_with_residency_policy(
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        manifest_dir: impl AsRef<Path>,
+        runtime_model: VulkanResidentRuntimeModel,
+        dynamic_state_capacity_activations: Option<usize>,
+        mount_speculative_decoders: bool,
+        resource_residency_policy: ResourceResidencyPolicy,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        Self::from_runtime_model_for_device_resolver(
+            manifest_dir,
+            runtime_model,
+            dynamic_state_capacity_activations,
+            mount_speculative_decoders,
+            resource_residency_policy,
             None,
             |device_id| {
                 devices
@@ -98,6 +128,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             runtime_model,
             dynamic_state_capacity_activations,
             mount_speculative_decoders,
+            ResourceResidencyPolicy::Eager,
             Some(parameter_pool),
             |device_id| {
                 devices
@@ -117,6 +148,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
         mount_speculative_decoders: bool,
+        resource_residency_policy: ResourceResidencyPolicy,
         parameter_pool: Option<&VulkanResidentBufferPool>,
         device_for: F,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError>
@@ -125,6 +157,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
     {
         let manifest_dir = manifest_dir.as_ref();
         let package_id = runtime_model.package.package_id.clone();
+        let execution_scope = runtime_model.execution_scope.clone();
+        if execution_scope.trim().is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "resident runtime execution scope must not be empty",
+                ),
+            ));
+        }
         let (input_processor_id, output_processor_id) = runtime_model
             .circuit_graph
             .signal_processor_endpoint_component_ids()
@@ -150,22 +190,23 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &runtime_model,
             capacity,
             mount_speculative_decoders,
+            resource_residency_policy,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
         let tensor_index =
             runtime_model.load_runtime_tensor_index(manifest_dir)?;
-        let eager_residency_plan = plan_vulkan_runtime_residency(
+        let residency_plan = plan_vulkan_runtime_residency(
             manifest_dir,
             &runtime_model,
             &tensor_index,
             capacity,
             mount_speculative_decoders,
-            ResourceResidencyPolicy::Eager,
+            resource_residency_policy,
         )
         .map_err(|error| {
             VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to plan eager compiled resources: {error}"
+                    "failed to plan compiled resources for {resource_residency_policy:?} residency: {error}"
                 )),
             )
         })?;
@@ -284,7 +325,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         }
         validate_physical_residency_schedule_coverage(
             &runtime_model.package.resource_residency,
-            "target",
+            &execution_scope,
             device_slice_plans
                 .iter()
                 .map(|slice| &slice.physical_residency_schedule),
@@ -434,14 +475,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
         })?;
         let mut compiled_resource_device_stores = BTreeMap::new();
         for package_slice in &mut device_slices {
-            let device_plan = eager_residency_plan
+            let device_plan = residency_plan
                 .device_plans
                 .iter()
                 .find(|plan| plan.device_id == package_slice.device_id)
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(format!(
-                            "eager residency plan omitted device {:?}",
+                            "{resource_residency_policy:?} residency plan omitted device {:?}",
                             package_slice.device_id
                         )),
                     )
@@ -491,7 +532,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             }
             let metadata_bytes = compiled_resource_layout
                 .metadata_byte_count_for_components(
-                    "target",
+                    &execution_scope,
                     &component_ids,
                 )
                 .map_err(|error| {
@@ -525,11 +566,33 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .unwrap_or(usize::MAX);
             let safe_dynamic_bytes =
                 available_bytes.saturating_sub(pending_fixed_bytes);
-            if maximum_dynamic_bytes > safe_dynamic_bytes {
+            let upload_alignment =
+                compiled_resource_upload_alignment(&compiled_resource_contract, slice_device)
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(error.to_string()),
+                        )
+                    })?;
+            let maximum_alignment_padding = compiled_resource_layout
+                .slot_count()
+                .checked_mul(upload_alignment.saturating_sub(1))
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(
+                            "dynamic resource alignment capacity overflowed",
+                        ),
+                    )
+                })?;
+            let resident_payload_capacity = maximum_dynamic_bytes.min(
+                safe_dynamic_bytes.saturating_sub(maximum_alignment_padding),
+            );
+            if resource_residency_policy == ResourceResidencyPolicy::Eager
+                && maximum_dynamic_bytes > resident_payload_capacity
+            {
                 return Err(
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(format!(
-                            "eager compiled resources for device {:?} require {maximum_dynamic_bytes} bytes, but only {safe_dynamic_bytes} bytes remain after exact runtime headroom",
+                            "eager compiled resources for device {:?} require {maximum_dynamic_bytes} payload bytes, but only {resident_payload_capacity} bytes remain after exact runtime headroom and alignment",
                             package_slice.device_id
                         )),
                     ),
@@ -542,7 +605,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     manifest_dir,
                     Arc::clone(&compiled_resource_contract),
                     Arc::clone(&compiled_resource_layout),
-                    maximum_dynamic_bytes,
+                    resident_payload_capacity,
                     safe_dynamic_bytes,
                     parameters.staging_headroom_bytes,
                     maximum_ranges_per_group,
@@ -561,7 +624,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     store
                         .dynamic_buffers_for_components(
                             slice_device,
-                            "target",
+                            &execution_scope,
                             &component_ids,
                         )
                         .map_err(|error| {
@@ -574,8 +637,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         })?,
                 );
                 let owner = DeviceResourceResidencyOwnerId::new(format!(
-                    "{}:{}:target",
-                    package_id, package_slice.device_id
+                    "{}:{}:{}",
+                    package_id, package_slice.device_id, execution_scope
                 ))
                 .map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -584,21 +647,23 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         )),
                     )
                 })?;
-                store
-                    .load_all_for_components(
-                        slice_device,
-                        "target",
-                        &component_ids,
-                        owner,
-                    )
-                    .map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "failed to load eager compiled resources for device {:?}: {error}",
-                                package_slice.device_id
-                            )),
+                if resource_residency_policy == ResourceResidencyPolicy::Eager {
+                    store
+                        .load_all_for_components(
+                            slice_device,
+                            &execution_scope,
+                            &component_ids,
+                            owner,
                         )
-                    })?;
+                        .map_err(|error| {
+                            VulkanResidentInProcessPlacedRuntimeError::Package(
+                                VulkanResidentTokenModelPackageError::new(format!(
+                                    "failed to load eager compiled resources for device {:?}: {error}",
+                                    package_slice.device_id
+                                )),
+                            )
+                        })?;
+                }
             }
             if compiled_resource_device_stores
                 .insert(package_slice.device_id.clone(), store)
@@ -654,6 +719,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             input_embedding_spirv_words: &input_transducer_spirv_words,
             compiled_resource_device_stores:
                 &compiled_resource_device_stores,
+            resource_residency_policy,
         };
         for decoder in runtime_model
             .package
@@ -673,7 +739,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
 
         Ok(Self {
             package_id,
+            execution_scope,
             runtime_execution_identity,
+            resource_residency_policy,
             input_device_id,
             output_device_id,
             dynamic_state_capacity_activations: capacity,
@@ -907,14 +975,56 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .filter(|group| group.owner_device_id == package_slice.device_id)
                 .map(|group| group.dispatch_indices())
                 .collect::<Vec<_>>();
+            let demand_context =
+                if self.resource_residency_policy
+                    == ResourceResidencyPolicy::DemandRetained
+                {
+                    let store = self
+                        .compiled_resource_device_stores
+                        .get(&package_slice.device_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::Package(
+                                VulkanResidentTokenModelPackageError::new(format!(
+                                    "demand-resident device {:?} has no compiled resource store",
+                                    package_slice.device_id
+                                )),
+                            )
+                        })?;
+                    Some(VulkanDemandResidencyExecutionContext {
+                        execution_scope: self.execution_scope.clone(),
+                        contract: Arc::clone(&store.contract),
+                        layout: Arc::clone(&store.layout),
+                        store,
+                        owner: DeviceResourceResidencyOwnerId::new(format!(
+                            "{}:{}:{}",
+                            self.package_id,
+                            package_slice.device_id,
+                            self.execution_scope
+                        ))
+                        .map_err(|error| {
+                            VulkanResidentInProcessPlacedRuntimeError::Package(
+                                VulkanResidentTokenModelPackageError::new(
+                                    error.to_string(),
+                                ),
+                            )
+                        })?,
+                    })
+                } else {
+                    None
+                };
             let resident_execution_plan =
-                VulkanMountedPlacedResidentStreamTickExecutionPlan::from_tick_plan_with_distributed_dispatch_groups(
+                VulkanMountedPlacedResidentStreamTickExecutionPlan::from_tick_plan_with_distributed_dispatch_groups_and_demand(
                     device,
                     &mounted,
                     &mounted_bound,
                     package_slice.loaded_manifest(),
                     tick_plan,
                     &distributed_dispatch_groups,
+                    demand_context
+                        .as_ref()
+                        .map(|_| package_slice.physical_residency_schedule()),
+                    demand_context.as_ref(),
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
             devices.push(VulkanResidentInProcessPlacedStreamProcessorDevice {
@@ -927,6 +1037,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 mounted,
                 mounted_bound,
                 resident_execution_plan,
+                demand_residency_context: demand_context,
             });
         }
         let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
@@ -1123,6 +1234,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &device_for,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let speculative_target_frame_history =
+            VulkanResidentSpeculativeTargetFrameHistory::new_if_needed(
+                self,
+                output_device,
+                &output_transducer,
+                &sampler,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut speculative_decoders = Vec::with_capacity(self.speculative_decoders.len());
         for decoder in &self.speculative_decoders {
             let draft_device = device_for(&decoder.device_id)?;
@@ -1155,6 +1274,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             sampler,
             output_synchronization,
             resident_feedback_loop,
+            speculative_target_frame_history,
             activation_schedule,
             device_slices: devices,
             execution_quantum_calibrators,

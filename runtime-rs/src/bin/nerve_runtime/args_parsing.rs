@@ -126,6 +126,18 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
                 parsed.speculative_draft_tokens =
                     parse_next(&mut raw, "--speculative-draft-tokens")?;
             }
+            "--residency-policy" => {
+                parsed.resource_residency_policy =
+                    match next_value(&mut raw, "--residency-policy")?.as_str() {
+                        "eager" => ResourceResidencyPolicy::Eager,
+                        "demand-retained" => ResourceResidencyPolicy::DemandRetained,
+                        value => {
+                            return Err(format!(
+                                "invalid --residency-policy {value:?}; expected eager or demand-retained"
+                            ));
+                        }
+                    };
+            }
             "--context-size" => {
                 parsed.context_size = Some(parse_next(&mut raw, "--context-size")?);
             }

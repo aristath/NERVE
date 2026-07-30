@@ -8,6 +8,7 @@ pub struct VulkanResidentInProcessPlacedStreamProcessorDevice {
     mounted: VulkanMountedPlacedStreamCircuit,
     mounted_bound: VulkanMountedPlacedBoundDispatchPlan,
     resident_execution_plan: VulkanMountedPlacedResidentStreamTickExecutionPlan,
+    demand_residency_context: Option<VulkanDemandResidencyExecutionContext>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,13 +54,61 @@ struct VulkanResidentInProcessPlacedFeedbackLoop {
     replayable: bool,
     scheduler_turn_count_per_tick: usize,
     completed_stage_count_per_tick: usize,
-    speculative_target_frame_history: Option<VulkanResidentFeedbackTargetFrameHistory>,
 }
 
-struct VulkanResidentFeedbackTargetFrameHistory {
+struct VulkanResidentSpeculativeTargetFrameHistory {
     frames: VulkanResidentBuffer,
     frame_byte_capacity: usize,
     lane_copies: Vec<VulkanResidentBufferCopyBatch>,
+}
+
+impl VulkanResidentSpeculativeTargetFrameHistory {
+    fn new_if_needed(
+        model: &VulkanResidentInProcessPlacedModelPackage,
+        output_device: &VulkanComputeDevice,
+        output_transducer: &VulkanResidentOutputTransducerRunner,
+        sampler: &VulkanResidentSamplerRunner,
+    ) -> Result<Option<Self>, VulkanError> {
+        if model.speculative_decoders.is_empty() {
+            return Ok(None);
+        }
+        let lane_capacity =
+            VULKAN_BACKEND_LOOP_MAX_WINDOW.min(sampler.history_capacity_activations.max(1));
+        let frame_byte_capacity = model
+            .output_transducer_spec
+            .normalized_frame_byte_capacity;
+        let history_byte_capacity = frame_byte_capacity
+            .checked_mul(lane_capacity)
+            .ok_or_else(|| {
+                VulkanError(
+                    "speculative target-frame history capacity overflowed".to_string(),
+                )
+            })?;
+        let frames = output_device.create_resident_buffer(history_byte_capacity)?;
+        let lane_copies = (0..lane_capacity)
+            .map(|lane| {
+                let destination_offset =
+                    lane.checked_mul(frame_byte_capacity).ok_or_else(|| {
+                        VulkanError(
+                            "speculative target-frame offset overflowed".to_string(),
+                        )
+                    })?;
+                let copy = VulkanResidentBufferRangeCopy::new(
+                    output_transducer.normalized_frame_buffer(),
+                    &frames,
+                    0,
+                    destination_offset,
+                    frame_byte_capacity,
+                )?;
+                output_device.create_resident_buffer_copy_batch(&[copy])
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(Self {
+            frames,
+            frame_byte_capacity,
+            lane_copies,
+        }))
+    }
 }
 
 const VULKAN_RESIDENT_FEEDBACK_TARGET_CONTROL_LATENCY_NS: u64 = 250_000_000;
@@ -476,6 +525,9 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         F: Fn(&str) -> Result<&'a VulkanComputeDevice, E>,
         E: Display,
     {
+        if model.resource_residency_policy == ResourceResidencyPolicy::DemandRetained {
+            return Ok(None);
+        }
         let VulkanResidentPlacedFeedbackMount {
             input_transducer,
             output_transducer,
@@ -555,44 +607,6 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                         VulkanError("placed feedback stage count overflowed".to_string())
                     })
             })?;
-        let speculative_target_frame_history = if model.speculative_decoders.is_empty() {
-            None
-        } else {
-            let frame_byte_capacity = model
-                .output_transducer_spec
-                .normalized_frame_byte_capacity;
-            let history_byte_capacity = frame_byte_capacity
-                .checked_mul(window_width)
-                .ok_or_else(|| {
-                    VulkanError(
-                        "resident feedback target-frame history capacity overflowed".to_string(),
-                    )
-                })?;
-            let frames = output_device.create_resident_buffer(history_byte_capacity)?;
-            let lane_copies = (0..window_width)
-                .map(|lane| {
-                    let destination_offset =
-                        lane.checked_mul(frame_byte_capacity).ok_or_else(|| {
-                            VulkanError(
-                                "resident feedback target-frame offset overflowed".to_string(),
-                            )
-                        })?;
-                    let copy = VulkanResidentBufferRangeCopy::new(
-                        output_transducer.normalized_frame_buffer(),
-                        &frames,
-                        0,
-                        destination_offset,
-                        frame_byte_capacity,
-                    )?;
-                    output_device.create_resident_buffer_copy_batch(&[copy])
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Some(VulkanResidentFeedbackTargetFrameHistory {
-                frames,
-                frame_byte_capacity,
-                lane_copies,
-            })
-        };
         Ok(Some(Self {
             feedback_synchronization,
             output_synchronization,
@@ -601,7 +615,6 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
             replayable: !has_dynamic_push_constants,
             scheduler_turn_count_per_tick: activation_schedule.turns.len(),
             completed_stage_count_per_tick,
-            speculative_target_frame_history,
         }))
     }
 }

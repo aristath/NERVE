@@ -4,7 +4,7 @@ const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT: usize = 4;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT: usize = 2;
-const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 6;
+const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_CONFIG_DISPATCH_WORD_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,10 +16,11 @@ pub struct VulkanGpuResidencyIndirectDispatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanGpuResidencyGateConfig {
     pub maximum_selection_count: usize,
+    pub selection_count_per_lane: usize,
+    pub selection_lane_stride_words: usize,
     pub selection_index_shift: u32,
     pub selection_index_mask: u32,
     pub address_slots_by_resource_index: Vec<Vec<usize>>,
-    pub missing_request_capacity: usize,
     pub downstream_dispatches: Vec<VulkanGpuResidencyIndirectDispatch>,
 }
 
@@ -38,6 +39,12 @@ pub struct VulkanGpuResidencyMissingSnapshot {
     pub requests: Vec<VulkanGpuResidencyMissingRequest>,
 }
 
+#[derive(Clone)]
+pub struct VulkanGpuResidencyMissQueue {
+    capacity: usize,
+    buffer: Arc<VulkanResidentBuffer>,
+}
+
 pub struct VulkanGpuResidencyGate {
     config: VulkanGpuResidencyGateConfig,
     _selection_buffer: Arc<VulkanResidentBuffer>,
@@ -46,7 +53,7 @@ pub struct VulkanGpuResidencyGate {
     _resource_group_records: Arc<VulkanResidentBuffer>,
     _resource_address_slots: Arc<VulkanResidentBuffer>,
     resolved_addresses: Arc<VulkanResidentBuffer>,
-    missing_requests: Arc<VulkanResidentBuffer>,
+    missing_queue: VulkanGpuResidencyMissQueue,
     indirect_dispatches: Arc<VulkanResidentBuffer>,
     dispatch: VulkanResidentKernelDispatch,
 }
@@ -56,6 +63,7 @@ impl VulkanGpuResidencyGateConfig {
         &self,
         selection_buffer_byte_capacity: usize,
         address_table_slot_count: usize,
+        missing_request_capacity: usize,
         indirect_dispatch_buffer_byte_capacity: usize,
     ) -> Result<(), VulkanError> {
         if self.maximum_selection_count == 0 {
@@ -68,8 +76,25 @@ impl VulkanGpuResidencyGateConfig {
                 "GPU residency gate maximum selection count exceeds u32".to_string(),
             ));
         }
-        let required_selection_bytes = self
-            .maximum_selection_count
+        if self.selection_count_per_lane == 0
+            || self.maximum_selection_count % self.selection_count_per_lane != 0
+            || self.selection_lane_stride_words < self.selection_count_per_lane
+            || self.selection_count_per_lane > u32::MAX as usize
+            || self.selection_lane_stride_words > u32::MAX as usize
+        {
+            return Err(VulkanError(
+                "GPU residency gate selection lane layout is invalid".to_string(),
+            ));
+        }
+        let lane_count = self.maximum_selection_count / self.selection_count_per_lane;
+        let required_selection_words = lane_count
+            .saturating_sub(1)
+            .checked_mul(self.selection_lane_stride_words)
+            .and_then(|offset| offset.checked_add(self.selection_count_per_lane))
+            .ok_or_else(|| {
+                VulkanError("GPU residency gate selection capacity overflowed".to_string())
+            })?;
+        let required_selection_bytes = required_selection_words
             .checked_mul(size_of::<u32>())
             .ok_or_else(|| {
                 VulkanError("GPU residency gate selection capacity overflowed".to_string())
@@ -120,13 +145,13 @@ impl VulkanGpuResidencyGateConfig {
                 }
             }
         }
-        if self.missing_request_capacity == 0
-            || self.missing_request_capacity < self.maximum_selection_count
-            || self.missing_request_capacity > i32::MAX as usize
+        if missing_request_capacity == 0
+            || missing_request_capacity < self.maximum_selection_count
+            || missing_request_capacity > i32::MAX as usize
         {
             return Err(VulkanError(format!(
                 "GPU residency miss capacity {} cannot safely hold one maximum-size selection of {} resources",
-                self.missing_request_capacity, self.maximum_selection_count
+                missing_request_capacity, self.maximum_selection_count
             )));
         }
         if self.downstream_dispatches.is_empty()
@@ -184,15 +209,18 @@ impl VulkanGpuResidencyGate {
         selection_buffer: Arc<VulkanResidentBuffer>,
         address_table_buffer: Arc<VulkanResidentBuffer>,
         address_table_slot_count: usize,
+        missing_queue: VulkanGpuResidencyMissQueue,
         indirect_dispatches: Arc<VulkanResidentBuffer>,
         config: VulkanGpuResidencyGateConfig,
     ) -> Result<Self, VulkanError> {
         config.validate(
             selection_buffer.byte_capacity(),
             address_table_slot_count,
+            missing_queue.capacity(),
             indirect_dispatches.byte_capacity(),
         )?;
         if !device.owns_resident_buffer(&address_table_buffer)
+            || !device.owns_resident_buffer(missing_queue.buffer())
             || !device.owns_resident_buffer(&indirect_dispatches)
         {
             return Err(VulkanError(
@@ -206,7 +234,7 @@ impl VulkanGpuResidencyGate {
             u32::try_from(config.address_slots_by_resource_index.len()).map_err(|_| {
                 VulkanError("GPU residency resource count exceeds u32".to_string())
             })?,
-            u32::try_from(config.missing_request_capacity).map_err(|_| {
+            u32::try_from(missing_queue.capacity()).map_err(|_| {
                 VulkanError("GPU residency missing capacity exceeds u32".to_string())
             })?,
             u32::try_from(config.maximum_resolved_address_count()?).map_err(|_| {
@@ -214,6 +242,12 @@ impl VulkanGpuResidencyGate {
             })?,
             u32::try_from(config.downstream_dispatches.len()).map_err(|_| {
                 VulkanError("GPU residency downstream dispatch count exceeds u32".to_string())
+            })?,
+            u32::try_from(config.selection_count_per_lane).map_err(|_| {
+                VulkanError("GPU residency selection count per lane exceeds u32".to_string())
+            })?,
+            u32::try_from(config.selection_lane_stride_words).map_err(|_| {
+                VulkanError("GPU residency selection lane stride exceeds u32".to_string())
             })?,
         ];
         debug_assert_eq!(
@@ -304,24 +338,6 @@ impl VulkanGpuResidencyGate {
             Arc::new(device.create_resident_buffer(words_byte_count(resolved_word_count)?)?);
         resolved_addresses.write_bytes(&vec![0; resolved_addresses.byte_capacity()])?;
 
-        let missing_word_count = VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT
-            .checked_add(
-                config
-                    .missing_request_capacity
-                    .checked_mul(VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT)
-                    .ok_or_else(|| {
-                        VulkanError("GPU residency miss queue capacity overflowed".to_string())
-                    })?,
-            )
-            .ok_or_else(|| {
-                VulkanError("GPU residency miss queue capacity overflowed".to_string())
-            })?;
-        let mut missing_buffer =
-            device.create_host_visible_resident_buffer(words_byte_count(missing_word_count)?)?;
-        missing_buffer.persistently_map()?;
-        let missing_requests = Arc::new(missing_buffer);
-        missing_requests.write_bytes(&vec![0; missing_requests.byte_capacity()])?;
-
         let bindings = [
             VulkanResidentKernelBufferBinding {
                 binding: 0,
@@ -360,9 +376,9 @@ impl VulkanGpuResidencyGate {
             },
             VulkanResidentKernelBufferBinding {
                 binding: 5,
-                buffer: &missing_requests,
+                buffer: missing_queue.buffer(),
                 byte_offset: 0,
-                byte_len: missing_requests.byte_capacity(),
+                byte_len: missing_queue.buffer().byte_capacity(),
                 access: VulkanResidentKernelBufferAccess::ReadWrite,
             },
             VulkanResidentKernelBufferBinding {
@@ -396,7 +412,7 @@ impl VulkanGpuResidencyGate {
             _resource_group_records: resource_group_records,
             _resource_address_slots: resource_address_slots,
             resolved_addresses,
-            missing_requests,
+            missing_queue,
             indirect_dispatches,
             dispatch,
         })
@@ -462,21 +478,64 @@ impl VulkanGpuResidencyGate {
     }
 
     pub fn notification_epoch(&self) -> Result<u32, VulkanError> {
-        self.missing_requests
-            .read_persistently_mapped_u32_le_at(3 * size_of::<u32>())
+        self.missing_queue.notification_epoch()
     }
 
     pub fn missing_snapshot(&self) -> Result<VulkanGpuResidencyMissingSnapshot, VulkanError> {
-        let published_count = self
-            .missing_requests
-            .read_persistently_mapped_u32_le_at(0)?;
+        self.missing_queue.snapshot()
+    }
+
+    pub fn acknowledge_missing_through(&self, published_count: u32) -> Result<(), VulkanError> {
+        self.missing_queue.acknowledge_through(published_count)
+    }
+}
+
+impl VulkanGpuResidencyMissQueue {
+    pub fn new(device: &VulkanComputeDevice, capacity: usize) -> Result<Self, VulkanError> {
+        if capacity == 0 || capacity > i32::MAX as usize {
+            return Err(VulkanError(format!(
+                "GPU residency miss queue capacity {capacity} is invalid"
+            )));
+        }
+        let word_count = VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT
+            .checked_add(
+                capacity
+                    .checked_mul(VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT)
+                    .ok_or_else(|| {
+                        VulkanError("GPU residency miss queue capacity overflowed".to_string())
+                    })?,
+            )
+            .ok_or_else(|| {
+                VulkanError("GPU residency miss queue capacity overflowed".to_string())
+            })?;
+        let mut buffer =
+            device.create_host_visible_resident_buffer(words_byte_count(word_count)?)?;
+        buffer.persistently_map()?;
+        let buffer = Arc::new(buffer);
+        buffer.write_bytes(&vec![0; buffer.byte_capacity()])?;
+        Ok(Self { capacity, buffer })
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn buffer(&self) -> &VulkanResidentBuffer {
+        &self.buffer
+    }
+
+    pub fn notification_epoch(&self) -> Result<u32, VulkanError> {
+        self.buffer
+            .read_persistently_mapped_u32_le_at(3 * size_of::<u32>())
+    }
+
+    pub fn snapshot(&self) -> Result<VulkanGpuResidencyMissingSnapshot, VulkanError> {
+        let published_count = self.buffer.read_persistently_mapped_u32_le_at(0)?;
         let consumed_count = self
-            .missing_requests
+            .buffer
             .read_persistently_mapped_u32_le_at(size_of::<u32>())?;
         let pending_count = published_count.wrapping_sub(consumed_count);
-        if usize::try_from(pending_count).unwrap_or(usize::MAX)
-            > self.config.missing_request_capacity
-        {
+        if usize::try_from(pending_count).unwrap_or(usize::MAX) > self.capacity {
             return Err(VulkanError(
                 "GPU residency miss queue counters exceed bounded capacity".to_string(),
             ));
@@ -484,17 +543,18 @@ impl VulkanGpuResidencyGate {
         let requests = (0..pending_count)
             .map(|pending_index| {
                 let ticket = consumed_count.wrapping_add(pending_index);
-                let slot = usize::try_from(ticket).unwrap_or(usize::MAX)
-                    % self.config.missing_request_capacity;
+                let slot =
+                    usize::try_from(ticket).unwrap_or(usize::MAX) % self.capacity;
                 let byte_offset = (VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT
                     + slot * VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT)
                     * size_of::<u32>();
                 let checkpoint_tag = self
-                    .missing_requests
+                    .buffer
                     .read_persistently_mapped_u32_le_at(byte_offset)?;
                 let resource_index = usize::try_from(
-                    self.missing_requests
-                        .read_persistently_mapped_u32_le_at(byte_offset + size_of::<u32>())?,
+                    self.buffer.read_persistently_mapped_u32_le_at(
+                        byte_offset + size_of::<u32>(),
+                    )?,
                 )
                 .map_err(|_| {
                     VulkanError("GPU residency resource index exceeds usize".to_string())
@@ -509,7 +569,7 @@ impl VulkanGpuResidencyGate {
             published_count,
             consumed_count,
             overflowed: self
-                .missing_requests
+                .buffer
                 .read_persistently_mapped_u32_le_at(2 * size_of::<u32>())?
                 != 0,
             notification_epoch: self.notification_epoch()?,
@@ -517,16 +577,14 @@ impl VulkanGpuResidencyGate {
         })
     }
 
-    pub fn acknowledge_missing_through(&self, published_count: u32) -> Result<(), VulkanError> {
-        let current = self
-            .missing_requests
-            .read_persistently_mapped_u32_le_at(0)?;
+    pub fn acknowledge_through(&self, published_count: u32) -> Result<(), VulkanError> {
+        let current = self.buffer.read_persistently_mapped_u32_le_at(0)?;
         if published_count != current {
             return Err(VulkanError(format!(
                 "GPU residency acknowledgement {published_count} is stale; current publication is {current}"
             )));
         }
-        self.missing_requests
+        self.buffer
             .write_bytes_at(size_of::<u32>(), &published_count.to_le_bytes())
     }
 }

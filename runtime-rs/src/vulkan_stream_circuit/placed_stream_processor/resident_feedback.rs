@@ -156,12 +156,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     run.status,
                 ));
             }
-            if let Some(history) = &self
-                .resident_feedback_loop
-                .as_ref()
-                .expect("resident feedback template requires a mounted loop")
-                .speculative_target_frame_history
-            {
+            if let Some(history) = &self.speculative_target_frame_history {
                 let output_device =
                     devices.get(&self.model.output_device_id).ok_or_else(|| {
                         VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
