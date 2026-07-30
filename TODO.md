@@ -74,23 +74,6 @@ device placement, loading, sharing, and lifetime remain runtime concerns.
 
 ## Work plan
 
-### 14. Expose policy, state, and normal-operation metrics
-
-- Add runtime and TUI selection for `eager` and `demand-retained` residency.
-- Show why a resource is always resident or dynamically addressable before
-  execution.
-- Report initial, current, maximum, and high-water device bytes; resident and
-  addressable unit counts; hits, misses, deduplicated loads, bytes read and
-  uploaded, read/upload/blocking time, failed loads, and per-component coverage.
-- Report MTP residency separately when it exists.
-- Include the statistics in ordinary chat and benchmark summaries; do not add a
-  profiling-only execution path.
-- Keep normal human-readable output bounded. Full per-resource counter arrays
-  belong in explicit machine-readable artifacts, not an unbounded chat dump.
-
-Completion requires consistent CLI/TUI behavior and counters reconciled against
-the runtime residency directory and device allocations.
-
 ### 15. Harden failure, teardown, and recovery behavior
 
 - Make partial reads, verification failures, upload failures, capacity failures,
