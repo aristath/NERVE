@@ -513,6 +513,26 @@ impl VulkanComputeDevice {
                     step.push_constants.len()
                 )));
             }
+            if let Some(condition) = step.condition {
+                if self.conditional_rendering.is_none() {
+                    return Err(VulkanError(format!(
+                        "resident kernel sequence step {step_index} requires unsupported VK_EXT_conditional_rendering"
+                    )));
+                }
+                if !self.owns_resident_buffer(condition.buffer) {
+                    return Err(VulkanError(format!(
+                        "resident kernel sequence step {step_index} condition belongs to another logical device"
+                    )));
+                }
+                if snapshot_copies
+                    .iter()
+                    .any(|copy| copy.after_step_index == step_index)
+                {
+                    return Err(VulkanError(format!(
+                        "resident kernel sequence step {step_index} cannot combine conditional execution with an unconditional snapshot copy"
+                    )));
+                }
+            }
         }
         if let Some(copy) = snapshot_copies
             .iter()
@@ -559,6 +579,10 @@ impl VulkanComputeDevice {
                                                 offset: indirect.offset,
                                             }
                                         })
+                                    && recorded.condition
+                                        == step.condition.map(
+                                            VulkanResidentKernelSequenceCondition::recorded,
+                                        )
                                     && recorded.push_constants == step.push_constants
                             })
                     })
@@ -654,6 +678,8 @@ impl VulkanComputeDevice {
             }
 
             if !command_buffer_matches {
+                let has_conditions =
+                    steps.iter().any(|step| step.condition.is_some());
                 if input_copies.is_empty() {
                     // A resident sequence is an independently submitted circuit unit. Its
                     // inputs may have been produced by the host, a transfer, or an earlier
@@ -668,7 +694,12 @@ impl VulkanComputeDevice {
                         .dst_access_mask(
                             vk::AccessFlags::SHADER_READ
                                 | vk::AccessFlags::SHADER_WRITE
-                                | vk::AccessFlags::INDIRECT_COMMAND_READ,
+                                | vk::AccessFlags::INDIRECT_COMMAND_READ
+                                | if has_conditions {
+                                    vk::AccessFlags::CONDITIONAL_RENDERING_READ_EXT
+                                } else {
+                                    vk::AccessFlags::empty()
+                                },
                         )];
                     self.device.cmd_pipeline_barrier(
                         sequence.command_buffer,
@@ -676,7 +707,12 @@ impl VulkanComputeDevice {
                             | vk::PipelineStageFlags::TRANSFER
                             | vk::PipelineStageFlags::COMPUTE_SHADER,
                         vk::PipelineStageFlags::COMPUTE_SHADER
-                            | vk::PipelineStageFlags::DRAW_INDIRECT,
+                            | vk::PipelineStageFlags::DRAW_INDIRECT
+                            | if has_conditions {
+                                vk::PipelineStageFlags::CONDITIONAL_RENDERING_EXT
+                            } else {
+                                vk::PipelineStageFlags::empty()
+                            },
                         vk::DependencyFlags::empty(),
                         &input_visibility_barrier,
                         &[],
@@ -741,13 +777,23 @@ impl VulkanComputeDevice {
                         .dst_access_mask(
                             vk::AccessFlags::SHADER_READ
                                 | vk::AccessFlags::SHADER_WRITE
-                                | vk::AccessFlags::INDIRECT_COMMAND_READ,
+                                | vk::AccessFlags::INDIRECT_COMMAND_READ
+                                | if has_conditions {
+                                    vk::AccessFlags::CONDITIONAL_RENDERING_READ_EXT
+                                } else {
+                                    vk::AccessFlags::empty()
+                                },
                         )];
                     self.device.cmd_pipeline_barrier(
                         sequence.command_buffer,
                         vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
                         vk::PipelineStageFlags::COMPUTE_SHADER
-                            | vk::PipelineStageFlags::DRAW_INDIRECT,
+                            | vk::PipelineStageFlags::DRAW_INDIRECT
+                            | if has_conditions {
+                                vk::PipelineStageFlags::CONDITIONAL_RENDERING_EXT
+                            } else {
+                                vk::PipelineStageFlags::empty()
+                            },
                         vk::DependencyFlags::empty(),
                         &transfer_to_compute,
                         &[],
@@ -758,7 +804,29 @@ impl VulkanComputeDevice {
 
             let mut pending_buffer_accesses = Vec::<VulkanResidentKernelBufferAccessRecord>::new();
             if !command_buffer_matches {
+                let mut active_condition =
+                    None::<VulkanResidentKernelRecordedCondition>;
                 for (step_index, step) in steps.iter().enumerate() {
+                    let recorded_condition = step
+                        .condition
+                        .map(VulkanResidentKernelSequenceCondition::recorded);
+                    if active_condition != recorded_condition
+                        && active_condition.is_some()
+                    {
+                        let conditional_rendering =
+                            self.conditional_rendering.as_ref().ok_or_else(|| {
+                                VulkanError(
+                                    "conditional compute dispatch was recorded on a device without VK_EXT_conditional_rendering"
+                                        .to_string(),
+                                )
+                            })?;
+                        (conditional_rendering
+                            .fp()
+                            .cmd_end_conditional_rendering_ext)(
+                            sequence.command_buffer,
+                        );
+                        active_condition = None;
+                    }
                     let mut step_buffer_accesses =
                         step.dispatch.buffer_accesses.clone();
                     if let Some(indirect) = step.indirect_dispatch {
@@ -766,6 +834,15 @@ impl VulkanComputeDevice {
                             &mut step_buffer_accesses,
                             &[VulkanResidentKernelBufferAccessRecord {
                                 buffer: indirect.buffer.buffer,
+                                access: VulkanResidentKernelBufferAccess::Read,
+                            }],
+                        );
+                    }
+                    if let Some(condition) = step.condition {
+                        merge_resident_kernel_buffer_accesses(
+                            &mut step_buffer_accesses,
+                            &[VulkanResidentKernelBufferAccessRecord {
+                                buffer: condition.buffer.buffer,
                                 access: VulkanResidentKernelBufferAccess::Read,
                             }],
                         );
@@ -783,6 +860,11 @@ impl VulkanComputeDevice {
                                     .is_some_and(|indirect| {
                                         indirect.buffer.buffer == dependency.buffer
                                     });
+                                let consumes_condition = step
+                                    .condition
+                                    .is_some_and(|condition| {
+                                        condition.buffer.buffer == dependency.buffer
+                                    });
                                 vk::BufferMemoryBarrier::default()
                                     .src_access_mask(
                                         vk::AccessFlags::SHADER_READ
@@ -795,8 +877,13 @@ impl VulkanComputeDevice {
                                                 vk::AccessFlags::INDIRECT_COMMAND_READ
                                             } else {
                                                 vk::AccessFlags::empty()
+                                            }
+                                            | if consumes_condition {
+                                                vk::AccessFlags::CONDITIONAL_RENDERING_READ_EXT
+                                            } else {
+                                                vk::AccessFlags::empty()
                                             },
-                                    )
+                                        )
                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                                     .buffer(dependency.buffer)
@@ -812,6 +899,11 @@ impl VulkanComputeDevice {
                                     vk::PipelineStageFlags::DRAW_INDIRECT
                                 } else {
                                     vk::PipelineStageFlags::empty()
+                                }
+                                | if step.condition.is_some() {
+                                    vk::PipelineStageFlags::CONDITIONAL_RENDERING_EXT
+                                } else {
+                                    vk::PipelineStageFlags::empty()
                                 },
                             vk::DependencyFlags::empty(),
                             &[],
@@ -820,6 +912,34 @@ impl VulkanComputeDevice {
                         );
                     }
 
+                    if let Some(condition) = recorded_condition
+                        && active_condition.is_none()
+                    {
+                        let conditional_rendering =
+                            self.conditional_rendering.as_ref().ok_or_else(|| {
+                                VulkanError(
+                                    "conditional compute dispatch was recorded on a device without VK_EXT_conditional_rendering"
+                                        .to_string(),
+                                )
+                            })?;
+                        let flags = if condition.inverted {
+                            vk::ConditionalRenderingFlagsEXT::INVERTED
+                        } else {
+                            vk::ConditionalRenderingFlagsEXT::empty()
+                        };
+                        let begin =
+                            vk::ConditionalRenderingBeginInfoEXT::default()
+                                .buffer(condition.buffer)
+                                .offset(condition.offset)
+                                .flags(flags);
+                        (conditional_rendering
+                            .fp()
+                            .cmd_begin_conditional_rendering_ext)(
+                            sequence.command_buffer,
+                            &begin,
+                        );
+                        active_condition = Some(condition);
+                    }
                     self.device.cmd_bind_pipeline(
                         sequence.command_buffer,
                         vk::PipelineBindPoint::COMPUTE,
@@ -930,6 +1050,20 @@ impl VulkanComputeDevice {
                         pending_buffer_accesses.clear();
                     }
                 }
+                if active_condition.is_some() {
+                    let conditional_rendering =
+                        self.conditional_rendering.as_ref().ok_or_else(|| {
+                            VulkanError(
+                                "conditional compute dispatch was recorded on a device without VK_EXT_conditional_rendering"
+                                    .to_string(),
+                            )
+                        })?;
+                    (conditional_rendering
+                        .fp()
+                        .cmd_end_conditional_rendering_ext)(
+                        sequence.command_buffer,
+                    );
+                }
 
                 if let Some(query_pool) = sequence.timestamp_query_pool {
                     self.device.cmd_write_timestamp(
@@ -990,6 +1124,9 @@ impl VulkanComputeDevice {
                                         offset: indirect.offset,
                                     }
                                 }),
+                                condition: step.condition.map(
+                                    VulkanResidentKernelSequenceCondition::recorded,
+                                ),
                                 push_constants: step.push_constants.to_vec(),
                             })
                             .collect(),

@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Output {
+    uint words[];
+} output_buffer;
+
+layout(set = 0, binding = 1) readonly buffer ContinuationGuard {
+    uint enabled;
+} continuation;
+
+layout(push_constant) uniform Increment {
+    uint value;
+} increment;
+
+void main() {
+    if (continuation.enabled == 0u) {
+        return;
+    }
+    atomicAdd(output_buffer.words[0], increment.value);
+}

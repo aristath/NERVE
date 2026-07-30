@@ -821,6 +821,45 @@ impl VulkanComputeDevice {
         })
     }
 
+    pub fn create_conditional_resident_buffer(
+        &self,
+        byte_capacity: usize,
+    ) -> Result<VulkanResidentBuffer, VulkanError> {
+        if byte_capacity == 0 {
+            return Err(VulkanError(
+                "conditional resident buffer capacity must not be zero".to_string(),
+            ));
+        }
+        if self.conditional_rendering.is_none() {
+            return Err(VulkanError(format!(
+                "Vulkan device {:?} does not support conditional compute dispatch",
+                self.device_name
+            )));
+        }
+        let (buffer, memory, byte_capacity, memory_access) =
+            self.create_resident_storage_buffer_with_usage(
+                byte_capacity,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                resident_buffer_usage()
+                    | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
+                false,
+            )?;
+        Ok(VulkanResidentBuffer {
+            device: self.device.clone(),
+            buffer,
+            memory,
+            memory_access,
+            byte_capacity,
+            device_address: None,
+            persistent_mapping: None,
+            persistent_mapping_requires_unmap: false,
+            _shared_host_allocation: None,
+            _shared_device_memory_identity: None,
+        })
+    }
+
     pub fn create_addressable_resident_buffer(
         &self,
         byte_capacity: usize,
@@ -968,14 +1007,39 @@ impl VulkanComputeDevice {
         ),
         VulkanError,
     > {
+        let usage = if addressable {
+            resident_buffer_usage()
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+        } else {
+            resident_buffer_usage()
+        };
+        self.create_resident_storage_buffer_with_usage(
+            byte_capacity,
+            required_memory_flags,
+            preferred_memory_flags,
+            usage,
+            addressable,
+        )
+    }
+
+    fn create_resident_storage_buffer_with_usage(
+        &self,
+        byte_capacity: usize,
+        required_memory_flags: vk::MemoryPropertyFlags,
+        preferred_memory_flags: vk::MemoryPropertyFlags,
+        usage: vk::BufferUsageFlags,
+        addressable: bool,
+    ) -> Result<
+        (
+            vk::Buffer,
+            vk::DeviceMemory,
+            vk::DeviceSize,
+            VulkanResidentMemoryAccess,
+        ),
+        VulkanError,
+    > {
         let byte_capacity = byte_capacity as vk::DeviceSize;
         unsafe {
-            let usage = if addressable {
-                resident_buffer_usage()
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-            } else {
-                resident_buffer_usage()
-            };
             let buffer_info = vk::BufferCreateInfo::default()
                 .size(byte_capacity)
                 .usage(usage)

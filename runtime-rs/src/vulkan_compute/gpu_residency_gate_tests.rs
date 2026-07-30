@@ -1,6 +1,8 @@
 const GPU_RESIDENCY_GATE_SHADER: &str = "shaders/gpu_residency_gate.comp";
 const GPU_RESIDENCY_GATE_DOWNSTREAM_SHADER: &str =
     "tests/fixtures/vulkan/gpu_residency_gate_downstream.comp";
+const GPU_RESIDENCY_GUARDED_DOWNSTREAM_SHADER: &str =
+    "tests/fixtures/vulkan/gpu_residency_guarded_downstream.comp";
 
 #[test]
 fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
@@ -811,6 +813,260 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
     drop(table);
     drop(source);
     assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+}
+
+#[test]
+fn conditional_direct_compute_chain_is_measured_against_indirect_dispatch() {
+    let started = std::time::Instant::now();
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!(
+            "skipping direct/indirect compute microbenchmark: explicit Vulkan device unset"
+        );
+        return;
+    };
+    let shader = compile_gpu_residency_gate_shader(
+        GPU_RESIDENCY_GATE_DOWNSTREAM_SHADER,
+    )
+    .expect("direct/indirect compute microbenchmark requires a GLSL compiler");
+    let guarded_shader = compile_gpu_residency_gate_shader(
+        GPU_RESIDENCY_GUARDED_DOWNSTREAM_SHADER,
+    )
+    .expect("guarded-direct compute microbenchmark requires a GLSL compiler");
+    let device =
+        VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    const DISPATCH_COUNT: usize = 256;
+    let direct_output = device.create_resident_buffer(4).unwrap();
+    let guarded_output = device.create_resident_buffer(4).unwrap();
+    let conditional_output = device.create_resident_buffer(4).unwrap();
+    let indirect_output = device.create_resident_buffer(4).unwrap();
+    let continuation = device.create_resident_buffer(4).unwrap();
+    let predicate = device.create_conditional_resident_buffer(4).unwrap();
+    direct_output.write_bytes(&0u32.to_le_bytes()).unwrap();
+    guarded_output.write_bytes(&0u32.to_le_bytes()).unwrap();
+    conditional_output.write_bytes(&0u32.to_le_bytes()).unwrap();
+    indirect_output.write_bytes(&0u32.to_le_bytes()).unwrap();
+    continuation.write_bytes(&1u32.to_le_bytes()).unwrap();
+    predicate.write_bytes(&1u32.to_le_bytes()).unwrap();
+    let direct_dispatch = device
+        .create_resident_kernel_dispatch(
+            &shader,
+            &[VulkanResidentKernelBufferBinding::new(0, &direct_output, 4)
+                .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    let conditional_dispatch = device
+        .create_resident_kernel_dispatch(
+            &shader,
+            &[VulkanResidentKernelBufferBinding::new(
+                0,
+                &conditional_output,
+                4,
+            )
+            .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    let guarded_dispatch = device
+        .create_resident_kernel_dispatch(
+            &guarded_shader,
+            &[
+                VulkanResidentKernelBufferBinding::new(0, &guarded_output, 4)
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
+                VulkanResidentKernelBufferBinding::new(1, &continuation, 4),
+            ],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    let indirect_dispatch = device
+        .create_resident_kernel_dispatch(
+            &shader,
+            &[VulkanResidentKernelBufferBinding::new(0, &indirect_output, 4)
+                .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    let indirect_dimensions = Arc::new(
+        device
+            .create_resident_buffer(
+                DISPATCH_COUNT * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+            )
+            .unwrap(),
+    );
+    indirect_dimensions
+        .write_bytes(
+            &(0..DISPATCH_COUNT)
+                .flat_map(|_| [1u32, 1, 1])
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let direct_sequence = device
+        .create_timestamped_resident_kernel_sequence()
+        .unwrap();
+    let guarded_sequence = device
+        .create_timestamped_resident_kernel_sequence()
+        .unwrap();
+    let conditional_sequence = device
+        .create_timestamped_resident_kernel_sequence()
+        .unwrap();
+    let indirect_sequence = device
+        .create_timestamped_resident_kernel_sequence()
+        .unwrap();
+    let increment = 1u32.to_le_bytes();
+    let direct_steps = (0..DISPATCH_COUNT)
+        .map(|_| VulkanResidentKernelSequenceStep::new(&direct_dispatch, &increment))
+        .collect::<Vec<_>>();
+    let guarded_steps = (0..DISPATCH_COUNT)
+        .map(|_| {
+            VulkanResidentKernelSequenceStep::new(
+                &guarded_dispatch,
+                &increment,
+            )
+        })
+        .collect::<Vec<_>>();
+    let conditional_steps = (0..DISPATCH_COUNT)
+        .map(|_| {
+            VulkanResidentKernelSequenceStep::new_conditional(
+                &conditional_dispatch,
+                &increment,
+                &predicate,
+                0,
+                false,
+                1,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let indirect_steps = (0..DISPATCH_COUNT)
+        .map(|dispatch_index| {
+            VulkanResidentKernelSequenceStep::new_indirect(
+                &indirect_dispatch,
+                &increment,
+                &indirect_dimensions,
+                dispatch_index * VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    device
+        .record_resident_kernel_sequence(&direct_sequence, &direct_steps)
+        .unwrap();
+    device
+        .record_resident_kernel_sequence(&guarded_sequence, &guarded_steps)
+        .unwrap();
+    device
+        .record_resident_kernel_sequence(
+            &conditional_sequence,
+            &conditional_steps,
+        )
+        .unwrap();
+    device
+        .record_resident_kernel_sequence(&indirect_sequence, &indirect_steps)
+        .unwrap();
+    let timeout = std::time::Duration::from_secs(5);
+    device
+        .run_timestamped_recorded_resident_kernel_sequence_for(
+            &direct_sequence,
+            timeout,
+        )
+        .unwrap();
+    device
+        .run_timestamped_recorded_resident_kernel_sequence_for(
+            &guarded_sequence,
+            timeout,
+        )
+        .unwrap();
+    device
+        .run_timestamped_recorded_resident_kernel_sequence_for(
+            &conditional_sequence,
+            timeout,
+        )
+        .unwrap();
+    device
+        .run_timestamped_recorded_resident_kernel_sequence_for(
+            &indirect_sequence,
+            timeout,
+        )
+        .unwrap();
+    let mut direct_ns = Vec::with_capacity(2);
+    let mut guarded_ns = Vec::with_capacity(2);
+    let mut conditional_ns = Vec::with_capacity(2);
+    let mut indirect_ns = Vec::with_capacity(2);
+    for _ in 0..2 {
+        direct_ns.push(
+            device
+                .run_timestamped_recorded_resident_kernel_sequence_for(
+                    &direct_sequence,
+                    timeout,
+                )
+                .unwrap(),
+        );
+        guarded_ns.push(
+            device
+                .run_timestamped_recorded_resident_kernel_sequence_for(
+                    &guarded_sequence,
+                    timeout,
+                )
+                .unwrap(),
+        );
+        conditional_ns.push(
+            device
+                .run_timestamped_recorded_resident_kernel_sequence_for(
+                    &conditional_sequence,
+                    timeout,
+                )
+                .unwrap(),
+        );
+        indirect_ns.push(
+            device
+                .run_timestamped_recorded_resident_kernel_sequence_for(
+                    &indirect_sequence,
+                    timeout,
+                )
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        direct_output.read_bytes(4).unwrap(),
+        guarded_output.read_bytes(4).unwrap()
+    );
+    assert_eq!(
+        direct_output.read_bytes(4).unwrap(),
+        conditional_output.read_bytes(4).unwrap()
+    );
+    assert_eq!(
+        direct_output.read_bytes(4).unwrap(),
+        indirect_output.read_bytes(4).unwrap()
+    );
+    let direct_average_ns = direct_ns.iter().sum::<u64>() / 2;
+    let guarded_average_ns = guarded_ns.iter().sum::<u64>() / 2;
+    let conditional_average_ns = conditional_ns.iter().sum::<u64>() / 2;
+    let indirect_average_ns = indirect_ns.iter().sum::<u64>() / 2;
+    let guarded_ratio = guarded_average_ns as f64 / direct_average_ns as f64;
+    let conditional_ratio =
+        conditional_average_ns as f64 / direct_average_ns as f64;
+    let indirect_ratio = indirect_average_ns as f64 / direct_average_ns as f64;
+    eprintln!(
+        "recorded_compute_dispatch_microbenchmark direct_ns={direct_ns:?} guarded_ns={guarded_ns:?} conditional_ns={conditional_ns:?} indirect_ns={indirect_ns:?} direct_average_ns={direct_average_ns} guarded_average_ns={guarded_average_ns} conditional_average_ns={conditional_average_ns} indirect_average_ns={indirect_average_ns} guarded_to_direct_ratio={guarded_ratio:.6} conditional_to_direct_ratio={conditional_ratio:.6} indirect_to_direct_ratio={indirect_ratio:.6} elapsed_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+    assert!(
+        conditional_average_ns < indirect_average_ns,
+        "conditional direct dispatch must beat indirect dispatch: conditional={conditional_average_ns}ns indirect={indirect_average_ns}ns"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "direct/indirect compute microbenchmark exceeded one minute"
+    );
 }
 
 fn run_gpu_residency_gate_sequence(

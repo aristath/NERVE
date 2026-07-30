@@ -28,6 +28,7 @@ pub struct VulkanComputeDevice {
     device_local_memory_bytes: u64,
     memory_budget_supported: bool,
     timestamp_period_ns: f32,
+    conditional_rendering: Option<ash::ext::conditional_rendering::Device>,
     generic_storage_pipelines: RefCell<HashMap<VulkanGenericPipelineKey, VulkanStoragePipeline>>,
     immediate_kernel_sequence: RefCell<Option<VulkanResidentKernelSequence>>,
 }

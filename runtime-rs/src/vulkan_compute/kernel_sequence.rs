@@ -47,6 +47,7 @@ struct VulkanResidentKernelRecordedStep {
     workgroup_count_y: u32,
     base_workgroup_z: u32,
     indirect_dispatch: Option<VulkanResidentKernelRecordedIndirectDispatch>,
+    condition: Option<VulkanResidentKernelRecordedCondition>,
     push_constants: Vec<u8>,
 }
 
@@ -66,11 +67,20 @@ struct VulkanResidentKernelRecordedSnapshotCopy {
     byte_len: vk::DeviceSize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct VulkanResidentKernelRecordedCondition {
+    buffer: vk::Buffer,
+    offset: vk::DeviceSize,
+    inverted: bool,
+    region_id: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct VulkanResidentKernelSequenceStep<'a> {
     dispatch: &'a VulkanResidentKernelDispatch,
     push_constants: &'a [u8],
     indirect_dispatch: Option<VulkanResidentKernelSequenceIndirectDispatch<'a>>,
+    condition: Option<VulkanResidentKernelSequenceCondition<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -79,12 +89,32 @@ struct VulkanResidentKernelSequenceIndirectDispatch<'a> {
     offset: vk::DeviceSize,
 }
 
+#[derive(Clone, Copy)]
+struct VulkanResidentKernelSequenceCondition<'a> {
+    buffer: &'a VulkanResidentBuffer,
+    offset: vk::DeviceSize,
+    inverted: bool,
+    region_id: u32,
+}
+
+impl VulkanResidentKernelSequenceCondition<'_> {
+    fn recorded(self) -> VulkanResidentKernelRecordedCondition {
+        VulkanResidentKernelRecordedCondition {
+            buffer: self.buffer.buffer,
+            offset: self.offset,
+            inverted: self.inverted,
+            region_id: self.region_id,
+        }
+    }
+}
+
 impl<'a> VulkanResidentKernelSequenceStep<'a> {
     pub fn new(dispatch: &'a VulkanResidentKernelDispatch, push_constants: &'a [u8]) -> Self {
         Self {
             dispatch,
             push_constants,
             indirect_dispatch: None,
+            condition: None,
         }
     }
 
@@ -107,6 +137,41 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
             indirect_dispatch: Some(VulkanResidentKernelSequenceIndirectDispatch {
                 buffer,
                 offset: byte_offset as vk::DeviceSize,
+            }),
+            condition: None,
+        })
+    }
+
+    pub fn new_conditional(
+        dispatch: &'a VulkanResidentKernelDispatch,
+        push_constants: &'a [u8],
+        predicate: &'a VulkanResidentBuffer,
+        byte_offset: usize,
+        inverted: bool,
+        region_id: u32,
+    ) -> Result<Self, VulkanError> {
+        let range_end = byte_offset
+            .checked_add(std::mem::size_of::<u32>())
+            .ok_or_else(|| {
+            VulkanError("conditional resident dispatch range overflowed".to_string())
+        })?;
+        if !byte_offset.is_multiple_of(std::mem::size_of::<u32>())
+            || range_end > predicate.byte_capacity()
+        {
+            return Err(VulkanError(format!(
+                "conditional resident dispatch predicate range {byte_offset}..{range_end} is invalid for buffer capacity {}",
+                predicate.byte_capacity()
+            )));
+        }
+        Ok(Self {
+            dispatch,
+            push_constants,
+            indirect_dispatch: None,
+            condition: Some(VulkanResidentKernelSequenceCondition {
+                buffer: predicate,
+                offset: byte_offset as vk::DeviceSize,
+                inverted,
+                region_id,
             }),
         })
     }

@@ -118,6 +118,27 @@ fn physical_device_supports_extension(
     }))
 }
 
+fn physical_device_supports_conditional_rendering(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<bool, VulkanError> {
+    if !physical_device_supports_extension(
+        instance,
+        physical_device,
+        ash::ext::conditional_rendering::NAME,
+    )? {
+        return Ok(false);
+    }
+    let mut conditional =
+        vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default();
+    let mut features =
+        vk::PhysicalDeviceFeatures2::default().push_next(&mut conditional);
+    unsafe {
+        instance.get_physical_device_features2(physical_device, &mut features);
+    }
+    Ok(conditional.conditional_rendering == vk::TRUE)
+}
+
 fn resident_buffer_usage() -> vk::BufferUsageFlags {
     vk::BufferUsageFlags::STORAGE_BUFFER
         | vk::BufferUsageFlags::TRANSFER_SRC

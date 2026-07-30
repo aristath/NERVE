@@ -45,6 +45,10 @@ impl VulkanComputeDevice {
                 .is_some_and(|minimum| self.api_version >= minimum)
     }
 
+    pub fn supports_conditional_compute_dispatch(&self) -> bool {
+        self.conditional_rendering.is_some()
+    }
+
     pub fn has_enabled_shader_feature(&self, feature: VulkanShaderFeature) -> bool {
         self.enabled_shader_features.contains(&feature)
     }

@@ -285,6 +285,11 @@ impl VulkanComputeDeviceCatalog {
                 physical_device,
                 ash::ext::memory_budget::NAME,
             )?;
+            let conditional_rendering_supported =
+                physical_device_supports_conditional_rendering(
+                    instance,
+                    physical_device,
+                )?;
             let enabled_shader_features =
                 physical_device_supported_shader_features(instance, physical_device)?;
             let shader_float8_support = VulkanShaderFloat8Support {
@@ -459,6 +464,9 @@ impl VulkanComputeDeviceCatalog {
             let mut buffer_device_address_features =
                 vk::PhysicalDeviceBufferDeviceAddressFeatures::default()
                     .buffer_device_address(buffer_device_address_supported);
+            let mut conditional_rendering_features =
+                vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default()
+                    .conditional_rendering(conditional_rendering_supported);
             let mut extension_names = Vec::new();
             let mut enabled_device_extensions = BTreeSet::new();
             let mut device_info = vk::DeviceCreateInfo::default()
@@ -559,6 +567,17 @@ impl VulkanComputeDeviceCatalog {
                         .into_owned(),
                 );
             }
+            if conditional_rendering_supported {
+                extension_names
+                    .push(ash::ext::conditional_rendering::NAME.as_ptr());
+                enabled_device_extensions.insert(
+                    ash::ext::conditional_rendering::NAME
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                device_info =
+                    device_info.push_next(&mut conditional_rendering_features);
+            }
             if shader_float8_support.shader_float8
                 || shader_float8_support.shader_float8_cooperative_matrix
             {
@@ -590,6 +609,9 @@ impl VulkanComputeDeviceCatalog {
                 .map_err(|error| {
                     VulkanError(format!("failed to create Vulkan device: {error:?}"))
                 })?;
+            let conditional_rendering = conditional_rendering_supported.then(|| {
+                ash::ext::conditional_rendering::Device::new(instance, &device)
+            });
             let queue = device.get_device_queue(queue_family_index, 0);
             let transfer_queue_is_distinct = queue_priorities.len() >= 2;
             let transfer_queue = device.get_device_queue(
@@ -638,6 +660,7 @@ impl VulkanComputeDeviceCatalog {
                 device_local_memory_bytes,
                 memory_budget_supported,
                 timestamp_period_ns: limits.timestamp_period,
+                conditional_rendering,
                 generic_storage_pipelines: RefCell::new(HashMap::new()),
                 immediate_kernel_sequence: RefCell::new(None),
             })
