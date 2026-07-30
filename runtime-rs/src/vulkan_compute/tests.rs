@@ -1366,6 +1366,140 @@ mod tests {
     }
 
     #[test]
+    fn cross_device_shared_predicate_suppresses_downstream_compute() {
+        let spirv_words =
+            compile_test_shader_words().expect("Vulkan predicate test requires a GLSL compiler");
+        let owner_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let worker_index = std::env::var("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must select an idle AMD GPU")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must be an integer");
+        assert_ne!(owner_index, worker_index);
+        let owner = VulkanComputeDevice::new_for_physical_device_index(owner_index).unwrap();
+        let worker = VulkanComputeDevice::new_for_physical_device_index(worker_index).unwrap();
+        let shared = owner
+            .create_shared_conditional_resident_buffers(&[&worker], 4)
+            .unwrap();
+        let owner_predicate = &shared.buffers[0];
+        let worker_predicate = &shared.buffers[1];
+        assert!(owner_predicate.shares_storage_with(worker_predicate));
+        owner_predicate
+            .write_bytes(&u32::MAX.to_le_bytes())
+            .unwrap();
+
+        let owner_dispatch = owner
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(
+                    0,
+                    owner_predicate,
+                    4,
+                )],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let worker_output = worker.create_resident_buffer(12).unwrap();
+        worker_output
+            .write_bytes(&u32_bytes(&[1, 2, 41]))
+            .unwrap();
+        let worker_dispatch = worker
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(
+                    0,
+                    &worker_output,
+                    12,
+                )],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let owner_sequence = owner.create_resident_kernel_sequence().unwrap();
+        owner
+            .record_resident_kernel_sequence(
+                &owner_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &owner_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        let worker_sequence = worker.create_resident_kernel_sequence().unwrap();
+        worker
+            .record_resident_kernel_sequence(
+                &worker_sequence,
+                &[VulkanResidentKernelSequenceStep::new_conditional(
+                    &worker_dispatch,
+                    &[],
+                    worker_predicate,
+                    0,
+                    false,
+                    1,
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let owner_signal = owner
+            .create_opaque_fd_exportable_timeline_semaphore(0)
+            .unwrap();
+        let worker_wait = worker.create_timeline_semaphore(0).unwrap();
+        worker
+            .import_timeline_semaphore_opaque_fd(
+                &worker_wait,
+                owner
+                    .export_timeline_semaphore_opaque_fd(&owner_signal)
+                    .unwrap(),
+            )
+            .unwrap();
+
+        for timeline_value in 1..=2 {
+            owner
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    &owner_sequence,
+                    &[],
+                    &[VulkanTimelineSemaphorePoint::new(
+                        &owner_signal,
+                        timeline_value,
+                    )],
+                )
+                .unwrap();
+            worker
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    &worker_sequence,
+                    &[VulkanTimelineSemaphorePoint::new(
+                        &worker_wait,
+                        timeline_value,
+                    )],
+                    &[],
+                )
+                .unwrap();
+            worker
+                .wait_resident_kernel_sequence(&worker_sequence)
+                .unwrap();
+            if timeline_value == 1 {
+                assert_eq!(
+                    bytes_to_u32(&worker_output.read_bytes(12).unwrap()),
+                    vec![1, 2, 41]
+                );
+            }
+        }
+        assert_eq!(
+            bytes_to_u32(&owner_predicate.read_bytes(4).unwrap()),
+            vec![1]
+        );
+        assert_eq!(
+            bytes_to_u32(&worker_output.read_bytes(12).unwrap()),
+            vec![2, 3, 42]
+        );
+    }
+
+    #[test]
     fn resident_kernel_sequence_combines_input_and_intermediate_snapshot_copies() {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");

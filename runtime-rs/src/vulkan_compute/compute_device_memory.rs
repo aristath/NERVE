@@ -4,6 +4,19 @@ impl VulkanComputeDevice {
         peer_devices: &[&VulkanComputeDevice],
         byte_capacity: usize,
     ) -> Result<Arc<VulkanSharedHostAllocation>, VulkanError> {
+        self.create_shared_host_allocation_with_usage(
+            peer_devices,
+            byte_capacity,
+            resident_buffer_usage(),
+        )
+    }
+
+    fn create_shared_host_allocation_with_usage(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Arc<VulkanSharedHostAllocation>, VulkanError> {
         if byte_capacity == 0 {
             return Err(VulkanError(
                 "shared host allocation capacity must not be zero".to_string(),
@@ -18,7 +31,8 @@ impl VulkanComputeDevice {
                     device.device_name
                 ))
             })?);
-            let requirements = device.shared_host_buffer_memory_requirements(byte_capacity)?;
+            let requirements =
+                device.shared_host_buffer_memory_requirements(byte_capacity, usage)?;
             alignment =
                 alignment.max(usize::try_from(requirements.alignment).map_err(|_| {
                     VulkanError("shared buffer alignment exceeds usize".to_string())
@@ -56,13 +70,14 @@ impl VulkanComputeDevice {
     fn shared_host_buffer_memory_requirements(
         &self,
         byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
     ) -> Result<vk::MemoryRequirements, VulkanError> {
         unsafe {
             let mut external_buffer_info = vk::ExternalMemoryBufferCreateInfo::default()
                 .handle_types(VULKAN_SHARED_HOST_MEMORY_HANDLE_TYPE);
             let buffer_info = vk::BufferCreateInfo::default()
                 .size(byte_capacity as vk::DeviceSize)
-                .usage(resident_buffer_usage())
+                .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .push_next(&mut external_buffer_info);
             let buffer = self
@@ -82,6 +97,17 @@ impl VulkanComputeDevice {
     pub fn import_shared_host_buffer(
         &self,
         allocation: Arc<VulkanSharedHostAllocation>,
+    ) -> Result<VulkanResidentBuffer, VulkanError> {
+        self.import_shared_host_buffer_with_usage(
+            allocation,
+            resident_buffer_usage(),
+        )
+    }
+
+    fn import_shared_host_buffer_with_usage(
+        &self,
+        allocation: Arc<VulkanSharedHostAllocation>,
+        usage: vk::BufferUsageFlags,
     ) -> Result<VulkanResidentBuffer, VulkanError> {
         if self.shared_host_memory_alignment.is_none() {
             return Err(VulkanError(format!(
@@ -111,7 +137,7 @@ impl VulkanComputeDevice {
                 .handle_types(VULKAN_SHARED_HOST_MEMORY_HANDLE_TYPE);
             let buffer_info = vk::BufferCreateInfo::default()
                 .size(allocation.byte_capacity as vk::DeviceSize)
-                .usage(resident_buffer_usage())
+                .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .push_next(&mut external_buffer_info);
             let buffer = self
@@ -202,8 +228,50 @@ impl VulkanComputeDevice {
         peer_devices: &[&VulkanComputeDevice],
         byte_capacity: usize,
     ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
+        self.create_shared_resident_buffers_with_usage(
+            peer_devices,
+            byte_capacity,
+            resident_buffer_usage(),
+        )
+    }
+
+    pub fn create_shared_conditional_resident_buffers(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+    ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
+        let devices = std::iter::once(self)
+            .chain(peer_devices.iter().copied())
+            .collect::<Vec<_>>();
+        if let Some(device) = devices
+            .iter()
+            .find(|device| !device.supports_conditional_compute_dispatch())
+        {
+            return Err(VulkanError(format!(
+                "Vulkan device {:?} cannot share a conditional compute predicate",
+                device.device_name()
+            )));
+        }
+        self.create_shared_resident_buffers_with_usage(
+            peer_devices,
+            byte_capacity,
+            resident_buffer_usage()
+                | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
+        )
+    }
+
+    fn create_shared_resident_buffers_with_usage(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
         let external_device_local_error =
-            match self.create_shared_device_resident_buffers(peer_devices, byte_capacity) {
+            match self.create_shared_device_resident_buffers(
+                peer_devices,
+                byte_capacity,
+                usage,
+            ) {
                 Ok(buffers) => {
                     return Ok(VulkanSharedResidentBufferSet {
                         route: VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
@@ -214,7 +282,11 @@ impl VulkanComputeDevice {
                 Err(error) => error.to_string(),
             };
         let allocation = self
-            .create_shared_host_allocation(peer_devices, byte_capacity)
+            .create_shared_host_allocation_with_usage(
+                peer_devices,
+                byte_capacity,
+                usage,
+            )
             .map_err(|host_error| {
                 VulkanError(format!(
                     "device-local external memory is unavailable ({external_device_local_error}); shared-host fallback is unavailable ({host_error})"
@@ -224,7 +296,10 @@ impl VulkanComputeDevice {
             .chain(peer_devices.iter().copied())
             .map(|device| {
                 device
-                    .import_shared_host_buffer(Arc::clone(&allocation))
+                    .import_shared_host_buffer_with_usage(
+                        Arc::clone(&allocation),
+                        usage,
+                    )
                     .map(Arc::new)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -239,6 +314,7 @@ impl VulkanComputeDevice {
         &self,
         peer_devices: &[&VulkanComputeDevice],
         byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
     ) -> Result<Vec<Arc<VulkanResidentBuffer>>, VulkanError> {
         if byte_capacity == 0 {
             return Err(VulkanError(
@@ -288,7 +364,7 @@ impl VulkanComputeDevice {
                         .handle_types(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE);
                     let buffer_info = vk::BufferCreateInfo::default()
                         .size(byte_capacity as vk::DeviceSize)
-                        .usage(resident_buffer_usage())
+                        .usage(usage)
                         .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .push_next(&mut external);
                     let buffer = device
