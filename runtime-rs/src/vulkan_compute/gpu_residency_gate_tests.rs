@@ -125,18 +125,18 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
 
     let selections = Arc::new(
         device
-            .create_resident_buffer(6 * size_of::<u32>())
+            .create_resident_buffer(512 * size_of::<u32>())
             .unwrap(),
     );
     selections
-        .write_bytes(&u32_words_bytes(&[0, 1, 99, 99, 1, 0]))
+        .write_bytes(&u32_words_bytes(&[0, 1, 1, 0]))
         .unwrap();
     let continuation_predicate =
         Arc::new(device.create_conditional_resident_buffer(4).unwrap());
     continuation_predicate
         .write_bytes(&1u32.to_le_bytes())
         .unwrap();
-    let missing_queue = VulkanGpuResidencyMissQueue::new(&device, 4).unwrap();
+    let missing_queue = VulkanGpuResidencyMissQueue::new(&device, 512).unwrap();
     let gate = VulkanGpuResidencyGate::new(
         &device,
         &gate_shader,
@@ -146,9 +146,9 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
         missing_queue,
         Arc::clone(&continuation_predicate),
         VulkanGpuResidencyGateConfig {
-            maximum_selection_count: 4,
-            selection_count_per_lane: 2,
-            selection_lane_stride_words: 4,
+            maximum_selection_count: 512,
+            selection_count_per_lane: 8,
+            selection_lane_stride_words: 8,
             selection_index_shift: 0,
             selection_index_mask: 0xffff,
             address_slots_by_resource_index: vec![vec![0], vec![1]],
@@ -195,13 +195,22 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
             gate.resolved_addresses_buffer().byte_capacity(),
         ).unwrap());
     assert_eq!(&resolved[..6], &[1, 2, 2, 0, 0, 41]);
+    let resolved_addresses = resolved[8..8 + resolved[2] as usize * 8]
+        .chunks_exact(8)
+        .map(|record| {
+            (
+                record[0],
+                u64::from(record[2]) | (u64::from(record[3]) << 32),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        u64::from(resolved[10]) | (u64::from(resolved[11]) << 32),
-        first.device_address()
+        resolved_addresses.get(&0),
+        Some(&first.device_address())
     );
     assert_eq!(
-        u64::from(resolved[18]) | (u64::from(resolved[19]) << 32),
-        second.device_address()
+        resolved_addresses.get(&1),
+        Some(&second.device_address())
     );
 
     table
@@ -264,12 +273,63 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
             .is_empty()
     );
 
-    drop(sequence);
-    drop(downstream);
-    drop(gate);
+    let wide_selections = (0..512)
+        .map(|index| u32::from(index % 2 != 0))
+        .collect::<Vec<_>>();
+    selections
+        .write_bytes(&u32_words_bytes(&wide_selections))
+        .unwrap();
+    run_gpu_residency_gate_sequence(
+        &device,
+        &sequence,
+        &gate,
+        &downstream,
+        &increment,
+        512,
+        44,
+    );
+    assert_eq!(
+        u32::from_le_bytes(output.read_bytes(4).unwrap().try_into().unwrap()),
+        3
+    );
+    let wide_resolved =
+        stable_resource_bytes_to_u32(&gate.resolved_addresses_buffer().read_bytes(
+            gate.resolved_addresses_buffer().byte_capacity(),
+        ).unwrap());
+    assert_eq!(&wide_resolved[..6], &[1, 2, 2, 0, 0, 44]);
+
     table
         .clear_group(&mut transfer, &second_republication)
         .unwrap();
+    run_gpu_residency_gate_sequence(
+        &device,
+        &sequence,
+        &gate,
+        &downstream,
+        &increment,
+        512,
+        45,
+    );
+    assert_eq!(
+        u32::from_le_bytes(output.read_bytes(4).unwrap().try_into().unwrap()),
+        3
+    );
+    let wide_missing = gate.missing_snapshot().unwrap();
+    assert_eq!(wide_missing.notification_epoch, 2);
+    assert_eq!(
+        wide_missing.requests,
+        vec![VulkanGpuResidencyMissingRequest {
+            checkpoint_tag: 45,
+            resource_index: 1,
+        }],
+        "a wide batch must publish each missing resource once"
+    );
+    gate.acknowledge_missing_through(wide_missing.published_count)
+        .unwrap();
+
+    drop(sequence);
+    drop(downstream);
+    drop(gate);
     table
         .clear_group(&mut transfer, &first_publication)
         .unwrap();

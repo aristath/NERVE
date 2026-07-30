@@ -1,6 +1,6 @@
 #version 450
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Selections {
     uint words[];
@@ -55,11 +55,17 @@ uint selected_resource(uint selection_index) {
         & configuration.words[1];
 }
 
-bool selection_is_duplicate(uint selection_index, uint resource_index) {
-    for (uint previous = 0u; previous < selection_index; previous += 1u) {
-        if (selected_resource(previous) == resource_index) return true;
-    }
-    return false;
+uint seen_resource_word_count() {
+    return (configuration.words[2] + 31u) / 32u;
+}
+
+uint seen_resource_word_offset() {
+    return RESOLVED_HEADER_WORDS
+        + configuration.words[4] * RESOLVED_RECORD_WORDS;
+}
+
+uint missing_resource_word_offset() {
+    return seen_resource_word_offset() + seen_resource_word_count();
 }
 
 bool address_slot_is_resident(uint slot) {
@@ -102,22 +108,40 @@ void copy_resolved_address(
 }
 
 void main() {
-    uint selected_count = 0u;
-    uint resolved_count = 0u;
-    uint missing_count = 0u;
-    uint invalid_selection = 0u;
-    uint published = missing_requests.words[0];
-    uint consumed = missing_requests.words[1];
-    uint pending = published - consumed;
+    uint lane = gl_LocalInvocationID.x;
+    for (uint word = lane; word < RESOLVED_HEADER_WORDS; word += 64u) {
+        resolved_addresses.words[word] = 0u;
+    }
+    for (
+        uint word = lane;
+        word < seen_resource_word_count();
+        word += 64u
+    ) {
+        resolved_addresses.words[seen_resource_word_offset() + word] = 0u;
+    }
+    memoryBarrierBuffer();
+    barrier();
 
-    for (uint selection = 0u; selection < control.selection_count; selection += 1u) {
+    for (
+        uint selection = lane;
+        selection < control.selection_count;
+        selection += 64u
+    ) {
         uint resource_index = selected_resource(selection);
-        if (selection_is_duplicate(selection, resource_index)) continue;
-        selected_count += 1u;
         if (resource_index >= configuration.words[2]) {
-            invalid_selection = 1u;
+            atomicOr(resolved_addresses.words[4], 1u);
             continue;
         }
+        uint seen_word = resource_index / 32u;
+        uint seen_bit = 1u << (resource_index % 32u);
+        uint previous_seen = atomicOr(
+            resolved_addresses.words[
+                seen_resource_word_offset() + seen_word
+            ],
+            seen_bit
+        );
+        if ((previous_seen & seen_bit) != 0u) continue;
+        atomicAdd(resolved_addresses.words[1], 1u);
 
         uint group_record = resource_index * GROUP_RECORD_WORDS;
         uint first_member = resource_groups.words[group_record];
@@ -128,33 +152,59 @@ void main() {
             resident = resident && address_slot_is_resident(slot);
         }
         if (!resident) {
-            if (pending + missing_count < configuration.words[3]) {
-                uint queue_slot = (published + missing_count) % configuration.words[3];
-                uint request = MISSING_HEADER_WORDS
-                    + queue_slot * MISSING_RECORD_WORDS;
-                missing_requests.words[request] = control.checkpoint_tag;
-                missing_requests.words[request + 1u] = resource_index;
-            } else {
-                missing_requests.words[2] = 1u;
-            }
-            missing_count += 1u;
+            uint missing_index = atomicAdd(resolved_addresses.words[3], 1u);
+            resolved_addresses.words[
+                missing_resource_word_offset() + missing_index
+            ] = resource_index;
             continue;
         }
 
+        uint first_resolved = atomicAdd(
+            resolved_addresses.words[2],
+            member_count
+        );
         for (uint member = 0u; member < member_count; member += 1u) {
-            if (resolved_count >= configuration.words[4]) {
-                invalid_selection = 1u;
+            uint resolved_index = first_resolved + member;
+            if (resolved_index >= configuration.words[4]) {
+                atomicOr(resolved_addresses.words[4], 1u);
                 break;
             }
             uint slot = resource_address_slots.words[first_member + member];
             copy_resolved_address(
-                resolved_count,
+                resolved_index,
                 resource_index,
                 member,
                 slot
             );
-            resolved_count += 1u;
         }
+    }
+
+    memoryBarrierBuffer();
+    barrier();
+    if (lane != 0u) return;
+
+    uint selected_count = resolved_addresses.words[1];
+    uint resolved_count = resolved_addresses.words[2];
+    uint missing_count = resolved_addresses.words[3];
+    uint invalid_selection = resolved_addresses.words[4];
+    uint published = missing_requests.words[0];
+    uint consumed = missing_requests.words[1];
+    uint pending = published - consumed;
+    uint capacity = configuration.words[3];
+    uint publishable = min(
+        missing_count,
+        capacity - min(pending, capacity)
+    );
+    for (uint missing = 0u; missing < publishable; missing += 1u) {
+        uint queue_slot = (published + missing) % capacity;
+        uint request = MISSING_HEADER_WORDS
+            + queue_slot * MISSING_RECORD_WORDS;
+        missing_requests.words[request] = control.checkpoint_tag;
+        missing_requests.words[request + 1u] =
+            resolved_addresses.words[missing_resource_word_offset() + missing];
+    }
+    if (publishable != missing_count) {
+        missing_requests.words[2] = 1u;
     }
 
     bool all_resident = missing_count == 0u && invalid_selection == 0u;
@@ -177,8 +227,6 @@ void main() {
 
     memoryBarrierBuffer();
     if (missing_count != 0u || invalid_selection != 0u) {
-        uint capacity = configuration.words[3];
-        uint publishable = min(missing_count, capacity - min(pending, capacity));
         missing_requests.words[0] = published + publishable;
         missing_requests.words[3] += 1u;
     }

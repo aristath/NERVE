@@ -264,19 +264,28 @@ impl VulkanGpuResidencyGate {
         );
         resource_address_slots.write_bytes(&u32_words_bytes(&resource_address_slot_words))?;
 
+        let resolved_record_word_count = config
+            .maximum_resolved_address_count()?
+            .checked_mul(VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT)
+            .ok_or_else(|| {
+                VulkanError(
+                    "GPU residency resolved record capacity overflowed".to_string(),
+                )
+            })?;
+        let seen_resource_word_count = config
+            .address_slots_by_resource_index
+            .len()
+            .div_ceil(u32::BITS as usize);
         let resolved_word_count = VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT
             .checked_add(
-                config
-                    .maximum_resolved_address_count()?
-                    .checked_mul(VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT)
-                    .ok_or_else(|| {
-                        VulkanError(
-                            "GPU residency resolved record capacity overflowed".to_string(),
-                        )
-                    })?,
+                resolved_record_word_count,
             )
+            .and_then(|count| count.checked_add(seen_resource_word_count))
+            .and_then(|count| count.checked_add(config.maximum_selection_count))
             .ok_or_else(|| {
-                VulkanError("GPU residency resolved buffer capacity overflowed".to_string())
+                VulkanError(
+                    "GPU residency resolved and scratch buffer capacity overflowed".to_string(),
+                )
             })?;
         let resolved_addresses =
             Arc::new(device.create_resident_buffer(words_byte_count(resolved_word_count)?)?);
