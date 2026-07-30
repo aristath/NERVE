@@ -460,12 +460,35 @@ pub struct PlannedNode {
     pub state_reads: Vec<String>,
     pub state_writes: Vec<String>,
     pub selection_domain: Option<PlannedNodeSelectionDomain>,
+    pub selected_parameter_accesses: Vec<PlannedSelectedParameterAccess>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedNodeSelectionDomain {
     pub domain_id: String,
     pub resource_count: usize,
+    pub selection_signal: String,
+    pub encoding: PlannedSelectionEncoding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlannedSelectionElementType {
+    U32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedSelectionEncoding {
+    pub element_type: PlannedSelectionElementType,
+    pub selection_count_per_activation: usize,
+    pub index_shift: u32,
+    pub index_mask: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedSelectedParameterAccess {
+    pub selection_signal: String,
+    pub partition_axis: usize,
+    pub parameter_ids: Vec<String>,
 }
 
 impl PlannedNode {
@@ -495,6 +518,8 @@ impl PlannedNode {
             state_reads: node.state_reads.clone(),
             state_writes: node.state_writes.clone(),
             selection_domain: planned_node_selection_domain(component_id, node)?,
+            selected_parameter_accesses:
+                planned_node_selected_parameter_accesses(component_id, node)?,
         })
     }
 }
@@ -516,6 +541,16 @@ fn planned_node_selection_domain(
             node.id
         ))
     })?;
+    if domain.len() != 4
+        || !["id", "resource_count", "selection_signal", "encoding"]
+            .iter()
+            .all(|field| domain.contains_key(*field))
+    {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} selection_domain has ambiguous fields",
+            node.id
+        )));
+    }
     let domain_id = domain
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -538,10 +573,216 @@ fn planned_node_selection_domain(
                 node.id
             ))
         })?;
+    let selection_signal = domain
+        .get("selection_signal")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| node.outputs.iter().any(|output| output == *value))
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.selection_signal must name a node output",
+                node.id
+            ))
+        })?
+        .to_string();
+    let encoding = domain
+        .get("encoding")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.encoding must be an object",
+                node.id
+            ))
+        })?;
+    if encoding.len() != 4
+        || ![
+            "element_type",
+            "selection_count_per_activation",
+            "index_shift",
+            "index_mask",
+        ]
+        .iter()
+        .all(|field| encoding.contains_key(*field))
+    {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} selection_domain.encoding has ambiguous fields",
+            node.id
+        )));
+    }
+    let element_type = match encoding
+        .get("element_type")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("u32") => PlannedSelectionElementType::U32,
+        _ => {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.encoding.element_type is unsupported",
+                node.id
+            )));
+        }
+    };
+    let selection_count_per_activation = encoding
+        .get("selection_count_per_activation")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.encoding.selection_count_per_activation must be a positive integer",
+                node.id
+            ))
+        })?;
+    let index_shift = encoding
+        .get("index_shift")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value < u32::BITS)
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.encoding.index_shift must be below 32",
+                node.id
+            ))
+        })?;
+    let index_mask = encoding
+        .get("index_mask")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| {
+            *value != 0
+                && *value <= u32::MAX >> index_shift
+                && (*value == u32::MAX
+                    || *value & (*value + 1) == 0)
+        })
+        .filter(|value| {
+            u32::try_from(resource_count - 1)
+                .is_ok_and(|maximum| maximum & *value == maximum)
+        })
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.encoding.index_mask cannot represent its domain",
+                node.id
+            ))
+        })?;
     Ok(Some(PlannedNodeSelectionDomain {
         domain_id,
         resource_count,
+        selection_signal,
+        encoding: PlannedSelectionEncoding {
+            element_type,
+            selection_count_per_activation,
+            index_shift,
+            index_mask,
+        },
     }))
+}
+
+fn planned_node_selected_parameter_accesses(
+    component_id: &str,
+    node: &CircuitNode,
+) -> Result<Vec<PlannedSelectedParameterAccess>, CircuitPlanError> {
+    let Some(accesses) = node
+        .attrs
+        .as_object()
+        .and_then(|attrs| attrs.get("selected_parameter_accesses"))
+    else {
+        return Ok(Vec::new());
+    };
+    let accesses = accesses.as_array().ok_or_else(|| {
+        CircuitPlanError(format!(
+            "{component_id} node {} selected_parameter_accesses must be an array",
+            node.id
+        ))
+    })?;
+    let mut planned = Vec::with_capacity(accesses.len());
+    let mut seen_signals = std::collections::BTreeSet::new();
+    for access in accesses {
+        let access = access.as_object().ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selected parameter access must be an object",
+                node.id
+            ))
+        })?;
+        if access.len() != 3
+            || !["selection_signal", "partition_axis", "parameter_ids"]
+                .iter()
+                .all(|field| access.contains_key(*field))
+        {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} selected parameter access has ambiguous fields",
+                node.id
+            )));
+        }
+        let selection_signal = access
+            .get("selection_signal")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .filter(|value| node.inputs.iter().any(|input| input == *value))
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} selected parameter access signal must name a node input",
+                    node.id
+                ))
+            })?
+            .to_string();
+        if !seen_signals.insert(selection_signal.clone()) {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} repeats a selected parameter access signal",
+                node.id
+            )));
+        }
+        let partition_axis = access
+            .get("partition_axis")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} selected parameter partition axis must be a non-negative integer",
+                    node.id
+                ))
+            })?;
+        let parameter_ids = access
+            .get("parameter_ids")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} selected parameter ids must be an array",
+                    node.id
+                ))
+            })?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .filter(|value| {
+                        node.params.iter().any(|parameter| parameter == *value)
+                    })
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        CircuitPlanError(format!(
+                            "{component_id} node {} selected parameter id must name a node parameter",
+                            node.id
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if parameter_ids.is_empty()
+            || parameter_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} selected parameter ids must be non-empty, unique, and sorted",
+                node.id
+            )));
+        }
+        planned.push(PlannedSelectedParameterAccess {
+            selection_signal,
+            partition_axis,
+            parameter_ids,
+        });
+    }
+    Ok(planned)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -614,6 +855,20 @@ pub struct SignalSlotAssignment {
 mod selection_domain_tests {
     use super::*;
 
+    fn valid_selection_domain() -> serde_json::Value {
+        serde_json::json!({
+            "id": "addressable_resources",
+            "resource_count": 256,
+            "selection_signal": "selected",
+            "encoding": {
+                "element_type": "u32",
+                "selection_count_per_activation": 8,
+                "index_shift": 0,
+                "index_mask": 0xffff
+            }
+        })
+    }
+
     fn node_with_selection_domain(selection_domain: serde_json::Value) -> CircuitNode {
         CircuitNode {
             id: "selector".to_string(),
@@ -631,55 +886,119 @@ mod selection_domain_tests {
 
     #[test]
     fn selection_domain_contract_accepts_a_positive_resource_domain() {
-        let node = node_with_selection_domain(serde_json::json!({
-            "id": "addressable_resources",
-            "resource_count": 256,
-        }));
+        let node = node_with_selection_domain(valid_selection_domain());
 
         assert_eq!(
             planned_node_selection_domain("component", &node).unwrap(),
             Some(PlannedNodeSelectionDomain {
                 domain_id: "addressable_resources".to_string(),
                 resource_count: 256,
+                selection_signal: "selected".to_string(),
+                encoding: PlannedSelectionEncoding {
+                    element_type: PlannedSelectionElementType::U32,
+                    selection_count_per_activation: 8,
+                    index_shift: 0,
+                    index_mask: 0xffff,
+                },
             })
         );
     }
 
     #[test]
+    fn selected_parameter_access_contract_is_preserved_in_the_stream_plan() {
+        let node = CircuitNode {
+            id: "selected_compute".to_string(),
+            op: "generic_compute".to_string(),
+            inputs: vec!["activation".to_string(), "selected".to_string()],
+            outputs: vec!["output".to_string()],
+            params: vec!["bank".to_string(), "scale".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "selected_parameter_accesses": [{
+                    "selection_signal": "selected",
+                    "partition_axis": 0,
+                    "parameter_ids": ["bank", "scale"]
+                }]
+            }),
+        };
+
+        assert_eq!(
+            planned_node_selected_parameter_accesses("component", &node).unwrap(),
+            vec![PlannedSelectedParameterAccess {
+                selection_signal: "selected".to_string(),
+                partition_axis: 0,
+                parameter_ids: vec!["bank".to_string(), "scale".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn selected_parameter_access_contract_rejects_nonphysical_metadata() {
+        let node = CircuitNode {
+            id: "selected_compute".to_string(),
+            op: "generic_compute".to_string(),
+            inputs: vec!["activation".to_string(), "selected".to_string()],
+            outputs: vec!["output".to_string()],
+            params: vec!["bank".to_string(), "scale".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "selected_parameter_accesses": [{
+                    "selection_signal": "selected",
+                    "partition_axis": 0,
+                    "parameter_ids": ["scale", "bank"]
+                }]
+            }),
+        };
+
+        let error =
+            planned_node_selected_parameter_accesses("component", &node)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must be non-empty, unique, and sorted"));
+    }
+
+    #[test]
     fn selection_domain_contract_rejects_malformed_metadata() {
+        let mut missing_id = valid_selection_domain();
+        missing_id.as_object_mut().unwrap().remove("id");
+        let mut blank_id = valid_selection_domain();
+        blank_id["id"] = serde_json::json!(" ");
+        let mut zero_resources = valid_selection_domain();
+        zero_resources["resource_count"] = serde_json::json!(0);
+        let mut wrong_signal = valid_selection_domain();
+        wrong_signal["selection_signal"] = serde_json::json!("not_an_output");
+        let mut missing_encoding = valid_selection_domain();
+        missing_encoding.as_object_mut().unwrap().remove("encoding");
+        let mut wrong_element = valid_selection_domain();
+        wrong_element["encoding"]["element_type"] = serde_json::json!("u16");
+        let mut zero_selections = valid_selection_domain();
+        zero_selections["encoding"]["selection_count_per_activation"] =
+            serde_json::json!(0);
+        let mut excessive_shift = valid_selection_domain();
+        excessive_shift["encoding"]["index_shift"] = serde_json::json!(32);
+        let mut inadequate_mask = valid_selection_domain();
+        inadequate_mask["encoding"]["index_mask"] = serde_json::json!(0x7f);
+
         let invalid = [
             (
                 serde_json::json!("addressable_resources"),
                 "must be an object",
             ),
+            (missing_id, "ambiguous fields"),
+            (blank_id, "id must be a non-empty string"),
+            (zero_resources, "resource_count must be a positive integer"),
+            (wrong_signal, "selection_signal must name a node output"),
+            (missing_encoding, "ambiguous fields"),
+            (wrong_element, "element_type is unsupported"),
             (
-                serde_json::json!({"resource_count": 256}),
-                "id must be a non-empty string",
+                zero_selections,
+                "selection_count_per_activation must be a positive integer",
             ),
-            (
-                serde_json::json!({"id": "", "resource_count": 256}),
-                "id must be a non-empty string",
-            ),
-            (
-                serde_json::json!({"id": "  ", "resource_count": 256}),
-                "id must be a non-empty string",
-            ),
-            (
-                serde_json::json!({"id": "resources"}),
-                "resource_count must be a positive integer",
-            ),
-            (
-                serde_json::json!({"id": "resources", "resource_count": 0}),
-                "resource_count must be a positive integer",
-            ),
-            (
-                serde_json::json!({"id": "resources", "resource_count": 1.5}),
-                "resource_count must be a positive integer",
-            ),
-            (
-                serde_json::json!({"id": "resources", "resource_count": -1}),
-                "resource_count must be a positive integer",
-            ),
+            (excessive_shift, "index_shift must be below 32"),
+            (inadequate_mask, "index_mask cannot represent its domain"),
         ];
 
         for (selection_domain, expected) in invalid {

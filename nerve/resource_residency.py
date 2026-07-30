@@ -18,7 +18,7 @@ from nerve.resource_range_integrity import (
 )
 
 
-RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v1"
+RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v2"
 RESOURCE_IDENTITY_ALGORITHM = "nerve.resource_identity_sha256.v1"
 RESOURCE_STATE_MACHINE_SCHEMA = "nerve.resource_residency_state_machine.v1"
 SUPPORTED_RESIDENCY_POLICIES = ("demand_retained", "eager")
@@ -109,7 +109,17 @@ _SELECTOR_FIELDS = frozenset(
         "node_id",
         "domain_id",
         "resource_count",
+        "selection_signal",
+        "encoding",
         "mapping",
+    )
+)
+_SELECTION_ENCODING_FIELDS = frozenset(
+    (
+        "element_type",
+        "selection_count_per_activation",
+        "index_shift",
+        "index_mask",
     )
 )
 _CHECKPOINT_FIELDS = frozenset(
@@ -237,6 +247,8 @@ def selector_identity(selector: Json) -> str:
                 "node_id",
                 "domain_id",
                 "resource_count",
+                "selection_signal",
+                "encoding",
                 "mapping",
             )
         },
@@ -1177,6 +1189,7 @@ def _validate_selectors(
             "component_id",
             "node_id",
             "domain_id",
+            "selection_signal",
         ):
             _require_non_empty_string(selector[field], f"selector {field}")
         nodes = component_nodes.get(
@@ -1190,15 +1203,56 @@ def _validate_selectors(
         )
         if (
             not isinstance(selection_domain, dict)
+            or set(selection_domain)
+            != {"id", "resource_count", "selection_signal", "encoding"}
             or selection_domain.get("id") != selector["domain_id"]
             or selection_domain.get("resource_count") != selector["resource_count"]
+            or selection_domain.get("selection_signal")
+            != selector["selection_signal"]
+            or selection_domain.get("encoding") != selector["encoding"]
         ):
             raise ModelCompileError(
                 f"selector {selector_id!r} does not match compiled node semantics"
             )
+        if selector["selection_signal"] not in node.get("outputs", []):
+            raise ModelCompileError(
+                f"selector {selector_id!r} selection signal is not a node output"
+            )
         resource_count = _require_positive_int(
             selector["resource_count"], "selector resource count"
         )
+        encoding = _require_object(
+            selector["encoding"], "selector selection encoding"
+        )
+        _require_exact_fields(
+            encoding,
+            _SELECTION_ENCODING_FIELDS,
+            "selector selection encoding",
+        )
+        if encoding["element_type"] != "u32":
+            raise ModelCompileError(
+                f"selector {selector_id!r} has unsupported selection element type"
+            )
+        _require_positive_int(
+            encoding["selection_count_per_activation"],
+            "selector selection count per activation",
+        )
+        index_shift = _require_non_negative_int(
+            encoding["index_shift"], "selector selection index shift"
+        )
+        index_mask = _require_positive_int(
+            encoding["index_mask"], "selector selection index mask"
+        )
+        if (
+            index_shift >= 32
+            or index_mask > 0xFFFFFFFF
+            or index_mask > 0xFFFFFFFF >> index_shift
+            or index_mask & (index_mask + 1) != 0
+            or (resource_count - 1) & index_mask != resource_count - 1
+        ):
+            raise ModelCompileError(
+                f"selector {selector_id!r} has invalid selection index encoding"
+            )
         mapping = _require_object(selector["mapping"], "selector mapping")
         kind = mapping.get("kind")
         if kind == "group_table":

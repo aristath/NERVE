@@ -29,8 +29,9 @@ use crate::stream_circuit::{
     StreamCircuitRuntimeGraph,
 };
 use crate::stream_plan::{
-    CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort, SignalProducer,
-    SignalStorage, StreamCircuitExecutionPlan, StreamCircuitResourcePlan, TensorIndex,
+    CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort,
+    PlannedSelectionEncoding, SignalProducer, SignalStorage, StreamCircuitExecutionPlan,
+    StreamCircuitResourcePlan, TensorIndex,
 };
 use crate::stream_prefix_cache::{RuntimePrefixStateCacheInsert, RuntimePrefixStateCacheKey};
 use crate::stream_runtime::{

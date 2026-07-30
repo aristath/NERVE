@@ -393,6 +393,8 @@ fn bind_node(
                 node_id: node.id.clone(),
                 domain_id: domain.domain_id.clone(),
                 resource_count: domain.resource_count,
+                selection_signal: domain.selection_signal.clone(),
+                encoding: domain.encoding.clone(),
             }
         }),
     })

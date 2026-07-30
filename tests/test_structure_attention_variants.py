@@ -301,6 +301,13 @@ def test_discovers_sparse_moe_and_model_specific_numerics_by_structure(
         "selection_domain": {
             "id": "routed_experts",
             "resource_count": 32,
+            "selection_signal": "moe_routes",
+            "encoding": {
+                "element_type": "u32",
+                "selection_count_per_activation": 8,
+                "index_shift": 0,
+                "index_mask": 0xffff,
+            },
         },
     }
     assert nodes["moe_topk"]["params"] == ["moe_router_correction_bias"]

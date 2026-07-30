@@ -28,7 +28,17 @@ TENSOR_PARTITION_INTEGRITY_SCHEMA = "nerve.tensor_partition_integrity.v1"
 SELECTED_PARAMETER_ACCESSES_ATTRIBUTE = "selected_parameter_accesses"
 ROW_MAJOR_LAYOUT = "row_major"
 
-_SELECTION_DOMAIN_FIELDS = frozenset(("id", "resource_count"))
+_SELECTION_DOMAIN_FIELDS = frozenset(
+    ("id", "resource_count", "selection_signal", "encoding")
+)
+_SELECTION_ENCODING_FIELDS = frozenset(
+    (
+        "element_type",
+        "selection_count_per_activation",
+        "index_shift",
+        "index_mask",
+    )
+)
 _ACCESS_FIELDS = frozenset(
     ("selection_signal", "partition_axis", "parameter_ids")
 )
@@ -222,16 +232,58 @@ def analyze_resource_residency_components(
             resource_count = _positive_int(
                 domain.get("resource_count"), "selection domain resource count"
             )
-            if not outputs:
+            selection_signal = _non_empty_string(
+                domain.get("selection_signal"), "selection signal"
+            )
+            if selection_signal not in outputs:
                 raise ModelCompileError(
                     f"{scope} component {component_id!r} selector {node_id!r} "
-                    "does not produce a selection signal"
+                    f"does not produce declared selection signal {selection_signal!r}"
+                )
+            encoding = domain.get("encoding")
+            if (
+                not isinstance(encoding, dict)
+                or set(encoding) != _SELECTION_ENCODING_FIELDS
+                or encoding.get("element_type") != "u32"
+            ):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector {node_id!r} "
+                    "has an unsupported selection encoding"
+                )
+            selection_count_per_activation = _positive_int(
+                encoding.get("selection_count_per_activation"),
+                "selection count per activation",
+            )
+            index_shift = _non_negative_int(
+                encoding.get("index_shift"), "selection index shift"
+            )
+            index_mask = _positive_int(
+                encoding.get("index_mask"), "selection index mask"
+            )
+            if (
+                index_shift >= 32
+                or index_mask > 0xFFFFFFFF
+                or index_mask > 0xFFFFFFFF >> index_shift
+                or index_mask & (index_mask + 1) != 0
+                or (resource_count - 1) & index_mask != resource_count - 1
+            ):
+                raise ModelCompileError(
+                    f"{scope} component {component_id!r} selector {node_id!r} "
+                    "has an invalid selection index encoding"
                 )
             selectors[node_id] = {
                 "node_index": node_index,
                 "node_id": node_id,
                 "domain_id": domain_id,
                 "resource_count": resource_count,
+                "selection_signal": selection_signal,
+                "encoding": {
+                    "element_type": "u32",
+                    "selection_count_per_activation":
+                        selection_count_per_activation,
+                    "index_shift": index_shift,
+                    "index_mask": index_mask,
+                },
                 "outputs": set(outputs),
                 "accesses": [],
             }
@@ -293,7 +345,7 @@ def analyze_resource_residency_components(
                     producer is None
                     or selector is None
                     or producer[0] >= node_index
-                    or selection_signal not in selector["outputs"]
+                    or selection_signal != selector["selection_signal"]
                 ):
                     raise ModelCompileError(
                         f"{scope} component {component_id!r} node {node_id!r} "
@@ -423,6 +475,7 @@ def analyze_resource_residency_components(
                     "component_id": component_id,
                     "selector_node_id": selector["node_id"],
                     "selection_signal": next(iter(selected_signals)),
+                    "encoding": deepcopy(selector["encoding"]),
                     "domain_id": selector["domain_id"],
                     "partition_count": selector["resource_count"],
                     "partition_axis": next(iter(axes)),
@@ -609,6 +662,8 @@ def build_planned_resource_residency_contract(
             "node_id": group["selector_node_id"],
             "domain_id": group["domain_id"],
             "resource_count": group["partition_count"],
+            "selection_signal": group["selection_signal"],
+            "encoding": deepcopy(group["encoding"]),
             "mapping": {
                 "kind": "partition_template",
                 "partition_template_id": template["id"],

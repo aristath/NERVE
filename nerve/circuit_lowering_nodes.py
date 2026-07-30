@@ -586,6 +586,15 @@ def _ffn_tail(
                     "selection_domain": {
                         "id": "routed_experts",
                         "resource_count": int(feed_forward["num_experts"]),
+                        "selection_signal": "moe_routes",
+                        "encoding": {
+                            "element_type": "u32",
+                            "selection_count_per_activation": int(
+                                feed_forward["experts_per_token"]
+                            ),
+                            "index_shift": 0,
+                            "index_mask": 0xffff,
+                        },
                     },
                 },
             },

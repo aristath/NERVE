@@ -197,6 +197,8 @@ pub struct VulkanSelectionDomainBinding {
     pub node_id: String,
     pub domain_id: String,
     pub resource_count: usize,
+    pub selection_signal: String,
+    pub encoding: PlannedSelectionEncoding,
 }
 
 impl VulkanNodeBinding {

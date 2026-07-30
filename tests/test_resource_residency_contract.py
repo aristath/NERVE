@@ -55,6 +55,13 @@ def _fixture(
                     "selection_domain": {
                         "id": "addressable_resources",
                         "resource_count": 2,
+                        "selection_signal": "selection",
+                        "encoding": {
+                            "element_type": "u32",
+                            "selection_count_per_activation": 1,
+                            "index_shift": 0,
+                            "index_mask": 0xffff,
+                        },
                     }
                 },
             }
@@ -218,6 +225,13 @@ def _add_dynamic_selector_contract(
             if resource_count is None
             else resource_count
         ),
+        "selection_signal": "selection",
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": 1,
+            "index_shift": 0,
+            "index_mask": 0xffff,
+        },
         "mapping": {
             "kind": "partition_template",
             "partition_template_id": template["id"],
@@ -679,6 +693,13 @@ def test_validates_concrete_dynamic_group_selector_and_checkpoint(
         "node_id": "selector",
         "domain_id": "addressable_resources",
         "resource_count": 1,
+        "selection_signal": "selection",
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": 1,
+            "index_shift": 0,
+            "index_mask": 0xffff,
+        },
         "mapping": {
             "kind": "group_table",
             "atomic_group_ids": [group["id"]],
@@ -738,6 +759,13 @@ def test_rejects_selector_count_and_checkpoint_boundary_drift(
         "node_id": "selector",
         "domain_id": "addressable_resources",
         "resource_count": 1,
+        "selection_signal": "selection",
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": 1,
+            "index_shift": 0,
+            "index_mask": 0xffff,
+        },
         "mapping": {
             "kind": "partition_template",
             "partition_template_id": template["id"],

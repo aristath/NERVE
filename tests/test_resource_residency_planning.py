@@ -44,6 +44,13 @@ def _routed_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                 "selection_domain": {
                     "id": "selectable_units",
                     "resource_count": 4,
+                    "selection_signal": "chosen",
+                    "encoding": {
+                        "element_type": "u32",
+                        "selection_count_per_activation": 2,
+                        "index_shift": 0,
+                        "index_mask": 0xffff,
+                    },
                 }
             },
         },
@@ -99,6 +106,13 @@ def _optional_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                 "selection_domain": {
                     "id": "optional_feature",
                     "resource_count": 3,
+                    "selection_signal": "feature_index",
+                    "encoding": {
+                        "element_type": "u32",
+                        "selection_count_per_activation": 1,
+                        "index_shift": 0,
+                        "index_mask": 0xffff,
+                    },
                 }
             },
         },
@@ -249,6 +263,9 @@ def test_reuses_compatible_partitions_across_independent_selectors() -> None:
     second_nodes[0]["id"] = "second_switch"
     second_nodes[0]["outputs"] = ["second_index"]
     second_nodes[0]["attrs"]["selection_domain"]["id"] = "second_feature"
+    second_nodes[0]["attrs"]["selection_domain"][
+        "selection_signal"
+    ] = "second_index"
     second_nodes[1]["id"] = "second_projection"
     second_nodes[1]["inputs"] = ["input", "second_index"]
     second_nodes[1]["attrs"]["selected_parameter_accesses"][0][
@@ -287,6 +304,18 @@ def test_reuses_compatible_partitions_across_independent_selectors() -> None:
                 0
             ].update({"prefetch": True}),
             "ambiguous selected parameter access",
+        ),
+        (
+            lambda nodes: nodes[0]["attrs"]["selection_domain"].update(
+                {"selection_signal": "not_a_node_output"}
+            ),
+            "does not produce declared selection signal",
+        ),
+        (
+            lambda nodes: nodes[0]["attrs"]["selection_domain"]["encoding"].update(
+                {"index_mask": 1}
+            ),
+            "invalid selection index encoding",
         ),
     ),
 )
@@ -409,6 +438,19 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
     assert template["partition_count"] == 3
     assert len(template["member_templates"]) == 1
     assert len(contract["selectors"]) == 2
+    assert [
+        (
+            selector["selection_signal"],
+            selector["encoding"]["element_type"],
+            selector["encoding"]["selection_count_per_activation"],
+            selector["encoding"]["index_shift"],
+            selector["encoding"]["index_mask"],
+        )
+        for selector in contract["selectors"]
+    ] == [
+        ("feature_index", "u32", 1, 0, 0xffff),
+        ("feature_index", "u32", 1, 0, 0xffff),
+    ]
     assert len(contract["checkpoints"]) == 2
     assert len(contract["bindings"]) == 4
     assert {

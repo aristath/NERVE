@@ -1,5 +1,5 @@
 pub const COMPILED_RESOURCE_RESIDENCY_SCHEMA: &str =
-    "nerve.compiled_resource_residency.v1";
+    "nerve.compiled_resource_residency.v2";
 pub const RESOURCE_IDENTITY_ALGORITHM: &str =
     "nerve.resource_identity_sha256.v1";
 pub const RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA: &str =
@@ -155,7 +155,24 @@ pub struct CompiledResourceSelector {
     pub node_id: String,
     pub domain_id: String,
     pub resource_count: usize,
+    pub selection_signal: String,
+    pub encoding: CompiledResourceSelectionEncoding,
     pub mapping: CompiledResourceSelectorMapping,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledResourceSelectionEncoding {
+    pub element_type: CompiledResourceSelectionElementType,
+    pub selection_count_per_activation: usize,
+    pub index_shift: u32,
+    pub index_mask: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompiledResourceSelectionElementType {
+    U32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +352,8 @@ fn compiled_selector_identity(
             "node_id": selector.node_id,
             "domain_id": selector.domain_id,
             "resource_count": selector.resource_count,
+            "selection_signal": selector.selection_signal,
+            "encoding": selector.encoding,
             "mapping": selector.mapping,
         }),
     )
@@ -908,6 +927,7 @@ fn validate_selectors_and_checkpoints(
                 selector.component_id.as_str(),
                 selector.node_id.as_str(),
                 selector.domain_id.as_str(),
+                selector.selection_signal.as_str(),
             ]
             .iter()
             .any(|value| value.trim().is_empty())
@@ -930,7 +950,19 @@ fn validate_selectors_and_checkpoints(
             .as_object()
             .and_then(|attrs| attrs.get("selection_domain"))
             .and_then(Value::as_object);
-        if selection_domain
+        let encoded_selection = serde_json::to_value(&selector.encoding)
+            .map_err(|error| invalid_residency_error(error.to_string()))?;
+        if selection_domain.is_none_or(|domain| {
+            domain.len() != 4
+                || ![
+                    "id",
+                    "resource_count",
+                    "selection_signal",
+                    "encoding",
+                ]
+                .iter()
+                .all(|field| domain.contains_key(*field))
+        }) || selection_domain
             .and_then(|domain| domain.get("id"))
             .and_then(Value::as_str)
             != Some(selector.domain_id.as_str())
@@ -939,9 +971,40 @@ fn validate_selectors_and_checkpoints(
                 .and_then(Value::as_u64)
                 .and_then(|count| usize::try_from(count).ok())
                 != Some(selector.resource_count)
+            || selection_domain
+                .and_then(|domain| domain.get("selection_signal"))
+                .and_then(Value::as_str)
+                != Some(selector.selection_signal.as_str())
+            || selection_domain
+                .and_then(|domain| domain.get("encoding"))
+                != Some(&encoded_selection)
         {
             return invalid_residency(
                 "compiled selector disagrees with its node selection domain",
+            );
+        }
+        if !selector_node
+            .outputs
+            .iter()
+            .any(|output| output == &selector.selection_signal)
+            || selector.encoding.selection_count_per_activation == 0
+            || selector.encoding.index_shift >= u32::BITS
+            || selector.encoding.index_mask == 0
+            || selector.encoding.index_mask
+                > u32::MAX >> selector.encoding.index_shift
+            || (selector.encoding.index_mask != u32::MAX
+                && selector.encoding.index_mask
+                    & (selector.encoding.index_mask + 1)
+                    != 0)
+            || u32::try_from(selector.resource_count - 1)
+                .ok()
+                .is_none_or(|maximum_index| {
+                    maximum_index & selector.encoding.index_mask
+                        != maximum_index
+                })
+        {
+            return invalid_residency(
+                "compiled selector has an invalid physical selection encoding",
             );
         }
         match &selector.mapping {
@@ -1251,10 +1314,19 @@ mod shared_template_tests {
             component.component_id = component_id.to_string();
             let selector_node_id = component.circuit.nodes[0].id.clone();
             let resume_node_id = component.circuit.nodes[1].id.clone();
+            let selection_signal =
+                component.circuit.nodes[0].outputs[0].clone();
             component.circuit.nodes[0].attrs = serde_json::json!({
                 "selection_domain": {
                     "id": "shared_partitions",
-                    "resource_count": 3
+                    "resource_count": 3,
+                    "selection_signal": selection_signal.clone(),
+                    "encoding": {
+                        "element_type": "u32",
+                        "selection_count_per_activation": 1,
+                        "index_shift": 0,
+                        "index_mask": 0xffff
+                    }
                 }
             });
             manifest.circuit_graph.components.push(component);
@@ -1266,6 +1338,13 @@ mod shared_template_tests {
                 node_id: selector_node_id.clone(),
                 domain_id: "shared_partitions".to_string(),
                 resource_count: 3,
+                selection_signal: selection_signal.clone(),
+                encoding: CompiledResourceSelectionEncoding {
+                    element_type: CompiledResourceSelectionElementType::U32,
+                    selection_count_per_activation: 1,
+                    index_shift: 0,
+                    index_mask: 0xffff,
+                },
                 mapping: CompiledResourceSelectorMapping::PartitionTemplate {
                     partition_template_id: template_id.clone(),
                 },
