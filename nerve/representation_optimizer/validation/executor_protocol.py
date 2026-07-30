@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.benchmarking.executor_protocol import (
+    nonnegative_integer,
     positive_integer,
     required_digest,
     required_device_state_digest,
@@ -355,6 +356,7 @@ def validate_validation_shutdown_payload(
         "physical_device_ids",
         "pre_release_quiesce_duration_ns",
         "role_release_duration_ns",
+        "engine_shutdown",
         "device_releases",
         "shutdown_duration_ns",
     }:
@@ -377,6 +379,10 @@ def validate_validation_shutdown_payload(
             payload[field],
             f"validation executor {field}",
         )
+    _validate_engine_shutdown_payload(
+        payload["engine_shutdown"],
+        physical_device_ids=physical_device_ids,
+    )
     releases = payload["device_releases"]
     if (
         not isinstance(releases, list)
@@ -426,3 +432,221 @@ def validate_validation_shutdown_payload(
             release["release_duration_ns"],
             "validation executor device release duration",
         )
+
+
+def _validate_engine_shutdown_payload(
+    payload: object,
+    *,
+    physical_device_ids: tuple[str, ...],
+) -> None:
+    fields = {
+        "stream_count",
+        "package_count",
+        "scheduler_in_flight_activation_count",
+        "physical_device_count",
+        "acknowledged_device_count",
+        "released_unit_count",
+        "released_payload_bytes",
+        "cancelled_load_count",
+        "resource_teardowns",
+        "complete",
+        "errors",
+    }
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise ModelCompileError(
+            "validation executor engine shutdown fields are invalid"
+        )
+    for field in fields - {"resource_teardowns", "complete", "errors"}:
+        nonnegative_integer(
+            payload[field],
+            f"validation executor engine shutdown {field}",
+        )
+    if (
+        payload["complete"] is not True
+        or payload["errors"] != []
+        or payload["scheduler_in_flight_activation_count"] != 0
+        or payload["physical_device_count"]
+        != payload["acknowledged_device_count"]
+    ):
+        raise ModelCompileError(
+            "validation executor engine shutdown proof is incomplete"
+        )
+    teardowns = payload["resource_teardowns"]
+    if (
+        not isinstance(teardowns, list)
+        or len(teardowns) != payload["package_count"]
+    ):
+        raise ModelCompileError(
+            "validation executor engine shutdown package proof is invalid"
+        )
+    acknowledged_device_count = 0
+    released_unit_count = 0
+    released_payload_bytes = 0
+    cancelled_load_count = 0
+    for teardown in teardowns:
+        counts = _validate_engine_resource_teardown(
+            teardown,
+            physical_device_ids=physical_device_ids,
+        )
+        acknowledged_device_count += counts[0]
+        released_unit_count += counts[1]
+        released_payload_bytes += counts[2]
+        cancelled_load_count += counts[3]
+    if (
+        payload["acknowledged_device_count"]
+        != acknowledged_device_count
+        or payload["released_unit_count"] != released_unit_count
+        or payload["released_payload_bytes"] != released_payload_bytes
+        or payload["cancelled_load_count"] != cancelled_load_count
+    ):
+        raise ModelCompileError(
+            "validation executor engine shutdown totals are invalid"
+        )
+
+
+def _validate_engine_resource_teardown(
+    payload: object,
+    *,
+    physical_device_ids: tuple[str, ...],
+) -> tuple[int, int, int, int]:
+    fields = {
+        "package_id",
+        "execution_scope",
+        "physical_device_count",
+        "released_unit_count",
+        "released_payload_bytes",
+        "cancelled_load_count",
+        "acknowledged_device_count",
+        "complete",
+        "devices",
+    }
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise ModelCompileError(
+            "validation executor engine resource teardown fields are invalid"
+        )
+    if (
+        not isinstance(payload["package_id"], str)
+        or not payload["package_id"]
+        or not isinstance(payload["execution_scope"], str)
+        or not payload["execution_scope"]
+    ):
+        raise ModelCompileError(
+            "validation executor engine resource identity is invalid"
+        )
+    for field in fields - {
+        "package_id",
+        "execution_scope",
+        "complete",
+        "devices",
+    }:
+        nonnegative_integer(
+            payload[field],
+            f"validation executor engine resource teardown {field}",
+        )
+    devices = payload["devices"]
+    if (
+        payload["complete"] is not True
+        or payload["physical_device_count"]
+        != payload["acknowledged_device_count"]
+        or not isinstance(devices, list)
+        or len(devices) != payload["physical_device_count"]
+    ):
+        raise ModelCompileError(
+            "validation executor engine resource teardown is incomplete"
+        )
+    released_unit_count = 0
+    released_payload_bytes = 0
+    cancelled_load_count = 0
+    seen_physical_devices: set[str] = set()
+    for device in devices:
+        counts = _validate_engine_resource_device_teardown(
+            device,
+            physical_device_ids=physical_device_ids,
+        )
+        physical_device_id = device["physical_device_id"]
+        if physical_device_id in seen_physical_devices:
+            raise ModelCompileError(
+                "validation executor engine resource device proof is duplicated"
+            )
+        seen_physical_devices.add(physical_device_id)
+        released_unit_count += counts[0]
+        released_payload_bytes += counts[1]
+        cancelled_load_count += counts[2]
+    if (
+        payload["released_unit_count"] != released_unit_count
+        or payload["released_payload_bytes"] != released_payload_bytes
+        or payload["cancelled_load_count"] != cancelled_load_count
+    ):
+        raise ModelCompileError(
+            "validation executor engine resource totals are invalid"
+        )
+    return (
+        payload["acknowledged_device_count"],
+        released_unit_count,
+        released_payload_bytes,
+        cancelled_load_count,
+    )
+
+
+def _validate_engine_resource_device_teardown(
+    payload: object,
+    *,
+    physical_device_ids: tuple[str, ...],
+) -> tuple[int, int, int]:
+    fields = {
+        "store_id",
+        "physical_device_id",
+        "logical_device_ids",
+        "released_unit_count",
+        "released_payload_bytes",
+        "cancelled_load_count",
+        "remaining_unit_count",
+        "remaining_payload_bytes",
+        "acknowledged",
+        "error",
+    }
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise ModelCompileError(
+            "validation executor engine resource device fields are invalid"
+        )
+    logical_device_ids = payload["logical_device_ids"]
+    if (
+        not isinstance(payload["store_id"], str)
+        or not payload["store_id"]
+        or payload["physical_device_id"] not in physical_device_ids
+        or not isinstance(logical_device_ids, list)
+        or not logical_device_ids
+        or any(
+            not isinstance(device_id, str) or not device_id
+            for device_id in logical_device_ids
+        )
+        or len(set(logical_device_ids)) != len(logical_device_ids)
+    ):
+        raise ModelCompileError(
+            "validation executor engine resource device identity is invalid"
+        )
+    for field in fields - {
+        "store_id",
+        "physical_device_id",
+        "logical_device_ids",
+        "acknowledged",
+        "error",
+    }:
+        nonnegative_integer(
+            payload[field],
+            f"validation executor engine resource device {field}",
+        )
+    if (
+        payload["acknowledged"] is not True
+        or payload["error"] is not None
+        or payload["remaining_unit_count"] != 0
+        or payload["remaining_payload_bytes"] != 0
+    ):
+        raise ModelCompileError(
+            "validation executor engine resource device proof is incomplete"
+        )
+    return (
+        payload["released_unit_count"],
+        payload["released_payload_bytes"],
+        payload["cancelled_load_count"],
+    )

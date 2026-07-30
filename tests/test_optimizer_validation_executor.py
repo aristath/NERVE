@@ -190,6 +190,9 @@ class FixtureWholeModelExecutor:
                 "physical_device_ids": physical_device_ids,
                 "pre_release_quiesce_duration_ns": 5,
                 "role_release_duration_ns": 6,
+                "engine_shutdown": _engine_shutdown_payload(
+                    tuple(physical_device_ids)
+                ),
                 "device_releases": [
                     {
                         "physical_device_id": physical_device_id,
@@ -269,6 +272,9 @@ def test_validation_shutdown_requires_ordered_destroyed_device_proof() -> None:
         "physical_device_ids": list(physical_device_ids),
         "pre_release_quiesce_duration_ns": 1,
         "role_release_duration_ns": 2,
+        "engine_shutdown": _engine_shutdown_payload(
+            physical_device_ids
+        ),
         "device_releases": [
             {
                 "physical_device_id": physical_device_id,
@@ -289,6 +295,49 @@ def test_validation_shutdown_requires_ordered_destroyed_device_proof() -> None:
     with pytest.raises(
         ModelCompileError,
         match="device shutdown proof is invalid",
+    ):
+        validate_validation_shutdown_payload(
+            payload,
+            physical_device_ids=physical_device_ids,
+        )
+
+
+def test_validation_shutdown_rejects_incomplete_engine_teardown() -> None:
+    physical_device_ids = (
+        "vulkan-uuid:" + "1" * 32,
+        "vulkan-uuid:" + "2" * 32,
+    )
+    payload = {
+        "released": True,
+        "physical_device_ids": list(physical_device_ids),
+        "pre_release_quiesce_duration_ns": 1,
+        "role_release_duration_ns": 2,
+        "engine_shutdown": _engine_shutdown_payload(
+            physical_device_ids
+        ),
+        "device_releases": [
+            {
+                "physical_device_id": physical_device_id,
+                "logical_device_id": f"optimizer:device:{index}",
+                "released_buffer_count": 1,
+                "released_buffer_bytes": 1024,
+                "quiesced": True,
+                "device_context_destroyed": True,
+                "release_duration_ns": 3,
+            }
+            for index, physical_device_id in enumerate(
+                physical_device_ids
+            )
+        ],
+        "shutdown_duration_ns": 4,
+    }
+    payload["engine_shutdown"]["resource_teardowns"][0]["devices"][0][
+        "remaining_payload_bytes"
+    ] = 1
+
+    with pytest.raises(
+        ModelCompileError,
+        match="resource device proof is incomplete",
     ):
         validate_validation_shutdown_payload(
             payload,
@@ -685,3 +734,60 @@ def _digest(payload: bytes) -> str:
 
 def _device_digest(payload: bytes) -> str:
     return device_state_digest({"fixture_state": payload.hex()})
+
+
+def _engine_shutdown_payload(
+    physical_device_ids: tuple[str, ...],
+) -> Json:
+    devices = [
+        {
+            "store_id": f"compiled-store-{index}",
+            "physical_device_id": physical_device_id,
+            "logical_device_ids": [f"optimizer:device:{index}"],
+            "released_unit_count": index + 1,
+            "released_payload_bytes": 1024 * (index + 1),
+            "cancelled_load_count": 0,
+            "remaining_unit_count": 0,
+            "remaining_payload_bytes": 0,
+            "acknowledged": True,
+            "error": None,
+        }
+        for index, physical_device_id in enumerate(
+            physical_device_ids
+        )
+    ]
+    return {
+        "stream_count": 1,
+        "package_count": 1,
+        "scheduler_in_flight_activation_count": 0,
+        "physical_device_count": len(devices),
+        "acknowledged_device_count": len(devices),
+        "released_unit_count": sum(
+            device["released_unit_count"] for device in devices
+        ),
+        "released_payload_bytes": sum(
+            device["released_payload_bytes"] for device in devices
+        ),
+        "cancelled_load_count": 0,
+        "resource_teardowns": [
+            {
+                "package_id": "package-fixture",
+                "execution_scope": "whole_model",
+                "physical_device_count": len(devices),
+                "released_unit_count": sum(
+                    device["released_unit_count"]
+                    for device in devices
+                ),
+                "released_payload_bytes": sum(
+                    device["released_payload_bytes"]
+                    for device in devices
+                ),
+                "cancelled_load_count": 0,
+                "acknowledged_device_count": len(devices),
+                "complete": True,
+                "devices": devices,
+            }
+        ],
+        "complete": True,
+        "errors": [],
+    }
