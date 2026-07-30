@@ -256,6 +256,38 @@ fn component_batch_demand_execution_keeps_contiguous_local_units_in_one_range() 
 }
 
 #[test]
+fn demand_batch_replay_rejects_dynamic_push_constants_in_its_remaining_commands() {
+    let commands = vec![
+        VulkanDemandResidencyBatchCommand::Step(0),
+        VulkanDemandResidencyBatchCommand::Gate(0),
+        VulkanDemandResidencyBatchCommand::Step(1),
+        VulkanDemandResidencyBatchCommand::Gate(1),
+        VulkanDemandResidencyBatchCommand::Step(2),
+    ];
+
+    assert!(!demand_batch_commands_are_replay_stable(
+        &commands,
+        0,
+        |step_index| step_index != 1,
+    ));
+    assert!(!demand_batch_commands_are_replay_stable(
+        &commands,
+        1,
+        |step_index| step_index != 1,
+    ));
+    assert!(demand_batch_commands_are_replay_stable(
+        &commands,
+        3,
+        |step_index| step_index != 1,
+    ));
+    assert!(!demand_batch_commands_are_replay_stable(
+        &commands,
+        commands.len() + 1,
+        |_| true,
+    ));
+}
+
+#[test]
 fn component_batch_execution_rejects_noncontiguous_dispatch_steps() {
     let spans = vec![
         VulkanComponentBatchDispatchSpan {

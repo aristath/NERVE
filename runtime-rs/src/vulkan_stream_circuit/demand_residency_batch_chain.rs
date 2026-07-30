@@ -17,6 +17,23 @@ enum VulkanDemandResidencyBatchCommand {
     Gate(usize),
 }
 
+fn demand_batch_commands_are_replay_stable(
+    commands: &[VulkanDemandResidencyBatchCommand],
+    start_command_index: usize,
+    mut step_has_static_push_constants: impl FnMut(usize) -> bool,
+) -> bool {
+    commands
+        .get(start_command_index..)
+        .is_some_and(|commands| {
+            commands.iter().all(|command| match command {
+                VulkanDemandResidencyBatchCommand::Step(step_index) => {
+                    step_has_static_push_constants(*step_index)
+                }
+                VulkanDemandResidencyBatchCommand::Gate(_) => true,
+            })
+        })
+}
+
 struct VulkanDemandResidencyBatchGateRuntime {
     checkpoint_id: String,
     selector_id: String,
@@ -634,6 +651,22 @@ impl VulkanDemandResidencyBatchChain {
                     &self.full_sequence,
                 ),
             };
+        let can_replay_recorded_commands = std::env::var_os("NERVE_VK_PERF_LOGGER").is_none()
+            && sequence.has_recorded_commands()
+            && demand_batch_commands_are_replay_stable(
+                &self.commands,
+                start_command_index,
+                |step_index| {
+                    steps
+                        .get(step_index)
+                        .is_some_and(|step| step.push_constants.is_empty())
+                },
+            );
+        if can_replay_recorded_commands {
+            return device
+                .run_recorded_resident_kernel_sequence(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop);
+        }
         let step_push_constants = steps
             .iter()
             .map(|step| {
