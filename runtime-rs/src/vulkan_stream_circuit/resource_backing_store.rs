@@ -184,6 +184,7 @@ pub struct CompiledResourceBackingStoreStatistics {
     pub physical_reads: u64,
     pub logical_bytes: u64,
     pub physical_bytes: u64,
+    pub read_time_ns: u64,
 }
 
 #[derive(Default)]
@@ -197,6 +198,7 @@ struct CompiledResourceBackingStoreAtomicStatistics {
     physical_reads: AtomicU64,
     logical_bytes: AtomicU64,
     physical_bytes: AtomicU64,
+    read_time_ns: AtomicU64,
 }
 
 impl CompiledResourceBackingStoreAtomicStatistics {
@@ -211,6 +213,7 @@ impl CompiledResourceBackingStoreAtomicStatistics {
             physical_reads: self.physical_reads.load(AtomicOrdering::Relaxed),
             logical_bytes: self.logical_bytes.load(AtomicOrdering::Relaxed),
             physical_bytes: self.physical_bytes.load(AtomicOrdering::Relaxed),
+            read_time_ns: self.read_time_ns.load(AtomicOrdering::Relaxed),
         }
     }
 }
@@ -422,6 +425,11 @@ impl CompiledResourceBackingStore {
                                 );
                                 worker_statistics.physical_bytes.fetch_add(
                                     loaded.physical_byte_count as u64,
+                                    AtomicOrdering::Relaxed,
+                                );
+                                worker_statistics.read_time_ns.fetch_add(
+                                    u64::try_from(loaded.elapsed.as_nanos())
+                                        .unwrap_or(u64::MAX),
                                     AtomicOrdering::Relaxed,
                                 );
                             }
@@ -907,6 +915,14 @@ mod resource_backing_store_tests {
         assert_eq!(loaded.logical_byte_count, 24);
         assert_eq!(loaded.physical_byte_count, 24);
         assert_eq!(&*loaded.resources[0].ranges[1].bytes, b"ijklmnop");
+        let statistics = store.statistics();
+        assert_eq!(statistics.physical_reads, 2);
+        assert_eq!(statistics.physical_bytes, 24);
+        assert_eq!(
+            statistics.read_time_ns,
+            u64::try_from(loaded.elapsed.as_nanos())
+                .unwrap_or(u64::MAX)
+        );
     }
 
     #[test]

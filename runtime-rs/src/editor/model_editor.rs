@@ -92,6 +92,12 @@ impl RuntimeModelEditor {
         self.manifest.max_context_activations
     }
 
+    pub fn supported_resource_residency_policies(
+        &self,
+    ) -> &[ResourceResidencyPolicy] {
+        &self.manifest.resource_residency.supported_policies
+    }
+
     pub fn source_components(&self) -> &[RuntimeEditorSourceComponent] {
         &self.source_components
     }

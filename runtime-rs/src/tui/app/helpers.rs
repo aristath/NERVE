@@ -321,4 +321,32 @@ mod tests {
             original
         );
     }
+
+    #[test]
+    fn loaded_package_selects_only_supported_runtime_residency_policies() {
+        let package = crate::test_support::tiny_model_dir();
+        let editor =
+            crate::editor::load_runtime_model_editor_without_hardware(
+                package,
+            )
+            .unwrap();
+        let mut app = App::new();
+        app.install_editor(editor);
+
+        assert_eq!(
+            app.resource_residency_policy(),
+            ResourceResidencyPolicy::Eager
+        );
+        app.dispatch(AppAction::ToggleResourceResidencyPolicy);
+        assert_eq!(
+            app.resource_residency_policy(),
+            ResourceResidencyPolicy::DemandRetained
+        );
+        assert!(app.status.contains("demand-retained"));
+        app.dispatch(AppAction::ToggleResourceResidencyPolicy);
+        assert_eq!(
+            app.resource_residency_policy(),
+            ResourceResidencyPolicy::Eager
+        );
+    }
 }

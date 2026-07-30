@@ -10,6 +10,7 @@ use crate::{
     CircuitPlacementError, CircuitRuntimeRole, ComponentPlacement, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID,
     ResolvedLoweredExecutionGraph, RuntimeAvailableDevice,
     RuntimeAvailableMemoryHeap,
+    ResourceResidencyPolicy,
     StreamCircuitNodeInstance, StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan,
     StreamCircuitRuntimeGraph, VulkanComputeDeviceCatalog,
     VulkanComputeDeviceInfo,

@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::{
     RuntimeEditorControlKind, RuntimeEditorControlSchema, RuntimeEditorInstance,
     RuntimeEditorSourceComponent, RuntimeModelEditor, RuntimeModelPathKind,
+    ResourceResidencyPolicy,
     StreamCircuitNodeInstanceStatePolicy, classify_runtime_model_path,
     validate_runtime_editor_control_value,
 };
@@ -41,6 +42,7 @@ pub enum AppAction {
     ToggleHelp,
     ToggleMouseCapture,
     RefreshDevices,
+    ToggleResourceResidencyPolicy,
     FocusNext,
     FocusPrevious,
     FocusSequence,
@@ -81,6 +83,7 @@ pub enum AppAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HitTarget {
     OpenModel,
+    ResourceResidencyPolicy,
     Sequence,
     Node(String),
     PanLeft,
@@ -512,6 +515,8 @@ pub struct App {
     pub(crate) overlay: Option<Overlay>,
     help_return_overlay: Option<Overlay>,
     pub(crate) status: String,
+    pub(crate) resource_residency_policy:
+        ResourceResidencyPolicy,
     pub(crate) should_quit: bool,
     pub(crate) mouse_capture: bool,
     pub(crate) hit_map: HitMap,

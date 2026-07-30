@@ -326,8 +326,10 @@ pub struct DeviceResourceResidencyStatistics {
     pub always_resident_bytes: usize,
     pub reserved_loading_bytes: usize,
     pub dynamic_resident_bytes: usize,
+    pub high_water_dynamic_resident_bytes: usize,
     pub loading_group_count: usize,
     pub resident_group_count: usize,
+    pub high_water_resident_group_count: usize,
     pub failed_group_count: usize,
     pub hit_count: u64,
     pub miss_count: u64,
@@ -335,6 +337,12 @@ pub struct DeviceResourceResidencyStatistics {
     pub successful_load_count: u64,
     pub failed_load_count: u64,
     pub cancelled_load_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeviceResourceResidencySnapshot {
+    pub statistics: DeviceResourceResidencyStatistics,
+    pub directory: Vec<DeviceResourceResidencyDirectoryEntry>,
 }
 
 struct DeviceResourceLoadOutcome {
@@ -421,6 +429,8 @@ struct DeviceResourceResidencyState<P: DeviceResidentResourcePayload> {
     entries: BTreeMap<String, DeviceResourceResidencyEntry<P>>,
     reserved_loading_bytes: usize,
     dynamic_resident_bytes: usize,
+    high_water_dynamic_resident_bytes: usize,
+    high_water_resident_group_count: usize,
     hit_count: u64,
     miss_count: u64,
     single_flight_join_count: u64,
@@ -438,6 +448,8 @@ impl<P: DeviceResidentResourcePayload> Default
             entries: BTreeMap::new(),
             reserved_loading_bytes: 0,
             dynamic_resident_bytes: 0,
+            high_water_dynamic_resident_bytes: 0,
+            high_water_resident_group_count: 0,
             hit_count: 0,
             miss_count: 0,
             single_flight_join_count: 0,
@@ -781,18 +793,19 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
         &self,
     ) -> Result<DeviceResourceResidencyStatistics, DeviceResourceResidencyError>
     {
-        let state = self.inner.state.lock().map_err(|_| {
-            DeviceResourceResidencyError::new(
-                DeviceResourceResidencyErrorKind::Stopped,
-                "per-device residency manager was poisoned",
-            )
-        })?;
-        Ok(statistics_for_state(&self.inner, &state))
+        self.snapshot().map(|snapshot| snapshot.statistics)
     }
 
     pub fn directory(
         &self,
     ) -> Result<Vec<DeviceResourceResidencyDirectoryEntry>, DeviceResourceResidencyError>
+    {
+        self.snapshot().map(|snapshot| snapshot.directory)
+    }
+
+    pub fn snapshot(
+        &self,
+    ) -> Result<DeviceResourceResidencySnapshot, DeviceResourceResidencyError>
     {
         let state = self.inner.state.lock().map_err(|_| {
             DeviceResourceResidencyError::new(
@@ -800,40 +813,10 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
                 "per-device residency manager was poisoned",
             )
         })?;
-        Ok(state
-            .entries
-            .iter()
-            .map(|(group_id, entry)| {
-                let (residency_state, descriptor, owner_count) = match entry {
-                    DeviceResourceResidencyEntry::Loading {
-                        descriptor, owners, ..
-                    } => (
-                        ResourceResidencyState::Loading,
-                        descriptor,
-                        owners.len(),
-                    ),
-                    DeviceResourceResidencyEntry::Resident {
-                        descriptor, owners, ..
-                    } => (
-                        ResourceResidencyState::Resident,
-                        descriptor,
-                        owners.len(),
-                    ),
-                    DeviceResourceResidencyEntry::Failed {
-                        descriptor, ..
-                    } => (ResourceResidencyState::Failed, descriptor, 0),
-                };
-                DeviceResourceResidencyDirectoryEntry {
-                    group_id: group_id.clone(),
-                    state: residency_state,
-                    location: DeviceResourceResidencyLocation::Local {
-                        device_id: self.inner.device_id.clone(),
-                    },
-                    byte_count: descriptor.byte_count,
-                    owner_count,
-                }
-            })
-            .collect())
+        Ok(DeviceResourceResidencySnapshot {
+            statistics: statistics_for_state(&self.inner, &state),
+            directory: directory_for_state(&self.inner, &state),
+        })
     }
 }
 
@@ -1146,6 +1129,9 @@ fn publish_loaded_group<P: DeviceResidentResourcePayload>(
         .reserved_loading_bytes
         .saturating_sub(descriptor.byte_count);
     state.dynamic_resident_bytes = published_dynamic_bytes;
+    state.high_water_dynamic_resident_bytes = state
+        .high_water_dynamic_resident_bytes
+        .max(published_dynamic_bytes);
     state.successful_load_count =
         state.successful_load_count.saturating_add(1);
     state.entries.insert(
@@ -1157,6 +1143,20 @@ fn publish_loaded_group<P: DeviceResidentResourcePayload>(
             group: Arc::clone(&group),
         },
     );
+    state.high_water_resident_group_count = state
+        .high_water_resident_group_count
+        .max(
+            state
+                .entries
+                .values()
+                .filter(|entry| {
+                    matches!(
+                        entry,
+                        DeviceResourceResidencyEntry::Resident { .. }
+                    )
+                })
+                .count(),
+        );
     drop(state);
     outcome.finish(Ok(()));
     Ok(())
@@ -1433,8 +1433,12 @@ fn statistics_for_state<P: DeviceResidentResourcePayload>(
         always_resident_bytes: manager.always_resident_bytes,
         reserved_loading_bytes: state.reserved_loading_bytes,
         dynamic_resident_bytes: state.dynamic_resident_bytes,
+        high_water_dynamic_resident_bytes:
+            state.high_water_dynamic_resident_bytes,
         loading_group_count,
         resident_group_count,
+        high_water_resident_group_count:
+            state.high_water_resident_group_count,
         failed_group_count,
         hit_count: state.hit_count,
         miss_count: state.miss_count,
@@ -1443,4 +1447,48 @@ fn statistics_for_state<P: DeviceResidentResourcePayload>(
         failed_load_count: state.failed_load_count,
         cancelled_load_count: state.cancelled_load_count,
     }
+}
+
+fn directory_for_state<P: DeviceResidentResourcePayload>(
+    manager: &DeviceResourceResidencyManagerInner<P>,
+    state: &DeviceResourceResidencyState<P>,
+) -> Vec<DeviceResourceResidencyDirectoryEntry> {
+    state
+        .entries
+        .iter()
+        .map(|(group_id, entry)| {
+            let (residency_state, descriptor, owner_count) = match entry {
+                DeviceResourceResidencyEntry::Loading {
+                    descriptor, owners, ..
+                } => (
+                    ResourceResidencyState::Loading,
+                    descriptor,
+                    owners.len(),
+                ),
+                DeviceResourceResidencyEntry::Resident {
+                    descriptor, owners, ..
+                } => (
+                    ResourceResidencyState::Resident,
+                    descriptor,
+                    owners.len(),
+                ),
+                DeviceResourceResidencyEntry::Failed {
+                    descriptor, ..
+                } => (
+                    ResourceResidencyState::Failed,
+                    descriptor,
+                    0,
+                ),
+            };
+            DeviceResourceResidencyDirectoryEntry {
+                group_id: group_id.clone(),
+                state: residency_state,
+                location: DeviceResourceResidencyLocation::Local {
+                    device_id: manager.device_id.clone(),
+                },
+                byte_count: descriptor.byte_count,
+                owner_count,
+            }
+        })
+        .collect()
 }

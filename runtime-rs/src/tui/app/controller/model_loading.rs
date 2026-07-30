@@ -461,6 +461,16 @@ impl App {
     }
 
     pub(crate) fn install_editor(&mut self, editor: RuntimeModelEditor) {
+        if !editor
+            .supported_resource_residency_policies()
+            .contains(&self.resource_residency_policy)
+        {
+            self.resource_residency_policy = editor
+                .supported_resource_residency_policies()
+                .first()
+                .copied()
+                .unwrap_or(ResourceResidencyPolicy::Eager);
+        }
         let sequence = editor.layer_sequence();
         let selected_instance_id = editor
             .instances()
@@ -472,9 +482,10 @@ impl App {
         self.selected_instance_id = selected_instance_id;
         self.graph_scroll = 0;
         self.status = format!(
-            "Loaded {} · {} source components · graph draft not mounted",
+            "Loaded {} · {} source components · residency {} · graph draft not mounted",
             editor.package_id(),
-            editor.instances().len()
+            editor.instances().len(),
+            self.resource_residency_policy.as_runtime_name()
         );
         self.editor = Some(editor);
         self.overlay = None;

@@ -14,6 +14,8 @@ impl App {
             ))),
             help_return_overlay: None,
             status: "No model loaded · draft not mounted".to_string(),
+            resource_residency_policy:
+                ResourceResidencyPolicy::Eager,
             should_quit: false,
             mouse_capture: true,
             hit_map: HitMap::default(),
@@ -43,6 +45,12 @@ impl App {
         self.selected_instance_id.as_deref()
     }
 
+    pub fn resource_residency_policy(
+        &self,
+    ) -> ResourceResidencyPolicy {
+        self.resource_residency_policy
+    }
+
     pub fn load_compiled_model(&mut self, path: impl AsRef<Path>) {
         self.load_model(path.as_ref().to_path_buf());
     }
@@ -64,6 +72,9 @@ impl App {
     pub fn action_at(&self, column: u16, row: u16) -> Option<AppAction> {
         match self.hit_map.resolve(column, row)? {
             HitTarget::OpenModel => Some(AppAction::OpenModelSelector),
+            HitTarget::ResourceResidencyPolicy => {
+                Some(AppAction::ToggleResourceResidencyPolicy)
+            }
             HitTarget::Sequence => Some(AppAction::FocusSequence),
             HitTarget::Node(instance_id) => Some(AppAction::OpenNode(instance_id.clone())),
             HitTarget::PanLeft => Some(AppAction::PanGraph(-1)),
@@ -108,6 +119,9 @@ impl App {
                         editor.available_devices().len()
                     );
                 }
+            }
+            AppAction::ToggleResourceResidencyPolicy => {
+                self.toggle_resource_residency_policy();
             }
             AppAction::FocusNext | AppAction::FocusPrevious => {
                 self.focus = match self.focus {
@@ -156,6 +170,40 @@ impl App {
             AppAction::RemoveSelected => self.remove_selected(),
             AppAction::MoveSelected(delta) => self.move_selected(delta),
             _ => {}
+        }
+    }
+
+    fn toggle_resource_residency_policy(&mut self) {
+        let Some(editor) = &self.editor else {
+            self.status =
+                "Load a compiled model before selecting residency"
+                    .to_string();
+            return;
+        };
+        let supported =
+            editor.supported_resource_residency_policies();
+        let requested = match self.resource_residency_policy {
+            ResourceResidencyPolicy::Eager => {
+                ResourceResidencyPolicy::DemandRetained
+            }
+            ResourceResidencyPolicy::DemandRetained => {
+                ResourceResidencyPolicy::Eager
+            }
+        };
+        if supported.contains(&requested) {
+            self.resource_residency_policy = requested;
+            self.status = format!(
+                "Runtime residency policy: {} · graph draft not mounted",
+                requested.as_runtime_name()
+            );
+        } else {
+            self.status = format!(
+                "Package supports only runtime residency policies {:?}",
+                supported
+                    .iter()
+                    .map(|policy| policy.as_runtime_name())
+                    .collect::<Vec<_>>()
+            );
         }
     }
 

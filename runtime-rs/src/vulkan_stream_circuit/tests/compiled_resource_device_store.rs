@@ -103,6 +103,28 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     unowned_selector.id = unowned_selector_id.clone();
     unowned_selector.component_id = "other_component".to_string();
     contract.selectors.push(unowned_selector);
+    let inspection = contract.inspection_report().unwrap();
+    assert_eq!(
+        inspection.supported_policies,
+        ["demand-retained", "eager"]
+    );
+    assert_eq!(inspection.always_resident.unit_count, 0);
+    assert_eq!(
+        inspection.dynamically_addressable.unit_count,
+        2
+    );
+    assert_eq!(
+        inspection.dynamically_addressable.resource_count,
+        2
+    );
+    assert_eq!(
+        inspection.dynamically_addressable.maximum_payload_bytes,
+        16
+    );
+    assert_eq!(inspection.scopes.len(), 1);
+    assert_eq!(inspection.scopes[0].component_count, 3);
+    assert_eq!(inspection.scopes[0].selector_count, 3);
+    assert_eq!(inspection.scopes[0].addressable_unit_count, 2);
     let contract = Arc::new(contract);
     let layout = Arc::new(
         VulkanCompiledResourceAddressLayout::from_contract(&contract)
@@ -111,6 +133,8 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let capacity_error = match VulkanCompiledResourceDeviceStore::new(
         &device,
         "amd-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
         root.path(),
         Arc::clone(&contract),
         Arc::clone(&layout),
@@ -122,6 +146,9 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         4096,
         1024,
         1,
+        128,
+        64,
+        layout.address_table_byte_count().unwrap(),
     ) {
         Ok(_) => panic!("physical allocation padding was not admitted"),
         Err(error) => error,
@@ -134,6 +161,8 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let store = VulkanCompiledResourceDeviceStore::new(
         &device,
         "amd-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
         root.path(),
         Arc::clone(&contract),
         Arc::clone(&layout),
@@ -145,6 +174,9 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         8192,
         1024,
         1,
+        128,
+        64,
+        layout.address_table_byte_count().unwrap(),
     )
     .unwrap();
     let buffers = store
@@ -155,6 +187,23 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         )
         .unwrap();
     let owner = DeviceResourceResidencyOwnerId::new("graph").unwrap();
+    store.mark_mount_complete().unwrap();
+    let initial = store.residency_report().unwrap();
+    assert_eq!(initial.initial_payload_bytes, 0);
+    assert_eq!(initial.current_payload_bytes, 0);
+    assert_eq!(initial.initial_resident_unit_count, 0);
+    assert_eq!(initial.resident_unit_count, 0);
+    assert_eq!(initial.addressable_unit_count, 2);
+    assert_eq!(initial.always_resident_parameter_bytes, 128);
+    assert_eq!(initial.runtime_working_set_device_bytes, 64);
+    assert!(
+        initial.initial_device_bytes
+            >= 128 + 64 + initial.metadata_device_bytes
+    );
+    assert_eq!(initial.scopes.len(), 1);
+    assert_eq!(initial.scopes[0].execution_scope, "target");
+    assert_eq!(initial.scopes[0].component_count, 2);
+    assert_eq!(initial.scopes[0].addressable_unit_count, 2);
 
     let unowned_error = store
         .load_selector_resource(
@@ -177,12 +226,53 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     store
         .load_selector_resource(&device, &alias_selector_id, 0, owner)
         .unwrap();
+    store
+        .record_gpu_gate_misses(&selector_id, 2)
+        .unwrap();
+    store
+        .record_gpu_gate_misses(&alias_selector_id, 3)
+        .unwrap();
 
     let stats = store.statistics().unwrap();
     assert_eq!(stats.miss_count, 1);
     assert_eq!(stats.hit_count, 1);
     assert_eq!(stats.resident_group_count, 1);
     assert_eq!(stats.dynamic_resident_bytes, 8);
+    assert_eq!(stats.high_water_resident_group_count, 1);
+    assert_eq!(stats.high_water_dynamic_resident_bytes, 8);
+    let report = store.residency_report().unwrap();
+    assert_eq!(report.physical_device_id, device.physical_device_id());
+    assert_eq!(report.logical_device_ids, ["gpu0"]);
+    assert_eq!(report.current_payload_bytes, 8);
+    assert_eq!(report.high_water_payload_bytes, 8);
+    assert_eq!(report.resident_unit_count, 1);
+    assert_eq!(report.high_water_resident_unit_count, 1);
+    assert_eq!(report.residency_directory_hit_count, 1);
+    assert_eq!(report.residency_load_required_count, 1);
+    assert_eq!(report.gpu_selection_count, 0);
+    assert_eq!(report.gpu_resident_hit_count, 0);
+    assert_eq!(report.gpu_miss_count, 5);
+    assert_eq!(report.successful_load_count, 1);
+    assert_eq!(report.failed_load_count, 0);
+    assert_eq!(report.physical_read_count, 1);
+    assert_eq!(report.physical_bytes_read, 8);
+    assert_eq!(report.uploaded_bytes, 8);
+    assert_eq!(report.components.len(), 2);
+    assert!(
+        report
+            .components
+            .iter()
+            .all(|component| component.addressable_unit_count == 2
+                && component.resident_unit_count == 1)
+    );
+    assert_eq!(
+        report
+            .components
+            .iter()
+            .map(|component| component.gpu_miss_count)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
     let address_words = buffers
         .address_table()
         .read_bytes(layout.slot_count() * 32)
@@ -206,6 +296,11 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         store.statistics().unwrap().dynamic_resident_bytes,
         0
     );
+    let unloaded = store.residency_report().unwrap();
+    assert_eq!(unloaded.current_payload_bytes, 0);
+    assert_eq!(unloaded.resident_unit_count, 0);
+    assert_eq!(unloaded.high_water_payload_bytes, 8);
+    assert_eq!(unloaded.high_water_resident_unit_count, 1);
     let retired_words = buffers
         .address_table()
         .read_bytes(layout.slot_count() * 32)

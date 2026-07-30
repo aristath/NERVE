@@ -29,6 +29,15 @@ pub enum ResourceResidencyPolicy {
     Eager,
 }
 
+impl ResourceResidencyPolicy {
+    pub fn as_runtime_name(self) -> &'static str {
+        match self {
+            Self::DemandRetained => "demand-retained",
+            Self::Eager => "eager",
+        }
+    }
+}
+
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -201,6 +210,361 @@ pub enum ResourceResidencyState {
     Loading,
     Resident,
     Failed,
+}
+
+impl CompiledResourceResidencyContract {
+    pub fn inspection_report(
+        &self,
+    ) -> io::Result<crate::RuntimeResourceResidencyInspectionReport> {
+        let resource_bytes = self
+            .resources
+            .iter()
+            .map(|resource| {
+                resource.ranges.iter().try_fold(
+                    0usize,
+                    |total, range| {
+                        total.checked_add(range.byte_count).ok_or_else(
+                            || {
+                                invalid_residency_error(
+                                    "compiled resource inspection byte count overflowed",
+                                )
+                            },
+                        )
+                    },
+                )
+                .map(|bytes| (resource.id.as_str(), bytes))
+            })
+            .collect::<io::Result<BTreeMap<_, _>>>()?;
+        let group_bytes = self
+            .atomic_groups
+            .iter()
+            .map(|group| {
+                group
+                    .resource_ids
+                    .iter()
+                    .try_fold(0usize, |total, resource_id| {
+                        total
+                            .checked_add(
+                                resource_bytes
+                                    .get(resource_id.as_str())
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        invalid_residency_error(
+                                            "compiled residency group inspection references a missing resource",
+                                        )
+                                    })?,
+                            )
+                            .ok_or_else(|| {
+                                invalid_residency_error(
+                                    "compiled residency group inspection byte count overflowed",
+                                )
+                            })
+                    })
+                    .map(|bytes| (group.id.as_str(), bytes))
+            })
+            .collect::<io::Result<BTreeMap<_, _>>>()?;
+        let template_bytes = self
+            .partition_templates
+            .iter()
+            .map(|template| {
+                template
+                    .member_templates
+                    .iter()
+                    .flat_map(|member| &member.range_templates)
+                    .try_fold(0usize, |total, range| {
+                        total.checked_add(range.byte_count).ok_or_else(
+                            || {
+                                invalid_residency_error(
+                                    "compiled partition inspection byte count overflowed",
+                                )
+                            },
+                        )
+                    })
+                    .map(|bytes| (template.id.as_str(), bytes))
+            })
+            .collect::<io::Result<BTreeMap<_, _>>>()?;
+
+        let always_group_ids = self
+            .atomic_groups
+            .iter()
+            .filter(|group| {
+                group.lifetime
+                    == CompiledResourceLifetime::AlwaysResident
+            })
+            .map(|group| group.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let dynamic_group_ids = self
+            .atomic_groups
+            .iter()
+            .filter(|group| {
+                group.lifetime == CompiledResourceLifetime::Dynamic
+            })
+            .map(|group| group.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let always_resident = runtime_resource_residency_class_report(
+            "always_resident",
+            "declared always_resident by the compiled contract; required before execution and never selected at a residency checkpoint",
+            &always_group_ids,
+            &group_bytes,
+            self.resources.iter().filter(|resource| {
+                resource.lifetime
+                    == CompiledResourceLifetime::AlwaysResident
+            }).count(),
+            &[],
+        )?;
+        let dynamic_templates = self
+            .partition_templates
+            .iter()
+            .collect::<Vec<_>>();
+        let dynamically_addressable =
+            runtime_resource_residency_class_report(
+                "dynamic",
+                "addressable through compiled selectors at physical residency checkpoints; demand-retained loads selected accesses while eager loads the same declared set at mount",
+                &dynamic_group_ids,
+                &group_bytes,
+                self.resources
+                    .iter()
+                    .filter(|resource| {
+                        resource.lifetime
+                            == CompiledResourceLifetime::Dynamic
+                    })
+                    .count(),
+                &dynamic_templates,
+            )?;
+
+        let mut scope_units =
+            BTreeMap::<String, BTreeMap<String, usize>>::new();
+        let mut scope_components =
+            BTreeMap::<String, BTreeSet<String>>::new();
+        let mut scope_selectors = BTreeMap::<String, usize>::new();
+        for selector in &self.selectors {
+            let units = scope_units
+                .entry(selector.execution_scope.clone())
+                .or_default();
+            scope_components
+                .entry(selector.execution_scope.clone())
+                .or_default()
+                .insert(selector.component_id.clone());
+            *scope_selectors
+                .entry(selector.execution_scope.clone())
+                .or_default() += 1;
+            match &selector.mapping {
+                CompiledResourceSelectorMapping::GroupTable {
+                    atomic_group_ids,
+                } => {
+                    for group_id in atomic_group_ids {
+                        units.insert(
+                            group_id.clone(),
+                            group_bytes
+                                .get(group_id.as_str())
+                                .copied()
+                                .ok_or_else(|| {
+                                    invalid_residency_error(
+                                        "compiled selector inspection references a missing group",
+                                    )
+                                })?,
+                        );
+                    }
+                }
+                CompiledResourceSelectorMapping::PartitionTemplate {
+                    partition_template_id,
+                } => {
+                    let template = self
+                        .partition_templates
+                        .iter()
+                        .find(|template| {
+                            template.id == *partition_template_id
+                        })
+                        .ok_or_else(|| {
+                            invalid_residency_error(
+                                "compiled selector inspection references a missing partition template",
+                            )
+                        })?;
+                    let bytes = template_bytes
+                        .get(template.id.as_str())
+                        .copied()
+                        .ok_or_else(|| {
+                            invalid_residency_error(
+                                "compiled selector inspection is missing partition bytes",
+                            )
+                        })?;
+                    for partition_index in 0..template.partition_count {
+                        units.insert(
+                            derived_partition_resource_id(
+                                &template.group_identity_seed,
+                                partition_index,
+                            )?,
+                            bytes,
+                        );
+                    }
+                }
+            }
+        }
+        let checkpoint_counts = self.checkpoints.iter().fold(
+            BTreeMap::<String, usize>::new(),
+            |mut counts, checkpoint| {
+                *counts
+                    .entry(checkpoint.execution_scope.clone())
+                    .or_default() += 1;
+                counts
+            },
+        );
+        let scopes = scope_units
+            .into_iter()
+            .map(|(execution_scope, units)| {
+                let maximum_payload_bytes = units
+                    .values()
+                    .try_fold(0usize, |total, bytes| {
+                        total.checked_add(*bytes).ok_or_else(|| {
+                            invalid_residency_error(
+                                "compiled residency scope inspection byte count overflowed",
+                            )
+                        })
+                    })?;
+                Ok(crate::RuntimeResourceResidencyScopeInspectionReport {
+                    component_count: scope_components
+                        .get(&execution_scope)
+                        .map(BTreeSet::len)
+                        .unwrap_or_default(),
+                    selector_count: scope_selectors
+                        .get(&execution_scope)
+                        .copied()
+                        .unwrap_or_default(),
+                    checkpoint_count: checkpoint_counts
+                        .get(&execution_scope)
+                        .copied()
+                        .unwrap_or_default(),
+                    addressable_unit_count: units.len(),
+                    maximum_payload_bytes,
+                    execution_scope,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
+        Ok(crate::RuntimeResourceResidencyInspectionReport {
+            schema:
+                "nerve.runtime_resource_residency_inspection.v1"
+                    .to_string(),
+            supported_policies: self
+                .supported_policies
+                .iter()
+                .map(|policy| policy.as_runtime_name().to_string())
+                .collect(),
+            always_resident,
+            dynamically_addressable,
+            scopes,
+        })
+    }
+}
+
+fn runtime_resource_residency_class_report(
+    lifetime: &str,
+    reason: &str,
+    group_ids: &BTreeSet<&str>,
+    group_bytes: &BTreeMap<&str, usize>,
+    concrete_resource_count: usize,
+    templates: &[&CompiledPartitionTemplate],
+) -> io::Result<crate::RuntimeResourceResidencyClassInspectionReport> {
+    let template_unit_count = templates
+        .iter()
+        .try_fold(0usize, |total, template| {
+            total.checked_add(template.partition_count).ok_or_else(|| {
+                invalid_residency_error(
+                    "compiled residency inspection unit count overflowed",
+                )
+            })
+        })?;
+    let template_resource_count =
+        templates.iter().try_fold(0usize, |total, template| {
+            let member_count = template
+                .partition_count
+                .checked_mul(template.member_templates.len())
+                .ok_or_else(|| {
+                    invalid_residency_error(
+                        "compiled residency inspection resource count overflowed",
+                    )
+                })?;
+            total.checked_add(member_count).ok_or_else(|| {
+                invalid_residency_error(
+                    "compiled residency inspection resource count overflowed",
+                )
+            })
+        })?;
+    let group_payload_bytes =
+        group_ids.iter().try_fold(0usize, |total, group_id| {
+            total
+                .checked_add(
+                    group_bytes.get(group_id).copied().ok_or_else(
+                        || {
+                            invalid_residency_error(
+                                "compiled residency inspection is missing group bytes",
+                            )
+                        },
+                    )?,
+                )
+                .ok_or_else(|| {
+                    invalid_residency_error(
+                        "compiled residency inspection byte count overflowed",
+                    )
+                })
+        })?;
+    let template_payload_bytes =
+        templates.iter().try_fold(0usize, |total, template| {
+            let unit_bytes = template
+                .member_templates
+                .iter()
+                .flat_map(|member| &member.range_templates)
+                .try_fold(0usize, |unit_total, range| {
+                    unit_total.checked_add(range.byte_count).ok_or_else(
+                        || {
+                            invalid_residency_error(
+                                "compiled residency inspection byte count overflowed",
+                            )
+                        },
+                    )
+                })?;
+            total
+                .checked_add(
+                    unit_bytes
+                        .checked_mul(template.partition_count)
+                        .ok_or_else(|| {
+                            invalid_residency_error(
+                                "compiled residency inspection byte count overflowed",
+                            )
+                        })?,
+                )
+                .ok_or_else(|| {
+                    invalid_residency_error(
+                        "compiled residency inspection byte count overflowed",
+                    )
+                })
+        })?;
+    Ok(crate::RuntimeResourceResidencyClassInspectionReport {
+        lifetime: lifetime.to_string(),
+        reason: reason.to_string(),
+        unit_count: group_ids
+            .len()
+            .checked_add(template_unit_count)
+            .ok_or_else(|| {
+                invalid_residency_error(
+                    "compiled residency inspection unit count overflowed",
+                )
+            })?,
+        resource_count: concrete_resource_count
+            .checked_add(template_resource_count)
+            .ok_or_else(|| {
+                invalid_residency_error(
+                    "compiled residency inspection resource count overflowed",
+                )
+            })?,
+        maximum_payload_bytes: group_payload_bytes
+            .checked_add(template_payload_bytes)
+            .ok_or_else(|| {
+                invalid_residency_error(
+                    "compiled residency inspection byte count overflowed",
+                )
+            })?,
+    })
 }
 
 impl ResourceResidencyState {

@@ -14,6 +14,7 @@ fn render_help(frame: &mut Frame<'_>) {
         Line::raw("Ctrl+O        open/replace model"),
         Line::raw("Ctrl+M        enable/disable mouse capture"),
         Line::raw("Ctrl+R        refresh runtime devices"),
+        Line::raw("R             toggle eager/demand-retained residency"),
         Line::raw("F1            toggle this help"),
         Line::raw("q / Ctrl+C    quit when not editing text"),
         Line::raw(""),

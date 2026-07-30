@@ -128,7 +128,17 @@ fn per_device_residency_single_flight_shares_one_atomic_publication() {
     let stats = manager.statistics().unwrap();
     assert_eq!(stats.resident_group_count, 1);
     assert_eq!(stats.dynamic_resident_bytes, 256);
+    assert_eq!(stats.high_water_resident_group_count, 1);
+    assert_eq!(stats.high_water_dynamic_resident_bytes, 256);
     assert_eq!(stats.single_flight_join_count, CALLER_COUNT as u64 - 1);
+    let snapshot = manager.snapshot().unwrap();
+    assert_eq!(snapshot.statistics, stats);
+    assert_eq!(snapshot.directory.len(), 1);
+    assert_eq!(
+        snapshot.directory[0].state,
+        ResourceResidencyState::Resident
+    );
+    assert_eq!(snapshot.directory[0].byte_count, 256);
     assert_eq!(manager.directory().unwrap()[0].owner_count, CALLER_COUNT);
     drop(leases);
     for caller_index in 0..CALLER_COUNT {
@@ -136,7 +146,10 @@ fn per_device_residency_single_flight_shares_one_atomic_publication() {
             .unload_owner(&owner(&format!("graph-{caller_index}")))
             .unwrap();
     }
-    assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 0);
+    let unloaded = manager.statistics().unwrap();
+    assert_eq!(unloaded.dynamic_resident_bytes, 0);
+    assert_eq!(unloaded.high_water_dynamic_resident_bytes, 256);
+    assert_eq!(unloaded.high_water_resident_group_count, 1);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 

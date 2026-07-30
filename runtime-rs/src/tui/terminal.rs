@@ -203,6 +203,7 @@ fn action_from_key(app: &App, key: KeyEvent) -> Option<AppAction> {
         },
         None => match key.code {
             KeyCode::Char('q') if !ctrl && !alt => Some(AppAction::Quit),
+            KeyCode::Char('r') if !ctrl && !alt => Some(AppAction::ToggleResourceResidencyPolicy),
             KeyCode::Left if alt => Some(AppAction::MoveSelected(-1)),
             KeyCode::Right if alt => Some(AppAction::MoveSelected(1)),
             KeyCode::Left | KeyCode::Char('h') => Some(AppAction::SelectPreviousNode),
@@ -306,6 +307,11 @@ mod tests {
             action_from_key(&app, left),
             Some(AppAction::SelectPreviousNode)
         );
+        let residency = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(&app, residency),
+            Some(AppAction::ToggleResourceResidencyPolicy)
+        );
         app.focus = FocusRegion::Sequence;
         assert_eq!(
             action_from_key(&app, left),
@@ -313,6 +319,10 @@ mod tests {
                 motion: CursorMotion::Left,
                 selecting: false
             })
+        );
+        assert_eq!(
+            action_from_key(&app, residency),
+            Some(AppAction::InsertText("r".to_string()))
         );
     }
 

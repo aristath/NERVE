@@ -64,10 +64,11 @@ fn run_placed_chat(
         })
         .collect::<Vec<_>>();
     println!(
-        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, setup_ms={:.3}",
+        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, residency_policy={}, setup_ms={:.3}",
         stream_snapshot.device_ids,
         mounted_device_bindings,
         stream_snapshot.context_window_activations,
+        args.resource_residency_policy.as_runtime_name(),
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
 
@@ -316,6 +317,18 @@ fn run_placed_chat(
             );
             let generated_token_digest =
                 token_id_digest(&transaction.generated_token_ids);
+            let resource_residency = engine
+                .stream("main")
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "placed chat engine lost its main stream",
+                    )
+                })?
+                .package()
+                .compiled_resource_residency_report(
+                    &cumulative_selection_coverage,
+                )?;
             Ok(RuntimeChatTurn {
                 generated_token_ids: transaction.generated_token_ids,
                 canonical_committed_token_ids:
@@ -359,6 +372,7 @@ fn run_placed_chat(
                 selection_coverage,
                 cumulative_selection_coverage,
                 transport_edges,
+                resource_residency,
             })
         },
     )
@@ -432,6 +446,19 @@ fn execute_placed_prompt_run(
         .selection_telemetry_snapshot()?;
     let selection_coverage =
         selection_after.delta_since(&selection_before)?.report();
+    let cumulative_selection_coverage = selection_after.report();
+    let resource_residency = engine
+        .stream("main")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "placed prompt engine lost its main stream",
+            )
+        })?
+        .package()
+        .compiled_resource_residency_report(
+            &cumulative_selection_coverage,
+        )?;
     let run_time_ns = elapsed_nanos_u64(run_start);
     let engine_run = submitted_run.engine_run;
     let prefill_activation_count = engine_run.prefill_activation_count;
@@ -559,6 +586,7 @@ fn execute_placed_prompt_run(
             decode_activation_count,
         ),
         selection_coverage,
+        resource_residency,
     })
 }
 
@@ -632,6 +660,9 @@ fn print_placed_prompt_report(
         print_runtime_selection_coverage_stats(
             "selection_coverage",
             &report.selection_coverage,
+        );
+        print_runtime_resource_residency(
+            &report.resource_residency,
         );
         print_runtime_transport_edges(&report.transport.edges);
         print_speculative_profile(report);

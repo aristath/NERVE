@@ -225,6 +225,8 @@
                     },
                     implementations: Vec::new(),
                 },
+            resource_residency:
+                fixture_resource_residency_inspection(),
             available_devices: vec![RuntimeAvailableDevice {
                 device_id: "gpu0".to_string(),
                 backend: "vulkan_compute".to_string(),
@@ -341,6 +343,11 @@
             true
         );
         assert_eq!(payload["effective"]["components"][0]["component_id"], "layer_00");
+        assert_eq!(
+            payload["resource_residency"]["dynamically_addressable"]
+                ["unit_count"],
+            2
+        );
     }
 
     #[test]
@@ -367,6 +374,8 @@
                     },
                     implementations: Vec::new(),
                 },
+            resource_residency:
+                fixture_resource_residency_inspection(),
             compiled_topology: "series".to_string(),
             runtime_graph: RuntimeGraphControls {
                 default_device_id: None,
@@ -403,6 +412,10 @@
             serde_json::Value::Null
         );
         assert_eq!(payload["source_component_count"], 0);
+        assert_eq!(
+            payload["resource_residency"]["supported_policies"][0],
+            "demand-retained"
+        );
     }
 
     #[test]
@@ -840,6 +853,22 @@
             },
             sparse_moe: RuntimeSparseMoeWorkReport::default(),
             selection_coverage: RuntimeSelectionCoverageReport::default(),
+            resource_residency:
+                crate::VulkanCompiledResourceResidencyReport {
+                    schema:
+                        crate::VULKAN_COMPILED_RESOURCE_RESIDENCY_REPORT_SCHEMA
+                            .to_string(),
+                    policy: crate::ResourceResidencyPolicy::DemandRetained,
+                    totals:
+                        crate::VulkanCompiledResourceResidencyTotalsReport::default(),
+                    target:
+                        crate::VulkanCompiledResourceScopeCoverageReport {
+                            execution_scope: "target".to_string(),
+                            ..Default::default()
+                        },
+                    mtp: Vec::new(),
+                    stores: Vec::new(),
+                },
         };
         let benchmark_transport = RuntimePromptBenchmarkTransportTotalsReport {
             published_packet_count: 0,
@@ -942,10 +971,52 @@
         );
         assert_eq!(placed_payload["resident_feedback"]["planned_tick_count"], 7);
         assert_eq!(placed_payload["resident_feedback"]["discarded_tick_count"], 4);
+        assert_eq!(
+            placed_payload["resource_residency"]["policy"],
+            "demand_retained"
+        );
         assert_eq!(benchmark_payload["profile_runs"], 1);
         assert_eq!(benchmark_payload["run_time_ns"]["average"], 90.0);
         assert_eq!(
             benchmark_payload["transport_totals"]["direct_copy_byte_count"],
             4096
         );
+    }
+    fn fixture_resource_residency_inspection(
+    ) -> RuntimeResourceResidencyInspectionReport {
+        RuntimeResourceResidencyInspectionReport {
+            schema:
+                "nerve.runtime_resource_residency_inspection.v1"
+                    .to_string(),
+            supported_policies: vec![
+                "demand-retained".to_string(),
+                "eager".to_string(),
+            ],
+            always_resident:
+                RuntimeResourceResidencyClassInspectionReport {
+                    lifetime: "always_resident".to_string(),
+                    reason: "required before execution".to_string(),
+                    unit_count: 1,
+                    resource_count: 1,
+                    maximum_payload_bytes: 8,
+                },
+            dynamically_addressable:
+                RuntimeResourceResidencyClassInspectionReport {
+                    lifetime: "dynamic".to_string(),
+                    reason: "selected at a checkpoint".to_string(),
+                    unit_count: 2,
+                    resource_count: 2,
+                    maximum_payload_bytes: 16,
+                },
+            scopes: vec![
+                RuntimeResourceResidencyScopeInspectionReport {
+                    execution_scope: "target".to_string(),
+                    component_count: 1,
+                    selector_count: 1,
+                    checkpoint_count: 1,
+                    addressable_unit_count: 2,
+                    maximum_payload_bytes: 16,
+                },
+            ],
+        }
     }

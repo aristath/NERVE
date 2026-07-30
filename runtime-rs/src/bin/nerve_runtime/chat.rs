@@ -29,6 +29,7 @@ struct RuntimeChatTurn {
     selection_post_generation_cumulative: RuntimeSelectionCoverageReport,
     selection_coverage: RuntimeSelectionCoverageReport,
     cumulative_selection_coverage: RuntimeSelectionCoverageReport,
+    resource_residency: VulkanCompiledResourceResidencyReport,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +261,9 @@ where
                 &turn.cumulative_selection_coverage,
             );
             print_runtime_transport_edges(&turn.transport_edges);
+            print_runtime_resource_residency(
+                &turn.resource_residency,
+            );
             println!("determinism:");
             println!(
                 "  generated_tokens={}",
@@ -278,6 +282,100 @@ where
             Ok(true)
         }
         Err(error) => Err(error),
+    }
+}
+
+fn print_runtime_resource_residency(
+    report: &VulkanCompiledResourceResidencyReport,
+) {
+    let totals = &report.totals;
+    println!("resource_residency:");
+    println!(
+        "  policy={} physical_stores={} device_bytes(initial/current/high_water/maximum)={}/{}/{}/{}",
+        report.policy.as_runtime_name(),
+        totals.physical_store_count,
+        totals.initial_device_bytes,
+        totals.current_device_bytes,
+        totals.high_water_device_bytes,
+        totals.maximum_device_bytes
+    );
+    println!(
+        "  payload_bytes(initial/current/high_water/maximum)={}/{}/{}/{} units(initial/current/high_water/addressable)={}/{}/{}/{}",
+        totals.initial_payload_bytes,
+        totals.current_payload_bytes,
+        totals.high_water_payload_bytes,
+        totals.maximum_payload_bytes,
+        totals.initial_resident_unit_count,
+        totals.resident_unit_count,
+        totals.high_water_resident_unit_count,
+        totals.addressable_unit_count
+    );
+    println!(
+        "  fixed_device_bytes(always_parameters/runtime_working_set/resource_metadata)={}/{}/{} transfer_staging_host_bytes={}",
+        totals.always_resident_parameter_bytes,
+        totals.runtime_working_set_device_bytes,
+        totals.metadata_device_bytes,
+        totals.transfer_staging_host_bytes
+    );
+    println!(
+        "  gpu_accesses(selections/resident_hits/misses)={}/{}/{}",
+        totals.gpu_selection_count,
+        totals.gpu_resident_hit_count,
+        totals.gpu_miss_count,
+    );
+    println!(
+        "  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={}/{}/{}/{}/{}/{}",
+        totals.residency_directory_hit_count,
+        totals.residency_load_required_count,
+        totals.deduplicated_load_count,
+        totals.successful_load_count,
+        totals.failed_load_count,
+        totals.cancelled_load_count
+    );
+    println!(
+        "  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={}/{}/{}/{:.3}/{:.3}/{:.3}",
+        totals.physical_read_count,
+        totals.physical_bytes_read,
+        totals.uploaded_bytes,
+        nanos_to_millis(totals.read_time_ns),
+        nanos_to_millis(totals.upload_time_ns),
+        nanos_to_millis(totals.blocking_time_ns)
+    );
+    println!(
+        "  target components={} units={}/{} gpu_accesses={}/{}/{}",
+        report.target.component_count,
+        report.target.resident_unit_count,
+        report.target.addressable_unit_count,
+        report.target.gpu_selection_count,
+        report.target.gpu_resident_hit_count,
+        report.target.gpu_miss_count,
+    );
+    for scope in &report.mtp {
+        println!(
+            "  mtp scope={} components={} units={}/{} gpu_accesses={}/{}/{}",
+            scope.execution_scope,
+            scope.component_count,
+            scope.resident_unit_count,
+            scope.addressable_unit_count,
+            scope.gpu_selection_count,
+            scope.gpu_resident_hit_count,
+            scope.gpu_miss_count,
+        );
+    }
+    for store in &report.stores {
+        println!(
+            "  store={} physical_device={} logical_devices={:?} device_bytes={}/{}/{} units={}/{} loading={} failed={}",
+            store.store_id,
+            store.physical_device_id,
+            store.logical_device_ids,
+            store.current_device_bytes,
+            store.high_water_device_bytes,
+            store.maximum_device_bytes,
+            store.resident_unit_count,
+            store.addressable_unit_count,
+            store.loading_unit_count,
+            store.failed_unit_count
+        );
     }
 }
 

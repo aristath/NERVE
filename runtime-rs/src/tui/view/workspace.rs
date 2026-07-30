@@ -104,6 +104,28 @@ fn render_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         app.hit_map.insert(button, HitTarget::OpenModel);
     }
+    if app.editor.is_some() && inner.height > 1 {
+        let label = format!(
+            "[ residency: {} ]",
+            app.resource_residency_policy.as_runtime_name()
+        );
+        let button_width =
+            u16::try_from(label.width()).unwrap_or(u16::MAX).min(inner.width);
+        let button = Rect::new(
+            inner.right().saturating_sub(button_width),
+            inner.y.saturating_add(1),
+            button_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(label)
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(COOL)),
+            button,
+        );
+        app.hit_map
+            .insert(button, HitTarget::ResourceResidencyPolicy);
+    }
 }
 
 fn render_sequence(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -372,7 +394,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 "Type/paste sequence · Shift+arrows select · Tab graph · Ctrl+O model · F1 help"
             }
             FocusRegion::Graph => {
-                "←/→ select · Enter edit · Ctrl+D duplicate · Del remove · Alt+←/→ reorder · Tab sequence"
+                "←/→ select · Enter edit · R residency · Ctrl+D duplicate · Del remove · Alt+←/→ reorder · Tab sequence"
             }
         }
     };

@@ -138,6 +138,7 @@ pub struct RuntimeTopologyReport {
     pub config_path: String,
     pub tokenizer: Value,
     pub implementation_catalog: crate::RuntimeImplementationCatalogReport,
+    pub resource_residency: RuntimeResourceResidencyInspectionReport,
     pub available_devices: Vec<RuntimeAvailableDevice>,
     pub compiled: RuntimeCompiledExecutionGraphSummary,
     pub runtime_graph_controls: RuntimeGraphControls,
@@ -155,6 +156,7 @@ pub struct RuntimePackageInspectionReport {
     pub config_path: String,
     pub tokenizer: Value,
     pub implementation_catalog: crate::RuntimeImplementationCatalogReport,
+    pub resource_residency: RuntimeResourceResidencyInspectionReport,
     pub compiled_topology: String,
     pub runtime_graph: RuntimeGraphControls,
     pub device_bindings: RuntimeDeviceBindings,
@@ -162,6 +164,34 @@ pub struct RuntimePackageInspectionReport {
     pub source_component_count: usize,
     pub source_components: Vec<RuntimeSourceComponent>,
     pub available_devices: Vec<RuntimeAvailableDevice>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeResourceResidencyClassInspectionReport {
+    pub lifetime: String,
+    pub reason: String,
+    pub unit_count: usize,
+    pub resource_count: usize,
+    pub maximum_payload_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeResourceResidencyScopeInspectionReport {
+    pub execution_scope: String,
+    pub component_count: usize,
+    pub selector_count: usize,
+    pub checkpoint_count: usize,
+    pub addressable_unit_count: usize,
+    pub maximum_payload_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeResourceResidencyInspectionReport {
+    pub schema: String,
+    pub supported_policies: Vec<String>,
+    pub always_resident: RuntimeResourceResidencyClassInspectionReport,
+    pub dynamically_addressable: RuntimeResourceResidencyClassInspectionReport,
+    pub scopes: Vec<RuntimeResourceResidencyScopeInspectionReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,4 +588,6 @@ pub struct RuntimePlacedPromptRunReport {
     pub resident_feedback: RuntimeFeedbackExecutionReport,
     pub sparse_moe: RuntimeSparseMoeWorkReport,
     pub selection_coverage: RuntimeSelectionCoverageReport,
+    pub resource_residency:
+        crate::VulkanCompiledResourceResidencyReport,
 }

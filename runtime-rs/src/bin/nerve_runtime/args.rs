@@ -27,6 +27,7 @@ use nerve_runtime::{
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageDeviceSlice,
     VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
     VulkanResidentPlacedPrefixStateCacheStats,
+    VulkanCompiledResourceResidencyReport,
     VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
     VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats,

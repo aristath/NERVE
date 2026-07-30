@@ -498,6 +498,18 @@ impl VulkanDemandResidencyDispatchChain {
                     ))
                 })?;
             let gate = &self.gates[gate_index];
+            context
+                .store
+                .record_gpu_gate_misses(
+                    &gate.selector_id,
+                    missing.requests.len(),
+                )
+                .map_err(|error| {
+                    demand_dispatch_error(format!(
+                        "failed to record GPU residency misses for selector {:?}: {error}",
+                        gate.selector_id
+                    ))
+                })?;
             let resource_indices = missing
                 .requests
                 .iter()

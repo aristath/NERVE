@@ -32,6 +32,8 @@ fn inspect_runtime_topology(
     let implementation_catalog = manifest
         .implementation_catalog(manifest_dir)?
         .report();
+    let resource_residency =
+        manifest.resource_residency.inspection_report()?;
     let payload = RuntimeTopologyReport {
         ok: true,
         schema: RUNTIME_TOPOLOGY_SCHEMA.to_string(),
@@ -42,6 +44,7 @@ fn inspect_runtime_topology(
         config_path: manifest.config_path.clone(),
         tokenizer: serde_json::to_value(&manifest.tokenizer)?,
         implementation_catalog,
+        resource_residency,
         available_devices,
         compiled: RuntimeCompiledExecutionGraphSummary {
             topology: manifest.circuit_graph.topology.clone(),
@@ -91,6 +94,9 @@ fn inspect_runtime_topology(
                 .edge_routes
                 .cross_physical_target_edge_count
         );
+        print_resource_residency_inspection(
+            &payload.resource_residency,
+        );
     }
 
     Ok(())
@@ -116,6 +122,8 @@ fn inspect_package(
     let implementation_catalog = manifest
         .implementation_catalog(manifest_dir)?
         .report();
+    let resource_residency =
+        manifest.resource_residency.inspection_report()?;
     let source_component_count = source_components.len();
     let payload = RuntimePackageInspectionReport {
         ok: true,
@@ -126,6 +134,7 @@ fn inspect_package(
         config_path: manifest.config_path.clone(),
         tokenizer: serde_json::to_value(&manifest.tokenizer)?,
         implementation_catalog,
+        resource_residency,
         compiled_topology: manifest.circuit_graph.topology.clone(),
         runtime_graph: runtime_graph_report(args),
         device_bindings: runtime_device_bindings_report(args, &[], &compute_devices),
@@ -141,6 +150,9 @@ fn inspect_package(
         println!("package_id={}", payload.package_id);
         println!("source_component_count={}", payload.source_component_count);
         println!("compiled_topology={}", payload.compiled_topology);
+        print_resource_residency_inspection(
+            &payload.resource_residency,
+        );
         for component in &payload.source_components {
             println!(
                 "{} {} kernels={} state_ports={}",
@@ -150,6 +162,40 @@ fn inspect_package(
     }
 
     Ok(())
+}
+
+fn print_resource_residency_inspection(
+    report: &nerve_runtime::RuntimeResourceResidencyInspectionReport,
+) {
+    println!(
+        "resource_residency supported_policies={:?}",
+        report.supported_policies
+    );
+    println!(
+        "  always_resident units={} resources={} maximum_payload_bytes={} reason={}",
+        report.always_resident.unit_count,
+        report.always_resident.resource_count,
+        report.always_resident.maximum_payload_bytes,
+        report.always_resident.reason
+    );
+    println!(
+        "  dynamically_addressable units={} resources={} maximum_payload_bytes={} reason={}",
+        report.dynamically_addressable.unit_count,
+        report.dynamically_addressable.resource_count,
+        report.dynamically_addressable.maximum_payload_bytes,
+        report.dynamically_addressable.reason
+    );
+    for scope in &report.scopes {
+        println!(
+            "  scope={} components={} selectors={} checkpoints={} units={} maximum_payload_bytes={}",
+            scope.execution_scope,
+            scope.component_count,
+            scope.selector_count,
+            scope.checkpoint_count,
+            scope.addressable_unit_count,
+            scope.maximum_payload_bytes
+        );
+    }
 }
 
 fn source_components_report(manifest: &VulkanResidentModelPackageManifest) -> Vec<RuntimeSourceComponent> {

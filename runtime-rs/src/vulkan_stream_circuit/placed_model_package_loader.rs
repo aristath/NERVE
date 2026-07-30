@@ -746,6 +746,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 VulkanCompiledResourceDeviceStore::new(
                     physical_device,
                     store_id.clone(),
+                    physical_device_id.clone(),
+                    logical_device_ids.iter().cloned().collect(),
                     manifest_dir,
                     Arc::clone(&compiled_resource_contract),
                     Arc::clone(&compiled_resource_layout),
@@ -754,6 +756,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     safe_dynamic_bytes,
                     physical_parameters.staging_headroom_bytes,
                     maximum_ranges_per_group,
+                    physical_parameters.always_resident_bytes,
+                    working_set_bytes,
+                    metadata_bytes,
                 )
                 .map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -826,6 +831,13 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         )
                     })?;
             }
+            store.mark_mount_complete().map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to seal initial compiled resource state for physical slices {logical_device_ids:?}: {error}"
+                    )),
+                )
+            })?;
             let executing_component_ids = components_by_scope
                 .into_values()
                 .flatten()

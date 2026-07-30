@@ -99,6 +99,7 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::AppAction;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -138,6 +139,13 @@ mod tests {
             assert!(rendered.contains("STREAM GRAPH"));
             assert!(rendered.contains("EXECUTION GRAPH"));
             assert!(rendered.contains("ZERO-BASED"));
+            if width == 80 {
+                assert!(rendered.contains("residency: eager"));
+                assert_eq!(
+                    app.action_at(width - 1, 1),
+                    Some(AppAction::ToggleResourceResidencyPolicy)
+                );
+            }
         }
     }
 
