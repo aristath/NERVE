@@ -151,8 +151,24 @@ impl VulkanDistributedExecutionPlan {
             .iter()
             .find(|(_, was_planned)| !**was_planned)
         {
+            let prepared_dispatches = prepared_plans
+                .iter()
+                .flat_map(|(owner_device_id, plan)| {
+                    plan.dispatches.iter().filter_map(move |dispatch| {
+                        (dispatch.component_id == *component_id).then(|| {
+                            format!(
+                                "{}.{}:{}@{}",
+                                dispatch.component_id,
+                                dispatch.node_id,
+                                dispatch.op,
+                                owner_device_id,
+                            )
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
             return Err(VulkanDistributedPlanError(format!(
-                "requested internal sharding for component {component_id:?} has no compatible distributable dispatch"
+                "requested internal sharding for component {component_id:?} has no compatible distributable dispatch; prepared dispatches for that component: {prepared_dispatches:?}"
             )));
         }
 
