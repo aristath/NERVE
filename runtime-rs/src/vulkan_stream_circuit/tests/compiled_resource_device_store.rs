@@ -96,7 +96,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             selection_signal: "selected".to_string(),
             encoding: CompiledResourceSelectionEncoding {
                 element_type: CompiledResourceSelectionElementType::U32,
-                selection_count_per_activation: 1,
+                selection_count_per_activation: 2,
                 index_shift: 0,
                 index_mask: 0xffff,
             },
@@ -464,28 +464,54 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             );
             continue;
         }
-        cycle_store
-            .load_selector_resource(
-                &device,
-                &selector_id,
-                0,
-                DeviceResourceResidencyOwnerId::new(format!(
-                    "cycle-{cycle_index}"
-                ))
-                .unwrap(),
-            )
-            .unwrap();
+        if cycle_index == 1 {
+            reset_vulkan_resident_execution_counters();
+            assert_eq!(
+                cycle_store
+                    .load_selector_resources(
+                        &device,
+                        &selector_id,
+                        &[0, 1],
+                        DeviceResourceResidencyOwnerId::new(
+                            "batched-cycle",
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                2
+            );
+            let counters = vulkan_resident_execution_counters();
+            assert_eq!(counters.resident_copy_queue_submits, 2);
+            assert_eq!(counters.resident_copy_waits, 2);
+        } else {
+            cycle_store
+                .load_selector_resource(
+                    &device,
+                    &selector_id,
+                    0,
+                    DeviceResourceResidencyOwnerId::new(format!(
+                        "cycle-{cycle_index}"
+                    ))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let expected_payload_bytes =
+            if cycle_index == 1 { 16 } else { 8 };
         assert_eq!(
             cycle_store
                 .residency_report()
                 .unwrap()
                 .current_payload_bytes,
-            8
+            expected_payload_bytes
         );
         assert_eq!(cycle_store.backing_store.retained_payload_bytes(), 0);
         let cycle_release = cycle_store.unload().unwrap();
-        assert_eq!(cycle_release.group_count, 1);
-        assert_eq!(cycle_release.byte_count, 8);
+        assert_eq!(
+            cycle_release.group_count,
+            if cycle_index == 1 { 2 } else { 1 }
+        );
+        assert_eq!(cycle_release.byte_count, expected_payload_bytes);
         drop(cycle_store);
         assert_eq!(
             compiled_store_worker_thread_count(),

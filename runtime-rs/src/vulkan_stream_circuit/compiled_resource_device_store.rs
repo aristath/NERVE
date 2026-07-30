@@ -42,6 +42,12 @@ struct VulkanCompiledResourceStoreLoadGuard<'a> {
     store: &'a VulkanCompiledResourceDeviceStore,
 }
 
+struct VulkanCompiledResourceLoadPlan {
+    descriptor: DeviceResourceGroupDescriptor,
+    resolved: ResolvedCompiledResourceGroup,
+    resource_slots: Vec<usize>,
+}
+
 pub struct VulkanCompiledResourceDeviceStore {
     device_id: String,
     physical_device_id: String,
@@ -62,6 +68,7 @@ pub struct VulkanCompiledResourceDeviceStore {
     runtime_working_set_device_bytes: usize,
     metadata_device_bytes: usize,
     transfer_staging_host_bytes: usize,
+    maximum_load_wave_group_count: usize,
     coverage_index: Vec<VulkanCompiledResourceComponentCoverageIndex>,
     instrumentation: VulkanCompiledResourceStoreInstrumentation,
     lifecycle: std::sync::Mutex<VulkanCompiledResourceStoreLifecycle>,
@@ -120,6 +127,26 @@ impl VulkanCompiledResourceDeviceStore {
                 &contract,
                 &allowed_selector_ids,
             )?;
+        let maximum_load_wave_group_count = contract
+            .selectors
+            .iter()
+            .filter(|selector| {
+                allowed_selector_ids.contains(&selector.id)
+            })
+            .map(|selector| {
+                selector.encoding.selection_count_per_activation
+            })
+            .max()
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled device-resource store has no allowed selector load wave",
+                )
+            })?;
+        if maximum_load_wave_group_count == 0 {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled device-resource store selector load wave is empty",
+            ));
+        }
         let maximum_addressable_resource_count = layout
             .selectors
             .iter()
@@ -192,8 +219,15 @@ impl VulkanCompiledResourceDeviceStore {
                     "compiled resource address-table capacity overflowed",
                 )
             })?;
-        let staging_byte_capacity =
-            maximum_group_byte_count.max(address_table_byte_count);
+        let maximum_load_wave_payload_bytes = maximum_group_byte_count
+            .checked_mul(maximum_load_wave_group_count)
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource load-wave payload capacity overflowed",
+                )
+            })?;
+        let staging_byte_capacity = maximum_load_wave_payload_bytes
+            .max(address_table_byte_count);
         let mut transfer = device
             .create_resident_transfer_stream(2, staging_byte_capacity)
             .map_err(compiled_device_store_vulkan_error)?;
@@ -213,13 +247,6 @@ impl VulkanCompiledResourceDeviceStore {
             .map_err(compiled_device_store_vulkan_error)?,
         )
         .map_err(compiled_device_store_vulkan_error)?;
-        let retained_payload_bytes = maximum_group_byte_count
-            .checked_mul(2)
-            .ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled resource retained host-memory capacity overflowed",
-                )
-            })?;
         let package_root = package_root.into();
         let coverage_index = compiled_resource_component_coverage_index(
             &contract,
@@ -229,10 +256,12 @@ impl VulkanCompiledResourceDeviceStore {
             package_root.clone(),
             CompiledResourceBackingStoreLimits {
                 worker_count: 2,
-                queued_request_capacity: 2,
+                queued_request_capacity:
+                    maximum_load_wave_group_count,
                 maximum_ranges_per_group,
                 maximum_logical_bytes_per_group: maximum_group_byte_count,
-                maximum_retained_payload_bytes: retained_payload_bytes,
+                maximum_retained_payload_bytes:
+                    maximum_load_wave_payload_bytes,
                 maximum_coalesced_read_bytes: maximum_group_byte_count,
                 maximum_coalescing_gap_bytes: 64 * 1024,
             },
@@ -284,6 +313,7 @@ impl VulkanCompiledResourceDeviceStore {
                         "compiled resource transfer staging byte count overflowed",
                     )
                 })?,
+            maximum_load_wave_group_count,
             coverage_index,
             instrumentation:
                 VulkanCompiledResourceStoreInstrumentation::default(),
@@ -354,194 +384,311 @@ impl VulkanCompiledResourceDeviceStore {
         resource_index: usize,
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
-        let _load = self.begin_load_operation()?;
-        self.load_selector_resource_while_active(
+        self.load_selector_resources(
             device,
             selector_id,
-            resource_index,
+            &[resource_index],
+            owner,
+        )
+        .map(|_| ())
+    }
+
+    pub fn load_selector_resources(
+        &self,
+        device: &VulkanComputeDevice,
+        selector_id: &str,
+        resource_indices: &[usize],
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let _load = self.begin_load_operation()?;
+        self.load_selector_resources_while_active(
+            device,
+            selector_id,
+            resource_indices,
             owner,
         )
     }
 
-    fn load_selector_resource_while_active(
+    fn load_selector_resources_while_active(
         &self,
         device: &VulkanComputeDevice,
         selector_id: &str,
-        resource_index: usize,
+        resource_indices: &[usize],
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        if resource_indices.is_empty() {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource load batch is empty",
+            ));
+        }
+        let mut plans_by_group = BTreeMap::new();
+        for resource_index in resource_indices {
+            let resolved =
+                self.resolve_selector_resource(selector_id, *resource_index)?;
+            let descriptor =
+                DeviceResourceGroupDescriptor::from_resolved(&resolved)
+                    .map_err(|error| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "compiled resource descriptor is invalid: {error}"
+                        ))
+                    })?;
+            let resource_slots = self
+                .layout
+                .resource_slots_for_ids(&descriptor.resource_ids)
+                .map_err(|error| {
+                    VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "compiled resource address layout is invalid: {error}"
+                    ))
+                })?;
+            let plan = VulkanCompiledResourceLoadPlan {
+                descriptor: descriptor.clone(),
+                resolved,
+                resource_slots: resource_slots.clone(),
+            };
+            if let Some(existing) =
+                plans_by_group.insert(descriptor.id.clone(), plan)
+                && (existing.descriptor != descriptor
+                    || existing.resource_slots != resource_slots)
+            {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "one compiled resource load batch maps a content identity to conflicting resources or address slots",
+                ));
+            }
+        }
+        let plans = plans_by_group.into_values().collect::<Vec<_>>();
+        for wave in plans.chunks(self.maximum_load_wave_group_count) {
+            self.load_compiled_resource_wave(device, wave, owner.clone())?;
+        }
+        Ok(plans.len())
+    }
+
+    fn load_compiled_resource_wave(
+        &self,
+        device: &VulkanComputeDevice,
+        plans: &[VulkanCompiledResourceLoadPlan],
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
-        let resolved = self.resolve_selector_resource(
-            selector_id,
-            resource_index,
-        )?;
-        let descriptor =
-            DeviceResourceGroupDescriptor::from_resolved(&resolved).map_err(
-                |error| {
-                    VulkanCompiledResourceDeviceStoreError::new(format!(
-                        "compiled resource descriptor is invalid: {error}"
-                    ))
-                },
-            )?;
-        let resource_slots = self
-            .layout
-            .resource_slots_for_ids(&descriptor.resource_ids)
-            .map_err(|error| {
-                VulkanCompiledResourceDeviceStoreError::new(error.to_string())
-            })?;
-        match self
+        let requests = self
             .manager
-            .request(descriptor.clone(), owner)
-            .map_err(compiled_device_store_residency_error)?
-        {
-            DeviceResourceResidencyRequest::Resident(lease) => {
-                drop(lease);
-                Ok(())
-            }
-            DeviceResourceResidencyRequest::Pending(waiter) => {
-                let _blocking =
-                    VulkanCompiledResourceBlockingTimer::new(
-                        &self.instrumentation,
-                    );
-                waiter
-                    .wait()
-                    .map(drop)
-                    .map_err(compiled_device_store_residency_error)
-            }
-            DeviceResourceResidencyRequest::LoadRequired(permit) => {
-                let _blocking =
-                    VulkanCompiledResourceBlockingTimer::new(
-                        &self.instrumentation,
-                    );
-                let loaded = match self
-                    .backing_store
-                    .try_load(resolved)
-                    .and_then(CompiledResourceLoadTicket::wait)
-                {
-                    Ok(loaded) => loaded,
-                    Err(error) => {
-                        let residency_error = DeviceResourceResidencyError::new(
-                            DeviceResourceResidencyErrorKind::Failed,
-                            format!(
-                                "compiled resource backing-store load failed: {error}"
-                            ),
-                        );
-                        let _ = permit.fail(residency_error);
-                        return Err(
-                            VulkanCompiledResourceDeviceStoreError::new(
-                                format!(
-                                    "compiled resource backing-store load failed: {error}"
-                                ),
-                            ),
-                        );
-                    }
-                };
-                #[cfg(test)]
-                if self
-                    .fail_next_upload_as_device_lost
-                    .swap(false, std::sync::atomic::Ordering::AcqRel)
-                {
-                    let error = VulkanError(
-                        "injected compiled resource upload failure: ERROR_DEVICE_LOST"
-                            .to_string(),
-                    );
-                    self.record_terminal_device_failure(&error)?;
-                    let _ = permit.fail(
-                        DeviceResourceResidencyError::load_failed(
-                            error.to_string(),
-                        ),
-                    );
-                    return Err(compiled_device_store_vulkan_error(error));
+            .request_batch(
+                plans.iter().map(|plan| plan.descriptor.clone()),
+                owner,
+            )
+            .map_err(compiled_device_store_residency_error)?;
+        let mut pending = Vec::new();
+        let mut required = Vec::new();
+        for (plan, request) in plans.iter().zip(requests) {
+            match request {
+                DeviceResourceResidencyRequest::Resident(lease) => {
+                    drop(lease);
                 }
-                if let Err(error) =
-                    self.ensure_device_work_is_available()
-                {
-                    let _ = permit.fail(
-                        DeviceResourceResidencyError::load_failed(
-                            error.to_string(),
-                        ),
-                    );
-                    return Err(error);
+                DeviceResourceResidencyRequest::Pending(waiter) => {
+                    pending.push(waiter);
                 }
-                let mut state = self.address_state.lock().map_err(|_| {
-                    VulkanCompiledResourceDeviceStoreError::new(
-                        "compiled resource address state was poisoned",
-                    )
-                })?;
-                let VulkanCompiledResourceDeviceAddressState {
-                    transfer,
-                    address_table,
-                    publications,
-                } = &mut *state;
-                if publications.contains_key(&descriptor.id) {
-                    let residency_error = DeviceResourceResidencyError::new(
-                        DeviceResourceResidencyErrorKind::IdentityConflict,
-                        "compiled resource address publication exists without a resident directory entry",
-                    );
-                    let _ = permit.fail(residency_error);
-                    return Err(VulkanCompiledResourceDeviceStoreError::new(
-                        "compiled resource address publication exists without a resident directory entry",
-                    ));
-                }
-                let upload_started = Instant::now();
-                let upload = match upload_loaded_compiled_resource_group_to_stable_address_space(
-                    device,
-                    transfer,
-                    &self.arena,
-                    address_table,
-                    &descriptor,
-                    &loaded,
-                    &resource_slots,
-                    self.upload_alignment,
-                ) {
-                    Ok(upload) => upload,
-                    Err(error) => {
-                        if compiled_resource_vulkan_error_is_device_loss(&error)
-                        {
-                            self.record_terminal_device_failure(&error)?;
-                        }
-                        let residency_error = DeviceResourceResidencyError::new(
-                            DeviceResourceResidencyErrorKind::Failed,
-                            format!("compiled resource upload failed: {error}"),
-                        );
-                        let _ = permit.fail(residency_error);
-                        return Err(compiled_device_store_vulkan_error(error));
-                    }
-                };
-                let (group, publications) = upload.into_parts();
-                match permit.publish(group) {
-                    Ok(lease) => {
-                        state
-                            .publications
-                            .insert(descriptor.id.clone(), publications);
-                        drop(lease);
-                        let arena = self
-                            .arena
-                            .stats()
-                            .map_err(compiled_device_store_vulkan_error)?;
-                        self.instrumentation.record_upload(
-                            descriptor.byte_count,
-                            u64::try_from(
-                                upload_started.elapsed().as_nanos(),
-                            )
-                            .unwrap_or(u64::MAX),
-                            arena.committed_byte_capacity,
-                        );
-                        Ok(())
-                    }
-                    Err(error) => {
-                        let VulkanCompiledResourceDeviceAddressState {
-                            transfer,
-                            address_table,
-                            ..
-                        } = &mut *state;
-                        address_table
-                            .clear_group(transfer, &publications)
-                            .map_err(compiled_device_store_vulkan_error)?;
-                        Err(compiled_device_store_residency_error(error))
-                    }
+                DeviceResourceResidencyRequest::LoadRequired(permit) => {
+                    required.push((plan, permit));
                 }
             }
         }
+        let _blocking = (!pending.is_empty() || !required.is_empty()).then(
+            || VulkanCompiledResourceBlockingTimer::new(&self.instrumentation),
+        );
+        let mut submitted = Vec::with_capacity(required.len());
+        for (plan, permit) in required {
+            match self.backing_store.try_load(plan.resolved.clone()) {
+                Ok(ticket) => submitted.push((plan, permit, ticket)),
+                Err(error) => {
+                    let message =
+                        format!("compiled resource backing-store load failed: {error}");
+                    let _ = permit.fail(
+                        DeviceResourceResidencyError::load_failed(
+                            message.clone(),
+                        ),
+                    );
+                    return Err(
+                        VulkanCompiledResourceDeviceStoreError::new(message),
+                    );
+                }
+            }
+        }
+        let mut loaded = Vec::with_capacity(submitted.len());
+        for (plan, permit, ticket) in submitted {
+            match ticket.wait() {
+                Ok(group) => loaded.push((plan, permit, group)),
+                Err(error) => {
+                    let message =
+                        format!("compiled resource backing-store load failed: {error}");
+                    let _ = permit.fail(
+                        DeviceResourceResidencyError::load_failed(
+                            message.clone(),
+                        ),
+                    );
+                    return Err(
+                        VulkanCompiledResourceDeviceStoreError::new(message),
+                    );
+                }
+            }
+        }
+        if !loaded.is_empty() {
+            self.publish_loaded_compiled_resource_wave(device, loaded)?;
+        }
+        for waiter in pending {
+            waiter
+                .wait()
+                .map(drop)
+                .map_err(compiled_device_store_residency_error)?;
+        }
+        Ok(())
+    }
+
+    fn publish_loaded_compiled_resource_wave(
+        &self,
+        device: &VulkanComputeDevice,
+        loaded: Vec<(
+            &VulkanCompiledResourceLoadPlan,
+            DeviceResourceLoadPermit<VulkanResidentCompiledResource>,
+            LoadedCompiledResourceGroup,
+        )>,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        #[cfg(test)]
+        if self
+            .fail_next_upload_as_device_lost
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let error = VulkanError(
+                "injected compiled resource upload failure: ERROR_DEVICE_LOST"
+                    .to_string(),
+            );
+            self.record_terminal_device_failure(&error)?;
+            for (_, permit, _) in loaded {
+                let _ = permit.fail(
+                    DeviceResourceResidencyError::load_failed(
+                        error.to_string(),
+                    ),
+                );
+            }
+            return Err(compiled_device_store_vulkan_error(error));
+        }
+        if let Err(error) = self.ensure_device_work_is_available() {
+            for (_, permit, _) in loaded {
+                let _ = permit.fail(
+                    DeviceResourceResidencyError::load_failed(
+                        error.to_string(),
+                    ),
+                );
+            }
+            return Err(error);
+        }
+        let mut state = self.address_state.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource address state was poisoned",
+            )
+        })?;
+        for (plan, _, _) in &loaded {
+            if state.publications.contains_key(&plan.descriptor.id) {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource address publication exists without a resident directory entry",
+                ));
+            }
+        }
+        let upload_started = Instant::now();
+        let upload_requests = loaded
+            .iter()
+            .map(|(plan, _, loaded)| {
+                VulkanStableCompiledResourceUploadRequest {
+                    descriptor: &plan.descriptor,
+                    loaded,
+                    resource_slots: &plan.resource_slots,
+                }
+            })
+            .collect::<Vec<_>>();
+        let total_uploaded_bytes = loaded.iter().try_fold(
+            0usize,
+            |total, (plan, _, _)| {
+                total
+                    .checked_add(plan.descriptor.byte_count)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "compiled resource upload batch byte count overflowed",
+                        )
+                    })
+            },
+        )?;
+        let VulkanCompiledResourceDeviceAddressState {
+            transfer,
+            address_table,
+            publications: resident_publications,
+        } = &mut *state;
+        let uploads = match
+            upload_loaded_compiled_resource_groups_to_stable_address_space(
+                device,
+                transfer,
+                &self.arena,
+                address_table,
+                &upload_requests,
+                self.upload_alignment,
+            ) {
+                Ok(uploads) => uploads,
+                Err(error) => {
+                    if compiled_resource_vulkan_error_is_device_loss(&error) {
+                        self.record_terminal_device_failure(&error)?;
+                    }
+                    let message =
+                        format!("compiled resource upload failed: {error}");
+                    for (_, permit, _) in loaded {
+                        let _ = permit.fail(
+                            DeviceResourceResidencyError::load_failed(
+                                message.clone(),
+                            ),
+                        );
+                    }
+                    return Err(compiled_device_store_vulkan_error(error));
+                }
+            };
+        let mut staged = loaded
+            .into_iter()
+            .zip(uploads)
+            .map(|((plan, permit, _), upload)| {
+                let (group, publications) = upload.into_parts();
+                (
+                    plan.descriptor.id.clone(),
+                    permit,
+                    group,
+                    publications,
+                )
+            })
+            .collect::<Vec<_>>();
+        while !staged.is_empty() {
+            let (group_id, permit, group, publications) =
+                staged.remove(0);
+            match permit.publish(group) {
+                Ok(lease) => {
+                    resident_publications.insert(group_id, publications);
+                    drop(lease);
+                }
+                Err(error) => {
+                    let mut unpublished = publications;
+                    for (_, _, _, remaining_publications) in &staged {
+                        unpublished.extend(remaining_publications.iter().cloned());
+                    }
+                    address_table
+                        .clear_group(transfer, &unpublished)
+                        .map_err(compiled_device_store_vulkan_error)?;
+                    return Err(compiled_device_store_residency_error(error));
+                }
+            }
+        }
+        let arena = self
+            .arena
+            .stats()
+            .map_err(compiled_device_store_vulkan_error)?;
+        self.instrumentation.record_upload(
+            total_uploaded_bytes,
+            u64::try_from(upload_started.elapsed().as_nanos())
+                .unwrap_or(u64::MAX),
+            arena.committed_byte_capacity,
+        );
+        Ok(())
     }
 
     pub fn record_gpu_gate_misses(
@@ -597,11 +744,19 @@ impl VulkanCompiledResourceDeviceStore {
             })
             .collect::<Vec<_>>();
         let selected = self.unique_selector_resources(selected)?;
+        let mut resources_by_selector =
+            BTreeMap::<String, Vec<usize>>::new();
         for (selector_id, resource_index) in &selected {
-            self.load_selector_resource_while_active(
+            resources_by_selector
+                .entry(selector_id.clone())
+                .or_default()
+                .push(*resource_index);
+        }
+        for (selector_id, resource_indices) in resources_by_selector {
+            self.load_selector_resources_while_active(
                 device,
-                selector_id,
-                *resource_index,
+                &selector_id,
+                &resource_indices,
                 owner.clone(),
             )?;
         }
@@ -629,11 +784,19 @@ impl VulkanCompiledResourceDeviceStore {
             })
             .collect::<Vec<_>>();
         let selected = self.unique_selector_resources(selected)?;
+        let mut resources_by_selector =
+            BTreeMap::<String, Vec<usize>>::new();
         for (selector_id, resource_index) in &selected {
-            self.load_selector_resource_while_active(
+            resources_by_selector
+                .entry(selector_id.clone())
+                .or_default()
+                .push(*resource_index);
+        }
+        for (selector_id, resource_indices) in resources_by_selector {
+            self.load_selector_resources_while_active(
                 device,
-                selector_id,
-                *resource_index,
+                &selector_id,
+                &resource_indices,
                 owner.clone(),
             )?;
         }

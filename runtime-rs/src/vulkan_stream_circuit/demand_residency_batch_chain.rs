@@ -561,22 +561,22 @@ impl VulkanDemandResidencyBatchChain {
                 .iter()
                 .map(|request| request.resource_index)
                 .collect::<BTreeSet<_>>();
-            for resource_index in resource_indices {
-                context
-                    .store
-                    .load_selector_resource(
-                        device,
-                        &gate.selector_id,
-                        resource_index,
-                        context.owner.clone(),
-                    )
-                    .map_err(|error| {
-                        demand_batch_error(format!(
-                            "failed to load batch selector {:?} resource {resource_index} at checkpoint {:?}: {error}",
-                            gate.selector_id, gate.checkpoint_id
-                        ))
-                    })?;
-            }
+            let resource_indices =
+                resource_indices.into_iter().collect::<Vec<_>>();
+            context
+                .store
+                .load_selector_resources(
+                    device,
+                    &gate.selector_id,
+                    &resource_indices,
+                    context.owner.clone(),
+                )
+                .map_err(|error| {
+                    demand_batch_error(format!(
+                        "failed to load batch selector {:?} resources {resource_indices:?} at checkpoint {:?}: {error}",
+                        gate.selector_id, gate.checkpoint_id
+                    ))
+                })?;
             self.missing_queue
                 .acknowledge_through(missing.published_count)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
