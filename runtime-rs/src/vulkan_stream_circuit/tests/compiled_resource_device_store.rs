@@ -604,3 +604,246 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         );
     }
 }
+
+#[test]
+fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
+    let device =
+        selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let root =
+        crate::test_support::TempDir::new("optional_output_head_residency");
+    let payloads = [
+        &b"head0-w0"[..],
+        &b"head0-b0"[..],
+        &b"head1-w1"[..],
+        &b"head1-b1"[..],
+    ];
+    let artifact_bytes = payloads.concat();
+    fs::write(root.path().join("optional_heads.bin"), &artifact_bytes)
+        .unwrap();
+    let content_id = |byte: char| {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    };
+    let compatibility = CompiledResourceCompatibility {
+        device_api: "vulkan".to_string(),
+        storage_class: "storage_buffer".to_string(),
+        read_only: true,
+        required_features: vec!["buffer_device_address".to_string()],
+    };
+    let resource_ids = ['1', '2', '3', '4']
+        .into_iter()
+        .map(content_id)
+        .collect::<Vec<_>>();
+    let resources = payloads
+        .iter()
+        .enumerate()
+        .map(|(index, payload)| CompiledImmutableResource {
+            id: resource_ids[index].clone(),
+            lifetime: CompiledResourceLifetime::Dynamic,
+            ranges: vec![CompiledResourceByteRange {
+                artifact_path: "optional_heads.bin".to_string(),
+                byte_offset: index * 8,
+                byte_count: payload.len(),
+                alignment_bytes: 8,
+                integrity: CompiledResourceRangeIntegrity {
+                    algorithm: "sha256".to_string(),
+                    digest: Sha256::digest(payload)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                },
+            }],
+            dependencies: Vec::new(),
+            compatibility: compatibility.clone(),
+        })
+        .collect::<Vec<_>>();
+    let group_ids = vec![content_id('5'), content_id('6')];
+    let selector_id = content_id('7');
+    let contract = Arc::new(CompiledResourceResidencyContract {
+        schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
+        identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
+        state_machine_schema:
+            RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
+        supported_policies: vec![
+            ResourceResidencyPolicy::DemandRetained,
+            ResourceResidencyPolicy::Eager,
+        ],
+        resources,
+        atomic_groups: vec![
+            CompiledAtomicResidencyGroup {
+                id: group_ids[0].clone(),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                resource_ids: resource_ids[0..2].to_vec(),
+                dependencies: Vec::new(),
+            },
+            CompiledAtomicResidencyGroup {
+                id: group_ids[1].clone(),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                resource_ids: resource_ids[2..4].to_vec(),
+                dependencies: Vec::new(),
+            },
+        ],
+        partition_templates: Vec::new(),
+        bindings: Vec::new(),
+        selectors: vec![CompiledResourceSelector {
+            id: selector_id.clone(),
+            execution_scope: "target".to_string(),
+            component_id: "optional_output_head".to_string(),
+            node_id: "choose_head".to_string(),
+            domain_id: "output_heads".to_string(),
+            resource_count: 2,
+            selection_signal: "selected_head".to_string(),
+            encoding: CompiledResourceSelectionEncoding {
+                element_type: CompiledResourceSelectionElementType::U32,
+                selection_count_per_activation: 1,
+                index_shift: 0,
+                index_mask: 0xffff,
+            },
+            mapping: CompiledResourceSelectorMapping::GroupTable {
+                atomic_group_ids: group_ids,
+            },
+        }],
+        checkpoints: Vec::new(),
+    });
+    let inspection = contract.inspection_report().unwrap();
+    assert_eq!(inspection.dynamically_addressable.unit_count, 2);
+    assert_eq!(inspection.dynamically_addressable.resource_count, 4);
+    assert_eq!(
+        inspection.dynamically_addressable.maximum_payload_bytes,
+        32
+    );
+    let layout = Arc::new(
+        VulkanCompiledResourceAddressLayout::from_contract(&contract)
+            .unwrap(),
+    );
+    let VulkanCompiledSelectorAddressMapping::GroupTable {
+        resource_address_slots,
+        resource_address_slot_offsets,
+    } = &layout.selectors[0].mapping
+    else {
+        panic!("optional output heads did not compile to a group table");
+    };
+    assert_eq!(resource_address_slots, &[0, 1, 2, 3]);
+    assert_eq!(resource_address_slot_offsets, &[0, 2, 4]);
+
+    let store = VulkanCompiledResourceDeviceStore::new(
+        &device,
+        "amd-optional-head-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
+        root.path(),
+        Arc::clone(&contract),
+        Arc::clone(&layout),
+        BTreeSet::from([selector_id.clone()]),
+        32,
+        256 * 1024,
+        16,
+        2,
+        0,
+        64,
+        layout.address_table_byte_count().unwrap(),
+    )
+    .unwrap();
+    let buffers = store
+        .dynamic_buffers_for_components(
+            &device,
+            "target",
+            &BTreeSet::from(["optional_output_head".to_string()]),
+        )
+        .unwrap();
+    store.mark_mount_complete().unwrap();
+    let initial = store.residency_report().unwrap();
+    assert_eq!(initial.initial_payload_bytes, 0);
+    assert_eq!(initial.resident_unit_count, 0);
+
+    let selection =
+        Arc::new(device.create_resident_buffer(size_of::<u32>()).unwrap());
+    selection.write_bytes(&1u32.to_le_bytes()).unwrap();
+    let continuation =
+        Arc::new(device.create_conditional_resident_buffer(4).unwrap());
+    continuation.write_bytes(&1u32.to_le_bytes()).unwrap();
+    let gate = VulkanGpuResidencyGate::new(
+        &device,
+        &vulkan_gpu_residency_gate_spirv_words().unwrap(),
+        selection,
+        buffers.shared_address_table(),
+        buffers.address_table_slot_count(),
+        VulkanGpuResidencyMissQueue::new(&device, 1).unwrap(),
+        continuation,
+        VulkanGpuResidencyGateConfig {
+            maximum_selection_count: 1,
+            selection_count_per_lane: 1,
+            selection_lane_stride_words: 1,
+            selection_index_shift: 0,
+            selection_index_mask: 0xffff,
+            address_mapping:
+                VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots:
+                        resource_address_slots.clone(),
+                    resource_address_slot_offsets:
+                        resource_address_slot_offsets.clone(),
+                },
+        },
+    )
+    .unwrap();
+    let first_control = gate.push_constants(1, 17, true).unwrap();
+    device
+        .run_resident_kernel_dispatch(gate.dispatch(), &first_control)
+        .unwrap();
+    let missing = gate.missing_snapshot().unwrap();
+    assert_eq!(
+        missing.requests,
+        [VulkanGpuResidencyMissingRequest {
+            checkpoint_tag: 17,
+            resource_index: 1,
+        }]
+    );
+    assert_eq!(store.residency_report().unwrap().current_payload_bytes, 0);
+
+    store.record_gpu_gate_misses(&selector_id, 1).unwrap();
+    store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            1,
+            DeviceResourceResidencyOwnerId::new("optional-head-graph")
+                .unwrap(),
+        )
+        .unwrap();
+    gate.acknowledge_missing_through(missing.published_count)
+        .unwrap();
+    let second_control = gate.push_constants(1, 18, true).unwrap();
+    device
+        .run_resident_kernel_dispatch(gate.dispatch(), &second_control)
+        .unwrap();
+    assert!(gate.missing_snapshot().unwrap().requests.is_empty());
+
+    let report = store.residency_report().unwrap();
+    assert_eq!(report.current_payload_bytes, 16);
+    assert_eq!(report.resident_unit_count, 1);
+    assert_eq!(report.successful_load_count, 1);
+    assert_eq!(report.physical_bytes_read, 16);
+    assert_eq!(report.uploaded_bytes, 16);
+    let records = buffers
+        .address_table()
+        .read_bytes(layout.address_table_byte_count().unwrap())
+        .unwrap()
+        .chunks_exact(32)
+        .map(|record| {
+            u32::from_le_bytes(record[24..28].try_into().unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(records, [0, 0, 1, 1]);
+
+    assert_eq!(
+        store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 1,
+            byte_count: 16,
+            cancelled_load_count: 0,
+        }
+    );
+    assert_eq!(store.residency_report().unwrap().current_payload_bytes, 0);
+    drop(gate);
+    drop(buffers);
+    drop(store);
+}

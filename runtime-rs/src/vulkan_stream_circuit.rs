@@ -68,8 +68,8 @@ use crate::vulkan_compute::{
 };
 #[cfg(test)]
 use crate::vulkan_compute::{
-    VulkanStableResourceArenaStats, reset_vulkan_resident_execution_counters,
-    vulkan_resident_execution_counters,
+    VulkanGpuResidencyMissingRequest, VulkanStableResourceArenaStats,
+    reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 use crate::vulkan_distributed::{
     VulkanDistributedActivationBufferPlan, VulkanDistributedActivationBuffers,
