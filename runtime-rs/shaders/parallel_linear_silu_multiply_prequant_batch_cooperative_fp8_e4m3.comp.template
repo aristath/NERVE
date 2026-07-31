@@ -124,21 +124,25 @@ void main() {
                 input_start < input_block_start + BLOCK_COLUMNS;
                 input_start += MATRIX_K
             ) {
-                for (
-                    uint index = lane;
-                    index < OUTPUT_TILE * MATRIX_K;
-                    index += gl_WorkGroupSize.x
-                ) {
-                    uint row = index / MATRIX_K;
-                    uint column = index % MATRIX_K;
-                    uint output_index = output_start + row;
-                    weight_tile[index] = output_index < OUTPUT_SIZE
-                        ? read_projection_weight(
-                            projection,
-                            output_index * INPUT_SIZE
-                                + input_start + column
-                        )
-                        : floate4m3_t(0.0);
+                bool stage_weight =
+                    output_start + OUTPUT_TILE > OUTPUT_SIZE;
+                if (stage_weight) {
+                    for (
+                        uint index = lane;
+                        index < OUTPUT_TILE * MATRIX_K;
+                        index += gl_WorkGroupSize.x
+                    ) {
+                        uint row = index / MATRIX_K;
+                        uint column = index % MATRIX_K;
+                        uint output_index = output_start + row;
+                        weight_tile[index] = output_index < OUTPUT_SIZE
+                            ? read_projection_weight(
+                                projection,
+                                output_index * INPUT_SIZE
+                                    + input_start + column
+                            )
+                            : floate4m3_t(0.0);
+                    }
                 }
                 for (
                     uint index = lane;
@@ -159,13 +163,36 @@ void main() {
 
                 coopmat<floate4m3_t, gl_ScopeSubgroup,
                     {{MATRIX_M}}, {{MATRIX_K}}, gl_MatrixUseA> a;
-                coopMatLoad(
-                    a,
-                    weight_tile,
-                    output_subtile * MATRIX_M * MATRIX_K,
-                    MATRIX_K,
-                    gl_CooperativeMatrixLayoutRowMajor
-                );
+                if (stage_weight) {
+                    coopMatLoad(
+                        a,
+                        weight_tile,
+                        output_subtile * MATRIX_M * MATRIX_K,
+                        MATRIX_K,
+                        gl_CooperativeMatrixLayoutRowMajor
+                    );
+                } else {
+                    uint weight_offset =
+                        (output_start + output_subtile * MATRIX_M) * INPUT_SIZE
+                        + input_start;
+                    if (projection == 0u) {
+                        coopMatLoad(
+                            a,
+                            gate_weight.values,
+                            weight_offset,
+                            INPUT_SIZE,
+                            gl_CooperativeMatrixLayoutRowMajor
+                        );
+                    } else {
+                        coopMatLoad(
+                            a,
+                            up_weight.values,
+                            weight_offset,
+                            INPUT_SIZE,
+                            gl_CooperativeMatrixLayoutRowMajor
+                        );
+                    }
+                }
                 for (
                     uint batch_subtile = 0u;
                     batch_subtile < BATCH_SUBTILES;

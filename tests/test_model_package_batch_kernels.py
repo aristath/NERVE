@@ -939,6 +939,10 @@ def test_compiler_renders_cooperative_parallel_fp8_prefill_shaders(
     assert "const uint OUTPUT_SIZE = 17408u;" in fused_source
     assert "binding = 3) readonly buffer GateWeight" in fused_source
     assert "binding = 5) readonly buffer UpWeight" in fused_source
+    assert "gate_weight.values," in fused_source
+    assert "up_weight.values," in fused_source
+    assert "bool stage_weight" in fused_source
+    assert "output_start + OUTPUT_TILE > OUTPUT_SIZE" in fused_source
     assert "rounded_silu(gate) * up" in fused_source
     assert "coopmat<floate4m3_t" in fused_source
     assert "{{" not in fused_source
