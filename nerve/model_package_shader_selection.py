@@ -795,6 +795,28 @@ def shader_file_for_node(
         return (
             f"linear_sigmoid_scalar_multiply_bf16_{in_features}x{hidden_size}.comp"
         )
+    if op == "linear_sigmoid_scalar_multiply_residual2":
+        out_features, in_features = parameter_shape_for_node(
+            circuit, node, tensor_index
+        )
+        if (
+            int(out_features) != 1
+            or int(in_features) <= 0
+            or int(in_features) % 2
+            or int(hidden_size) <= 0
+            or int(hidden_size) % 2
+            or parameter_dtype_for_node(circuit, node, tensor_index) != "BF16"
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+        ):
+            raise ModelCompileError(
+                f"linear scalar-gate residual node {node['id']!r} has "
+                "unsupported geometry"
+            )
+        return (
+            "linear_sigmoid_scalar_multiply_residual2_bf16_"
+            f"{in_features}x{hidden_size}.comp"
+        )
     if op == "rms_norm_per_head":
         return (
             f"rms_norm_per_head_bf16_{node['attrs']['head_count']}x"

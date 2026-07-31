@@ -100,6 +100,33 @@ fn infer_node_output_shapes(
                 .and_then(|signal| signal.shape.clone());
             Ok(vec![value_shape])
         }
+        "linear_sigmoid_scalar_multiply_residual2" => {
+            if node.inputs.len() != 4 || node.outputs.len() != 1 || node.params.len() != 1 {
+                return Err(CircuitPlanError(format!(
+                    "{} node {} fused linear scalar-gate residual chain requires four inputs, one output, and one parameter",
+                    component_id, node.id
+                )));
+            }
+            let mut value_shape = None;
+            for input in node.inputs.iter().skip(1) {
+                let shape = signals
+                    .get(input)
+                    .and_then(|signal| signal.shape.clone());
+                if let Some(shape) = shape {
+                    if let Some(existing) = &value_shape {
+                        if existing != &shape {
+                            return Err(CircuitPlanError(format!(
+                                "{} node {} value/residual input {} shape {:?} does not match {:?}",
+                                component_id, node.id, input, shape, existing
+                            )));
+                        }
+                    } else {
+                        value_shape = Some(shape);
+                    }
+                }
+            }
+            Ok(vec![value_shape])
+        }
         "parallel_head_norm_rope_2way"
         | "parallel_head_norm_rope_2way_codebook_u8"
         | "parallel_head_norm_rope_2way_embedded_parameters" => {

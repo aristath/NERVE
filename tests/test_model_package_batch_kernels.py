@@ -165,6 +165,15 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp"
     )
     assert (
+        weight_shared_batch_shader_file(
+            "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.comp"
+        )
+        == (
+            "linear_sigmoid_scalar_multiply_residual2_batch16_bf16_"
+            "2048x2048.comp"
+        )
+    )
+    assert (
         weight_shared_batch_shader_file("add_bf16_2048.comp")
         == "add_batch16_bf16_2048.comp"
     )
@@ -174,6 +183,7 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         "silu_multiply_bf16_512.comp",
         "sigmoid_scalar_multiply_bf16_2048.comp",
         "linear_sigmoid_scalar_multiply_bf16_2048x2048.comp",
+        "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.comp",
         "add_bf16_2048.comp",
     ):
         assert (
@@ -951,6 +961,7 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
         "silu_multiply_batch16_bf16_512.comp",
         "sigmoid_scalar_multiply_batch16_bf16_2048.comp",
         "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp",
+        "linear_sigmoid_scalar_multiply_residual2_batch16_bf16_2048x2048.comp",
         "add_batch16_bf16_2048.comp",
         "sigmoid_multiply_batch16_bf16.comp",
     }
@@ -983,6 +994,16 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
         fused_scalar_gate_source
     )
     assert "uint batch_lane = gl_WorkGroupID.x;" in fused_scalar_gate_source
+    fused_scalar_gate_residual_source = (
+        tmp_path
+        / "linear_sigmoid_scalar_multiply_residual2_batch16_bf16_2048x2048.comp"
+    ).read_text()
+    assert "uint combined_lo = f32_to_bf16(" in (
+        fused_scalar_gate_residual_source
+    )
+    assert "bf16_to_f32(combined_lo) + bf16_to_f32(second)" in (
+        fused_scalar_gate_residual_source
+    )
 
     for shader_file in shader_files:
         source = (tmp_path / shader_file).read_text()

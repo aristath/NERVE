@@ -1159,6 +1159,121 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
 
         self.assertEqual(circuit, optimized)
 
+    def test_fuses_scalar_gate_and_two_exact_residual_stages(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "gate_projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["gate_logit"],
+                    "params": ["gate_weight"],
+                },
+                {
+                    "id": "apply_gate",
+                    "op": "sigmoid_scalar_multiply",
+                    "inputs": ["shared_value", "gate_logit"],
+                    "outputs": ["gated_value"],
+                },
+                {
+                    "id": "add_sparse",
+                    "op": "residual_add",
+                    "inputs": ["sparse_value", "gated_value"],
+                    "outputs": ["combined_value"],
+                },
+                {
+                    "id": "add_layer_residual",
+                    "op": "residual_add",
+                    "inputs": ["layer_residual", "combined_value"],
+                    "outputs": ["output"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_linear_sigmoid_scalar_multiply=lambda _linear, _multiply: True,
+        )
+
+        self.assertEqual(1, len(optimized["nodes"]))
+        fused = optimized["nodes"][0]
+        self.assertEqual(
+            "linear_sigmoid_scalar_multiply_residual2",
+            fused["op"],
+        )
+        self.assertEqual(
+            [
+                "normalized",
+                "shared_value",
+                "sparse_value",
+                "layer_residual",
+            ],
+            fused["inputs"],
+        )
+        self.assertEqual(["output"], fused["outputs"])
+        self.assertEqual(["gate_weight"], fused["params"])
+        self.assertEqual(
+            [
+                "gate_projection",
+                "apply_gate",
+                "add_sparse",
+                "add_layer_residual",
+            ],
+            fused["attrs"]["compiled_from"],
+        )
+
+    def test_keeps_scalar_gate_residual_chain_with_an_observed_intermediate(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "gate_projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["gate_logit"],
+                    "params": ["gate_weight"],
+                },
+                {
+                    "id": "apply_gate",
+                    "op": "sigmoid_scalar_multiply",
+                    "inputs": ["shared_value", "gate_logit"],
+                    "outputs": ["gated_value"],
+                },
+                {
+                    "id": "add_sparse",
+                    "op": "residual_add",
+                    "inputs": ["sparse_value", "gated_value"],
+                    "outputs": ["combined_value"],
+                },
+                {
+                    "id": "add_layer_residual",
+                    "op": "residual_add",
+                    "inputs": ["layer_residual", "combined_value"],
+                    "outputs": ["output"],
+                },
+                {
+                    "id": "observe_combined",
+                    "op": "silu",
+                    "inputs": ["combined_value"],
+                    "outputs": ["observed"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_linear_sigmoid_scalar_multiply=lambda _linear, _multiply: True,
+        )
+
+        self.assertEqual(
+            [
+                "linear_sigmoid_scalar_multiply",
+                "residual_add",
+                "residual_add",
+                "silu",
+            ],
+            [node["op"] for node in optimized["nodes"]],
+        )
+
     def test_fuses_contiguous_gate_up_projection_split_and_swiglu(self) -> None:
         circuit = {
             "nodes": [

@@ -93,6 +93,7 @@ def optimize_circuit_for_vulkan(
         compiled_nodes.append(deepcopy(current))
         index += 1
 
+    compiled_nodes = _fuse_linear_scalar_gate_residual_chains(compiled_nodes)
     compiled_nodes = _fuse_multiply_rolling_depthwise_regions(
         compiled_nodes,
         can_fuse_multiply_rolling_depthwise,
@@ -1202,6 +1203,77 @@ def _fuse_linear_sigmoid_scalar_multiply(
             "intermediate_rounding": "BF16",
         },
     }
+
+
+def _fuse_linear_scalar_gate_residual_chains(nodes: list[Json]) -> list[Json]:
+    consumer_counts = Counter(
+        signal for node in nodes for signal in node.get("inputs", [])
+    )
+    compiled: list[Json] = []
+    index = 0
+    while index < len(nodes):
+        if index + 2 >= len(nodes):
+            compiled.extend(deepcopy(node) for node in nodes[index:])
+            break
+        gate, first_add, second_add = nodes[index : index + 3]
+        gate_outputs = gate.get("outputs", [])
+        first_outputs = first_add.get("outputs", [])
+        gate_output = gate_outputs[0] if len(gate_outputs) == 1 else None
+        first_output = first_outputs[0] if len(first_outputs) == 1 else None
+        first_inputs = first_add.get("inputs", [])
+        second_inputs = second_add.get("inputs", [])
+        if (
+            gate.get("op") != "linear_sigmoid_scalar_multiply"
+            or first_add.get("op") != "residual_add"
+            or second_add.get("op") != "residual_add"
+            or len(gate.get("inputs", [])) != 2
+            or len(gate_outputs) != 1
+            or len(gate.get("params", [])) != 1
+            or len(first_inputs) != 2
+            or len(first_outputs) != 1
+            or len(second_inputs) != 2
+            or len(second_add.get("outputs", [])) != 1
+            or first_inputs.count(gate_output) != 1
+            or second_inputs.count(first_output) != 1
+            or consumer_counts[gate_output] != 1
+            or consumer_counts[first_output] != 1
+            or any(
+                node.get("params")
+                or node.get("state_reads")
+                or node.get("state_writes")
+                for node in (first_add, second_add)
+            )
+        ):
+            compiled.append(deepcopy(gate))
+            index += 1
+            continue
+        first_residual = next(signal for signal in first_inputs if signal != gate_output)
+        second_residual = next(
+            signal for signal in second_inputs if signal != first_output
+        )
+        compiled.append(
+            {
+                "id": f"{gate['id']}__{first_add['id']}__{second_add['id']}",
+                "op": "linear_sigmoid_scalar_multiply_residual2",
+                "inputs": [
+                    *deepcopy(gate["inputs"]),
+                    first_residual,
+                    second_residual,
+                ],
+                "outputs": deepcopy(second_add["outputs"]),
+                "params": deepcopy(gate["params"]),
+                "attrs": {
+                    "compiled_from": [
+                        *_source_node_ids(gate),
+                        first_add["id"],
+                        second_add["id"],
+                    ],
+                    "intermediate_rounding": "BF16",
+                },
+            }
+        )
+        index += 3
+    return compiled
 
 
 def _plain_single_input_output_node(node: Json) -> bool:

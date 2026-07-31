@@ -822,6 +822,8 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         "sigmoid_scalar_multiply_bf16_2048.comp",
         "linear_sigmoid_scalar_multiply_bf16_2048x2048.comp",
         "linear_sigmoid_scalar_multiply_batch1_bf16_2048x2048.comp",
+        "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.comp",
+        "linear_sigmoid_scalar_multiply_residual2_batch1_bf16_2048x2048.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
@@ -908,6 +910,21 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     assert "float rounded_gate = bf16_to_f32(f32_to_bf16(gate_sum));" in fused_shared_gate
     assert "subgroupAdd(gate_sum)" in fused_shared_gate
     assert "{{" not in fused_shared_gate
+    fused_shared_gate_residual = (
+        tmp_path
+        / "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.comp"
+    ).read_text()
+    assert "binding = 2) readonly buffer FirstResidual" in (
+        fused_shared_gate_residual
+    )
+    assert "binding = 3) readonly buffer SecondResidual" in (
+        fused_shared_gate_residual
+    )
+    assert "uint combined_lo = f32_to_bf16(" in fused_shared_gate_residual
+    assert "bf16_to_f32(combined_lo) + bf16_to_f32(second)" in (
+        fused_shared_gate_residual
+    )
+    assert "{{" not in fused_shared_gate_residual
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / "moe_route_compact_batch1_i512_k8_t16.spv").is_file()
     assert (tmp_path / "moe_route_count_batch1_i512_k8_t32.spv").is_file()
@@ -916,6 +933,13 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     ).is_file()
     assert (
         tmp_path / "linear_sigmoid_scalar_multiply_batch1_bf16_2048x2048.spv"
+    ).is_file()
+    assert (
+        tmp_path / "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.spv"
+    ).is_file()
+    assert (
+        tmp_path
+        / "linear_sigmoid_scalar_multiply_residual2_batch1_bf16_2048x2048.spv"
     ).is_file()
 
 

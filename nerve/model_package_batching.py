@@ -656,6 +656,15 @@ def weight_shared_batch_shader_file(
             f"linear_sigmoid_scalar_multiply_batch{tile}_bf16_",
             1,
         )
+    if re.fullmatch(
+        r"linear_sigmoid_scalar_multiply_residual2_bf16_\d+x\d+\.comp",
+        shader_file,
+    ):
+        return shader_file.replace(
+            "linear_sigmoid_scalar_multiply_residual2_bf16_",
+            f"linear_sigmoid_scalar_multiply_residual2_batch{tile}_bf16_",
+            1,
+        )
     contiguous_split = re.fullmatch(r"split_bf16_2x(\d+)\.comp", shader_file)
     if contiguous_split is not None and int(contiguous_split.group(1)) % 2 == 0:
         return shader_file.replace("split_bf16_", f"split_batch{tile}_bf16_", 1)
@@ -1046,6 +1055,11 @@ def weight_shared_batch_workgroup_count_x(
         is not None
         or re.fullmatch(
             r"linear_sigmoid_scalar_multiply_bf16_\d+x\d+\.comp",
+            shader_file,
+        )
+        is not None
+        or re.fullmatch(
+            r"linear_sigmoid_scalar_multiply_residual2_bf16_\d+x\d+\.comp",
             shader_file,
         )
         is not None

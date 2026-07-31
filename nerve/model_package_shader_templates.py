@@ -2202,6 +2202,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("BATCH_TILE_WIDTH", "GATE_INPUT_SIZE", "VALUE_SIZE"),
         ),
         (
+            r"linear_sigmoid_scalar_multiply_residual2_bf16_(\d+)x(\d+)\.comp",
+            "linear_sigmoid_scalar_multiply_residual2_bf16.comp.template",
+            ("GATE_INPUT_SIZE", "VALUE_SIZE"),
+        ),
+        (
+            r"linear_sigmoid_scalar_multiply_residual2_batch(\d+)_bf16_(\d+)x(\d+)\.comp",
+            "linear_sigmoid_scalar_multiply_residual2_batch_bf16.comp.template",
+            ("BATCH_TILE_WIDTH", "GATE_INPUT_SIZE", "VALUE_SIZE"),
+        ),
+        (
             r"linear_bf16_(\d+)x(\d+)\.comp",
             "linear_bf16.comp.template",
             ("INPUT_SIZE", "OUTPUT_SIZE"),

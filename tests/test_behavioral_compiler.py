@@ -151,6 +151,96 @@ def test_exact_candidate_gate_proves_fused_linear_scalar_gate() -> None:
     )
 
 
+def test_exact_candidate_gate_proves_fused_scalar_gate_residual_chain() -> None:
+    source = {
+        "schema": "nerve.stream_circuit.v1",
+        "source": {"component_id": "layer_00"},
+        "boundary": {
+            "inputs": [
+                {"id": signal, "source": signal}
+                for signal in (
+                    "normalized",
+                    "shared_value",
+                    "sparse_value",
+                    "layer_residual",
+                )
+            ],
+            "outputs": [{"id": "output", "source": "output"}],
+        },
+        "state_ports": [],
+        "parameters": {
+            "refs": {"gate_weight": {"tensor": "gate.weight"}}
+        },
+        "behavioral_error_contract": {"mode": "source_reference_circuit"},
+        "nodes": [
+            {
+                "id": "gate_projection",
+                "op": "linear",
+                "inputs": ["normalized"],
+                "outputs": ["gate_logit"],
+                "params": ["gate_weight"],
+            },
+            {
+                "id": "apply_gate",
+                "op": "sigmoid_scalar_multiply",
+                "inputs": ["shared_value", "gate_logit"],
+                "outputs": ["gated_value"],
+            },
+            {
+                "id": "add_sparse",
+                "op": "residual_add",
+                "inputs": ["sparse_value", "gated_value"],
+                "outputs": ["combined_value"],
+            },
+            {
+                "id": "add_layer_residual",
+                "op": "residual_add",
+                "inputs": ["layer_residual", "combined_value"],
+                "outputs": ["output"],
+            },
+        ],
+    }
+    candidate = deepcopy(source)
+    candidate["nodes"] = [
+        {
+            "id": (
+                "gate_projection__apply_gate__add_sparse__"
+                "add_layer_residual"
+            ),
+            "op": "linear_sigmoid_scalar_multiply_residual2",
+            "inputs": [
+                "normalized",
+                "shared_value",
+                "sparse_value",
+                "layer_residual",
+            ],
+            "outputs": ["output"],
+            "params": ["gate_weight"],
+            "attrs": {
+                "compiled_from": [
+                    "gate_projection",
+                    "apply_gate",
+                    "add_sparse",
+                    "add_layer_residual",
+                ],
+                "intermediate_rounding": "BF16",
+            },
+        }
+    ]
+
+    evidence = prove_exact_circuit_candidate(
+        component_id="layer_00",
+        source=source,
+        candidate=candidate,
+    )
+
+    assert evidence["status"] == "passed"
+    assert (
+        evidence["rewrites"][0]["proof_contract"]
+        == "linear_sigmoid_scalar_multiply_residual2_exact_bf16.v1"
+    )
+
+
 def test_exact_candidate_gate_proves_fused_parallel_ffn_projection() -> None:
     source = {
         "schema": "nerve.stream_circuit.v1",
