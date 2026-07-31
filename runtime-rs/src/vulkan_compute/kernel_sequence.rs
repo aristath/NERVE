@@ -80,6 +80,7 @@ struct VulkanResidentKernelRecordedCondition {
 pub struct VulkanResidentKernelSequenceStep<'a> {
     dispatch: &'a VulkanResidentKernelDispatch,
     push_constants: &'a [u8],
+    direct_workgroup_count: Option<[u32; 2]>,
     indirect_dispatch: Option<VulkanResidentKernelSequenceIndirectDispatch<'a>>,
     condition: Option<VulkanResidentKernelSequenceCondition<'a>>,
 }
@@ -114,9 +115,30 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
         Self {
             dispatch,
             push_constants,
+            direct_workgroup_count: None,
             indirect_dispatch: None,
             condition: None,
         }
+    }
+
+    pub fn new_direct_with_workgroup_count(
+        dispatch: &'a VulkanResidentKernelDispatch,
+        push_constants: &'a [u8],
+        workgroup_count_x: u32,
+        workgroup_count_y: u32,
+    ) -> Result<Self, VulkanError> {
+        if workgroup_count_x == 0 || workgroup_count_y == 0 {
+            return Err(VulkanError(
+                "direct resident dispatch workgroup counts must be positive".to_string(),
+            ));
+        }
+        Ok(Self {
+            dispatch,
+            push_constants,
+            direct_workgroup_count: Some([workgroup_count_x, workgroup_count_y]),
+            indirect_dispatch: None,
+            condition: None,
+        })
     }
 
     pub fn new_indirect(
@@ -135,6 +157,7 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
         Ok(Self {
             dispatch,
             push_constants,
+            direct_workgroup_count: None,
             indirect_dispatch: Some(VulkanResidentKernelSequenceIndirectDispatch {
                 buffer,
                 offset: byte_offset as vk::DeviceSize,
@@ -167,6 +190,7 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
         Ok(Self {
             dispatch,
             push_constants,
+            direct_workgroup_count: None,
             indirect_dispatch: None,
             condition: Some(VulkanResidentKernelSequenceCondition {
                 buffer: predicate,
@@ -175,6 +199,18 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
                 region_id,
             }),
         })
+    }
+
+    fn workgroup_count_x(self) -> u32 {
+        self.direct_workgroup_count
+            .map(|count| count[0])
+            .unwrap_or(self.dispatch.workgroup_count_x)
+    }
+
+    fn workgroup_count_y(self) -> u32 {
+        self.direct_workgroup_count
+            .map(|count| count[1])
+            .unwrap_or(self.dispatch.workgroup_count_y)
     }
 }
 
@@ -385,8 +421,8 @@ fn print_resident_kernel_timestamp_summary(
         let elapsed_ticks = timestamps[step_index + 1].saturating_sub(timestamps[step_index]);
         let elapsed_ns = elapsed_ticks as f64 * f64::from(timestamp_period_ns);
         let key = (
-            step.dispatch.workgroup_count_x,
-            step.dispatch.workgroup_count_y,
+            step.workgroup_count_x(),
+            step.workgroup_count_y(),
             step.dispatch.descriptor_count,
             step.dispatch.push_constant_byte_count,
         );

@@ -83,6 +83,8 @@ fn validate_component_executions(
                             !stage.shader_path.is_empty()
                                 && stage.local_size_x > 0
                                 && stage.workgroup_count_x > 0
+                                && !(stage.dispatch_y_from_batch_width
+                                    && stage.indirect_dispatch_byte_offset.is_some())
                                 && {
                                     let (_, byte_count, payload) =
                                         stage.control.storage_buffer();

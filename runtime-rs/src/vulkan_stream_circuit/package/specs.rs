@@ -153,6 +153,8 @@ pub struct VulkanResidentComponentBatchStageSpec {
     pub control: VulkanResidentComponentBatchControlSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indirect_dispatch_byte_offset: Option<u32>,
+    #[serde(default)]
+    pub dispatch_y_from_batch_width: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -612,8 +612,8 @@ impl VulkanComputeDevice {
                             && recorded.iter().zip(steps).all(|(recorded, step)| {
                                 recorded.pipeline == step.dispatch.pipeline
                                     && recorded.descriptor_set == step.dispatch.descriptor_set
-                                    && recorded.workgroup_count_x == step.dispatch.workgroup_count_x
-                                    && recorded.workgroup_count_y == step.dispatch.workgroup_count_y
+                                    && recorded.workgroup_count_x == step.workgroup_count_x()
+                                    && recorded.workgroup_count_y == step.workgroup_count_y()
                                     && recorded.base_workgroup_z == step.dispatch.base_workgroup_z
                                     && recorded.indirect_dispatch
                                         == step.indirect_dispatch.map(|indirect| {
@@ -1044,8 +1044,8 @@ impl VulkanComputeDevice {
                     } else if step.dispatch.base_workgroup_z == 0 {
                         self.device.cmd_dispatch(
                             sequence.command_buffer,
-                            step.dispatch.workgroup_count_x,
-                            step.dispatch.workgroup_count_y,
+                            step.workgroup_count_x(),
+                            step.workgroup_count_y(),
                             1,
                         );
                     } else {
@@ -1054,8 +1054,8 @@ impl VulkanComputeDevice {
                             0,
                             0,
                             step.dispatch.base_workgroup_z,
-                            step.dispatch.workgroup_count_x,
-                            step.dispatch.workgroup_count_y,
+                            step.workgroup_count_x(),
+                            step.workgroup_count_y(),
                             1,
                         );
                     }
@@ -1203,8 +1203,8 @@ impl VulkanComputeDevice {
                             .map(|step| VulkanResidentKernelRecordedStep {
                                 pipeline: step.dispatch.pipeline,
                                 descriptor_set: step.dispatch.descriptor_set,
-                                workgroup_count_x: step.dispatch.workgroup_count_x,
-                                workgroup_count_y: step.dispatch.workgroup_count_y,
+                                workgroup_count_x: step.workgroup_count_x(),
+                                workgroup_count_y: step.workgroup_count_y(),
                                 base_workgroup_z: step.dispatch.base_workgroup_z,
                                 indirect_dispatch: step.indirect_dispatch.map(|indirect| {
                                     VulkanResidentKernelRecordedIndirectDispatch {

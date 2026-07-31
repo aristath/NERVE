@@ -16,6 +16,7 @@ def persistent_batch_control_stage(
     state_snapshot_binding: int | None = None,
     control_access: str = "read",
     indirect_dispatch_byte_offset: int | None = None,
+    dispatch_y_from_batch_width: bool = False,
 ) -> Json:
     byte_count = {
         "width": 4,
@@ -48,6 +49,8 @@ def persistent_batch_control_stage(
         stage["state_snapshot_binding"] = state_snapshot_binding
     if indirect_dispatch_byte_offset is not None:
         stage["indirect_dispatch_byte_offset"] = indirect_dispatch_byte_offset
+    if dispatch_y_from_batch_width:
+        stage["dispatch_y_from_batch_width"] = True
     return stage
 
 
@@ -223,11 +226,10 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             persistent_batch_control_stage(
                 stem,
                 local_size_x,
-                query_heads
-                * partition_count
-                * CAUSAL_SCAN_LANE_TILE_WIDTH,
+                query_heads * partition_count,
                 payload="temporal",
                 binding=6,
+                dispatch_y_from_batch_width=True,
             )
         ]
 
@@ -253,9 +255,10 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             persistent_batch_control_stage(
                 stem,
                 head_width,
-                query_heads * CAUSAL_SCAN_LANE_TILE_WIDTH,
+                query_heads,
                 payload="temporal",
                 binding=control_binding,
+                dispatch_y_from_batch_width=True,
             ),
             persistent_batch_control_stage(
                 (

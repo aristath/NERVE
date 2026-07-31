@@ -138,11 +138,9 @@ float read_v(
 }
 
 void main() {
-    uint linear_index = gl_WorkGroupID.x;
-    uint query_head = linear_index % QUERY_HEADS;
-    linear_index /= QUERY_HEADS;
-    uint partition_index = linear_index % PARTITION_COUNT;
-    uint position = linear_index / PARTITION_COUNT;
+    uint query_head = {{QUERY_HEAD_EXPR}};
+    uint partition_index = {{PARTITION_INDEX_EXPR}};
+    uint position = {{POSITION_EXPR}};
     uint batch_width = {{BATCH_WIDTH_EXPR}};
     if (position >= batch_width) {
         return;

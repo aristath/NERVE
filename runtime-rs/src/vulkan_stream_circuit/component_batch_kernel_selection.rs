@@ -3,6 +3,7 @@ struct VulkanComponentBatchDispatchStep {
     push_constants: Vec<VulkanKernelScalarBinding>,
     lane_index: Option<usize>,
     commits_state: bool,
+    dispatch_y_from_batch_width: bool,
 }
 
 fn component_batch_control_buffer_access(

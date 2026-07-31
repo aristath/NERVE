@@ -579,6 +579,11 @@ def valid_batch_stage(stage: Any) -> bool:
         if isinstance(stage, dict)
         else None
     )
+    dispatch_y_from_batch_width = (
+        stage.get("dispatch_y_from_batch_width", False)
+        if isinstance(stage, dict)
+        else None
+    )
     return (
         isinstance(stage, dict)
         and isinstance(stage.get("shader_path"), str)
@@ -589,6 +594,8 @@ def valid_batch_stage(stage: Any) -> bool:
         and isinstance(stage.get("workgroup_count_x"), int)
         and not isinstance(stage.get("workgroup_count_x"), bool)
         and stage["workgroup_count_x"] > 0
+        and isinstance(dispatch_y_from_batch_width, bool)
+        and not (dispatch_y_from_batch_width and indirect_offset is not None)
         and valid_batch_control(control)
         and (
             (state_snapshot_binding is not None)

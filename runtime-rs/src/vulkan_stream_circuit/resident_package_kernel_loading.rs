@@ -226,6 +226,8 @@ fn load_resident_component_batch_kernels(
                                 control: stage.control,
                                 indirect_dispatch_byte_offset: stage
                                     .indirect_dispatch_byte_offset,
+                                dispatch_y_from_batch_width: stage
+                                    .dispatch_y_from_batch_width,
                             })
                         })
                         .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?,

@@ -1281,7 +1281,15 @@ impl VulkanTargetedPrefillExecution {
                     &stage.spirv_words,
                     &bindings,
                     stage.workgroup_count_x,
-                    workgroup_count_y,
+                    if stage.dispatch_y_from_batch_width {
+                        u32::try_from(activation_batch_width).map_err(|_| {
+                            targeted_component_error_value(
+                                "targeted prefill activation width exceeds u32",
+                            )
+                        })?
+                    } else {
+                        workgroup_count_y
+                    },
                     stage.local_size_x,
                     0,
                     Some(vulkan_dispatch_semantic_label(

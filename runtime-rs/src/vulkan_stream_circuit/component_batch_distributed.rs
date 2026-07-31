@@ -151,6 +151,7 @@ struct VulkanDistributedComponentBatchShardDispatch {
     control_buffer_set_index: usize,
     indirect_dispatch:
         Option<(VulkanResidentComponentBatchControlPayload, usize)>,
+    dispatch_y_from_batch_width: bool,
 }
 
 impl VulkanDistributedComponentBatchShardRunner {
@@ -607,7 +608,18 @@ impl VulkanDistributedComponentBatchRunners {
                             &stage.spirv_words,
                             &stage_bindings,
                             workgroup_count_x,
-                            workgroup_count_y,
+                            if stage.dispatch_y_from_batch_width {
+                                u32::try_from(lane_capacity).map_err(|_| {
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                        VulkanError(
+                                            "distributed component batch lane capacity exceeds u32"
+                                                .to_string(),
+                                        ),
+                                    )
+                                })?
+                            } else {
+                                workgroup_count_y
+                            },
                             stage.local_size_x,
                             0,
                             Some(format!(
@@ -634,6 +646,8 @@ impl VulkanDistributedComponentBatchRunners {
                                         .expect("u32 indirect offset fits usize"),
                                 )
                             }),
+                        dispatch_y_from_batch_width: stage
+                            .dispatch_y_from_batch_width,
                     });
                 }
                 shards.push(VulkanDistributedComponentBatchShardRunner {
@@ -832,7 +846,7 @@ impl VulkanDistributedComponentBatchRunners {
         prepare_owner_continuation: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let dispatch = self.dispatch(owner_device_id, dispatch_index)?;
-        let _batch_width = batch_control
+        let batch_width = batch_control
             .get(..std::mem::size_of::<u32>())
             .and_then(|bytes| bytes.try_into().ok())
             .map(u32::from_le_bytes)
@@ -868,21 +882,41 @@ impl VulkanDistributedComponentBatchRunners {
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 }
             }
-            if !shard.sequence_catalog.borrow().contains_key(&0) {
+            if !shard.sequence_catalog.borrow().contains_key(&batch_width) {
                 let sequence = device
                     .create_resident_kernel_sequence()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                shard.sequence_catalog.borrow_mut().insert(0, sequence);
+                shard
+                    .sequence_catalog
+                    .borrow_mut()
+                    .insert(batch_width, sequence);
             }
             let steps = shard
                 .dispatches
                 .iter()
                 .map(|resident| {
                     let Some((payload, byte_offset)) = resident.indirect_dispatch else {
-                        return Ok(VulkanResidentKernelSequenceStep::new(
-                            &resident.dispatch,
-                            &[],
-                        ));
+                        return if resident.dispatch_y_from_batch_width {
+                            VulkanResidentKernelSequenceStep::new_direct_with_workgroup_count(
+                                &resident.dispatch,
+                                &[],
+                                resident.dispatch.workgroup_count_x(),
+                                u32::try_from(batch_width).map_err(|_| {
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                        VulkanError(
+                                            "distributed component batch width exceeds u32"
+                                                .to_string(),
+                                        ),
+                                    )
+                                })?,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                        } else {
+                            Ok(VulkanResidentKernelSequenceStep::new(
+                                &resident.dispatch,
+                                &[],
+                            ))
+                        };
                     };
                     let control_buffer = shard
                         .batch_control_buffer_sets
@@ -907,7 +941,7 @@ impl VulkanDistributedComponentBatchRunners {
                 .collect::<Result<Vec<_>, _>>()?;
             let catalog = shard.sequence_catalog.borrow();
             let sequence = catalog
-                .get(&0)
+                .get(&batch_width)
                 .expect("distributed batch sequence shape was inserted");
             if !sequence.has_recorded_commands() {
                 device

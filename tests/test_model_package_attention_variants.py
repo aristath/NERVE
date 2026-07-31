@@ -4,6 +4,7 @@ from nerve.model_package import (
     local_size_x_for_node,
 )
 from nerve.model_package_shader_compiler import compile_shader_artifacts
+from nerve.model_package_batching import causal_scan_batch_stages
 
 def test_compiler_renders_biased_recurrent_and_windowed_attention_components(
     tmp_path: Path,
@@ -122,12 +123,46 @@ def test_compiler_renders_and_compiles_partitioned_attention_stages(
             "q16_kv2_d256_s8_scale0.0625__pbc7.comp"
         )
     ).read_text()
+    temporal_partials = (
+        tmp_path
+        / (
+            "attention_partition_partials_temporal_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__pbc6.comp"
+        )
+    ).read_text()
     assert "const uint PARTITION_COUNT = 8u;" in scalar_partials
     assert "binding = 6) readonly buffer StreamControl" in scalar_partials
     assert "partition_start" in scalar_partials
+    assert "uint position = gl_WorkGroupID.y;" in temporal_partials
+    assert (
+        "uint query_head = gl_WorkGroupID.x % QUERY_HEADS;"
+        in temporal_partials
+    )
     assert "binding = 7) readonly buffer BatchControl" in temporal_reduce
+    assert "uint position = gl_WorkGroupID.y;" in temporal_reduce
     assert "partition_scales" in temporal_reduce
     assert "KvStateWrite" not in temporal_reduce
+    partial_stages = causal_scan_batch_stages(
+        (
+            "attention_partition_partials_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__sc6.comp"
+        ),
+        1024,
+    )
+    reduce_stages = causal_scan_batch_stages(
+        (
+            "append_gqa_attention_partition_reduce_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__sc7.comp"
+        ),
+        256,
+    )
+    assert partial_stages is not None
+    assert partial_stages[0]["workgroup_count_x"] == 128
+    assert partial_stages[0]["dispatch_y_from_batch_width"] is True
+    assert reduce_stages is not None
+    assert reduce_stages[0]["workgroup_count_x"] == 16
+    assert reduce_stages[0]["dispatch_y_from_batch_width"] is True
+    assert "dispatch_y_from_batch_width" not in reduce_stages[1]
     compile_shader_artifacts(tmp_path)
     assert all(
         (tmp_path / shader_file.replace(".comp", ".spv")).is_file()

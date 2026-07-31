@@ -597,6 +597,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                         access: VulkanResidentComponentBatchControlAccess::Read,
                     },
                     indirect_dispatch_byte_offset: None,
+                    dispatch_y_from_batch_width: false,
                 }],
             })
             .collect();
@@ -718,6 +719,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             access: VulkanResidentComponentBatchControlAccess::Read,
         },
         indirect_dispatch_byte_offset: None,
+        dispatch_y_from_batch_width: false,
     };
     let temporal = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/append_kv_temporal_commit_bf16_kv8_d128_w0.spv".to_string(),
@@ -733,6 +735,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             access: VulkanResidentComponentBatchControlAccess::Read,
         },
         indirect_dispatch_byte_offset: None,
+        dispatch_y_from_batch_width: false,
     };
     let sparse = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/sparse_moe_gate_up_batch1_bf16.spv".to_string(),
@@ -748,6 +751,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             access: VulkanResidentComponentBatchControlAccess::Read,
         },
         indirect_dispatch_byte_offset: None,
+        dispatch_y_from_batch_width: false,
     };
 
     assert_eq!(

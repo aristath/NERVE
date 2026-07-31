@@ -2785,6 +2785,21 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "BATCH_WIDTH_EXPR": (
                     "batch_control.batch_width" if is_temporal else "1u"
                 ),
+                "QUERY_HEAD_EXPR": (
+                    "gl_WorkGroupID.x % QUERY_HEADS"
+                    if is_temporal
+                    else "gl_WorkGroupID.x % QUERY_HEADS"
+                ),
+                "PARTITION_INDEX_EXPR": (
+                    "gl_WorkGroupID.x / QUERY_HEADS"
+                    if is_temporal
+                    else "(gl_WorkGroupID.x / QUERY_HEADS) % PARTITION_COUNT"
+                ),
+                "POSITION_EXPR": (
+                    "gl_WorkGroupID.y"
+                    if is_temporal
+                    else "gl_WorkGroupID.x / (QUERY_HEADS * PARTITION_COUNT)"
+                ),
                 "START_TICK_EXPR": (
                     "batch_control.start_stream_tick_low"
                     if is_temporal
@@ -2916,6 +2931,16 @@ if (
                 ),
                 "BATCH_WIDTH_EXPR": (
                     "batch_control.batch_width" if is_temporal else "1u"
+                ),
+                "QUERY_HEAD_EXPR": (
+                    "gl_WorkGroupID.x"
+                    if is_temporal
+                    else "gl_WorkGroupID.x % QUERY_HEADS"
+                ),
+                "POSITION_EXPR": (
+                    "gl_WorkGroupID.y"
+                    if is_temporal
+                    else "gl_WorkGroupID.x / QUERY_HEADS"
                 ),
             },
         )

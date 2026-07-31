@@ -572,7 +572,18 @@ impl VulkanResidentComponentBatchSliceRunner {
                             &stage.spirv_words,
                             &bindings,
                             stage.workgroup_count_x,
-                            workgroup_count_y,
+                            if stage.dispatch_y_from_batch_width {
+                                u32::try_from(lane_capacity).map_err(|_| {
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                        VulkanError(
+                                            "component batch lane capacity exceeds u32"
+                                                .to_string(),
+                                        ),
+                                    )
+                                })?
+                            } else {
+                                workgroup_count_y
+                            },
                             stage.local_size_x,
                             0,
                             Some(vulkan_dispatch_semantic_label(dispatch, Some("batch"))),
@@ -583,6 +594,8 @@ impl VulkanResidentComponentBatchSliceRunner {
                         push_constants: Vec::new(),
                         lane_index: None,
                         commits_state,
+                        dispatch_y_from_batch_width: stage
+                            .dispatch_y_from_batch_width,
                     });
                 }
                 dispatch_spans.push(VulkanComponentBatchDispatchSpan {
@@ -636,6 +649,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     push_constants: dispatch.push_constants.clone(),
                     lane_index: Some(lane_index),
                     commits_state,
+                    dispatch_y_from_batch_width: false,
                 });
             }
             dispatch_spans.push(VulkanComponentBatchDispatchSpan {
@@ -1311,9 +1325,27 @@ impl VulkanResidentComponentBatchSliceRunner {
             .iter()
             .zip(&push_constant_storage)
             .map(|(step, push_constants)| {
-                VulkanResidentKernelSequenceStep::new(&step.dispatch, push_constants)
+                if step.dispatch_y_from_batch_width {
+                    VulkanResidentKernelSequenceStep::new_direct_with_workgroup_count(
+                        &step.dispatch,
+                        push_constants,
+                        step.dispatch.workgroup_count_x(),
+                        u32::try_from(batch_width).map_err(|_| {
+                            VulkanError(
+                                "component batch width exceeds direct dispatch range"
+                                    .to_string(),
+                            )
+                        })?,
+                    )
+                } else {
+                    Ok(VulkanResidentKernelSequenceStep::new(
+                        &step.dispatch,
+                        push_constants,
+                    ))
+                }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, VulkanError>>()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         if let Some(submission_batch) = submission_batch {
             let execution_cost = RuntimeExecutionCost::new(
                 active_steps.iter().fold(0u64, |total, step| {

@@ -65,8 +65,8 @@ float read_attention_sink(uint head) {
 {{STATE_HELPERS}}
 
 void main() {
-    uint query_head = gl_WorkGroupID.x % QUERY_HEADS;
-    uint position = gl_WorkGroupID.x / QUERY_HEADS;
+    uint query_head = {{QUERY_HEAD_EXPR}};
+    uint position = {{POSITION_EXPR}};
     uint batch_width = {{BATCH_WIDTH_EXPR}};
     if (position >= batch_width) {
         return;
