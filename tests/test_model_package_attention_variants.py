@@ -3,6 +3,7 @@ from nerve.model_package import (
     gated_delta_lanes_per_value,
     local_size_x_for_node,
 )
+from nerve.model_package_shader_compiler import compile_shader_artifacts
 
 def test_compiler_renders_biased_recurrent_and_windowed_attention_components(
     tmp_path: Path,
@@ -87,6 +88,51 @@ def test_compiler_renders_fused_kv_append_attention_variants(
     assert "for (uint batch = 0u; batch < TOKEN_BATCHES; batch++)" in sinks
     assert "{{" not in plain
     assert "{{" not in sinks
+
+
+def test_compiler_renders_and_compiles_partitioned_attention_stages(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "attention_partition_partials_bf16_q16_kv2_d256_s8_scale0.0625__sc6.comp",
+        (
+            "attention_partition_partials_temporal_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__pbc6.comp"
+        ),
+        (
+            "append_gqa_attention_partition_reduce_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__sc7.comp"
+        ),
+        (
+            "append_gqa_attention_partition_reduce_temporal_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__pbc7.comp"
+        ),
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+    scalar_partials = (
+        tmp_path
+        / "attention_partition_partials_bf16_q16_kv2_d256_s8_scale0.0625__sc6.comp"
+    ).read_text()
+    temporal_reduce = (
+        tmp_path
+        / (
+            "append_gqa_attention_partition_reduce_temporal_bf16_"
+            "q16_kv2_d256_s8_scale0.0625__pbc7.comp"
+        )
+    ).read_text()
+    assert "const uint PARTITION_COUNT = 8u;" in scalar_partials
+    assert "binding = 6) readonly buffer StreamControl" in scalar_partials
+    assert "partition_start" in scalar_partials
+    assert "binding = 7) readonly buffer BatchControl" in temporal_reduce
+    assert "partition_scales" in temporal_reduce
+    assert "KvStateWrite" not in temporal_reduce
+    compile_shader_artifacts(tmp_path)
+    assert all(
+        (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+        for shader_file in shader_files
+    )
 
 
 def test_compiler_renders_subgroup_padded_attention_and_unequal_qkv_split(

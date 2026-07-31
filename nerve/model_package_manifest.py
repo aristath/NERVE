@@ -502,6 +502,7 @@ def build_vulkan_resident_package_manifest(
                     compiler_target=compiler_target,
                 )
             ),
+            attention_partition_count=8,
         )
     behavioral_validation = build_behavioral_validation(
         model_graph=model_graph,

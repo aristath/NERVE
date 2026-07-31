@@ -279,8 +279,30 @@ fn infer_node_output_shapes(
             Ok(repeat_shape(output_shape, outputs))
         }
         "append_state_update" => unknown(),
+        "attention_partition_partials" => {
+            let output_shape = attr_usize(node, "partition_count")
+                .zip(attr_usize(node, "query_heads"))
+                .zip(attr_usize(node, "head_width"))
+                .and_then(|((partitions, heads), width)| {
+                    width
+                        .checked_add(2)
+                        .map(|partial_width| vec![partitions, heads, partial_width])
+                });
+            Ok(repeat_shape(output_shape, outputs))
+        }
         "scaled_dot_product_attention" | "append_scaled_dot_product_attention" => {
-            Ok(repeat_shape(first_input_shape(node, signals), outputs))
+            let logical_query = node
+                .attrs
+                .get("physical_logical_inputs")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|inputs| inputs.first())
+                .and_then(serde_json::Value::as_str)
+                .and_then(|input| signals.get(input))
+                .and_then(|signal| signal.shape.clone());
+            Ok(repeat_shape(
+                logical_query.or_else(|| first_input_shape(node, signals)),
+                outputs,
+            ))
         }
         _ => unknown(),
     }?;

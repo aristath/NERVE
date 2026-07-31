@@ -5,7 +5,10 @@ from copy import deepcopy
 from collections.abc import Callable
 from typing import Any
 
-from nerve.physical_representations import physical_representation_contract
+from nerve.physical_representations import (
+    ATTENTION_PARTIALS_CONTRACT,
+    physical_representation_contract,
+)
 
 
 Json = dict[str, Any]
@@ -39,6 +42,7 @@ def optimize_circuit_for_vulkan(
     ) = None,
     prequantization_spec: Callable[[Json], Json | None] | None = None,
     can_emit_representation: Callable[[Json, Json], bool] | None = None,
+    attention_partition_count: int | None = None,
 ) -> Json:
     """Compile discoverable node regions without changing the component boundary."""
     optimized = deepcopy(circuit)
@@ -122,6 +126,10 @@ def optimize_circuit_for_vulkan(
             for output in optimized.get("boundary", {}).get("outputs", [])
         },
     )
+    compiled_nodes = _lower_partitioned_attention(
+        compiled_nodes,
+        attention_partition_count,
+    )
     compiled_nodes = _fuse_contiguous_linear_swiglu_regions(
         compiled_nodes,
         consumer_counts,
@@ -141,6 +149,86 @@ def optimize_circuit_for_vulkan(
         can_fuse_mixed_precision_parallel_linears,
     )
     return optimized
+
+
+def _lower_partitioned_attention(
+    nodes: list[Json],
+    partition_count: int | None,
+) -> list[Json]:
+    if partition_count is None or partition_count <= 1:
+        return nodes
+    compiled: list[Json] = []
+    for source in nodes:
+        node = deepcopy(source)
+        attrs = node.get("attrs", {})
+        attention = attrs.get("attention", {})
+        inputs = node.get("inputs", [])
+        state_reads = node.get("state_reads", [])
+        if (
+            node.get("op") != "append_scaled_dot_product_attention"
+            or len(inputs) != 4
+            or len(node.get("outputs", [])) != 1
+            or len(state_reads) != 1
+            or node.get("state_writes") != state_reads
+            or not isinstance(attention, dict)
+            or attention.get("causal") is not True
+            or not isinstance(attention.get("query_heads"), int)
+            or attention["query_heads"] <= 0
+            or not isinstance(attention.get("key_value_heads"), int)
+            or attention["key_value_heads"] <= 0
+            or attention["query_heads"] % attention["key_value_heads"]
+            or not isinstance(attention.get("head_width"), int)
+            or attention["head_width"] <= 0
+            or attention["head_width"] % 2
+        ):
+            compiled.append(node)
+            continue
+
+        helper_id = f"{node['id']}__partition_partials"
+        partials_signal = f"{node['id']}__attention_partials_f32"
+        metadata = {
+            "query_heads": attention["query_heads"],
+            "key_value_heads": attention["key_value_heads"],
+            "head_width": attention["head_width"],
+            "partition_count": partition_count,
+            "scale": attention["scale"],
+            "window_size": attention.get("window_size"),
+            "attention_sinks": bool(attention.get("attention_sinks")),
+        }
+        compiled.append(
+            {
+                "id": helper_id,
+                "op": "attention_partition_partials",
+                "inputs": deepcopy(inputs),
+                "outputs": [partials_signal],
+                "params": [],
+                "state_reads": deepcopy(state_reads),
+                "state_writes": [],
+                "attrs": {
+                    "physical_representation_contract": (
+                        ATTENTION_PARTIALS_CONTRACT
+                    ),
+                    "consumer_node_ids": [node["id"]],
+                    "semantic_source_node_ids": _source_node_ids(node),
+                    **metadata,
+                    "output_element_bytes": [4],
+                },
+            }
+        )
+        node["inputs"] = [partials_signal, *deepcopy(inputs[1:])]
+        node_attrs = node.setdefault("attrs", {})
+        node_attrs.update(
+            {
+                "physical_input_contract": ATTENTION_PARTIALS_CONTRACT,
+                "physical_input_provider_id": helper_id,
+                "physical_logical_inputs": deepcopy(inputs),
+                "physical_passthrough_inputs": deepcopy(inputs[1:]),
+                "attention_partition_count": partition_count,
+                "output_element_bytes": [2],
+            }
+        )
+        compiled.append(node)
+    return compiled
 
 
 def _fuse_contiguous_linear_swiglu_regions(
@@ -331,7 +419,10 @@ def _lower_prequantized_inputs(
     for source in nodes:
         node = deepcopy(source)
         node_attrs = node.setdefault("attrs", {})
-        node_attrs["output_element_bytes"] = [2] * len(node.get("outputs", []))
+        node_attrs.setdefault(
+            "output_element_bytes",
+            [2] * len(node.get("outputs", [])),
+        )
         spec = describe(node)
         prepared.append((node, spec))
         if spec is None:

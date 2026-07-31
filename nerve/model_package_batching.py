@@ -205,6 +205,70 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             )
         ]
 
+    partition_partials = re.fullmatch(
+        r"attention_partition_partials_bf16_q(\d+)_kv(\d+)_d(\d+)_s(\d+)"
+        r"_scale([0-9eE+.-]+)(?:_w(\d+))?__sc\d+\.comp",
+        shader_file,
+    )
+    if partition_partials is not None:
+        query_heads, _kv_heads, _head_width, partition_count = map(
+            int, partition_partials.groups()[:4]
+        )
+        stem = re.sub(r"__sc\d+\.comp$", ".comp", shader_file).replace(
+            "attention_partition_partials_bf16_",
+            "attention_partition_partials_temporal_bf16_",
+            1,
+        )
+        return [
+            persistent_batch_control_stage(
+                stem,
+                local_size_x,
+                query_heads
+                * partition_count
+                * CAUSAL_SCAN_LANE_TILE_WIDTH,
+                payload="temporal",
+                binding=6,
+            )
+        ]
+
+    partition_reduce = re.fullmatch(
+        r"append_gqa_attention_partition_reduce_bf16_"
+        r"q(\d+)_kv(\d+)_d(\d+)_s(\d+)_scale([0-9eE+.-]+)"
+        r"(?:_w(\d+))?(_sinks)?__sc\d+\.comp",
+        shader_file,
+    )
+    if partition_reduce is not None:
+        query_heads, kv_heads, head_width, _partition_count = map(
+            int, partition_reduce.groups()[:4]
+        )
+        stem = re.sub(r"__sc\d+\.comp$", ".comp", shader_file).replace(
+            "append_gqa_attention_partition_reduce_bf16_",
+            "append_gqa_attention_partition_reduce_temporal_bf16_",
+            1,
+        )
+        sinks = "_sinks" if partition_reduce.group(7) else ""
+        attention_window = partition_reduce.group(6) or "0"
+        control_binding = 8 if sinks else 7
+        return [
+            persistent_batch_control_stage(
+                stem,
+                head_width,
+                query_heads * CAUSAL_SCAN_LANE_TILE_WIDTH,
+                payload="temporal",
+                binding=control_binding,
+            ),
+            persistent_batch_control_stage(
+                (
+                    "append_kv_temporal_commit_bf16_"
+                    f"kv{kv_heads}_d{head_width}_w{attention_window}{sinks}.comp"
+                ),
+                64,
+                kv_heads,
+                payload="temporal",
+                binding=control_binding,
+            ),
+        ]
+
     attention = re.fullmatch(
         r"append_gqa_attention_bf16_q(\d+)_kv(\d+)_d(\d+)_scale([0-9eE+.-]+)"
         r"(?:_w(\d+))?(_sinks)?__sc\d+\.comp",

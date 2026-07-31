@@ -96,6 +96,7 @@ PHYSICAL_NODE_ATTRS = {
     "physical_logical_inputs",
     "physical_passthrough_inputs",
     "physical_output_representations",
+    "attention_partition_count",
 }
 def build_behavioral_validation(
     *,
@@ -369,16 +370,15 @@ def _validate_physical_representation_providers(
         helper_id = helper["id"]
         consumer_node_ids = attrs.get("consumer_node_ids")
         outputs = helper.get("outputs", [])
+        expected_attr_keys = {
+            "physical_representation_contract",
+            "consumer_node_ids",
+            "semantic_source_node_ids",
+            "output_element_bytes",
+            *contract.metadata_fields,
+        }
         if (
-            set(attrs)
-            != {
-                "physical_representation_contract",
-                "consumer_node_ids",
-                "semantic_source_node_ids",
-                "element_count",
-                "block_columns",
-                "output_element_bytes",
-            }
+            set(attrs) != expected_attr_keys
             or contract_id != contract.id
             or not isinstance(consumer_node_ids, list)
             or not consumer_node_ids
@@ -388,13 +388,12 @@ def _validate_physical_representation_providers(
             or attrs.get("output_element_bytes")
             != list(contract.output_element_bytes)
             or helper.get("params")
-            or helper.get("state_reads")
             or helper.get("state_writes")
-            or not isinstance(attrs.get("element_count"), int)
-            or attrs["element_count"] <= 0
-            or not isinstance(attrs.get("block_columns"), int)
-            or attrs["block_columns"] <= 0
-            or attrs["element_count"] % attrs["block_columns"]
+            or (
+                not contract.mirrors_consumer_state_reads
+                and helper.get("state_reads")
+            )
+            or not _valid_physical_representation_metadata(contract.id, attrs)
             or any(output in boundary_outputs for output in outputs)
             or any(consumers.get(output) != set(consumer_node_ids) for output in outputs)
         ):
@@ -426,14 +425,24 @@ def _validate_physical_representation_providers(
                     for signal in passthrough_inputs
                 )
                 or len(set(passthrough_inputs)) != len(passthrough_inputs)
-                or helper.get("inputs") != [logical_inputs[0]]
+                or helper.get("inputs")
+                != logical_inputs[: contract.logical_input_count]
                 or target.get("inputs")
-                != [*outputs, *logical_inputs[1:], *passthrough_inputs]
+                != [
+                    *outputs,
+                    *logical_inputs[contract.logical_input_count :],
+                    *passthrough_inputs,
+                ]
                 or target_attrs.get("physical_input_contract")
                 != contract_id
                 or target_attrs.get("physical_input_provider_id") != helper_id
                 or target_attrs.get("output_element_bytes")
                 != [2] * len(target.get("outputs", []))
+                or (
+                    contract.mirrors_consumer_state_reads
+                    and helper.get("state_reads")
+                    != target.get("state_reads")
+                )
             ):
                 raise ModelCompileError(
                     f"candidate circuit {component_id!r} has an invalid physical "
@@ -594,6 +603,59 @@ def _validate_physical_representation_providers(
             f"representation providers: {unlinked_targets}"
         )
     return helper_ids, representation_count
+
+
+def _valid_physical_representation_metadata(
+    contract_id: str,
+    attrs: Json,
+) -> bool:
+    if contract_id == "bf16_attention_partition_partials_f32.v1":
+        query_heads = attrs.get("query_heads")
+        key_value_heads = attrs.get("key_value_heads")
+        head_width = attrs.get("head_width")
+        partition_count = attrs.get("partition_count")
+        scale = attrs.get("scale")
+        window_size = attrs.get("window_size")
+        return (
+            isinstance(query_heads, int)
+            and not isinstance(query_heads, bool)
+            and query_heads > 0
+            and isinstance(key_value_heads, int)
+            and not isinstance(key_value_heads, bool)
+            and key_value_heads > 0
+            and query_heads % key_value_heads == 0
+            and isinstance(head_width, int)
+            and not isinstance(head_width, bool)
+            and head_width > 0
+            and head_width % 2 == 0
+            and isinstance(partition_count, int)
+            and not isinstance(partition_count, bool)
+            and partition_count > 1
+            and isinstance(scale, (int, float))
+            and not isinstance(scale, bool)
+            and math.isfinite(float(scale))
+            and float(scale) > 0.0
+            and (
+                window_size is None
+                or (
+                    isinstance(window_size, int)
+                    and not isinstance(window_size, bool)
+                    and window_size > 0
+                )
+            )
+            and isinstance(attrs.get("attention_sinks"), bool)
+        )
+    element_count = attrs.get("element_count")
+    block_columns = attrs.get("block_columns")
+    return (
+        isinstance(element_count, int)
+        and not isinstance(element_count, bool)
+        and element_count > 0
+        and isinstance(block_columns, int)
+        and not isinstance(block_columns, bool)
+        and block_columns > 0
+        and element_count % block_columns == 0
+    )
 
 
 def model_contract_digest(model_graph: Json, tensor_index: Json) -> str:

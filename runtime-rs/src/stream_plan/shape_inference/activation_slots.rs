@@ -598,6 +598,86 @@ mod tests {
     }
 
     #[test]
+    fn infers_partitioned_attention_workspace_and_logical_output_shapes() {
+        let helper = crate::stream_circuit::CircuitNode {
+            id: "attention_partials".to_string(),
+            op: "attention_partition_partials".to_string(),
+            inputs: vec![
+                "q".to_string(),
+                "k".to_string(),
+                "v".to_string(),
+                "kv_memory".to_string(),
+            ],
+            outputs: vec!["partials".to_string()],
+            params: Vec::new(),
+            state_reads: vec!["kv_memory".to_string()],
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "partition_count": 8,
+                "query_heads": 16,
+                "head_width": 256
+            }),
+        };
+        let reduction = crate::stream_circuit::CircuitNode {
+            id: "attention_reduce".to_string(),
+            op: "append_scaled_dot_product_attention".to_string(),
+            inputs: vec![
+                "partials".to_string(),
+                "k".to_string(),
+                "v".to_string(),
+                "kv_memory".to_string(),
+            ],
+            outputs: vec!["attention_out".to_string()],
+            params: Vec::new(),
+            state_reads: vec!["kv_memory".to_string()],
+            state_writes: vec!["kv_memory".to_string()],
+            attrs: serde_json::json!({
+                "physical_logical_inputs": ["q", "k", "v", "kv_memory"],
+                "attention": {
+                    "query_heads": 16,
+                    "key_value_heads": 2,
+                    "head_width": 256
+                }
+            }),
+        };
+        let signals = BTreeMap::from([(
+            "q".to_string(),
+            PlannedSignal {
+                id: "q".to_string(),
+                producer: SignalProducer::BoundaryInput,
+                consumers: vec!["attention_partials".to_string()],
+                shape: Some(vec![4096]),
+                element_bytes: Some(2),
+                storage: SignalStorage::Boundary,
+                is_boundary_output: false,
+            },
+        )]);
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_03",
+                &helper,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![8, 16, 258])]
+        );
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_03",
+                &reduction,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![4096])]
+        );
+    }
+
+    #[test]
     fn infers_exact_codebook_head_norm_rope_shapes_and_abi() {
         let node = crate::stream_circuit::CircuitNode {
             id: "codebook_head_norm_rope".to_string(),

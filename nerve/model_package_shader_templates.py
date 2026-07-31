@@ -2726,6 +2726,200 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    partition_partials_shape = re.fullmatch(
+        r"attention_partition_partials(_temporal)?_bf16_"
+        r"q(\d+)_kv(\d+)_d(\d+)_s(\d+)_scale([0-9eE+.-]+)"
+        r"(?:_w(\d+))?\.comp",
+        shader_file,
+    )
+    if partition_partials_shape is not None:
+        (
+            temporal,
+            query_heads,
+            kv_heads,
+            head_width,
+            partition_count,
+            scale,
+            attention_window,
+        ) = partition_partials_shape.groups()
+        query_heads, kv_heads, head_width, partition_count = map(
+            int,
+            (query_heads, kv_heads, head_width, partition_count),
+        )
+        local_size, tile_tokens = attention_workgroup_shape(head_width)
+        if (
+            query_heads % kv_heads
+            or partition_count <= 1
+            or local_size == 0
+            or tile_tokens == 0
+        ):
+            raise ModelCompileError(
+                f"invalid partitioned attention geometry {shader_file!r}"
+            )
+        is_temporal = temporal is not None
+        return render_shader_template(
+            source_dir,
+            "attention_partition_partials_bf16.comp.template",
+            {
+                "QUERY_HEADS": str(query_heads),
+                "KV_HEADS": str(kv_heads),
+                "HEAD_WIDTH": str(head_width),
+                "PARTITION_COUNT": str(partition_count),
+                "ATTENTION_SCALE": scale,
+                "ATTENTION_WINDOW": attention_window or "0",
+                "LOCAL_SIZE": str(local_size),
+                "TILE_TOKENS": str(tile_tokens),
+                "TILE_REDUCTION_WIDTH": str(
+                    1 << (tile_tokens - 1).bit_length()
+                ),
+                "STATE_READ_BINDING": "5",
+                "CONTROL_DECLARATION": (
+                    "layout(set = 0, binding = 6) readonly buffer BatchControl "
+                    "{ uint batch_width; uint start_stream_tick_low; "
+                    "uint start_stream_tick_high; uint dynamic_state_capacity; "
+                    "} batch_control;"
+                    if is_temporal
+                    else "layout(set = 0, binding = 8) readonly buffer StreamControl "
+                    "{ uint words[]; } stream_control;"
+                ),
+                "BATCH_WIDTH_EXPR": (
+                    "batch_control.batch_width" if is_temporal else "1u"
+                ),
+                "START_TICK_EXPR": (
+                    "batch_control.start_stream_tick_low"
+                    if is_temporal
+                    else "stream_control.words[1]"
+                ),
+                "CAPACITY_EXPR": (
+                    "batch_control.dynamic_state_capacity"
+                    if is_temporal
+                    else "stream_control.words[4]"
+                ),
+            },
+        )
+
+    partition_reduce_shape = re.fullmatch(
+        r"append_gqa_attention_partition_reduce(_temporal)?_bf16_"
+        r"q(\d+)_kv(\d+)_d(\d+)_s(\d+)_scale([0-9eE+.-]+)"
+        r"(?:_w(\d+))?(_sinks)?\.comp",
+        shader_file,
+    )
+    if partition_reduce_shape is not None:
+        (
+            temporal,
+            query_heads,
+            kv_heads,
+            head_width,
+            partition_count,
+            _scale,
+            attention_window,
+            sinks,
+        ) = partition_reduce_shape.groups()
+        query_heads, kv_heads, head_width, partition_count = map(
+            int,
+            (query_heads, kv_heads, head_width, partition_count),
+        )
+        if (
+            query_heads % kv_heads
+            or head_width <= 0
+            or head_width % 2
+            or partition_count <= 1
+        ):
+            raise ModelCompileError(
+                f"invalid partitioned attention reduction geometry {shader_file!r}"
+            )
+        is_temporal = temporal is not None
+        has_sinks = sinks is not None
+        control_binding = 8 if has_sinks else 7
+        state_write_binding = 7 if has_sinks else 6
+        state_declarations = (
+            ""
+            if is_temporal
+            else (
+                f"layout(set = 0, binding = {state_write_binding}) buffer "
+                "KvStateWrite { uint words[]; } kv_state_write;"
+            )
+        )
+        state_helpers = (
+            ""
+            if is_temporal
+            else """
+uint kv_state_write_word(uint logical_word) {
+    uint logical_byte = logical_word * 4u;
+    uint static_bytes = kv_state_write.words[2];
+    if (logical_byte < static_bytes) {
+        return (kv_state_write.words[3] + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - static_bytes;
+    uint page_bytes = kv_state_write.words[4];
+    uint logical_page = dynamic_byte / page_bytes;
+    uint physical_page =
+        kv_state_write.words[STATE_PAGE_TABLE_WORDS + logical_page];
+    return (
+        kv_state_write.words[8]
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+"""
+        )
+        state_commit = (
+            ""
+            if is_temporal
+            else """
+if (
+    query_head % QUERY_GROUPS_PER_KV_HEAD == 0u
+    && lane < HEAD_WIDTH / 2u
+) {
+    uint runtime_capacity = stream_control.words[4];
+    uint capacity = ATTENTION_WINDOW == 0u
+        ? runtime_capacity
+        : min(runtime_capacity, ATTENTION_WINDOW);
+    if (capacity > 0u) {
+        uint kv_head = query_head / QUERY_GROUPS_PER_KV_HEAD;
+        uint head_word = kv_head * (HEAD_WIDTH / 2u) + lane;
+        uint destination =
+            (stream_control.words[1] % capacity) * SLOT_WORD_COUNT
+            + head_word;
+        kv_state_write.words[kv_state_write_word(destination)] =
+            current_k_frames.words[head_word];
+        kv_state_write.words[
+            kv_state_write_word(destination + KV_WORD_COUNT)
+        ] = current_v_frames.words[head_word];
+    }
+}
+"""
+        )
+        return render_shader_template(
+            source_dir,
+            "append_gqa_attention_partition_reduce_bf16.comp.template",
+            {
+                "QUERY_HEADS": str(query_heads),
+                "KV_HEADS": str(kv_heads),
+                "HEAD_WIDTH": str(head_width),
+                "PARTITION_COUNT": str(partition_count),
+                "ATTENTION_WINDOW": attention_window or "0",
+                "LOCAL_SIZE": str(head_width),
+                "HAS_SINKS": "1" if has_sinks else "0",
+                "ATTENTION_SINK_BINDING": "5",
+                "STATE_DECLARATIONS": state_declarations,
+                "STATE_HELPERS": state_helpers,
+                "STATE_COMMIT_BODY": state_commit,
+                "CONTROL_DECLARATION": (
+                    f"layout(set = 0, binding = {control_binding}) readonly "
+                    "buffer BatchControl { uint batch_width; "
+                    "uint start_stream_tick_low; uint start_stream_tick_high; "
+                    "uint dynamic_state_capacity; } batch_control;"
+                    if is_temporal
+                    else "layout(set = 0, binding = 8) readonly buffer "
+                    "StreamControl { uint words[]; } stream_control;"
+                ),
+                "BATCH_WIDTH_EXPR": (
+                    "batch_control.batch_width" if is_temporal else "1u"
+                ),
+            },
+        )
+
     temporal_attention_shape = re.fullmatch(
         r"append_gqa_attention_temporal_read_bf16_q(\d+)_kv(\d+)_d(\d+)"
         r"_scale([0-9eE+.-]+)(?:_w(\d+))?(_sinks)?\.comp",

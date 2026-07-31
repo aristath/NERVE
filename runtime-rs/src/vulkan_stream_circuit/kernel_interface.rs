@@ -132,6 +132,7 @@ impl VulkanKernelStreamMetadata {
                     | "append_state_update"
                     | "scaled_dot_product_attention"
                     | "append_scaled_dot_product_attention"
+                    | "attention_partition_partials"
                     | "per_layer_embedding"
                     | "rg_lru_step"
             ),

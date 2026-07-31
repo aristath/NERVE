@@ -10,6 +10,7 @@ INT8_PREQUANTIZATION_CONTRACT = "bf16_blockwise_symmetric_int8_f32_scale.v1"
 PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT = (
     "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1"
 )
+ATTENTION_PARTIALS_CONTRACT = "bf16_attention_partition_partials_f32.v1"
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,9 @@ class PhysicalRepresentationContract:
     helper_op: str
     output_signal_suffixes: tuple[str, ...]
     output_element_bytes: tuple[int, ...]
+    metadata_fields: tuple[str, ...] = ("element_count", "block_columns")
+    logical_input_count: int = 1
+    mirrors_consumer_state_reads: bool = False
 
 
 _CONTRACTS = {
@@ -40,6 +44,23 @@ _CONTRACTS = {
             helper_op="quantize_int8_symmetric_pairpacked",
             output_signal_suffixes=("int8_pairpacked", "scale_f32", "sum_i32"),
             output_element_bytes=(1, 4, 4),
+        ),
+        PhysicalRepresentationContract(
+            id=ATTENTION_PARTIALS_CONTRACT,
+            helper_op="attention_partition_partials",
+            output_signal_suffixes=("attention_partials_f32",),
+            output_element_bytes=(4,),
+            metadata_fields=(
+                "query_heads",
+                "key_value_heads",
+                "head_width",
+                "partition_count",
+                "scale",
+                "window_size",
+                "attention_sinks",
+            ),
+            logical_input_count=4,
+            mirrors_consumer_state_reads=True,
         ),
     )
 }

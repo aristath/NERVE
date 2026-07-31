@@ -935,13 +935,35 @@ def shader_file_for_node(
         if attrs.get("attention_sinks"):
             name += "_sinks"
         return f"{name}__sc{binding}.comp"
+    if op == "attention_partition_partials":
+        attrs = node["attrs"]
+        binding = stream_control_binding_for_node(circuit, node)
+        name = (
+            "attention_partition_partials_bf16_"
+            f"q{attrs['query_heads']}_kv{attrs['key_value_heads']}"
+            f"_d{attrs['head_width']}_s{attrs['partition_count']}"
+            f"_scale{shader_float_token(float(attrs['scale']))}"
+        )
+        if attrs.get("window_size") is not None:
+            name += f"_w{int(attrs['window_size'])}"
+        return f"{name}__sc{binding}.comp"
     if op == "append_scaled_dot_product_attention":
         attrs = node["attrs"]["attention"]
         binding = stream_control_binding_for_node(circuit, node)
+        partition_count = node["attrs"].get("attention_partition_count")
         name = (
-            "append_gqa_attention_bf16_"
-            f"q{attrs['query_heads']}_kv{attrs['key_value_heads']}_d{attrs['head_width']}"
-            f"_scale{shader_float_token(float(attrs['scale']))}"
+            (
+                "append_gqa_attention_partition_reduce_bf16_"
+                if partition_count is not None
+                else "append_gqa_attention_bf16_"
+            )
+            + f"q{attrs['query_heads']}_kv{attrs['key_value_heads']}_d{attrs['head_width']}"
+            + (
+                f"_s{int(partition_count)}"
+                if partition_count is not None
+                else ""
+            )
+            + f"_scale{shader_float_token(float(attrs['scale']))}"
         )
         if attrs.get("window_size") is not None:
             name += f"_w{int(attrs['window_size'])}"
@@ -1281,6 +1303,9 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
             else node["attrs"]
         )
         return int(attrs["query_heads"])
+    if node["op"] == "attention_partition_partials":
+        attrs = node["attrs"]
+        return int(attrs["query_heads"]) * int(attrs["partition_count"])
     if node["op"] == "gated_delta_step":
         return int(node["attrs"]["value_heads"])
     if node["op"] == "rg_lru_step":
@@ -1368,6 +1393,10 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if shader_file.startswith("attention_partition_partials_bf16_"):
+        return attention_workgroup_shape(int(node["attrs"]["head_width"]))[0]
+    if shader_file.startswith("append_gqa_attention_partition_reduce_bf16_"):
+        return int(node["attrs"]["attention"]["head_width"])
     if shader_file.startswith("sparse_moe_gate_up_prequant_fp8_"):
         return 512
     if shader_file.startswith(("sparse_moe_gate_up_fp8_", "sparse_moe_down_fp8_")):

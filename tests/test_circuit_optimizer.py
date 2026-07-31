@@ -1274,6 +1274,86 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             [node["op"] for node in optimized["nodes"]],
         )
 
+    def test_lowers_fused_attention_to_partitioned_physical_stages(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "kv_memory_append",
+                    "op": "append_state_update",
+                    "inputs": ["k", "v", "kv_memory"],
+                    "outputs": ["all_k", "all_v"],
+                    "params": [],
+                    "state_reads": ["kv_memory"],
+                    "state_writes": ["kv_memory"],
+                    "attrs": {
+                        "growth": "per_activation",
+                        "query_heads": 16,
+                        "key_value_heads": 2,
+                        "head_width": 256,
+                        "query_groups_per_kv_head": 8,
+                    },
+                },
+                {
+                    "id": "attention_read",
+                    "op": "scaled_dot_product_attention",
+                    "inputs": ["q", "all_k", "all_v"],
+                    "outputs": ["out"],
+                    "params": [],
+                    "state_reads": [],
+                    "state_writes": [],
+                    "attrs": {
+                        "causal": True,
+                        "scale": 0.0625,
+                        "window_size": None,
+                        "attention_sinks": False,
+                        "query_heads": 16,
+                        "key_value_heads": 2,
+                        "head_width": 256,
+                        "query_groups_per_kv_head": 8,
+                    },
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_append_attention=lambda _append, _attention: True,
+            attention_partition_count=8,
+            prequantization_spec=lambda _node: None,
+        )
+
+        self.assertEqual(
+            [
+                "attention_partition_partials",
+                "append_scaled_dot_product_attention",
+            ],
+            [node["op"] for node in optimized["nodes"]],
+        )
+        helper, reduction = optimized["nodes"]
+        self.assertEqual(["q", "k", "v", "kv_memory"], helper["inputs"])
+        self.assertEqual(["kv_memory"], helper["state_reads"])
+        self.assertEqual([], helper["state_writes"])
+        self.assertEqual(8, helper["attrs"]["partition_count"])
+        self.assertEqual([4], helper["attrs"]["output_element_bytes"])
+        self.assertEqual(
+            "bf16_attention_partition_partials_f32.v1",
+            helper["attrs"]["physical_representation_contract"],
+        )
+        self.assertEqual(
+            [
+                helper["outputs"][0],
+                "k",
+                "v",
+                "kv_memory",
+            ],
+            reduction["inputs"],
+        )
+        self.assertEqual(
+            ["q", "k", "v", "kv_memory"],
+            reduction["attrs"]["physical_logical_inputs"],
+        )
+        self.assertEqual(8, reduction["attrs"]["attention_partition_count"])
+
     def test_fuses_contiguous_gate_up_projection_split_and_swiglu(self) -> None:
         circuit = {
             "nodes": [

@@ -1,0 +1,169 @@
+#version 450
+
+layout(local_size_x = {{LOCAL_SIZE}}, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer AttentionPartials {
+    float values[];
+} attention_partials;
+layout(set = 0, binding = 1) readonly buffer CurrentKFrames {
+    uint words[];
+} current_k_frames;
+layout(set = 0, binding = 2) readonly buffer CurrentVFrames {
+    uint words[];
+} current_v_frames;
+layout(set = 0, binding = 4) buffer OutputFrames {
+    uint words[];
+} output_frames;
+#if {{HAS_SINKS}}
+layout(set = 0, binding = {{ATTENTION_SINK_BINDING}}) readonly buffer AttentionSinks {
+    uint words[];
+} attention_sinks;
+#endif
+{{STATE_DECLARATIONS}}
+{{CONTROL_DECLARATION}}
+
+const uint QUERY_HEADS = {{QUERY_HEADS}}u;
+const uint KV_HEADS = {{KV_HEADS}}u;
+const uint QUERY_GROUPS_PER_KV_HEAD = QUERY_HEADS / KV_HEADS;
+const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
+const uint PARTITION_COUNT = {{PARTITION_COUNT}}u;
+const uint PARTIAL_WIDTH = HEAD_WIDTH + 2u;
+const uint PARTIAL_FRAME_ELEMENTS =
+    PARTITION_COUNT * QUERY_HEADS * PARTIAL_WIDTH;
+const uint QUERY_WORD_COUNT = QUERY_HEADS * HEAD_WIDTH / 2u;
+const uint KV_WORD_COUNT = KV_HEADS * HEAD_WIDTH / 2u;
+const uint SLOT_WORD_COUNT = KV_WORD_COUNT * 2u;
+const uint ATTENTION_WINDOW = {{ATTENTION_WINDOW}}u;
+const uint STATE_PAGE_TABLE_WORDS = 9u;
+const float LOWEST_FLOAT = -3.4028234663852886e38;
+
+shared float partition_maxima[{{PARTITION_COUNT}}];
+shared float partition_scales[{{PARTITION_COUNT}}];
+shared float merged_denominator;
+shared float merged_maximum;
+shared float output_values[{{HEAD_WIDTH}}];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+#if {{HAS_SINKS}}
+float read_attention_sink(uint head) {
+    uint packed = attention_sinks.words[head >> 1u];
+    return bf16_to_f32(
+        (head & 1u) == 0u ? packed : packed >> 16u
+    );
+}
+#endif
+
+{{STATE_HELPERS}}
+
+void main() {
+    uint query_head = gl_WorkGroupID.x % QUERY_HEADS;
+    uint position = gl_WorkGroupID.x / QUERY_HEADS;
+    uint batch_width = {{BATCH_WIDTH_EXPR}};
+    if (position >= batch_width) {
+        return;
+    }
+    uint lane = gl_LocalInvocationID.x;
+    uint frame_base = position * PARTIAL_FRAME_ELEMENTS;
+    if (lane < PARTITION_COUNT) {
+        uint partial_base =
+            frame_base
+            + (lane * QUERY_HEADS + query_head) * PARTIAL_WIDTH;
+        partition_maxima[lane] =
+            attention_partials.values[partial_base];
+    }
+    barrier();
+
+    if (lane == 0u) {
+        float maximum = LOWEST_FLOAT;
+        for (
+            uint partition_index = 0u;
+            partition_index < PARTITION_COUNT;
+            partition_index++
+        ) {
+            maximum = max(
+                maximum,
+                partition_maxima[partition_index]
+            );
+        }
+        float denominator = 0.0;
+        for (
+            uint partition_index = 0u;
+            partition_index < PARTITION_COUNT;
+            partition_index++
+        ) {
+            uint partial_base =
+                frame_base
+                + (
+                    partition_index * QUERY_HEADS + query_head
+                ) * PARTIAL_WIDTH;
+            float partition_denominator =
+                attention_partials.values[partial_base + 1u];
+            float scale = partition_denominator == 0.0
+                ? 0.0
+                : exp(partition_maxima[partition_index] - maximum);
+            partition_scales[partition_index] = scale;
+            denominator += scale * partition_denominator;
+        }
+        merged_maximum = maximum;
+        merged_denominator = denominator;
+    }
+    barrier();
+
+    for (uint dim = lane; dim < HEAD_WIDTH; dim += gl_WorkGroupSize.x) {
+        float accumulator = 0.0;
+        for (
+            uint partition_index = 0u;
+            partition_index < PARTITION_COUNT;
+            partition_index++
+        ) {
+            uint partial_base =
+                frame_base
+                + (
+                    partition_index * QUERY_HEADS + query_head
+                ) * PARTIAL_WIDTH;
+            accumulator +=
+                partition_scales[partition_index]
+                * attention_partials.values[partial_base + 2u + dim];
+        }
+        float output_scale = 1.0;
+#if {{HAS_SINKS}}
+        if (merged_denominator != 0.0) {
+            float logsumexp =
+                merged_maximum + log(merged_denominator);
+            output_scale = 1.0 / (
+                1.0
+                + exp(read_attention_sink(query_head) - logsumexp)
+            );
+        }
+#endif
+        output_values[dim] = merged_denominator == 0.0
+            ? 0.0
+            : accumulator / merged_denominator * output_scale;
+    }
+    barrier();
+
+    for (
+        uint dim = lane * 2u;
+        dim < HEAD_WIDTH;
+        dim += gl_WorkGroupSize.x * 2u
+    ) {
+        uint word =
+            position * QUERY_WORD_COUNT
+            + query_head * (HEAD_WIDTH / 2u)
+            + dim / 2u;
+        output_frames.words[word] =
+            (f32_to_bf16(output_values[dim + 1u]) << 16u)
+            | f32_to_bf16(output_values[dim]);
+    }
+
+    {{STATE_COMMIT_BODY}}
+}
