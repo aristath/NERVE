@@ -186,6 +186,14 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == 2048
     )
     assert (
+        weight_shared_batch_workgroup_count_x(
+            "split_bf16_2x16x256_head_interleaved.comp",
+            tile_width=4,
+            scalar_workgroup_count_x=8,
+        )
+        == 8
+    )
+    assert (
         weight_shared_batch_shader_file("sigmoid_multiply_bf16.comp")
         == "sigmoid_multiply_batch16_bf16.comp"
     )
@@ -972,6 +980,12 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
             assert "fp8_dot4_acc32" in source
             assert "shared fe4m3vec4 quantized_input" in source
         assert "{{" not in source
+    head_interleaved_split = (
+        tmp_path / "split_batch16_bf16_2x16x256_head_interleaved.comp"
+    ).read_text()
+    assert "layout(local_size_x = 256" in head_interleaved_split
+    assert "uint output_word = gl_GlobalInvocationID.x;" in head_interleaved_split
+    assert "gl_NumWorkGroups.x * gl_WorkGroupSize.x" in head_interleaved_split
     assert required_vulkan_device_extensions(tmp_path, shader_files) == [
         "VK_EXT_shader_float8",
         "VK_VALVE_shader_mixed_float_dot_product",

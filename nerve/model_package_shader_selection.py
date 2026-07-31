@@ -1105,6 +1105,17 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
                 f"{part_width}"
             )
         return part_width // 8
+    if (
+        node["op"] == "split"
+        and node.get("attrs", {}).get("layout") == "per_head_interleaved"
+    ):
+        attrs = node["attrs"]
+        output_words = (
+            int(attrs["blocks"]) * int(attrs["block_part_width"]) + 1
+        ) // 2
+        return (
+            output_words + HEAD_INTERLEAVED_SPLIT_LOCAL_SIZE - 1
+        ) // HEAD_INTERLEAVED_SPLIT_LOCAL_SIZE
     if node["op"] in {"parallel_linear_2way", "parallel_linear_3way"}:
         branch_count = int(node["attrs"]["branch_count"])
         branch_parameter_counts = [
@@ -1308,6 +1319,11 @@ def local_size_x_for_node(node: Json) -> int:
         return int(node["attrs"]["block_width"])
     if node["op"] == "moe_reduce":
         return MOE_REDUCE_LOCAL_SIZE
+    if (
+        node["op"] == "split"
+        and node.get("attrs", {}).get("layout") == "per_head_interleaved"
+    ):
+        return HEAD_INTERLEAVED_SPLIT_LOCAL_SIZE
     return 64
 
 

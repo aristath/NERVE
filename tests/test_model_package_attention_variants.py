@@ -212,6 +212,33 @@ def test_compiler_renders_hybrid_recurrent_and_gated_attention_components(
     )
     assert "const uint BLOCKS = 8u;" in split
     assert "const uint BLOCK_PART_WIDTH = 256u;" in split
+    assert "layout(local_size_x = 256" in split
+    assert "uint output_word = gl_GlobalInvocationID.x;" in split
+    assert "gl_NumWorkGroups.x * gl_WorkGroupSize.x" in split
+    assert (
+        workgroup_count_x_for_node(
+            {},
+            {
+                "op": "split",
+                "attrs": {
+                    "layout": "per_head_interleaved",
+                    "blocks": 8,
+                    "block_part_width": 256,
+                },
+            },
+            {},
+        )
+        == 4
+    )
+    assert (
+        local_size_x_for_node(
+            {
+                "op": "split",
+                "attrs": {"layout": "per_head_interleaved"},
+            }
+        )
+        == 256
+    )
     assert all(
         "{{" not in (tmp_path / shader_file).read_text() for shader_file in shader_files
     )

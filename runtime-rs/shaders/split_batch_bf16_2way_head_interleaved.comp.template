@@ -1,6 +1,6 @@
 #version 450
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer InputFrames {
     uint words[];
@@ -25,9 +25,9 @@ const uint INPUT_FRAME_WORDS = OUTPUT_FRAME_WORDS * 2u;
 
 void main() {
     uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
-    for (uint output_word = gl_LocalInvocationID.x;
+    for (uint output_word = gl_GlobalInvocationID.x;
          output_word < OUTPUT_FRAME_WORDS;
-         output_word += 64u) {
+         output_word += gl_NumWorkGroups.x * gl_WorkGroupSize.x) {
         uint block = output_word / BLOCK_PART_WORDS;
         uint word_in_block = output_word % BLOCK_PART_WORDS;
         uint input_word = block * 2u * BLOCK_PART_WORDS + word_in_block;
