@@ -222,6 +222,21 @@ impl VulkanResidentStateTransactionBank {
         Ok(())
     }
 
+    fn submit_baseline_capture(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<(), VulkanError> {
+        if !self.has_baseline {
+            return Err(VulkanError(
+                "resident state snapshot bank has no transactional baseline".to_string(),
+            ));
+        }
+        if let Some(batch) = &self.capture_batches[0] {
+            device.submit_resident_buffer_copy_batch(batch)?;
+        }
+        Ok(())
+    }
+
     fn restore_baseline(
         &self,
         buffers: &VulkanStreamCircuitStreamBuffers,

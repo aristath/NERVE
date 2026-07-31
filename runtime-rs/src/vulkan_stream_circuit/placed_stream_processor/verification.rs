@@ -324,8 +324,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
 
-    fn capture_verification_baseline(
+    fn submit_verification_baseline_capture(
         &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let transactions = self.verification_state_transactions.borrow();
         let transactions = transactions.as_ref().ok_or_else(|| {
@@ -334,8 +335,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             ))
         })?;
         for (transaction, slice) in transactions.iter().zip(&self.device_slices) {
+            let device = devices.get(&slice.device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: slice.device_id.clone(),
+                }
+            })?;
             transaction
-                .capture_baseline(&slice.mounted.buffers)
+                .submit_baseline_capture(device)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
         Ok(())

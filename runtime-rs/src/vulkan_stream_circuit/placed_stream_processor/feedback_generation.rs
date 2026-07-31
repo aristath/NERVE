@@ -93,7 +93,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
 
         let cycle_start = Instant::now();
         decoder.capture_baseline()?;
-        self.capture_verification_baseline()?;
+        self.submit_verification_baseline_capture(devices)?;
         self.sampler
             .capture_token_state()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
