@@ -1,5 +1,5 @@
 from nerve.model_transpiler_types import *
-from nerve.model_transpiler_quantization import annotate_packed_linear_tensors
+from nerve.model_transpiler_quantization import annotate_quantized_linear_tensors
 
 def make_tensor_index(model_dir: Path) -> Json:
     tensor_entries: Json = {}
@@ -35,7 +35,7 @@ def make_tensor_index(model_dir: Path) -> Json:
                 "source_header_bytes": header_len,
             }
 
-    annotate_packed_linear_tensors(model_dir, tensor_entries)
+    annotate_quantized_linear_tensors(model_dir, tensor_entries)
 
     return {
         "schema": "nerve.tensor_index.v1",

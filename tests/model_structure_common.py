@@ -7,7 +7,7 @@ from nerve.circuit_lowering import build_component_circuit
 from nerve.model_transpiler import (
     attach_block_quantization_scales,
     attach_packed_linear_quantization,
-    annotate_packed_linear_tensors,
+    annotate_quantized_linear_tensors,
     compile_rope_scaling,
     discover_model_structure,
     discover_quantization_policy,
@@ -21,4 +21,3 @@ from nerve.model_transpiler import (
 
 def _tensor(shape: list[int], dtype: str = "BF16") -> dict[str, object]:
     return {"dtype": dtype, "shape": shape}
-

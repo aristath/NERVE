@@ -116,6 +116,46 @@ def test_does_not_invent_dynamic_activation_quantization() -> None:
     )
 
 
+def test_discovers_compressed_tensors_channel_fp8_by_numerical_structure() -> None:
+    config = {
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "format": "float-quantized",
+            "config_groups": {
+                "linear": {
+                    "format": "float-quantized",
+                    "weights": {
+                        "type": "float",
+                        "num_bits": 8,
+                        "strategy": "channel",
+                        "dynamic": False,
+                        "symmetric": True,
+                    },
+                    "input_activations": {
+                        "type": "float",
+                        "num_bits": 8,
+                        "strategy": "token",
+                        "dynamic": True,
+                        "symmetric": True,
+                    },
+                }
+            },
+        }
+    }
+
+    assert discover_quantization_policy(config) == {
+        "weight": {
+            "format": "channel_scaled_fp8_e4m3",
+            "channel_axis": 0,
+            "per_tensor": False,
+        },
+        "activation": {
+            "format": "dynamic_token_fp8_e4m3",
+            "per_tensor": False,
+        },
+    }
+
+
 def test_attaches_block_scale_to_fp8_parameter_by_tensor_structure() -> None:
     tensors = {
         "projection.weight": _tensor([256, 512], "F8_E4M3"),
@@ -150,7 +190,7 @@ def test_annotates_auto_gptq_storage_as_logical_packed_linear(
         "projection.scales": _tensor([4, 768], "F16"),
     }
 
-    annotate_packed_linear_tensors(tmp_path, tensors)
+    annotate_quantized_linear_tensors(tmp_path, tensors)
     parameters = {"projection": "projection.qweight"}
     attach_packed_linear_quantization(tensors, parameters)
 
@@ -190,7 +230,7 @@ def test_annotates_asymmetric_auto_gptq_zero_points_as_compile_only_source_data(
         "projection.scales": _tensor([4, 768], "F16"),
     }
 
-    annotate_packed_linear_tensors(tmp_path, tensors)
+    annotate_quantized_linear_tensors(tmp_path, tensors)
     parameters = {"projection": "projection.qweight"}
     attach_packed_linear_quantization(tensors, parameters)
 
@@ -225,7 +265,7 @@ def test_rejects_non_boolean_auto_gptq_symmetry_metadata(tmp_path: Path) -> None
     )
 
     with pytest.raises(ModelTranspileError, match="invalid sym value"):
-        annotate_packed_linear_tensors(
+        annotate_quantized_linear_tensors(
             tmp_path,
             {
                 "projection.qweight": _tensor([64, 768], "I32"),
@@ -262,7 +302,7 @@ def test_annotates_compressed_tensors_int4_storage_by_structure(
         "projection.weight_shape": _tensor([2], "I64"),
     }
 
-    annotate_packed_linear_tensors(tmp_path, tensors)
+    annotate_quantized_linear_tensors(tmp_path, tensors)
     parameters = {"projection": "projection.weight_packed"}
     attach_packed_linear_quantization(tensors, parameters)
 
@@ -278,4 +318,79 @@ def test_annotates_compressed_tensors_int4_storage_by_structure(
     assert parameters == {
         "projection": "projection.weight_packed",
         "projection_scales": "projection.weight_scale",
+    }
+
+
+def test_annotates_compressed_tensors_channel_fp8_as_native_block_grid(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.json").write_text(
+        """{
+          "quantization_config": {
+            "format": "float-quantized",
+            "config_groups": {
+              "linear": {
+                "format": "float-quantized",
+                "weights": {
+                  "type": "float",
+                  "num_bits": 8,
+                  "strategy": "channel",
+                  "dynamic": false,
+                  "symmetric": true
+                },
+                "input_activations": {
+                  "type": "float",
+                  "num_bits": 8,
+                  "strategy": "token",
+                  "dynamic": true,
+                  "symmetric": true
+                }
+              }
+            }
+          }
+        }"""
+    )
+    tensors = {
+        "projection.weight": {
+            **_tensor([768, 512], "F8_E4M3"),
+            "source_file": "/models/source.safetensors",
+            "source_header_bytes": 128,
+            "data_offsets": [0, 768 * 512],
+        },
+        "projection.weight_scale": {
+            **_tensor([768, 1], "BF16"),
+            "source_file": "/models/source.safetensors",
+            "source_header_bytes": 128,
+            "data_offsets": [768 * 512, 768 * 512 + 768 * 2],
+        },
+    }
+
+    annotate_quantized_linear_tensors(tmp_path, tensors)
+    parameters = {"projection": "projection.weight"}
+    attach_block_quantization_scales(tensors, parameters)
+    attach_packed_linear_quantization(tensors, parameters)
+
+    execution_scale = tensors["projection.weight_scale_inv"]
+    assert execution_scale["shape"] == [768, 4]
+    assert execution_scale["dtype"] == "BF16"
+    assert execution_scale["derived"] == {
+        "kind": "fp8_channel_scale_to_block_grid",
+        "source_tensor": "projection.weight_scale",
+        "source_file": "/models/source.safetensors",
+        "source_header_bytes": 128,
+        "data_offsets": [768 * 512, 768 * 512 + 768 * 2],
+        "source_shape": [768, 1],
+        "block_columns": 128,
+    }
+    assert tensors["projection.weight"]["quantization"] == {
+        "format": "compressed_tensors_channel_fp8",
+        "weight_strategy": "channel",
+        "activation_strategy": "dynamic_token",
+        "source_scales": "projection.weight_scale",
+        "execution_scales": "projection.weight_scale_inv",
+        "execution_block_shape": [1, 128],
+    }
+    assert parameters == {
+        "projection": "projection.weight",
+        "projection_scale_inv": "projection.weight_scale_inv",
     }

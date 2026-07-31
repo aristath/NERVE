@@ -268,7 +268,9 @@ def synthesize_shared_expert_input(tensors: dict[str, Json], layer_prefix: str) 
         )
 
 
-def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) -> None:
+def annotate_quantized_linear_tensors(
+    model_dir: Path, tensors: dict[str, Json]
+) -> None:
     config = read_json(model_dir / "config.json")
     quantization = config.get("quantization_config")
     if not isinstance(quantization, dict):
@@ -278,6 +280,9 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
     )
     if packing_format == "pack-quantized":
         annotate_compressed_tensors_packed_linears(quantization, tensors)
+        return
+    if packing_format == "float-quantized":
+        annotate_compressed_tensors_channel_fp8_linears(quantization, tensors)
         return
     if packing_format not in {"auto_round:auto_gptq", "auto_round:gptq"}:
         return
@@ -383,6 +388,112 @@ def annotate_packed_linear_tensors(model_dir: Path, tensors: dict[str, Json]) ->
             )
 
 
+def annotate_compressed_tensors_channel_fp8_linears(
+    quantization: Json, tensors: dict[str, Json]
+) -> None:
+    """Normalize per-output-channel FP8 weights to NERVE's block-grid ABI.
+
+    Compressed-tensors stores one dequantization scale per output channel while
+    NERVE's reusable native-FP8 kernels consume a regular two-dimensional scale
+    grid. The compiler keeps the source FP8 bytes unchanged and derives a small
+    scale artifact that repeats each channel scale across 128-column blocks.
+    This is an exact representation rewrite of the weights, not requantization.
+    """
+
+    config_groups = quantization.get("config_groups")
+    if not isinstance(config_groups, dict):
+        raise ModelTranspileError(
+            "compressed-tensors float-quantized format has no config groups"
+        )
+    schemes: list[tuple[Json, Json]] = []
+    for group in config_groups.values():
+        if (
+            isinstance(group, dict)
+            and (group.get("format") or quantization.get("format"))
+            == "float-quantized"
+            and isinstance(group.get("weights"), dict)
+            and isinstance(group.get("input_activations"), dict)
+        ):
+            schemes.append((group["weights"], group["input_activations"]))
+    if len(schemes) != 1:
+        raise ModelTranspileError(
+            "compressed-tensors float-quantized format requires one structural "
+            "weight/activation scheme"
+        )
+    weights, activations = schemes[0]
+    if (
+        weights.get("type") != "float"
+        or int(weights.get("num_bits") or 0) != 8
+        or weights.get("strategy") != "channel"
+        or bool(weights.get("dynamic"))
+        or not bool(weights.get("symmetric", True))
+        or activations.get("type") != "float"
+        or int(activations.get("num_bits") or 0) != 8
+        or activations.get("strategy") != "token"
+        or not bool(activations.get("dynamic"))
+        or not bool(activations.get("symmetric", True))
+    ):
+        raise ModelTranspileError(
+            "compressed-tensors float-quantized execution requires symmetric "
+            "static per-channel FP8 weights and dynamic per-token FP8 activations"
+        )
+
+    block_columns = 128
+    for tensor_name, info in tuple(tensors.items()):
+        if info.get("dtype") != "F8_E4M3" or not tensor_name.endswith(".weight"):
+            continue
+        source_scale_name = f"{tensor_name}_scale"
+        source_scale = tensors.get(source_scale_name)
+        if source_scale is None:
+            continue
+        shape = [int(value) for value in info.get("shape", [])]
+        scale_shape = [int(value) for value in source_scale.get("shape", [])]
+        if len(shape) != 2 or shape[1] <= 0 or shape[1] % block_columns:
+            raise ModelTranspileError(
+                f"compressed-tensors FP8 weight {tensor_name!r} requires a "
+                f"matrix with {block_columns}-aligned input columns; got {shape}"
+            )
+        if (
+            source_scale.get("dtype") != "BF16"
+            or scale_shape != [shape[0], 1]
+        ):
+            raise ModelTranspileError(
+                f"compressed-tensors FP8 weight {tensor_name!r} has incompatible "
+                f"channel scale dtype {source_scale.get('dtype')!r} and shape "
+                f"{scale_shape}"
+            )
+        execution_scale_name = f"{tensor_name}_scale_inv"
+        if execution_scale_name in tensors:
+            raise ModelTranspileError(
+                f"compressed-tensors FP8 weight {tensor_name!r} collides with "
+                f"execution scale tensor {execution_scale_name!r}"
+            )
+        execution_scale_shape = [shape[0], shape[1] // block_columns]
+        tensors[execution_scale_name] = {
+            "dtype": "BF16",
+            "shape": execution_scale_shape,
+            "parameter_count": math.prod(execution_scale_shape),
+            "byte_count": math.prod(execution_scale_shape) * 2,
+            "derived": {
+                "kind": "fp8_channel_scale_to_block_grid",
+                "source_tensor": source_scale_name,
+                "source_file": source_scale["source_file"],
+                "source_header_bytes": int(source_scale["source_header_bytes"]),
+                "data_offsets": list(source_scale["data_offsets"]),
+                "source_shape": scale_shape,
+                "block_columns": block_columns,
+            },
+        }
+        info["quantization"] = {
+            "format": "compressed_tensors_channel_fp8",
+            "weight_strategy": "channel",
+            "activation_strategy": "dynamic_token",
+            "source_scales": source_scale_name,
+            "execution_scales": execution_scale_name,
+            "execution_block_shape": [1, block_columns],
+        }
+
+
 def annotate_compressed_tensors_packed_linears(
     quantization: Json, tensors: dict[str, Json]
 ) -> None:
@@ -461,7 +572,11 @@ def attach_packed_linear_quantization(
     additions: dict[str, str] = {}
     for parameter_id, tensor_name in tuple(layer_tensors.items()):
         quantization = tensors[tensor_name].get("quantization")
-        if not isinstance(quantization, dict):
+        if (
+            not isinstance(quantization, dict)
+            or quantization.get("format")
+            not in {"auto_gptq", "compressed_tensors_pack_quantized"}
+        ):
             continue
         execution_zero_encoding = str(
             quantization.get(

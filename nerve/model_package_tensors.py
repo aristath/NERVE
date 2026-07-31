@@ -571,6 +571,82 @@ def write_compiled_derived_bf16_from_fp8_e4m3(
     return len(header), data_digest.hexdigest()
 
 
+def write_compiled_block_grid_from_channel_scales(
+    *,
+    tensor_name: str,
+    info: Json,
+    destination: Path,
+    layout: str,
+) -> tuple[int, str]:
+    """Expand BF16 per-channel FP8 scales into a regular block-scale grid."""
+
+    if layout != ROW_MAJOR_LAYOUT:
+        raise ModelCompileError(
+            "derived FP8 block-grid scales require row-major layout"
+        )
+    derivation = info.get("derived")
+    if (
+        not isinstance(derivation, dict)
+        or derivation.get("kind") != "fp8_channel_scale_to_block_grid"
+    ):
+        raise ModelCompileError(
+            f"tensor {tensor_name!r} is not a derived FP8 block-grid scale"
+        )
+    source_shape = [int(value) for value in derivation["source_shape"]]
+    target_shape = [int(value) for value in info["shape"]]
+    if (
+        len(source_shape) != 2
+        or source_shape[1] != 1
+        or len(target_shape) != 2
+        or target_shape[0] != source_shape[0]
+        or target_shape[1] <= 0
+        or info.get("dtype") != "BF16"
+    ):
+        raise ModelCompileError(
+            f"derived FP8 block-grid scale {tensor_name!r} has incompatible "
+            f"source/target shapes {source_shape} / {target_shape}"
+        )
+    expected_byte_count = math.prod(target_shape) * 2
+    if int(info["byte_count"]) != expected_byte_count:
+        raise ModelCompileError(
+            f"derived FP8 block-grid scale {tensor_name!r} byte count "
+            f"{info['byte_count']} does not match {expected_byte_count}"
+        )
+    source = Path(derivation["source_file"])
+    if not source.is_file():
+        raise ModelCompileError(
+            f"derived FP8 channel-scale source does not exist: {source}"
+        )
+    source_bytes = read_source_tensor_payload(
+        source=source,
+        source_header_bytes=int(derivation["source_header_bytes"]),
+        data_offsets=[int(value) for value in derivation["data_offsets"]],
+    )
+    expected_source_bytes = math.prod(source_shape) * 2
+    if len(source_bytes) != expected_source_bytes:
+        raise ModelCompileError(
+            f"derived FP8 channel-scale payload for {tensor_name!r} has "
+            f"{len(source_bytes)} bytes; expected {expected_source_bytes}"
+        )
+
+    channel_scales = np.frombuffer(source_bytes, dtype="<u2").reshape(source_shape)
+    block_scales = np.repeat(channel_scales, target_shape[1], axis=1)
+    payload = block_scales.astype("<u2", copy=False).tobytes(order="C")
+    header = compiled_safetensors_header(
+        tensor_name,
+        dtype="BF16",
+        shape=target_shape,
+        byte_count=expected_byte_count,
+        layout=layout,
+    )
+    data_digest = sha256(payload).hexdigest()
+    with destination.open("wb") as destination_handle:
+        destination_handle.write(struct.pack("<Q", len(header)))
+        destination_handle.write(header)
+        destination_handle.write(payload)
+    return len(header), data_digest
+
+
 def compiled_safetensors_header(
     tensor_name: str,
     *,

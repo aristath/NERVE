@@ -1479,8 +1479,12 @@ def discover_quantization_policy(config: Json) -> Json | None:
         for candidate in candidates
         if str(candidate.get("quant_method", "")).lower() == "fp8"
     ]
-    if not fp8_candidates:
-        return None
+    compressed_fp8_candidates = [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("quant_method", "")).lower() == "compressed-tensors"
+        and str(candidate.get("format", "")).lower() == "float-quantized"
+    ]
 
     policies: list[Json] = []
     for candidate in fp8_candidates:
@@ -1515,6 +1519,48 @@ def discover_quantization_policy(config: Json) -> Json | None:
                 "activation": {
                     "format": "dynamic_block_fp8_e4m3",
                     "group_size": int(block_shape[1]),
+                    "per_tensor": False,
+                },
+            }
+        )
+    for candidate in compressed_fp8_candidates:
+        config_groups = candidate.get("config_groups")
+        if not isinstance(config_groups, dict):
+            continue
+        schemes = [
+            (group.get("weights"), group.get("input_activations"))
+            for group in config_groups.values()
+            if isinstance(group, dict)
+            and str(group.get("format") or candidate.get("format", "")).lower()
+            == "float-quantized"
+            and isinstance(group.get("weights"), dict)
+            and isinstance(group.get("input_activations"), dict)
+        ]
+        if len(schemes) != 1:
+            continue
+        weights, activations = schemes[0]
+        if (
+            weights.get("type") != "float"
+            or int(weights.get("num_bits") or 0) != 8
+            or weights.get("strategy") != "channel"
+            or bool(weights.get("dynamic"))
+            or not bool(weights.get("symmetric", True))
+            or activations.get("type") != "float"
+            or int(activations.get("num_bits") or 0) != 8
+            or activations.get("strategy") != "token"
+            or not bool(activations.get("dynamic"))
+            or not bool(activations.get("symmetric", True))
+        ):
+            continue
+        policies.append(
+            {
+                "weight": {
+                    "format": "channel_scaled_fp8_e4m3",
+                    "channel_axis": 0,
+                    "per_tensor": False,
+                },
+                "activation": {
+                    "format": "dynamic_token_fp8_e4m3",
                     "per_tensor": False,
                 },
             }

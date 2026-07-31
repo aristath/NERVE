@@ -14,6 +14,7 @@ from nerve.model_package_tensors import (
     write_compiled_derived_fp8_e4m3_output_projection,
     write_compiled_derived_bf16_from_fp8_e4m3,
     write_compiled_derived_q8_0_from_fp8_e4m3,
+    write_compiled_block_grid_from_channel_scales,
 )
 from nerve.model_package_packed_tensors import (
     write_compiled_auto_gptq_fixed_zero_8,
@@ -21,6 +22,64 @@ from nerve.model_package_packed_tensors import (
 from nerve.model_package_assets import referenced_tensor_index
 
 import numpy as np
+
+
+def test_compiler_expands_channel_fp8_scales_without_changing_values(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.safetensors"
+    source_values = np.asarray([0.5, 1.25], dtype=np.float32)
+    source_payload = f32_to_bf16_bytes(source_values)
+    source_header = {
+        "projection.weight_scale": {
+            "dtype": "BF16",
+            "shape": [2, 1],
+            "data_offsets": [0, len(source_payload)],
+        }
+    }
+    source_header_payload = json.dumps(source_header).encode()
+    source_header_payload += b" " * (-len(source_header_payload) % 8)
+    source.write_bytes(
+        struct.pack("<Q", len(source_header_payload))
+        + source_header_payload
+        + source_payload
+    )
+    destination = tmp_path / "compiled.safetensors"
+
+    header_bytes, data_sha256 = write_compiled_block_grid_from_channel_scales(
+        tensor_name="projection.weight_scale_inv",
+        info={
+            "dtype": "BF16",
+            "shape": [2, 4],
+            "byte_count": 16,
+            "derived": {
+                "kind": "fp8_channel_scale_to_block_grid",
+                "source_tensor": "projection.weight_scale",
+                "source_file": str(source),
+                "source_header_bytes": len(source_header_payload),
+                "data_offsets": [0, len(source_payload)],
+                "source_shape": [2, 1],
+                "block_columns": 128,
+            },
+        },
+        destination=destination,
+        layout=ROW_MAJOR_LAYOUT,
+    )
+
+    compiled = destination.read_bytes()
+    stored_header_bytes = struct.unpack("<Q", compiled[:8])[0]
+    header = json.loads(compiled[8 : 8 + stored_header_bytes])
+    payload = compiled[8 + stored_header_bytes :]
+    expanded = (
+        np.frombuffer(payload, dtype="<u2").astype(np.uint32) << 16
+    ).view(np.float32).reshape(2, 4)
+    assert header_bytes == stored_header_bytes
+    assert data_sha256 == sha256(payload).hexdigest()
+    assert header["projection.weight_scale_inv"]["shape"] == [2, 4]
+    assert np.array_equal(
+        expanded,
+        np.asarray([[0.5] * 4, [1.25] * 4], dtype=np.float32),
+    )
 
 
 def test_asymmetric_auto_gptq_zero_points_are_compile_dependencies_only(
