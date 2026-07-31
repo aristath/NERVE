@@ -11,6 +11,7 @@ from nerve.model_transpiler import (
     compile_rope_scaling,
     discover_model_structure,
     discover_quantization_policy,
+    discover_safetensor_files,
     discover_sampling_policy,
     make_layer,
     make_model_graph,

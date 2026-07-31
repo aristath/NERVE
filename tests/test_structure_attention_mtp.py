@@ -1,6 +1,31 @@
 from model_structure_common import *
 from model_structure_common import _tensor
 
+import json
+
+
+def test_safetensors_index_keeps_auxiliary_draft_artifacts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "model.safetensors").touch()
+    (tmp_path / "model_mtp.safetensors").touch()
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.layers.0.weight": "model.safetensors",
+                    "mtp.layers.0.weight": "model_mtp.safetensors",
+                }
+            }
+        )
+    )
+
+    assert discover_safetensor_files(tmp_path) == (
+        tmp_path / "model.safetensors",
+        tmp_path / "model_mtp.safetensors",
+    )
+
+
 def test_discovers_attention_with_values_derived_from_keys() -> None:
     prefix = "model.layers.0"
     tensors = {
@@ -142,4 +167,3 @@ def test_discovers_structural_mtp_as_auxiliary_execution_graph() -> None:
     assert draft_layer["transition_contract"]["reference_behavior"] == (
         "source_checkpoint_entity:mtp.layers.0"
     )
-

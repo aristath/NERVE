@@ -111,10 +111,6 @@ def segment_per_layer_embedding_parameters(
 
 
 def discover_safetensor_files(model_dir: Path) -> tuple[Path, ...]:
-    single = model_dir / "model.safetensors"
-    if single.exists():
-        return (single,)
-
     index_file = model_dir / "model.safetensors.index.json"
     if index_file.exists():
         index = read_json(index_file)
@@ -122,7 +118,17 @@ def discover_safetensor_files(model_dir: Path) -> tuple[Path, ...]:
             {model_dir / filename for filename in index.get("weight_map", {}).values()}
         )
         if files:
+            missing = [path for path in files if not path.is_file()]
+            if missing:
+                raise ModelTranspileError(
+                    "safetensors index references missing files: "
+                    + ", ".join(str(path) for path in missing)
+                )
             return tuple(files)
+
+    single = model_dir / "model.safetensors"
+    if single.exists():
+        return (single,)
 
     files = tuple(sorted(model_dir.glob("*.safetensors")))
     if files:
