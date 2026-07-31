@@ -722,6 +722,29 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             for index, label in enumerate(labels[:-1])
         )
         weight_reads += f"\n    return weight_{labels[-1].lower()}.values[index];"
+        direct_weight_loads = "\n".join(
+            f"                    if (branch == {index}u) {{\n"
+            "                        coopMatLoad(\n"
+            "                            a,\n"
+            f"                            weight_{label.lower()}.values,\n"
+            "                            weight_offset,\n"
+            "                            INPUT_SIZE,\n"
+            "                            gl_CooperativeMatrixLayoutRowMajor\n"
+            "                        );\n"
+            "                    } else"
+            for index, label in enumerate(labels[:-1])
+        )
+        direct_weight_loads += (
+            " {\n"
+            "                        coopMatLoad(\n"
+            "                            a,\n"
+            f"                            weight_{labels[-1].lower()}.values,\n"
+            "                            weight_offset,\n"
+            "                            INPUT_SIZE,\n"
+            "                            gl_CooperativeMatrixLayoutRowMajor\n"
+            "                        );\n"
+            "                    }"
+        )
         output_writes = "\n".join(
             f"    if (branch == {index}u) {{\n"
             f"        output_{label.lower()}.values["
@@ -751,6 +774,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "WEIGHT_BINDINGS": weight_bindings,
                 "WEIGHT_SCALE_READS": weight_scale_reads,
                 "WEIGHT_READS": weight_reads,
+                "DIRECT_WEIGHT_LOADS": direct_weight_loads,
                 "OUTPUT_WRITES": output_writes,
             },
         )

@@ -931,6 +931,11 @@ def test_compiler_renders_cooperative_parallel_fp8_prefill_shaders(
     assert "binding = 2) buffer OutputA" in parallel_source
     assert "binding = 4) buffer OutputC" in parallel_source
     assert "binding = 10) readonly buffer WeightScaleInvC" in parallel_source
+    assert "weight_a.values," in parallel_source
+    assert "weight_b.values," in parallel_source
+    assert "weight_c.values," in parallel_source
+    assert "bool stage_weight" in parallel_source
+    assert "output_start + OUTPUT_TILE" in parallel_source
     assert "coopmat<floate4m3_t" in parallel_source
     assert "{{" not in parallel_source
 
