@@ -16,3 +16,9 @@
 - Before loading anything onto a GPU, inspect that device, unload existing workloads from it, and verify that the unload completed.
 - Do not co-locate a NERVE test or model with another model server merely because free VRAM appears sufficient.
 - If an existing GPU workload cannot be safely unloaded and verified, use a different idle GPU or do not start the new workload.
+
+## Multi-GPU placement
+
+- Never use tensor parallelism on this workstation. Its GPU interconnect does not have enough lanes for tensor-parallel execution to be a useful or fair configuration.
+- Multi-GPU NERVE workloads must use contiguous component/layer placement unless the user explicitly requests another non-tensor-parallel wiring.
+- Performance comparisons with another inference engine must use equivalent execution settings and placement strategies. Do not compare a tensor-parallel run with a layer/model-parallel run.
