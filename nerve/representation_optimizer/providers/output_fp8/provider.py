@@ -46,6 +46,9 @@ from nerve.representation_optimizer.providers.types import (
     ProviderIdentity,
     StaticEstimate,
 )
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
+)
 
 
 def _is_standalone_output_scope(scope: Json) -> bool:
@@ -498,7 +501,7 @@ def _build_plan(
             "semantic_construction",
             0,
             json_contract(
-                "nerve.optimizer.validation_conversation.v1"
+                VALIDATION_CONVERSATION_SCHEMA
             ),
         ),
         _output(
@@ -549,7 +552,7 @@ def _build_plan(
             "semantic_construction",
             0,
             json_contract(
-                "nerve.optimizer.validation_conversation.v1"
+                VALIDATION_CONVERSATION_SCHEMA
             ),
         ),
         _output(

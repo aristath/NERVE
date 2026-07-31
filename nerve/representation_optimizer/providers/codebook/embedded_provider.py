@@ -52,6 +52,9 @@ from nerve.representation_optimizer.providers.types import (
     ProviderIdentity,
     StaticEstimate,
 )
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
+)
 
 
 class ExactEmbeddedHeadNormParameterProgramProvider:
@@ -597,7 +600,7 @@ def _build_plan(
             "compile",
             "semantic_construction",
             0,
-            json_contract("nerve.optimizer.validation_conversation.v1"),
+            json_contract(VALIDATION_CONVERSATION_SCHEMA),
         ),
         _output(
             prefix(PRODUCT_CONVERSATION_FIXTURE_PATH),
@@ -605,7 +608,7 @@ def _build_plan(
             "compile",
             "semantic_construction",
             0,
-            json_contract("nerve.optimizer.validation_conversation.v1"),
+            json_contract(VALIDATION_CONVERSATION_SCHEMA),
         ),
         _output(
             prefix(DECODE_SHADER_PATH),

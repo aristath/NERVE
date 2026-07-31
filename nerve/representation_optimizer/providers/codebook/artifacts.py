@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from nerve.compilation import Json
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
+)
 from nerve.representation_optimizer.contracts import canonical_json_bytes
 from nerve.representation_optimizer.providers.codebook.discovery import (
     HeadNormCodebookOpportunity,
@@ -89,7 +92,7 @@ def component_fixture_from_geometry(
 
 def conversation_fixture() -> Json:
     return {
-        "schema": "nerve.optimizer.validation_conversation.v1",
+        "schema": VALIDATION_CONVERSATION_SCHEMA,
         "enable_thinking": True,
         "turns": [
             "hi",
@@ -115,27 +118,58 @@ def conversation_fixture() -> Json:
             "forbid_repeated_suffix": True,
             "turns": [
                 {
-                    "required_terms": [],
+                    "required_concepts": [],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["language model"],
+                    "required_concepts": [
+                        {
+                            "name": "model_identity",
+                            "any_terms": [
+                                "ai assistant",
+                                "artificial intelligence",
+                                "chatbot",
+                                "language model",
+                                "qwen",
+                            ],
+                        }
+                    ],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["athens"],
+                    "required_concepts": [
+                        {
+                            "name": "capital_city",
+                            "any_terms": ["athens"],
+                        }
+                    ],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["corinth"],
+                    "required_concepts": [
+                        {
+                            "name": "place_name",
+                            "any_terms": ["corinth"],
+                        }
+                    ],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["cutoff"],
+                    "required_concepts": [
+                        {
+                            "name": "knowledge_boundary",
+                            "any_terms": ["cutoff", "training data"],
+                        }
+                    ],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["greece"],
+                    "required_concepts": [
+                        {
+                            "name": "recalled_country",
+                            "any_terms": ["greece"],
+                        }
+                    ],
                     "conversation_memory": True,
                 },
             ],
@@ -145,7 +179,7 @@ def conversation_fixture() -> Json:
 
 def product_conversation_fixture() -> Json:
     return {
-        "schema": "nerve.optimizer.validation_conversation.v1",
+        "schema": VALIDATION_CONVERSATION_SCHEMA,
         "enable_thinking": True,
         "turns": [
             "hi",

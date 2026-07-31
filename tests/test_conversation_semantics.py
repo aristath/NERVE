@@ -6,6 +6,7 @@ import pytest
 
 from nerve.compilation import ModelCompileError
 from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
     assess_semantic_conversation,
     compare_semantic_conversations,
     validate_semantic_expectations,
@@ -17,7 +18,7 @@ from nerve.representation_optimizer.validation.runner import (
 
 def _fixture() -> dict:
     return {
-        "schema": "nerve.optimizer.validation_conversation.v1",
+        "schema": VALIDATION_CONVERSATION_SCHEMA,
         "turns": [
             "what is the capital of Greece?",
             "Which country did I ask about?",
@@ -31,11 +32,21 @@ def _fixture() -> dict:
             "forbid_repeated_suffix": True,
             "turns": [
                 {
-                    "required_terms": ["athens"],
+                    "required_concepts": [
+                        {
+                            "name": "capital_city",
+                            "any_terms": ["athens"],
+                        }
+                    ],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["greece"],
+                    "required_concepts": [
+                        {
+                            "name": "recalled_country",
+                            "any_terms": ["greece"],
+                        }
+                    ],
                     "conversation_memory": True,
                 },
             ],
@@ -123,7 +134,10 @@ def test_semantic_comparison_rejects_candidate_memory_failure() -> None:
     assert by_name["conversation_memory"]["error"] == 1.0
     assert by_name["semantic_consistency"]["error"] == 1.0
     assert comparison["diagnostics"] == [
-        "candidate: conversation turn 1 is missing semantic terms ['greece']"
+        (
+            "candidate: conversation turn 1 is missing semantic concepts "
+            "['recalled_country']"
+        )
     ]
 
 
@@ -158,7 +172,7 @@ def test_semantic_assessment_rejects_repetition_and_malformed_thinking() -> None
     )
 
 
-def test_semantic_expectations_require_memory_and_canonical_terms() -> None:
+def test_semantic_expectations_require_memory_and_canonical_concepts() -> None:
     fixture = _fixture()
     fixture["semantic_expectations"]["turns"][1][
         "conversation_memory"
@@ -167,11 +181,28 @@ def test_semantic_expectations_require_memory_and_canonical_terms() -> None:
         validate_semantic_expectations(fixture, turn_count=2)
 
     fixture = _fixture()
-    fixture["semantic_expectations"]["turns"][1]["required_terms"] = [
-        "Greece"
-    ]
-    with pytest.raises(ModelCompileError, match="invalid terms"):
+    fixture["semantic_expectations"]["turns"][1]["required_concepts"][0][
+        "any_terms"
+    ] = ["Greece"]
+    with pytest.raises(ModelCompileError, match="invalid concepts"):
         validate_semantic_expectations(fixture, turn_count=2)
+
+
+def test_semantic_concepts_accept_valid_alternative_phrasings() -> None:
+    fixture = _fixture()
+    fixture["semantic_expectations"]["turns"][0]["required_concepts"][0][
+        "any_terms"
+    ] = ["athens", "greek capital"]
+
+    comparison = compare_semantic_conversations(
+        _request(),
+        fixture,
+        _trace("Athens is the answer.", "You asked about Greece."),
+        _trace("The Greek capital is the answer.", "The country was Greece."),
+    )
+
+    assert comparison["diagnostics"] == []
+    assert all(metric["error"] == 0.0 for metric in comparison["metrics"])
 
 
 def test_semantic_comparison_policy_allows_distinct_valid_trajectories() -> None:

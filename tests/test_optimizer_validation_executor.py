@@ -25,6 +25,9 @@ from nerve.representation_optimizer.validation.contracts import (
     ValidationResidencyEvent,
     ValidationRoleResult,
 )
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
+)
 from nerve.representation_optimizer.validation.executor_protocol import (
     VALIDATION_EXECUTOR_RESPONSE_SCHEMA,
     validate_validation_execution_payload,
@@ -357,10 +360,10 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     fixtures = candidate / "fixtures"
     fixtures.mkdir(parents=True)
     fixture_payload = (
-        b'{"schema":"nerve.optimizer.validation_conversation.v1",'
-        b'"turns":["Who are you?","What is the capital of Greece?"],'
-        b'"teacher_forced_assistant_turns":["A model.","Athens."]}\n'
-    )
+        f'{{"schema":"{VALIDATION_CONVERSATION_SCHEMA}",'
+        '"turns":["Who are you?","What is the capital of Greece?"],'
+        '"teacher_forced_assistant_turns":["A model.","Athens."]}\n'
+    ).encode()
     (fixtures / "conversation.json").write_bytes(fixture_payload)
     driver = tmp_path / "radeon_icd.json"
     driver.write_text("{}\n", encoding="utf-8")
@@ -611,7 +614,7 @@ def test_whole_model_validation_compares_free_running_traces_semantically(
     fixtures = candidate / "fixtures"
     fixtures.mkdir(parents=True)
     fixture = {
-        "schema": "nerve.optimizer.validation_conversation.v1",
+        "schema": VALIDATION_CONVERSATION_SCHEMA,
         "turns": [
             "what is the capital of Greece?",
             "Which country did I ask about?",
@@ -625,11 +628,21 @@ def test_whole_model_validation_compares_free_running_traces_semantically(
             "forbid_repeated_suffix": True,
             "turns": [
                 {
-                    "required_terms": ["athens"],
+                    "required_concepts": [
+                        {
+                            "name": "capital_city",
+                            "any_terms": ["athens"],
+                        }
+                    ],
                     "conversation_memory": False,
                 },
                 {
-                    "required_terms": ["greece"],
+                    "required_concepts": [
+                        {
+                            "name": "recalled_country",
+                            "any_terms": ["greece"],
+                        }
+                    ],
                     "conversation_memory": True,
                 },
             ],

@@ -50,6 +50,9 @@ from nerve.representation_optimizer.providers.types import (
     ProviderIdentity,
     StaticEstimate,
 )
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
+)
 
 
 LOOKUP_CODEBOOK_DESCRIPTOR_ID = (
@@ -634,7 +637,7 @@ def _build_plan(
             "semantic_construction",
             0,
             json_contract(
-                "nerve.optimizer.validation_conversation.v1"
+                VALIDATION_CONVERSATION_SCHEMA
             ),
         ),
         _output(
@@ -644,7 +647,7 @@ def _build_plan(
             "semantic_construction",
             0,
             json_contract(
-                "nerve.optimizer.validation_conversation.v1"
+                VALIDATION_CONVERSATION_SCHEMA
             ),
         ),
         _output(

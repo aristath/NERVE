@@ -39,6 +39,7 @@ from nerve.representation_optimizer.validation.comparison import (
     compare_exact_role_results,
 )
 from nerve.representation_optimizer.validation.conversation_semantics import (
+    VALIDATION_CONVERSATION_SCHEMA,
     compare_semantic_conversations,
     validate_semantic_expectations,
 )
@@ -504,7 +505,7 @@ class ResidentWholeModelValidationBackend:
         if (
             not isinstance(document, dict)
             or document.get("schema")
-            != "nerve.optimizer.validation_conversation.v1"
+            != VALIDATION_CONVERSATION_SCHEMA
             or not isinstance(document.get("turns"), list)
             or not document["turns"]
             or any(

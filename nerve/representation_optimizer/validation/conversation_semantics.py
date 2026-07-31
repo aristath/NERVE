@@ -8,6 +8,8 @@ from nerve.representation_optimizer.contracts import canonical_json_bytes
 
 
 _WORD = re.compile(r"\S+")
+_CONCEPT_NAME = re.compile(r"[a-z][a-z0-9_]*")
+VALIDATION_CONVERSATION_SCHEMA = "nerve.optimizer.validation_conversation.v2"
 
 
 @dataclass(frozen=True)
@@ -44,32 +46,65 @@ def validate_semantic_expectations(
     normalized_turns = []
     for index, raw_turn in enumerate(expectations["turns"]):
         if not isinstance(raw_turn, dict) or set(raw_turn) != {
-            "required_terms",
+            "required_concepts",
             "conversation_memory",
         }:
             raise ModelCompileError(
                 f"semantic expectation turn {index} is invalid"
             )
-        raw_terms = raw_turn["required_terms"]
+        raw_concepts = raw_turn["required_concepts"]
         memory = raw_turn["conversation_memory"]
         if (
-            not isinstance(raw_terms, list)
+            not isinstance(raw_concepts, list)
             or not isinstance(memory, bool)
-            or any(
-                not isinstance(term, str)
-                or not term.strip()
-                or term != term.casefold()
-                for term in raw_terms
-            )
-            or raw_terms != sorted(set(raw_terms))
         ):
             raise ModelCompileError(
-                f"semantic expectation turn {index} has invalid terms"
+                f"semantic expectation turn {index} has invalid concepts"
+            )
+        concepts = []
+        for raw_concept in raw_concepts:
+            if not isinstance(raw_concept, dict) or set(raw_concept) != {
+                "name",
+                "any_terms",
+            }:
+                raise ModelCompileError(
+                    f"semantic expectation turn {index} has invalid concepts"
+                )
+            name = raw_concept["name"]
+            terms = raw_concept["any_terms"]
+            if (
+                not isinstance(name, str)
+                or _CONCEPT_NAME.fullmatch(name) is None
+                or not isinstance(terms, list)
+                or not terms
+                or any(
+                    not isinstance(term, str)
+                    or not term.strip()
+                    or term != term.strip()
+                    or term != term.casefold()
+                    for term in terms
+                )
+                or terms != sorted(set(terms))
+            ):
+                raise ModelCompileError(
+                    f"semantic expectation turn {index} has invalid concepts"
+                )
+            concepts.append(
+                {
+                    "name": name,
+                    "any_terms": list(terms),
+                }
+            )
+        if concepts != sorted(concepts, key=lambda item: item["name"]) or len(
+            {concept["name"] for concept in concepts}
+        ) != len(concepts):
+            raise ModelCompileError(
+                f"semantic expectation turn {index} has invalid concepts"
             )
         memory_turn_count += int(memory)
         normalized_turns.append(
             {
-                "required_terms": list(raw_terms),
+                "required_concepts": concepts,
                 "conversation_memory": memory,
             }
         )
@@ -159,16 +194,16 @@ def assess_semantic_conversation(
 
         folded_answer = answer.casefold()
         missing = [
-            term
-            for term in expectation["required_terms"]
-            if term not in folded_answer
+            concept["name"]
+            for concept in expectation["required_concepts"]
+            if not any(term in folded_answer for term in concept["any_terms"])
         ]
         if missing:
             semantic_consistency = False
             if expectation["conversation_memory"]:
                 conversation_memory = False
             diagnostics.append(
-                f"conversation turn {index} is missing semantic terms {missing}"
+                f"conversation turn {index} is missing semantic concepts {missing}"
             )
 
     return ConversationAssessment(
