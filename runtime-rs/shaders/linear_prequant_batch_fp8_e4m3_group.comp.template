@@ -26,7 +26,7 @@ layout(set = 0, binding = {{WEIGHT_SCALE_BINDING}}) readonly buffer WeightScaleI
 
 layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
 
-const uint BATCH_PAIR_WIDTH = 2u;
+const uint BATCH_GROUP_WIDTH = 4u;
 const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
 const uint BLOCK_ROWS = {{BLOCK_ROWS}}u;
 const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
@@ -38,7 +38,7 @@ const uint OUTPUT_WORDS = OUTPUT_SIZE / 2u;
 const uint BLOCK_FP8_WORDS = BLOCK_COLUMNS / 4u;
 const uint SCALE_COLUMNS = INPUT_SIZE / BLOCK_COLUMNS;
 
-shared float output_rows[BATCH_PAIR_WIDTH][OUTPUT_TILE_ROWS];
+shared float output_rows[BATCH_GROUP_WIDTH][OUTPUT_TILE_ROWS];
 
 float bf16_to_f32(uint value) {
     return uintBitsToFloat((value & 0xffffu) << 16u);
@@ -69,25 +69,28 @@ void main() {
     uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
     uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
     for (
-        uint batch_pair = 0u;
-        batch_pair < BATCH_TILE_WIDTH;
-        batch_pair += BATCH_PAIR_WIDTH
+        uint batch_group = 0u;
+        batch_group < BATCH_TILE_WIDTH;
+        batch_group += BATCH_GROUP_WIDTH
     ) {
-        uint batch_index_0 = batch_start + batch_pair;
-        if (batch_index_0 >= batch_control.batch_width) {
+        uint first_batch_index = batch_start + batch_group;
+        if (first_batch_index >= batch_control.batch_width) {
             break;
         }
-        uint batch_index_1 = batch_index_0 + 1u;
-        bool batch_1_is_valid = batch_index_1 < batch_control.batch_width;
-
         for (
             uint local_row = gl_SubgroupID;
             local_row < OUTPUT_TILE_ROWS;
             local_row += gl_NumSubgroups
         ) {
             uint row = first_row + local_row;
-            float sum_0 = 0.0;
-            float sum_1 = 0.0;
+            float sums[BATCH_GROUP_WIDTH];
+            for (
+                uint batch_lane = 0u;
+                batch_lane < BATCH_GROUP_WIDTH;
+                batch_lane++
+            ) {
+                sums[batch_lane] = 0.0;
+            }
             if (row < OUTPUT_SIZE) {
                 for (
                     uint word = gl_SubgroupInvocationID;
@@ -97,51 +100,51 @@ void main() {
                     uint block = word / BLOCK_FP8_WORDS;
                     fe4m3vec4 weight_value = read_weightx4(row, word);
                     float weight_scale = read_weight_scale(row, block);
-                    sum_0 = fma(
-                        fp8_dot4_acc32(
-                            quantized_inputs.values[
-                                batch_index_0 * INPUT_FP8_WORDS + word
-                            ],
-                            weight_value,
-                            0.0
-                        ),
-                        input_scales.values[
-                            batch_index_0 * SCALE_COLUMNS + block
-                        ] * weight_scale,
-                        sum_0
-                    );
-                    if (batch_1_is_valid) {
-                        sum_1 = fma(
+                    for (
+                        uint batch_lane = 0u;
+                        batch_lane < BATCH_GROUP_WIDTH;
+                        batch_lane++
+                    ) {
+                        uint batch_index = first_batch_index + batch_lane;
+                        if (batch_index >= batch_control.batch_width) {
+                            break;
+                        }
+                        sums[batch_lane] = fma(
                             fp8_dot4_acc32(
                                 quantized_inputs.values[
-                                    batch_index_1 * INPUT_FP8_WORDS + word
+                                    batch_index * INPUT_FP8_WORDS + word
                                 ],
                                 weight_value,
                                 0.0
                             ),
                             input_scales.values[
-                                batch_index_1 * SCALE_COLUMNS + block
+                                batch_index * SCALE_COLUMNS + block
                             ] * weight_scale,
-                            sum_1
+                            sums[batch_lane]
                         );
                     }
                 }
             }
-            sum_0 = subgroupAdd(sum_0);
-            sum_1 = subgroupAdd(sum_1);
-            if (gl_SubgroupInvocationID == 0u) {
-                output_rows[0][local_row] =
-                    finalize_output(batch_index_0, row, sum_0);
-                if (batch_1_is_valid) {
-                    output_rows[1][local_row] =
-                        finalize_output(batch_index_1, row, sum_1);
+            for (
+                uint batch_lane = 0u;
+                batch_lane < BATCH_GROUP_WIDTH;
+                batch_lane++
+            ) {
+                uint batch_index = first_batch_index + batch_lane;
+                if (batch_index >= batch_control.batch_width) {
+                    break;
+                }
+                sums[batch_lane] = subgroupAdd(sums[batch_lane]);
+                if (gl_SubgroupInvocationID == 0u) {
+                    output_rows[batch_lane][local_row] =
+                        finalize_output(batch_index, row, sums[batch_lane]);
                 }
             }
         }
         barrier();
 
-        for (uint pair_lane = 0u; pair_lane < BATCH_PAIR_WIDTH; pair_lane++) {
-            uint batch_index = batch_index_0 + pair_lane;
+        for (uint batch_lane = 0u; batch_lane < BATCH_GROUP_WIDTH; batch_lane++) {
+            uint batch_index = first_batch_index + batch_lane;
             if (batch_index >= batch_control.batch_width) {
                 break;
             }
@@ -153,12 +156,14 @@ void main() {
                 uint row = first_row + pair * 2u;
                 if (row < OUTPUT_SIZE) {
                     uint hi = row + 1u < OUTPUT_SIZE
-                        ? f32_to_bf16(output_rows[pair_lane][pair * 2u + 1u])
+                        ? f32_to_bf16(
+                            output_rows[batch_lane][pair * 2u + 1u]
+                        )
                         : 0u;
                     output_frames.words[
                         batch_index * OUTPUT_WORDS + row / 2u
                     ] = (hi << 16u)
-                        | f32_to_bf16(output_rows[pair_lane][pair * 2u]);
+                        | f32_to_bf16(output_rows[batch_lane][pair * 2u]);
                 }
             }
         }

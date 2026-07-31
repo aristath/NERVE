@@ -12,7 +12,7 @@ def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
     tmp_path: Path,
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
-    paired_shader_files = {
+    grouped_shader_files = {
         (
             "linear_residual_prequant_batch4_fp8_e4m3_"
             "b128x128_512x512.comp"
@@ -47,20 +47,19 @@ def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
         ),
     }
     shader_files = (
-        paired_shader_files
+        grouped_shader_files
         | vectorized_shader_files
         | row_scaled_shader_files
     )
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
 
-    for shader_file in paired_shader_files:
+    for shader_file in grouped_shader_files:
         source = (tmp_path / shader_file).read_text()
         assert_uses_direct_packed_fp8_vectors(source)
-        assert "const uint BATCH_PAIR_WIDTH = 2u;" in source
-        assert "float sum_0 = 0.0;" in source
-        assert "float sum_1 = 0.0;" in source
-        assert "shared float output_rows[BATCH_PAIR_WIDTH]" in source
+        assert "const uint BATCH_GROUP_WIDTH = 4u;" in source
+        assert "float sums[BATCH_GROUP_WIDTH];" in source
+        assert "shared float output_rows[BATCH_GROUP_WIDTH]" in source
         assert "{{" not in source
     for shader_file in vectorized_shader_files:
         source = (tmp_path / shader_file).read_text()
@@ -76,7 +75,7 @@ def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
         source = (tmp_path / shader_file).read_text()
         assert_uses_direct_packed_fp8_vectors(source)
         assert "const uint BATCH_TILE_WIDTH = 4u;" in source
-        assert "const uint BATCH_PAIR_WIDTH" not in source
+        assert "const uint BATCH_GROUP_WIDTH" not in source
         assert "float sums[BATCH_TILE_WIDTH]" not in source
         assert "float gates[BATCH_TILE_WIDTH]" not in source
         assert "{{" not in source
