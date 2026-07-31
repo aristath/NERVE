@@ -952,7 +952,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return render_shader_template(
             source_dir,
             (
-                "linear_prequant_batch_fp8_e4m3.comp.template"
+                (
+                    "linear_prequant_batch_fp8_e4m3_pair.comp.template"
+                    if block_rows > 1
+                    else "linear_prequant_batch_fp8_e4m3.comp.template"
+                )
                 if batch_tile_width is not None
                 else "linear_prequant_fp8_e4m3.comp.template"
             ),
