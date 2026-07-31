@@ -773,6 +773,23 @@ impl VulkanResidentSamplerRunner {
         device: &VulkanComputeDevice,
         token_ids: &[u32],
     ) -> Result<(), VulkanResidentSamplerRunnerError> {
+        self.submit_input_tokens(device, token_ids, true)
+    }
+
+    fn submit_input_tokens_deferred(
+        &self,
+        device: &VulkanComputeDevice,
+        token_ids: &[u32],
+    ) -> Result<(), VulkanResidentSamplerRunnerError> {
+        self.submit_input_tokens(device, token_ids, false)
+    }
+
+    fn submit_input_tokens(
+        &self,
+        device: &VulkanComputeDevice,
+        token_ids: &[u32],
+        wait_for_completion: bool,
+    ) -> Result<(), VulkanResidentSamplerRunnerError> {
         let Some(dispatch) = &self.seen_token_batch_dispatch else {
             return Ok(());
         };
@@ -805,10 +822,8 @@ impl VulkanResidentSamplerRunner {
         let sequence = catalog
             .get(&token_ids.len())
             .expect("repetition token batch sequence was inserted");
-        if sequence.has_recorded_commands() {
-            device.run_recorded_resident_kernel_sequence(sequence)?;
-        } else {
-            device.run_resident_kernel_sequence(
+        if !sequence.has_recorded_commands() {
+            device.record_resident_kernel_sequence(
                 sequence,
                 &[VulkanResidentKernelSequenceStep::new(
                     dispatch,
@@ -822,6 +837,11 @@ impl VulkanResidentSamplerRunner {
                         .to_le_bytes(),
                 )],
             )?;
+        }
+        if wait_for_completion {
+            device.run_recorded_resident_kernel_sequence(sequence)?;
+        } else {
+            device.submit_recorded_resident_kernel_sequence(sequence)?;
         }
         Ok(())
     }

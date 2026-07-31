@@ -1,4 +1,5 @@
 include!("tests/package_batch.rs");
+include!("tests/speculative_catch_up.rs");
 include!("tests/feedback_control.rs");
 include!("tests/fixture_model_helpers.rs");
 include!("tests/causal_state_snapshot_tests.rs");

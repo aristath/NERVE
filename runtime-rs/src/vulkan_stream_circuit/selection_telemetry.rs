@@ -190,7 +190,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             append_mounted_selection_telemetry(
                 &format!("draft:{}", decoder.id),
                 device,
-                &decoder.mounted,
+                decoder.mounted(),
                 &mut domains,
             )?;
         }

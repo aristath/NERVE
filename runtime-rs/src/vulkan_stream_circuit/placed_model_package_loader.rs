@@ -990,6 +990,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
             target_output_parameters: &output_transducer_parameter_buffers,
             input_embedding_spec: &runtime_model.package.input_transducer.spec,
             input_embedding_spirv_words: &input_transducer_spirv_words,
+            input_embedding_batch_spirv_words: &input_transducer_batch_spirv_words,
+            input_embedding_batch_control: runtime_model
+                .package
+                .input_transducer
+                .batch_control,
             compiled_resource_device_stores:
                 &compiled_resource_device_stores,
             resource_residency_policy,

@@ -7,6 +7,8 @@ pub struct VulkanResidentSpeculativeDecoderModelPackage {
     additional_parameter_buffers: Option<Arc<VulkanPermanentParameterBuffers>>,
     input_embedding_spec: VulkanResidentInputEmbeddingTransducerSpec,
     input_embedding_spirv_words: Vec<u32>,
+    input_embedding_batch_spirv_words: Vec<u32>,
+    input_embedding_batch_control: VulkanResidentComponentBatchControlSpec,
     output_norm_spirv_words: Vec<u32>,
     output_projection_spirv_words: Vec<u32>,
     demand_residency_context: Option<VulkanDemandResidencyExecutionContext>,
@@ -20,6 +22,8 @@ struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
     target_output_parameters: &'a VulkanPermanentParameterBuffers,
     input_embedding_spec: &'a VulkanResidentInputEmbeddingTransducerSpec,
     input_embedding_spirv_words: &'a [u32],
+    input_embedding_batch_spirv_words: &'a [u32],
+    input_embedding_batch_control: VulkanResidentComponentBatchControlSpec,
     compiled_resource_device_stores:
         &'a BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
     resource_residency_policy: ResourceResidencyPolicy,
@@ -193,6 +197,10 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
             additional_parameter_buffers,
             input_embedding_spec,
             input_embedding_spirv_words: context.input_embedding_spirv_words.to_vec(),
+            input_embedding_batch_spirv_words: context
+                .input_embedding_batch_spirv_words
+                .to_vec(),
+            input_embedding_batch_control: context.input_embedding_batch_control,
             output_norm_spirv_words,
             output_projection_spirv_words,
             demand_residency_context,

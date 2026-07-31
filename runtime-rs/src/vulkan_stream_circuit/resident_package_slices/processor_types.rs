@@ -199,7 +199,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .iter()
             .try_fold(target_bytes, |total, decoder| {
                 let telemetry_bytes = decoder
-                    .mounted
+                    .mounted()
                     .buffers
                     .zero_selection_telemetry_buffers()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -296,18 +296,24 @@ where
 struct VulkanResidentSpeculativeDecoderProcessor {
     id: String,
     device_id: String,
-    mounted: VulkanMountedPlacedStreamCircuit,
-    execution_plan: VulkanMountedPlacedResidentStreamTickExecutionPlan,
+    device_slice: VulkanResidentInProcessPlacedStreamProcessorDevice,
     input_transducer: VulkanResidentInputEmbeddingTransducerRunner,
+    input_embedding_batch_spirv_words: Vec<u32>,
+    input_embedding_batch_control: VulkanResidentComponentBatchControlSpec,
+    input_embedding_spec: VulkanResidentInputEmbeddingTransducerSpec,
+    input_embedding_weight: VulkanPermanentParameterBufferAllocation,
     output_transducer: VulkanResidentOutputTransducerRunner,
     sampler: VulkanResidentSamplerRunner,
     draft_sequence: VulkanResidentKernelSequence,
     state_sequence: VulkanResidentKernelSequence,
     catch_up_sequence: VulkanResidentKernelSequence,
     hidden_input_signal_id: String,
-    pending_hidden_input_copy: VulkanResidentBufferCopy,
-    update_pending_hidden_copy: VulkanResidentBufferCopy,
-    pending_target_hidden: VulkanResidentBuffer,
+    pending_hidden_input_copies: [VulkanResidentBufferCopy; 2],
+    update_pending_hidden_copies: [VulkanResidentBufferCopy; 2],
+    pending_target_hiddens: [VulkanResidentBuffer; 2],
+    active_pending_target_hidden: Cell<usize>,
+    catch_up_batches:
+        RefCell<BTreeMap<(usize, usize, usize), VulkanResidentSpeculativeCatchUpBatch>>,
     catch_up_controls: VulkanResidentBuffer,
     catch_up_controls_initial_copy: VulkanResidentBufferCopy,
     state_transaction: VulkanResidentStateTransactionBank,

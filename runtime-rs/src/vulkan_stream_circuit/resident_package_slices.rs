@@ -5,4 +5,5 @@ include!("resident_package_slices/device_slice.rs");
 include!("resident_package_slices/placed_model_package.rs");
 include!("resident_package_slices/speculative_decoder_package.rs");
 include!("resident_package_slices/processor_types.rs");
+include!("resident_package_slices/speculative_catch_up_batch.rs");
 include!("resident_package_slices/speculative_decoder_processor.rs");

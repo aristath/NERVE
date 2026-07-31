@@ -1,4 +1,62 @@
 impl VulkanResidentPlacedComponentBatchRunner {
+    fn new_single_device(
+        device: &VulkanComputeDevice,
+        slice: &VulkanResidentInProcessPlacedStreamProcessorDevice,
+        runtime_execution_identity: &str,
+        lane_capacity: usize,
+        execution_mode: VulkanComponentBatchExecutionMode,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let devices = BTreeMap::new();
+        let distributed_execution_plan = VulkanDistributedExecutionPlan {
+            device_ids: Vec::new(),
+            storage_buffer_offset_alignment: device.min_storage_buffer_offset_alignment(),
+            dispatches: Vec::new(),
+            dispatch_groups: Vec::new(),
+            shared_input_byte_capacity: 0,
+            shared_output_byte_capacity: 0,
+            distributed_parameter_byte_count: 0,
+        };
+        let distributed_parameter_buffers = VulkanDistributedParameterBuffers {
+            plan: VulkanDistributedParameterAllocationPlan {
+                allocations: Vec::new(),
+                allocation_count: 0,
+                tensor_count: 0,
+                total_byte_capacity: 0,
+            },
+            buffers: Vec::new(),
+            total_byte_capacity: 0,
+        };
+        let lane_mounteds = vec![&slice.mounted; lane_capacity];
+        let batch_slice = VulkanResidentComponentBatchSliceRunner::new(
+            &devices,
+            device,
+            slice,
+            runtime_execution_identity,
+            &lane_mounteds,
+            lane_capacity,
+            execution_mode,
+            false,
+            &distributed_execution_plan,
+            Rc::new(RefCell::new(RuntimeExecutionQuantumCalibrator::default())),
+        )?;
+        let slices = vec![batch_slice];
+        let distributed_dispatches = VulkanDistributedComponentBatchRunners::new(
+            &devices,
+            std::slice::from_ref(slice),
+            &slices,
+            &distributed_execution_plan,
+            &distributed_parameter_buffers,
+            lane_capacity,
+            execution_mode,
+        )?;
+        Ok(Self {
+            distributed_dispatches,
+            lane_capacity,
+            slices,
+            edge_transfers: Vec::new(),
+        })
+    }
+
     fn new(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         placed_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
@@ -392,6 +450,29 @@ impl VulkanResidentPlacedComponentBatchRunner {
             start_stream_tick,
             dynamic_state_capacity_activations,
             completion_mode,
+        )
+    }
+
+    fn run_causal_sequence_single_device(
+        &self,
+        device: &VulkanComputeDevice,
+        owner_device_id: &str,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let devices = BTreeMap::new();
+        self.slice(0)?.run_causal_sequence(
+            &devices,
+            device,
+            owner_device_id,
+            &self.distributed_dispatches,
+            mounted,
+            input_token_ids,
+            start_stream_tick,
+            dynamic_state_capacity_activations,
+            VulkanComponentBatchCompletionMode::Blocking,
         )
     }
 

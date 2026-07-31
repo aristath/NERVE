@@ -1,4 +1,24 @@
 impl VulkanResidentSpeculativeDecoderProcessor {
+    fn mounted(&self) -> &VulkanMountedPlacedStreamCircuit {
+        &self.device_slice.mounted
+    }
+
+    fn execution_plan(&self) -> &VulkanMountedPlacedResidentStreamTickExecutionPlan {
+        &self.device_slice.resident_execution_plan
+    }
+
+    fn active_pending_target_hidden_index(&self) -> usize {
+        self.active_pending_target_hidden.get()
+    }
+
+    fn pending_hidden_input_copy(&self) -> &VulkanResidentBufferCopy {
+        &self.pending_hidden_input_copies[self.active_pending_target_hidden_index()]
+    }
+
+    fn pending_target_hidden(&self) -> &VulkanResidentBuffer {
+        &self.pending_target_hiddens[self.active_pending_target_hidden_index()]
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_model(
         device: &VulkanComputeDevice,
@@ -92,6 +112,11 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     },
                 )
             })?;
+        let input_embedding_weight_allocation = VulkanPermanentParameterBufferAllocation {
+            parameter: input_embedding_weight.parameter.clone(),
+            byte_capacity: input_embedding_weight.byte_capacity,
+            buffer: Arc::clone(&input_embedding_weight.buffer),
+        };
         let input_transducer =
             VulkanResidentInputEmbeddingTransducerRunner::from_mounted_token_embedding_with_parameter_allocation(
                 device,
@@ -158,26 +183,51 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             random_seed,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
-        let pending_target_hidden = device
-            .create_resident_buffer(adapter.target_hidden_byte_capacity)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
-        pending_target_hidden
-            .write_bytes(&vec![0u8; adapter.target_hidden_byte_capacity])
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
-        let pending_hidden_input_copy = device
-            .create_resident_buffer_copy(
-                &pending_target_hidden,
-                &hidden_input.buffer,
-                adapter.target_hidden_byte_capacity,
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
-        let update_pending_hidden_copy = device
-            .create_resident_buffer_copy(
-                target_hidden,
-                &pending_target_hidden,
-                adapter.target_hidden_byte_capacity,
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
+        let pending_target_hiddens = [
+            device
+                .create_resident_buffer(adapter.target_hidden_byte_capacity)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?,
+            device
+                .create_resident_buffer(adapter.target_hidden_byte_capacity)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?,
+        ];
+        for pending_target_hidden in &pending_target_hiddens {
+            pending_target_hidden
+                .write_bytes(&vec![0u8; adapter.target_hidden_byte_capacity])
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
+        }
+        let pending_hidden_input_copies = [
+            device
+                .create_resident_buffer_copy(
+                    &pending_target_hiddens[0],
+                    &hidden_input.buffer,
+                    adapter.target_hidden_byte_capacity,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?,
+            device
+                .create_resident_buffer_copy(
+                    &pending_target_hiddens[1],
+                    &hidden_input.buffer,
+                    adapter.target_hidden_byte_capacity,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?,
+        ];
+        let update_pending_hidden_copies = [
+            device
+                .create_resident_buffer_copy(
+                    target_hidden,
+                    &pending_target_hiddens[0],
+                    adapter.target_hidden_byte_capacity,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?,
+            device
+                .create_resident_buffer_copy(
+                    target_hidden,
+                    &pending_target_hiddens[1],
+                    adapter.target_hidden_byte_capacity,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?,
+        ];
         let state_transaction =
             VulkanResidentStateTransactionBank::new_transactional(device, &mounted.buffers, 1)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -211,21 +261,41 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
+        let device_slice = VulkanResidentInProcessPlacedStreamProcessorDevice {
+            device_id: model.device_id.clone(),
+            hosted_component_count: model.device_slice.hosted_component_count,
+            incoming_edge_count: model.device_slice.incoming_edge_count,
+            outgoing_edge_count: model.device_slice.outgoing_edge_count,
+            dispatch_count: mounted_bound.dispatches.len(),
+            package_slice: Arc::clone(&model.device_slice),
+            mounted,
+            mounted_bound,
+            resident_execution_plan: execution_plan,
+            demand_residency_context: model.demand_residency_context.clone(),
+        };
+
         Ok(Self {
             id: model.id.clone(),
             device_id: model.device_id.clone(),
-            mounted,
-            execution_plan,
+            device_slice,
             input_transducer,
+            input_embedding_batch_spirv_words: model
+                .input_embedding_batch_spirv_words
+                .clone(),
+            input_embedding_batch_control: model.input_embedding_batch_control,
+            input_embedding_spec: model.input_embedding_spec.clone(),
+            input_embedding_weight: input_embedding_weight_allocation,
             output_transducer,
             sampler,
             draft_sequence,
             state_sequence,
             catch_up_sequence,
             hidden_input_signal_id: adapter.target_hidden_signal_id.clone(),
-            pending_hidden_input_copy,
-            update_pending_hidden_copy,
-            pending_target_hidden,
+            pending_hidden_input_copies,
+            update_pending_hidden_copies,
+            pending_target_hiddens,
+            active_pending_target_hidden: Cell::new(0),
+            catch_up_batches: RefCell::new(BTreeMap::new()),
             catch_up_controls,
             catch_up_controls_initial_copy,
             state_transaction,
@@ -234,7 +304,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
 
     fn capture_baseline(&self) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         self.state_transaction
-            .capture_baseline(&self.mounted.buffers)
+            .capture_baseline(&self.mounted().buffers)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         self.sampler
             .capture_token_state()
@@ -243,7 +313,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
 
     fn restore_baseline(&self) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         self.state_transaction
-            .restore_baseline(&self.mounted.buffers)
+            .restore_baseline(&self.mounted().buffers)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         self.sampler
             .restore_token_state()
@@ -260,7 +330,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         if draft_token_count == 0 {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
-        if self.execution_plan.uses_demand_residency() {
+        if self.execution_plan().uses_demand_residency() {
             return self.run_demand_draft_window(
                 device,
                 initial_token_id,
@@ -272,14 +342,14 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             .prepare_token_id_only(initial_token_id)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::InputTransducer)?;
         let dynamic_state_capacity_activations = u32::try_from(
-            self.mounted.buffers.dynamic_state_capacity_activations,
+            self.mounted().buffers.dynamic_state_capacity_activations,
         )
         .map_err(|_| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "speculative decoder dynamic state capacity exceeds u32".to_string(),
             ))
         })?;
-        self.mounted
+        self.mounted()
             .stream_control_buffer
             .write_bytes_at(
                 VULKAN_STREAM_CONTROL_METADATA_OFFSET,
@@ -292,7 +362,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
         let decoder_dispatches = self
-            .execution_plan
+            .execution_plan()
             .dispatch_segments
             .iter()
             .flat_map(|segment| segment.dispatches.iter())
@@ -338,7 +408,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 })?,
         );
         let hidden_input = self
-            .mounted
+            .mounted()
             .boundary_io
             .input_buffer(&self.hidden_input_signal_id)
             .expect("validated speculative hidden input must remain mounted");
@@ -395,7 +465,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             .run_resident_kernel_sequence_with_input_and_snapshot_copies(
                 &self.draft_sequence,
                 &[VulkanResidentKernelSequenceInputCopy::new(
-                    &self.pending_hidden_input_copy,
+                    self.pending_hidden_input_copy(),
                 )],
                 &steps,
                 &hidden_feedback_copies,
@@ -429,7 +499,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             input_token_id,
             stream_tick,
             &[VulkanResidentKernelSequenceInputCopy::new(
-                &self.pending_hidden_input_copy,
+                self.pending_hidden_input_copy(),
             )],
             false,
         )?;
@@ -446,7 +516,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
         include_output: bool,
     ) -> Result<Option<VulkanResidentSamplerRun>, VulkanResidentInProcessPlacedRuntimeError> {
-        if self.execution_plan.uses_demand_residency() {
+        if self.execution_plan().uses_demand_residency() {
             if input_copies.len() != 1 {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                     VulkanError(format!(
@@ -466,7 +536,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             .prepare_token_id_only(input_token_id)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::InputTransducer)?;
         let dynamic_state_capacity_activations = u32::try_from(
-            self.mounted.buffers.dynamic_state_capacity_activations,
+            self.mounted().buffers.dynamic_state_capacity_activations,
         )
         .map_err(|_| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -478,7 +548,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             control_flags: 0,
             dynamic_state_capacity_activations,
         };
-        self.mounted
+        self.mounted()
             .stream_control_buffer
             .write_bytes_at(
                 VULKAN_STREAM_CONTROL_METADATA_OFFSET,
@@ -486,7 +556,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let decoder_dispatches = self
-            .execution_plan
+            .execution_plan()
             .dispatch_segments
             .iter()
             .flat_map(|segment| segment.dispatches.iter())
@@ -578,7 +648,45 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 )),
             ));
         }
-        if self.execution_plan.uses_demand_residency() {
+        if self.execution_plan().uses_demand_residency() || input_token_ids.len() == 1 {
+            return self.run_serial_catch_up_window(
+                device,
+                input_token_ids,
+                start_stream_tick,
+                normalized_target_frames,
+                frame_byte_capacity,
+            );
+        }
+        self.run_batched_catch_up_window(
+            device,
+            input_token_ids,
+            start_stream_tick,
+            normalized_target_frames,
+            frame_byte_capacity,
+        )
+    }
+
+    fn run_serial_catch_up_window(
+        &self,
+        device: &VulkanComputeDevice,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        normalized_target_frames: &VulkanResidentBuffer,
+        frame_byte_capacity: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if input_token_ids.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        if input_token_ids.len() > VULKAN_BACKEND_LOOP_MAX_WINDOW {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "speculative catch-up width {} exceeds resident window {}",
+                    input_token_ids.len(),
+                    VULKAN_BACKEND_LOOP_MAX_WINDOW,
+                )),
+            ));
+        }
+        if self.execution_plan().uses_demand_residency() {
             return self.run_demand_catch_up_window(
                 device,
                 input_token_ids,
@@ -588,7 +696,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             );
         }
         let dynamic_state_capacity_activations = u32::try_from(
-            self.mounted.buffers.dynamic_state_capacity_activations,
+            self.mounted().buffers.dynamic_state_capacity_activations,
         )
         .map_err(|_| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -596,7 +704,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             ))
         })?;
         let decoder_dispatches = self
-            .execution_plan
+            .execution_plan()
             .dispatch_segments
             .iter()
             .flat_map(|segment| segment.dispatches.iter())
@@ -638,7 +746,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         }
 
         let hidden_input = self
-            .mounted
+            .mounted()
             .boundary_io
             .input_buffer(&self.hidden_input_signal_id)
             .expect("validated speculative hidden input must remain mounted");
@@ -716,7 +824,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     VulkanResidentKernelSequenceSnapshotCopy::new(
                         after_step_index,
                         &self.catch_up_controls,
-                        &self.mounted.stream_control_buffer,
+                        &self.mounted().stream_control_buffer,
                         next_control_offset,
                         0,
                         VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
@@ -739,7 +847,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     VulkanResidentKernelSequenceSnapshotCopy::new(
                         after_step_index,
                         normalized_target_frames,
-                        &self.pending_target_hidden,
+                        self.pending_target_hidden(),
                         target_hidden_offset,
                         0,
                         frame_byte_capacity,
@@ -756,7 +864,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                         &self.catch_up_controls_initial_copy,
                     ),
                     VulkanResidentKernelSequenceInputCopy::new(
-                        &self.pending_hidden_input_copy,
+                        self.pending_hidden_input_copy(),
                     ),
                 ],
                 &steps,
@@ -766,8 +874,8 @@ impl VulkanResidentSpeculativeDecoderProcessor {
     }
 
     fn commit_target_hidden(&self) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        self.update_pending_hidden_copy
-            .run(self.update_pending_hidden_copy.byte_len())
+        let copy = &self.update_pending_hidden_copies[self.active_pending_target_hidden_index()];
+        copy.run(copy.byte_len())
             .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)
     }
 
@@ -783,7 +891,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::InputTransducer)?;
         let dynamic_state_capacity_activations = self.speculative_dynamic_state_capacity()?;
         let hidden_input = self
-            .mounted
+            .mounted()
             .boundary_io
             .input_buffer(&self.hidden_input_signal_id)
             .expect("validated speculative hidden input must remain mounted");
@@ -813,7 +921,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     control,
                     true,
                     &[VulkanResidentKernelSequenceInputCopy::new(
-                        &self.pending_hidden_input_copy,
+                        self.pending_hidden_input_copy(),
                     )],
                     &[feedback_copy],
                 )?;
@@ -856,7 +964,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             control,
             include_output,
             &[VulkanResidentKernelSequenceInputCopy::new(
-                &self.pending_hidden_input_copy,
+                self.pending_hidden_input_copy(),
             )],
             &[],
         )?;
@@ -875,7 +983,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         frame_byte_capacity: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let hidden_input = self
-            .mounted
+            .mounted()
             .boundary_io
             .input_buffer(&self.hidden_input_signal_id)
             .expect("validated speculative hidden input must remain mounted");
@@ -899,7 +1007,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 control_flags: 0,
                 dynamic_state_capacity_activations,
             };
-            self.mounted
+            self.mounted()
                 .stream_control_buffer
                 .write_bytes(&stream_control_bytes(input_token_id, control))
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -913,7 +1021,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             let destination = if tick_index + 1 < input_token_ids.len() {
                 &hidden_input.buffer
             } else {
-                &self.pending_target_hidden
+                self.pending_target_hidden()
             };
             let copy = VulkanResidentBufferRangeCopy::new(
                 normalized_target_frames,
@@ -929,7 +1037,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     control,
                     false,
                     &[VulkanResidentKernelSequenceInputCopy::new(
-                        &self.pending_hidden_input_copy,
+                        self.pending_hidden_input_copy(),
                     )],
                     &[copy],
                 )?;
@@ -967,7 +1075,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         let sequence_variant = u8::from(include_output)
             | (u8::from(!input_copies.is_empty()) << 1)
             | (u8::from(!post_copies.is_empty()) << 2);
-        self.execution_plan
+        self.execution_plan()
             .run_single_segment_demand_resident(
                 device,
                 control,
@@ -983,7 +1091,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
     fn speculative_dynamic_state_capacity(
         &self,
     ) -> Result<u32, VulkanResidentInProcessPlacedRuntimeError> {
-        u32::try_from(self.mounted.buffers.dynamic_state_capacity_activations).map_err(|_| {
+        u32::try_from(self.mounted().buffers.dynamic_state_capacity_activations).map_err(|_| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "speculative decoder dynamic state capacity exceeds u32".to_string(),
             ))
