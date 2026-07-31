@@ -1140,13 +1140,18 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             + output_index.format(label=labels[-1])
             + "] = value;"
         )
+        if batch_tile_width is None:
+            template_file = "parallel_linear_prequant_fp8_e4m3.comp.template"
+        elif block_rows == 1:
+            template_file = (
+                "parallel_linear_prequant_batch_fp8_e4m3_row_scaled"
+                ".comp.template"
+            )
+        else:
+            template_file = "parallel_linear_prequant_batch_fp8_e4m3.comp.template"
         return render_shader_template(
             source_dir,
-            (
-                "parallel_linear_prequant_batch_fp8_e4m3.comp.template"
-                if batch_tile_width is not None
-                else "parallel_linear_prequant_fp8_e4m3.comp.template"
-            ),
+            template_file,
             {
                 "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
                 "BRANCH_COUNT": str(branch_count),
@@ -1532,13 +1537,22 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             raise ModelCompileError(
                 f"invalid prequantized FP8 FFN shader shape {shader_file!r}"
             )
+        if batch_tile_width is None:
+            template_file = (
+                "parallel_linear_silu_multiply_prequant_fp8_e4m3.comp.template"
+            )
+        elif block_rows == 1:
+            template_file = (
+                "parallel_linear_silu_multiply_prequant_batch_fp8_e4m3_"
+                "row_scaled.comp.template"
+            )
+        else:
+            template_file = (
+                "parallel_linear_silu_multiply_prequant_batch_fp8_e4m3.comp.template"
+            )
         return render_shader_template(
             source_dir,
-            (
-                "parallel_linear_silu_multiply_prequant_batch_fp8_e4m3.comp.template"
-                if batch_tile_width is not None
-                else "parallel_linear_silu_multiply_prequant_fp8_e4m3.comp.template"
-            ),
+            template_file,
             {
                 "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
                 "BLOCK_ROWS": str(block_rows),

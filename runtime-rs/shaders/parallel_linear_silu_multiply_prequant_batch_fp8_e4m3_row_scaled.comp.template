@@ -36,7 +36,7 @@ const uint OUTPUT_WORDS = OUTPUT_SIZE / 2u;
 const uint BLOCK_FP8_WORDS = BLOCK_COLUMNS / 4u;
 const uint SCALE_COLUMNS = INPUT_SIZE / BLOCK_COLUMNS;
 
-shared float activated_rows[BATCH_TILE_WIDTH][OUTPUT_TILE_ROWS];
+shared float activated_rows[OUTPUT_TILE_ROWS];
 
 float bf16_to_f32(uint value) {
     return uintBitsToFloat((value & 0xffffu) << 16u);
@@ -82,105 +82,79 @@ fe4m3vec4 read_fp8x4(uint packed) {
 void main() {
     uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
     uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
-    for (
-        uint local_row = gl_SubgroupID;
-        local_row < OUTPUT_TILE_ROWS;
-        local_row += gl_NumSubgroups
-    ) {
-        uint row = first_row + local_row;
-        float gates[BATCH_TILE_WIDTH];
-        float ups[BATCH_TILE_WIDTH];
-        for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; batch_lane++) {
-            gates[batch_lane] = 0.0;
-            ups[batch_lane] = 0.0;
-        }
-        if (row < OUTPUT_SIZE) {
-            for (
-                uint word = gl_SubgroupInvocationID;
-                word < INPUT_FP8_WORDS;
-                word += gl_SubgroupSize
-            ) {
-                uint block = word / BLOCK_FP8_WORDS;
-                fe4m3vec4 gate_weight_value = read_fp8x4(
-                    gate_weight.words[row * INPUT_FP8_WORDS + word]
-                );
-                fe4m3vec4 up_weight_value = read_fp8x4(
-                    up_weight.words[row * INPUT_FP8_WORDS + word]
-                );
-                float gate_scale = read_gate_scale(row, block);
-                float up_scale = read_up_scale(row, block);
-                for (
-                    uint batch_lane = 0u;
-                    batch_lane < BATCH_TILE_WIDTH;
-                    batch_lane++
-                ) {
-                    uint batch_index = batch_start + batch_lane;
-                    if (batch_index >= batch_control.batch_width) {
-                        continue;
-                    }
-                    uint input_index =
-                        batch_index * INPUT_FP8_WORDS + word;
-                    fe4m3vec4 input_value =
-                        read_fp8x4(quantized_inputs.words[input_index]);
-                    float activation_scale =
-                        input_scales.values[batch_index * SCALE_COLUMNS + block];
-                    gates[batch_lane] = fma(
-                        fp8_dot4_acc32(
-                            input_value,
-                            gate_weight_value,
-                            0.0
-                        ),
-                        activation_scale * gate_scale,
-                        gates[batch_lane]
-                    );
-                    ups[batch_lane] = fma(
-                        fp8_dot4_acc32(
-                            input_value,
-                            up_weight_value,
-                            0.0
-                        ),
-                        activation_scale * up_scale,
-                        ups[batch_lane]
-                    );
-                }
-            }
-        }
-        for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; batch_lane++) {
-            gates[batch_lane] = subgroupAdd(gates[batch_lane]);
-            ups[batch_lane] = subgroupAdd(ups[batch_lane]);
-            if (gl_SubgroupInvocationID == 0u) {
-                activated_rows[batch_lane][local_row] = (
-                    rounded_silu(round_bf16(gates[batch_lane]))
-                    * round_bf16(ups[batch_lane])
-                );
-            }
-        }
-    }
-    barrier();
-
     for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; batch_lane++) {
         uint batch_index = batch_start + batch_lane;
         if (batch_index >= batch_control.batch_width) {
             break;
         }
+        for (
+            uint local_row = gl_SubgroupID;
+            local_row < OUTPUT_TILE_ROWS;
+            local_row += gl_NumSubgroups
+        ) {
+            uint row = first_row + local_row;
+            float gate = 0.0;
+            float up = 0.0;
+            if (row < OUTPUT_SIZE) {
+                for (
+                    uint word = gl_SubgroupInvocationID;
+                    word < INPUT_FP8_WORDS;
+                    word += gl_SubgroupSize
+                ) {
+                    uint block = word / BLOCK_FP8_WORDS;
+                    uint input_index = batch_index * INPUT_FP8_WORDS + word;
+                    fe4m3vec4 input_value =
+                        read_fp8x4(quantized_inputs.words[input_index]);
+                    float activation_scale =
+                        input_scales.values[batch_index * SCALE_COLUMNS + block];
+                    gate = fma(
+                        fp8_dot4_acc32(
+                            input_value,
+                            read_fp8x4(
+                                gate_weight.words[row * INPUT_FP8_WORDS + word]
+                            ),
+                            0.0
+                        ),
+                        activation_scale
+                            * read_gate_scale(row, block),
+                        gate
+                    );
+                    up = fma(
+                        fp8_dot4_acc32(
+                            input_value,
+                            read_fp8x4(
+                                up_weight.words[row * INPUT_FP8_WORDS + word]
+                            ),
+                            0.0
+                        ),
+                        activation_scale
+                            * read_up_scale(row, block),
+                        up
+                    );
+                }
+            }
+            gate = subgroupAdd(gate);
+            up = subgroupAdd(up);
+            if (gl_SubgroupInvocationID == 0u) {
+                activated_rows[local_row] =
+                    rounded_silu(round_bf16(gate)) * round_bf16(up);
+            }
+        }
+        barrier();
+
         if (gl_LocalInvocationID.x < OUTPUT_TILE_ROWS / 2u) {
             uint row = first_row + gl_LocalInvocationID.x * 2u;
             if (row < OUTPUT_SIZE) {
                 uint hi = row + 1u < OUTPUT_SIZE
                     ? f32_to_bf16(
-                        activated_rows[batch_lane][
-                            gl_LocalInvocationID.x * 2u + 1u
-                        ]
+                        activated_rows[gl_LocalInvocationID.x * 2u + 1u]
                     )
                     : 0u;
                 output_frames.words[batch_index * OUTPUT_WORDS + row / 2u] =
                     (hi << 16u)
-                    | f32_to_bf16(
-                        activated_rows[batch_lane][
-                            gl_LocalInvocationID.x * 2u
-                        ]
-                    );
+                    | f32_to_bf16(activated_rows[gl_LocalInvocationID.x * 2u]);
             }
         }
+        barrier();
     }
 }

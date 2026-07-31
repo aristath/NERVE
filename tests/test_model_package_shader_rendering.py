@@ -1,4 +1,59 @@
 from model_package_layout_common import *
+from nerve.model_package_shader_compiler import compile_shader_artifacts
+
+
+def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    vectorized_shader_files = {
+        (
+            "parallel_linear_batch4_3way_prequant_fp8_e4m3_"
+            "b128x128_512x512_128_128.comp"
+        ),
+        (
+            "parallel_linear_silu_multiply_prequant_batch4_fp8_e4m3_"
+            "b128x128_512x512.comp"
+        ),
+        (
+            "mixed_parallel_linear_4way_prequant_batch4_fp8_e4m3_"
+            "b128x128_bf16_512x512_256_32_32.comp"
+        ),
+    }
+    row_scaled_shader_files = {
+        (
+            "parallel_linear_batch4_3way_prequant_fp8_e4m3_"
+            "b1x128_512x512_128_128.comp"
+        ),
+        (
+            "parallel_linear_silu_multiply_prequant_batch4_fp8_e4m3_"
+            "b1x128_512x512.comp"
+        ),
+    }
+    shader_files = vectorized_shader_files | row_scaled_shader_files
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    for shader_file in vectorized_shader_files:
+        source = (tmp_path / shader_file).read_text()
+        assert "const uint BATCH_TILE_WIDTH = 4u;" in source
+        assert (
+            "float sums[BATCH_TILE_WIDTH]" in source
+            or "float gates[BATCH_TILE_WIDTH]" in source
+        )
+        assert "[BATCH_TILE_WIDTH]" in source
+        assert "{{" not in source
+    for shader_file in row_scaled_shader_files:
+        source = (tmp_path / shader_file).read_text()
+        assert "const uint BATCH_TILE_WIDTH = 4u;" in source
+        assert "float sums[BATCH_TILE_WIDTH]" not in source
+        assert "float gates[BATCH_TILE_WIDTH]" not in source
+        assert "{{" not in source
+    compile_shader_artifacts(tmp_path)
+    assert all(
+        (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+        for shader_file in shader_files
+    )
 
 def test_compiler_renders_parallel_linear_shaders(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
