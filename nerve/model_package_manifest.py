@@ -478,6 +478,14 @@ def build_vulkan_resident_package_manifest(
                     tensor_index,
                 )
             ),
+            can_fuse_linear_sigmoid_scalar_multiply=lambda projection, multiply, circuit=circuit: (
+                can_fuse_bf16_linear_sigmoid_scalar_multiply(
+                    circuit,
+                    projection,
+                    multiply,
+                    tensor_index,
+                )
+            ),
             prequantization_spec=lambda node, circuit=circuit: (
                 physical_input_prequantization_spec(
                     circuit,

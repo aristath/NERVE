@@ -1,10 +1,54 @@
 from model_package_layout_common import *
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_tensors import (
+    can_fuse_bf16_linear_sigmoid_scalar_multiply,
     can_fuse_contiguous_linear_swiglu,
     can_fuse_native_parallel_linears,
     physical_input_prequantization_spec,
 )
+
+
+def test_scalar_gate_fusion_requires_one_bf16_row_major_projection() -> None:
+    projection = {
+        "id": "gate_projection",
+        "op": "linear",
+        "params": ["gate_weight"],
+    }
+    multiply = {"id": "apply_gate", "op": "sigmoid_scalar_multiply"}
+    circuit = {
+        "parameters": {"refs": {"gate_weight": {"tensor": "gate.weight"}}}
+    }
+    tensor_index = {
+        "tensors": {
+            "gate.weight": {
+                "dtype": "BF16",
+                "shape": [1, 2048],
+                "layout": ROW_MAJOR_LAYOUT,
+            }
+        }
+    }
+
+    assert can_fuse_bf16_linear_sigmoid_scalar_multiply(
+        circuit,
+        projection,
+        multiply,
+        tensor_index,
+    )
+    tensor_index["tensors"]["gate.weight"]["shape"] = [2, 2048]
+    assert not can_fuse_bf16_linear_sigmoid_scalar_multiply(
+        circuit,
+        projection,
+        multiply,
+        tensor_index,
+    )
+    tensor_index["tensors"]["gate.weight"]["shape"] = [1, 2048]
+    tensor_index["tensors"]["gate.weight"]["dtype"] = "F8_E4M3"
+    assert not can_fuse_bf16_linear_sigmoid_scalar_multiply(
+        circuit,
+        projection,
+        multiply,
+        tensor_index,
+    )
 
 
 def test_parallel_linear_shader_selector_rejects_invalid_metadata_and_layout() -> None:
@@ -776,6 +820,8 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         "moe_reduce_bf16_h2048_k8_scale1.comp",
         "moe_reduce_batch1_bf16_h2048_k8_scale1.comp",
         "sigmoid_scalar_multiply_bf16_2048.comp",
+        "linear_sigmoid_scalar_multiply_bf16_2048x2048.comp",
+        "linear_sigmoid_scalar_multiply_batch1_bf16_2048x2048.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
@@ -854,9 +900,23 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
         "const uint HIDDEN_SIZE = 2048u;"
         in (tmp_path / "sigmoid_scalar_multiply_bf16_2048.comp").read_text()
     )
+    fused_shared_gate = (
+        tmp_path / "linear_sigmoid_scalar_multiply_bf16_2048x2048.comp"
+    ).read_text()
+    assert "const uint GATE_INPUT_SIZE = 2048u;" in fused_shared_gate
+    assert "const uint VALUE_SIZE = 2048u;" in fused_shared_gate
+    assert "float rounded_gate = bf16_to_f32(f32_to_bf16(gate_sum));" in fused_shared_gate
+    assert "subgroupAdd(gate_sum)" in fused_shared_gate
+    assert "{{" not in fused_shared_gate
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / "moe_route_compact_batch1_i512_k8_t16.spv").is_file()
     assert (tmp_path / "moe_route_count_batch1_i512_k8_t32.spv").is_file()
+    assert (
+        tmp_path / "linear_sigmoid_scalar_multiply_bf16_2048x2048.spv"
+    ).is_file()
+    assert (
+        tmp_path / "linear_sigmoid_scalar_multiply_batch1_bf16_2048x2048.spv"
+    ).is_file()
 
 
 def test_compiler_parallelizes_only_selected_sparse_expert_routes() -> None:

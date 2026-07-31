@@ -86,6 +86,20 @@ fn infer_node_output_shapes(
             outputs,
         )),
         "sigmoid_scalar_multiply" => Ok(repeat_shape(first_input_shape(node, signals), outputs)),
+        "linear_sigmoid_scalar_multiply" => {
+            if node.inputs.len() != 2 || node.outputs.len() != 1 || node.params.len() != 1 {
+                return Err(CircuitPlanError(format!(
+                    "{} node {} fused linear scalar gate requires two inputs, one output, and one parameter",
+                    component_id, node.id
+                )));
+            }
+            let value_shape = node
+                .inputs
+                .get(1)
+                .and_then(|input| signals.get(input))
+                .and_then(|signal| signal.shape.clone());
+            Ok(vec![value_shape])
+        }
         "parallel_head_norm_rope_2way"
         | "parallel_head_norm_rope_2way_codebook_u8"
         | "parallel_head_norm_rope_2way_embedded_parameters" => {

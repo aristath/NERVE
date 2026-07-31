@@ -1,0 +1,72 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer GateInput {
+    uint words[];
+} gate_input;
+layout(set = 0, binding = 1) readonly buffer ValueInput {
+    uint words[];
+} value_input;
+layout(set = 0, binding = 2) buffer OutputFrame {
+    uint words[];
+} output_frame;
+layout(set = 0, binding = 3) readonly buffer GateWeight {
+    uint words[];
+} gate_weight;
+
+const uint GATE_INPUT_SIZE = {{GATE_INPUT_SIZE}}u;
+const uint VALUE_SIZE = {{VALUE_SIZE}}u;
+const uint GATE_INPUT_WORDS = GATE_INPUT_SIZE / 2u;
+const uint VALUE_WORDS = (VALUE_SIZE + 1u) / 2u;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    float gate_sum = 0.0;
+    for (
+        uint word = lane;
+        word < GATE_INPUT_WORDS;
+        word += gl_WorkGroupSize.x
+    ) {
+        uint input_pair = gate_input.words[word];
+        uint weight_pair = gate_weight.words[word];
+        gate_sum = fma(
+            bf16_to_f32(input_pair),
+            bf16_to_f32(weight_pair),
+            gate_sum
+        );
+        gate_sum = fma(
+            bf16_to_f32(input_pair >> 16u),
+            bf16_to_f32(weight_pair >> 16u),
+            gate_sum
+        );
+    }
+    gate_sum = subgroupAdd(gate_sum);
+    float rounded_gate = bf16_to_f32(f32_to_bf16(gate_sum));
+    float gate = 1.0 / (1.0 + exp(-rounded_gate));
+
+    for (
+        uint word = lane;
+        word < VALUE_WORDS;
+        word += gl_WorkGroupSize.x
+    ) {
+        uint packed = value_input.words[word];
+        float lo = bf16_to_f32(packed) * gate;
+        float hi = bf16_to_f32(packed >> 16u) * gate;
+        output_frame.words[word] =
+            (f32_to_bf16(hi) << 16u) | f32_to_bf16(lo);
+    }
+}

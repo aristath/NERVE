@@ -22,6 +22,9 @@ EXACT_REWRITE_CONTRACTS = {
     "append_scaled_dot_product_attention": "append_attention_exact_bf16.v1",
     "contiguous_linear_swiglu": "contiguous_linear_swiglu_exact_bf16.v1",
     "linear_residual": "linear_residual_exact_bf16.v1",
+    "linear_sigmoid_scalar_multiply": (
+        "linear_sigmoid_scalar_multiply_exact_bf16.v1"
+    ),
     "linear_split_3way": "linear_split_exact_bf16.v1",
     "linear_split_recurrent_depthwise_gate": "linear_recurrent_exact_bf16.v1",
     "multiply_rolling_depthwise": "rolling_depthwise_exact_bf16.v1",
@@ -39,6 +42,9 @@ EXACT_REWRITE_SOURCE_OPS = {
     },
     "contiguous_linear_swiglu": {("linear", "split", "silu_multiply")},
     "linear_residual": {("linear", "residual_add")},
+    "linear_sigmoid_scalar_multiply": {
+        ("linear", "sigmoid_scalar_multiply")
+    },
     "linear_split_3way": {("linear", "split")},
     "linear_split_recurrent_depthwise_gate": {
         (
@@ -818,6 +824,12 @@ def _validate_exact_rewrite_semantics(
             "intermediate_rounding": "BF16",
         }
     elif op == "linear_residual":
+        _require_empty_attrs(component_id, op, region)
+        expected_attrs = {
+            "compiled_from": source_ids,
+            "intermediate_rounding": "BF16",
+        }
+    elif op == "linear_sigmoid_scalar_multiply":
         _require_empty_attrs(component_id, op, region)
         expected_attrs = {
             "compiled_from": source_ids,

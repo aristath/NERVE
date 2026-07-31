@@ -187,6 +187,51 @@ mod tests {
     }
 
     #[test]
+    fn infers_fused_linear_scalar_gate_shape_from_value_input() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "shared_gate".to_string(),
+            op: "linear_sigmoid_scalar_multiply".to_string(),
+            inputs: vec!["normalized".to_string(), "shared_value".to_string()],
+            outputs: vec!["gated_value".to_string()],
+            params: vec!["gate_weight".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({}),
+        };
+        let signal = |id: &str, shape: Vec<usize>| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: vec!["shared_gate".to_string()],
+            shape: Some(shape),
+            element_bytes: None,
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let signals = BTreeMap::from([
+            (
+                "normalized".to_string(),
+                signal("normalized", vec![2048]),
+            ),
+            (
+                "shared_value".to_string(),
+                signal("shared_value", vec![1024]),
+            ),
+        ]);
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![1024])]
+        );
+    }
+
+    #[test]
     fn infers_fp8_quantization_representation_shapes() {
         let node = crate::stream_circuit::CircuitNode {
             id: "quantize".to_string(),

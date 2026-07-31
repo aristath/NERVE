@@ -159,6 +159,12 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == "sigmoid_scalar_multiply_batch16_bf16_2048.comp"
     )
     assert (
+        weight_shared_batch_shader_file(
+            "linear_sigmoid_scalar_multiply_bf16_2048x2048.comp"
+        )
+        == "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp"
+    )
+    assert (
         weight_shared_batch_shader_file("add_bf16_2048.comp")
         == "add_batch16_bf16_2048.comp"
     )
@@ -167,6 +173,7 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         "split_bf16_2x512.comp",
         "silu_multiply_bf16_512.comp",
         "sigmoid_scalar_multiply_bf16_2048.comp",
+        "linear_sigmoid_scalar_multiply_bf16_2048x2048.comp",
         "add_bf16_2048.comp",
     ):
         assert (
@@ -943,6 +950,7 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
         "split_batch16_bf16_2x512.comp",
         "silu_multiply_batch16_bf16_512.comp",
         "sigmoid_scalar_multiply_batch16_bf16_2048.comp",
+        "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp",
         "add_batch16_bf16_2048.comp",
         "sigmoid_multiply_batch16_bf16.comp",
     }
@@ -967,6 +975,14 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
     assert "uint16_t values[]" in scalar_gate_source
     assert "gate_logits.values[batch_index]" in scalar_gate_source
     assert "uint batch_lane = gl_WorkGroupID.x;" in scalar_gate_source
+    fused_scalar_gate_source = (
+        tmp_path
+        / "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp"
+    ).read_text()
+    assert "float rounded_gate = bf16_to_f32(f32_to_bf16(gate_sum));" in (
+        fused_scalar_gate_source
+    )
+    assert "uint batch_lane = gl_WorkGroupID.x;" in fused_scalar_gate_source
 
     for shader_file in shader_files:
         source = (tmp_path / shader_file).read_text()

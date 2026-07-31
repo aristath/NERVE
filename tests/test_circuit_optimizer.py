@@ -1091,6 +1091,74 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             ["weight", "weight_scale_inv"], optimized["nodes"][0]["params"]
         )
 
+    def test_fuses_scalar_gate_projection_with_its_only_multiply(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "gate_projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["gate_logit"],
+                    "params": ["gate_weight"],
+                },
+                {
+                    "id": "apply_gate",
+                    "op": "sigmoid_scalar_multiply",
+                    "inputs": ["value", "gate_logit"],
+                    "outputs": ["gated_value"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_linear_sigmoid_scalar_multiply=lambda _linear, _multiply: True,
+        )
+
+        self.assertEqual(1, len(optimized["nodes"]))
+        fused = optimized["nodes"][0]
+        self.assertEqual("linear_sigmoid_scalar_multiply", fused["op"])
+        self.assertEqual(["normalized", "value"], fused["inputs"])
+        self.assertEqual(["gated_value"], fused["outputs"])
+        self.assertEqual(["gate_weight"], fused["params"])
+        self.assertEqual(
+            ["gate_projection", "apply_gate"],
+            fused["attrs"]["compiled_from"],
+        )
+        self.assertEqual("BF16", fused["attrs"]["intermediate_rounding"])
+
+    def test_keeps_scalar_gate_projection_with_an_additional_consumer(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "gate_projection",
+                    "op": "linear",
+                    "inputs": ["normalized"],
+                    "outputs": ["gate_logit"],
+                    "params": ["gate_weight"],
+                },
+                {
+                    "id": "apply_gate",
+                    "op": "sigmoid_scalar_multiply",
+                    "inputs": ["value", "gate_logit"],
+                    "outputs": ["gated_value"],
+                },
+                {
+                    "id": "observe_gate",
+                    "op": "silu",
+                    "inputs": ["gate_logit"],
+                    "outputs": ["observed_gate"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_linear_sigmoid_scalar_multiply=lambda _linear, _multiply: True,
+        )
+
+        self.assertEqual(circuit, optimized)
+
     def test_fuses_contiguous_gate_up_projection_split_and_swiglu(self) -> None:
         circuit = {
             "nodes": [

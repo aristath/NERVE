@@ -777,6 +777,24 @@ def shader_file_for_node(
         return f"softplus_multiply_bf16_q{query_heads}_d{head_width}_{mode}.comp"
     if op == "sigmoid_scalar_multiply":
         return f"sigmoid_scalar_multiply_bf16_{hidden_size}.comp"
+    if op == "linear_sigmoid_scalar_multiply":
+        out_features, in_features = parameter_shape_for_node(
+            circuit, node, tensor_index
+        )
+        if (
+            int(out_features) != 1
+            or int(in_features) <= 0
+            or int(in_features) % 2
+            or parameter_dtype_for_node(circuit, node, tensor_index) != "BF16"
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+        ):
+            raise ModelCompileError(
+                f"linear scalar-gate node {node['id']!r} has unsupported geometry"
+            )
+        return (
+            f"linear_sigmoid_scalar_multiply_bf16_{in_features}x{hidden_size}.comp"
+        )
     if op == "rms_norm_per_head":
         return (
             f"rms_norm_per_head_bf16_{node['attrs']['head_count']}x"

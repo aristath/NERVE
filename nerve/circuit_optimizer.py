@@ -34,6 +34,9 @@ def optimize_circuit_for_vulkan(
     can_fuse_contiguous_linear_swiglu: (
         Callable[[Json, Json, Json], bool] | None
     ) = None,
+    can_fuse_linear_sigmoid_scalar_multiply: (
+        Callable[[Json, Json], bool] | None
+    ) = None,
     prequantization_spec: Callable[[Json], Json | None] | None = None,
     can_emit_representation: Callable[[Json, Json], bool] | None = None,
 ) -> Json:
@@ -75,6 +78,13 @@ def optimize_circuit_for_vulkan(
             fused = _fuse_silu_multiply(current, following, consumer_counts)
         if fused is None:
             fused = _fuse_linear_residual(current, following, consumer_counts)
+        if fused is None:
+            fused = _fuse_linear_sigmoid_scalar_multiply(
+                current,
+                following,
+                consumer_counts,
+                can_fuse_linear_sigmoid_scalar_multiply,
+            )
         if fused is not None:
             compiled_nodes.append(fused)
             index += 2
@@ -1141,6 +1151,54 @@ def _fuse_linear_residual(
         "params": deepcopy(linear["params"]),
         "attrs": {
             "compiled_from": [linear["id"], residual["id"]],
+            "intermediate_rounding": "BF16",
+        },
+    }
+
+
+def _fuse_linear_sigmoid_scalar_multiply(
+    linear: Json,
+    multiply: Json | None,
+    consumer_counts: Counter[str],
+    can_fuse: Callable[[Json, Json], bool] | None,
+) -> Json | None:
+    if (
+        can_fuse is None
+        or multiply is None
+        or linear.get("op") != "linear"
+        or multiply.get("op") != "sigmoid_scalar_multiply"
+        or not can_fuse(linear, multiply)
+    ):
+        return None
+    if (
+        len(linear.get("inputs", [])) != 1
+        or len(linear.get("outputs", [])) != 1
+        or len(linear.get("params", [])) != 1
+        or linear.get("state_reads")
+        or linear.get("state_writes")
+    ):
+        return None
+    linear_output = linear["outputs"][0]
+    multiply_inputs = multiply.get("inputs", [])
+    if (
+        len(multiply_inputs) != 2
+        or multiply_inputs.count(linear_output) != 1
+        or consumer_counts[linear_output] != 1
+        or multiply.get("params")
+        or multiply.get("state_reads")
+        or multiply.get("state_writes")
+    ):
+        return None
+
+    value_input = next(signal for signal in multiply_inputs if signal != linear_output)
+    return {
+        "id": f"{linear['id']}__{multiply['id']}",
+        "op": "linear_sigmoid_scalar_multiply",
+        "inputs": [linear["inputs"][0], value_input],
+        "outputs": deepcopy(multiply.get("outputs", [])),
+        "params": deepcopy(linear["params"]),
+        "attrs": {
+            "compiled_from": [linear["id"], multiply["id"]],
             "intermediate_rounding": "BF16",
         },
     }

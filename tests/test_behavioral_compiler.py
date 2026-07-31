@@ -91,6 +91,66 @@ def test_exact_candidate_gate_proves_complete_fusion_coverage() -> None:
     assert evidence["rewrites"][0]["proof_contract"] == "silu_multiply_exact_bf16.v1"
 
 
+def test_exact_candidate_gate_proves_fused_linear_scalar_gate() -> None:
+    source = {
+        "schema": "nerve.stream_circuit.v1",
+        "source": {"component_id": "layer_00"},
+        "boundary": {
+            "inputs": [
+                {"id": "normalized", "source": "normalized"},
+                {"id": "value", "source": "value"},
+            ],
+            "outputs": [{"id": "gated", "source": "gated"}],
+        },
+        "state_ports": [],
+        "parameters": {
+            "refs": {"gate_weight": {"tensor": "gate.weight"}}
+        },
+        "behavioral_error_contract": {"mode": "source_reference_circuit"},
+        "nodes": [
+            {
+                "id": "gate_projection",
+                "op": "linear",
+                "inputs": ["normalized"],
+                "outputs": ["gate_logit"],
+                "params": ["gate_weight"],
+            },
+            {
+                "id": "apply_gate",
+                "op": "sigmoid_scalar_multiply",
+                "inputs": ["value", "gate_logit"],
+                "outputs": ["gated"],
+            },
+        ],
+    }
+    candidate = deepcopy(source)
+    candidate["nodes"] = [
+        {
+            "id": "gate_projection__apply_gate",
+            "op": "linear_sigmoid_scalar_multiply",
+            "inputs": ["normalized", "value"],
+            "outputs": ["gated"],
+            "params": ["gate_weight"],
+            "attrs": {
+                "compiled_from": ["gate_projection", "apply_gate"],
+                "intermediate_rounding": "BF16",
+            },
+        }
+    ]
+
+    evidence = prove_exact_circuit_candidate(
+        component_id="layer_00",
+        source=source,
+        candidate=candidate,
+    )
+
+    assert evidence["status"] == "passed"
+    assert (
+        evidence["rewrites"][0]["proof_contract"]
+        == "linear_sigmoid_scalar_multiply_exact_bf16.v1"
+    )
+
+
 def test_exact_candidate_gate_proves_fused_parallel_ffn_projection() -> None:
     source = {
         "schema": "nerve.stream_circuit.v1",

@@ -718,6 +718,34 @@ def can_fuse_bf16_linear_split(circuit: Json, node: Json, tensor_index: Json) ->
     )
 
 
+def can_fuse_bf16_linear_sigmoid_scalar_multiply(
+    circuit: Json,
+    projection: Json,
+    multiply: Json,
+    tensor_index: Json,
+) -> bool:
+    if (
+        projection.get("op") != "linear"
+        or multiply.get("op") != "sigmoid_scalar_multiply"
+        or len(projection.get("params", [])) != 1
+    ):
+        return False
+    try:
+        shape = parameter_shape_for_node(circuit, projection, tensor_index)
+        dtype = parameter_dtype_for_node(circuit, projection, tensor_index)
+        layout = parameter_layout_for_node(circuit, projection, tensor_index)
+    except (KeyError, ModelCompileError):
+        return False
+    return (
+        len(shape) == 2
+        and int(shape[0]) == 1
+        and int(shape[1]) > 0
+        and int(shape[1]) % 2 == 0
+        and dtype == "BF16"
+        and layout == ROW_MAJOR_LAYOUT
+    )
+
+
 def can_fuse_native_parallel_linears(
     circuit: Json, nodes: list[Json], tensor_index: Json
 ) -> bool:
