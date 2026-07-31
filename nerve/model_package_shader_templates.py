@@ -1121,7 +1121,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 [
                     f"layout(set = 0, binding = {branch_count + index * 2 + 2}) "
                     f"readonly buffer Weight{label} {{\n"
-                    "    uint words[];\n"
+                    "    fe4m3vec4 values[];\n"
                     f"}} weight_{label.lower()};",
                     f"layout(set = 0, binding = {branch_count + index * 2 + 3}) "
                     f"readonly buffer WeightScaleInv{label} {{\n"
@@ -1144,11 +1144,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
         weight_reads = "\n".join(
             f"    if (branch == {index}u) "
-            f"return read_fp8x4(weight_{label.lower()}.words[index]);"
+            f"return weight_{label.lower()}.values[index];"
             for index, label in enumerate(labels[:-1])
         )
         weight_reads += (
-            f"\n    return read_fp8x4(weight_{labels[-1].lower()}.words[index]);"
+            f"\n    return weight_{labels[-1].lower()}.values[index];"
         )
         output_index = (
             "batch_index * OUTPUT_{label}_WORDS + row / 2u"

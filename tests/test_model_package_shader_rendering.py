@@ -2,6 +2,12 @@ from model_package_layout_common import *
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 
 
+def assert_uses_direct_packed_fp8_vectors(source: str) -> None:
+    assert "fe4m3vec4 values[];" in source
+    assert "read_fp8x4" not in source
+    assert "uintBitsToFloate4m3EXT(u8vec4" not in source
+
+
 def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
     tmp_path: Path,
 ) -> None:
@@ -50,6 +56,7 @@ def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
 
     for shader_file in paired_shader_files:
         source = (tmp_path / shader_file).read_text()
+        assert_uses_direct_packed_fp8_vectors(source)
         assert "const uint BATCH_PAIR_WIDTH = 2u;" in source
         assert "float sum_0 = 0.0;" in source
         assert "float sum_1 = 0.0;" in source
@@ -57,6 +64,7 @@ def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
         assert "{{" not in source
     for shader_file in vectorized_shader_files:
         source = (tmp_path / shader_file).read_text()
+        assert_uses_direct_packed_fp8_vectors(source)
         assert "const uint BATCH_TILE_WIDTH = 4u;" in source
         assert (
             "float sums[BATCH_TILE_WIDTH]" in source
@@ -66,6 +74,7 @@ def test_compiler_vectorizes_small_fp8_batches_across_shared_weights(
         assert "{{" not in source
     for shader_file in row_scaled_shader_files:
         source = (tmp_path / shader_file).read_text()
+        assert_uses_direct_packed_fp8_vectors(source)
         assert "const uint BATCH_TILE_WIDTH = 4u;" in source
         assert "const uint BATCH_PAIR_WIDTH" not in source
         assert "float sums[BATCH_TILE_WIDTH]" not in source
@@ -126,6 +135,7 @@ def test_compiler_renders_mixed_precision_parallel_projection(
     scalar_source = (tmp_path / scalar).read_text()
     batch_source = (tmp_path / batch).read_text()
     for source in (scalar_source, batch_source):
+        assert_uses_direct_packed_fp8_vectors(source)
         assert "binding = 2) readonly buffer LogicalInput" in source
         assert "binding = 11) readonly buffer WeightC" in source
         assert "binding = 12) readonly buffer WeightD" in source
@@ -157,11 +167,13 @@ def test_compiler_renders_contiguous_fp8_swiglu_family(tmp_path: Path) -> None:
     )
 
     scalar_source = (tmp_path / scalar).read_text()
+    assert_uses_direct_packed_fp8_vectors(scalar_source)
     assert "projection * OUTPUT_SIZE + row" in scalar_source
     assert "layout(local_size_x = 1024" in scalar_source
     assert "rounded_silu(gate_lo) * up_lo" in scalar_source
 
     batch_source = (tmp_path / batch).read_text()
+    assert_uses_direct_packed_fp8_vectors(batch_source)
     assert "const uint BATCH_TILE_WIDTH = 4u;" in batch_source
     assert "batch_index * OUTPUT_WORDS" in batch_source
 
@@ -342,6 +354,8 @@ def test_compiler_renders_reusable_fp8_activation_kernel_family(
     assert "shared fe4m3vec4 quantized_input" not in parallel
     assert "read_gate_scale" in fused
     assert "layout(push_constant) uniform BatchControl" in fused
+    for source in (residual, parallel, fused):
+        assert_uses_direct_packed_fp8_vectors(source)
     for shader_file in shader_files:
         assert "{{" not in (tmp_path / shader_file).read_text()
 

@@ -16,7 +16,7 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer QuantizedInputs {
-    uint words[];
+    fe4m3vec4 values[];
 } quantized_inputs;
 layout(set = 0, binding = 1) readonly buffer InputScales {
     float values[];
@@ -53,15 +53,6 @@ uint f32_to_bf16(float value) {
 
 float read_bf16_word(uint packed, uint index) {
     return bf16_to_f32(packed >> ((index & 1u) * 16u));
-}
-
-fe4m3vec4 read_fp8x4(uint packed) {
-    return uintBitsToFloate4m3EXT(u8vec4(
-        uint8_t(packed),
-        uint8_t(packed >> 8u),
-        uint8_t(packed >> 16u),
-        uint8_t(packed >> 24u)
-    ));
 }
 
 float read_branch_weight_scale(uint branch, uint row, uint block) {
@@ -114,7 +105,7 @@ void main() {
                             batch_index * INPUT_FP8_WORDS + word;
                         sum = fma(
                             fp8_dot4_acc32(
-                                read_fp8x4(quantized_inputs.words[input_word]),
+                                quantized_inputs.values[input_word],
                                 read_branch_weightx4(branch, row, word),
                                 0.0
                             ),

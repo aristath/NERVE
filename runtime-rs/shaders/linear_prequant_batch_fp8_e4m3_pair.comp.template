@@ -15,11 +15,11 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 
 layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer QuantizedInputs { uint words[]; } quantized_inputs;
+layout(set = 0, binding = 0) readonly buffer QuantizedInputs { fe4m3vec4 values[]; } quantized_inputs;
 layout(set = 0, binding = 1) readonly buffer InputScales { float values[]; } input_scales;
 {{AUXILIARY_BUFFER}}
 layout(set = 0, binding = {{OUTPUT_BINDING}}) buffer OutputFrames { uint words[]; } output_frames;
-layout(set = 0, binding = {{WEIGHT_BINDING}}) readonly buffer Weight { uint words[]; } weight;
+layout(set = 0, binding = {{WEIGHT_BINDING}}) readonly buffer Weight { fe4m3vec4 values[]; } weight;
 layout(set = 0, binding = {{WEIGHT_SCALE_BINDING}}) readonly buffer WeightScaleInv {
     uint words[];
 } weight_scale_inv;
@@ -59,17 +59,8 @@ float read_weight_scale(uint row, uint block) {
     return read_bf16_word(weight_scale_inv.words[index >> 1u], index);
 }
 
-fe4m3vec4 read_fp8x4(uint packed) {
-    return uintBitsToFloate4m3EXT(u8vec4(
-        uint8_t(packed),
-        uint8_t(packed >> 8u),
-        uint8_t(packed >> 16u),
-        uint8_t(packed >> 24u)
-    ));
-}
-
 fe4m3vec4 read_weightx4(uint row, uint word) {
-    return read_fp8x4(weight.words[row * INPUT_FP8_WORDS + word]);
+    return weight.values[row * INPUT_FP8_WORDS + word];
 }
 
 {{FINALIZE_OUTPUT_FUNCTION}}
@@ -108,11 +99,9 @@ void main() {
                     float weight_scale = read_weight_scale(row, block);
                     sum_0 = fma(
                         fp8_dot4_acc32(
-                            read_fp8x4(
-                                quantized_inputs.words[
-                                    batch_index_0 * INPUT_FP8_WORDS + word
-                                ]
-                            ),
+                            quantized_inputs.values[
+                                batch_index_0 * INPUT_FP8_WORDS + word
+                            ],
                             weight_value,
                             0.0
                         ),
@@ -124,11 +113,9 @@ void main() {
                     if (batch_1_is_valid) {
                         sum_1 = fma(
                             fp8_dot4_acc32(
-                                read_fp8x4(
-                                    quantized_inputs.words[
-                                        batch_index_1 * INPUT_FP8_WORDS + word
-                                    ]
-                                ),
+                                quantized_inputs.values[
+                                    batch_index_1 * INPUT_FP8_WORDS + word
+                                ],
                                 weight_value,
                                 0.0
                             ),

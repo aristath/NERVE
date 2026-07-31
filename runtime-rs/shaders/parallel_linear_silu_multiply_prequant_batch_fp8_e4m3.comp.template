@@ -15,12 +15,12 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 
 layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer QuantizedInputs { uint words[]; } quantized_inputs;
+layout(set = 0, binding = 0) readonly buffer QuantizedInputs { fe4m3vec4 values[]; } quantized_inputs;
 layout(set = 0, binding = 1) readonly buffer InputScales { float values[]; } input_scales;
 layout(set = 0, binding = 2) buffer OutputFrames { uint words[]; } output_frames;
-layout(set = 0, binding = 3) readonly buffer GateWeight { uint words[]; } gate_weight;
+layout(set = 0, binding = 3) readonly buffer GateWeight { fe4m3vec4 values[]; } gate_weight;
 layout(set = 0, binding = 4) readonly buffer GateScaleInv { uint words[]; } gate_scale_inv;
-layout(set = 0, binding = 5) readonly buffer UpWeight { uint words[]; } up_weight;
+layout(set = 0, binding = 5) readonly buffer UpWeight { fe4m3vec4 values[]; } up_weight;
 layout(set = 0, binding = 6) readonly buffer UpScaleInv { uint words[]; } up_scale_inv;
 
 layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
@@ -70,15 +70,6 @@ float read_up_scale(uint row, uint block) {
     return read_bf16_word(up_scale_inv.words[index >> 1u], index);
 }
 
-fe4m3vec4 read_fp8x4(uint packed) {
-    return uintBitsToFloate4m3EXT(u8vec4(
-        uint8_t(packed),
-        uint8_t(packed >> 8u),
-        uint8_t(packed >> 16u),
-        uint8_t(packed >> 24u)
-    ));
-}
-
 void main() {
     uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
     uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
@@ -101,12 +92,10 @@ void main() {
                 word += gl_SubgroupSize
             ) {
                 uint block = word / BLOCK_FP8_WORDS;
-                fe4m3vec4 gate_weight_value = read_fp8x4(
-                    gate_weight.words[row * INPUT_FP8_WORDS + word]
-                );
-                fe4m3vec4 up_weight_value = read_fp8x4(
-                    up_weight.words[row * INPUT_FP8_WORDS + word]
-                );
+                fe4m3vec4 gate_weight_value =
+                    gate_weight.values[row * INPUT_FP8_WORDS + word];
+                fe4m3vec4 up_weight_value =
+                    up_weight.values[row * INPUT_FP8_WORDS + word];
                 float gate_scale = read_gate_scale(row, block);
                 float up_scale = read_up_scale(row, block);
                 for (
@@ -121,7 +110,7 @@ void main() {
                     uint input_index =
                         batch_index * INPUT_FP8_WORDS + word;
                     fe4m3vec4 input_value =
-                        read_fp8x4(quantized_inputs.words[input_index]);
+                        quantized_inputs.values[input_index];
                     float activation_scale =
                         input_scales.values[batch_index * SCALE_COLUMNS + block];
                     gates[batch_lane] = fma(
