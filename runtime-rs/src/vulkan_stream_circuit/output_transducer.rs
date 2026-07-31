@@ -346,6 +346,7 @@ pub enum VulkanResidentOutputTransducerRunnerError {
         shape: Option<Vec<usize>>,
         byte_capacity: usize,
     },
+    InvalidProjectionScaleSpec,
     MissingModelOutputBuffer {
         signal_id: String,
     },
@@ -401,6 +402,9 @@ impl Display for VulkanResidentOutputTransducerRunnerError {
             } => write!(
                 f,
                 "output projection scale tensor {tensor:?} has dtype {dtype:?}, shape {shape:?}, and {byte_capacity} bytes"
+            ),
+            Self::InvalidProjectionScaleSpec => f.write_str(
+                "output projection scale tensor declaration must provide either all metadata fields or none",
             ),
             Self::MissingModelOutputBuffer { signal_id } => {
                 write!(f, "missing model output boundary buffer {signal_id:?}")
@@ -476,19 +480,21 @@ fn validate_output_projection_scale(
     allocation: Option<&VulkanPermanentParameterBufferAllocation>,
     spec: &VulkanResidentOutputTransducerSpec,
 ) -> Result<(), VulkanResidentOutputTransducerRunnerError> {
-    match spec.projection_parameter_dtype.as_str() {
-        "F8_E4M3" => {
+    match (
+        spec.projection_scale_parameter_tensor.as_ref(),
+        spec.projection_scale_parameter_dtype.as_ref(),
+        spec.projection_scale_parameter_shape.as_ref(),
+        spec.projection_scale_parameter_byte_capacity,
+    ) {
+        (Some(tensor), Some(dtype), Some(shape), Some(byte_capacity)) => {
             let allocation = allocation.ok_or_else(|| {
                 VulkanResidentOutputTransducerRunnerError::MissingProjectionScaleParameterBuffer {
-                    tensor: spec
-                        .projection_scale_parameter_tensor
-                        .clone()
-                        .unwrap_or_else(|| "<missing>".to_string()),
+                    tensor: tensor.clone(),
                 }
             })?;
-            if allocation.parameter.dtype != spec.projection_scale_parameter_dtype
-                || allocation.parameter.shape != spec.projection_scale_parameter_shape
-                || Some(allocation.byte_capacity) != spec.projection_scale_parameter_byte_capacity
+            if allocation.parameter.dtype.as_ref() != Some(dtype)
+                || allocation.parameter.shape.as_ref() != Some(shape)
+                || allocation.byte_capacity != byte_capacity
             {
                 return Err(
                     VulkanResidentOutputTransducerRunnerError::InvalidProjectionScaleWeight {
@@ -500,7 +506,7 @@ fn validate_output_projection_scale(
                 );
             }
         }
-        _ => {
+        (None, None, None, None) => {
             if let Some(allocation) = allocation {
                 return Err(
                     VulkanResidentOutputTransducerRunnerError::InvalidProjectionScaleWeight {
@@ -511,6 +517,11 @@ fn validate_output_projection_scale(
                     },
                 );
             }
+        }
+        _ => {
+            return Err(
+                VulkanResidentOutputTransducerRunnerError::InvalidProjectionScaleSpec,
+            );
         }
     }
     Ok(())

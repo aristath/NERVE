@@ -48,12 +48,14 @@ class CompleteSemanticConstructor:
         stream_source: bool = False,
         stream_parameter: bool = False,
         source_regions: tuple[tuple[int, int], ...] | None = None,
+        paired_stream: bool = False,
     ) -> None:
         self.calls = calls
         self.source_path = source_path
         self.stream_source = stream_source
         self.stream_parameter = stream_parameter
         self.source_regions = source_regions
+        self.paired_stream = paired_stream
 
     def construct_semantic_artifacts(self, context) -> None:
         self.calls.append("semantic_construction")
@@ -77,14 +79,27 @@ class CompleteSemanticConstructor:
                 )
                 assert source == b"immutable source parameter"
         context.account_transient_bytes(4096)
-        for path in (
+        binary_paths = (
             "codebooks/table.bin",
             "corrections/residual.bin",
             "fields/samples.bin",
             "geometry/basis.bin",
             "indexes/search.bin",
             "programs/evaluator.bin",
-        ):
+        )
+        if self.paired_stream:
+            first, second = (f"fixture:{path}".encode() for path in binary_paths[:2])
+            context.write_artifact_streams(
+                binary_paths[:2],
+                (
+                    (first[:8], second[:8]),
+                    (first[8:], second[8:]),
+                ),
+            )
+            remaining_paths = binary_paths[2:]
+        else:
+            remaining_paths = binary_paths
+        for path in remaining_paths:
             context.write_artifact(path, f"fixture:{path}".encode())
         if self.stream_parameter:
             context.write_artifact_stream(
@@ -99,9 +114,7 @@ class CompleteSemanticConstructor:
         context.write_json_artifact(
             "state/compact_layout.json",
             {
-                "schema": (
-                    "nerve.optimizer.vulkan_component_overlay.v1"
-                ),
+                "schema": ("nerve.optimizer.vulkan_component_overlay.v1"),
                 "source_component_id": "component",
                 "component": {"fixture": True},
                 "execution": {"fixture": True},
@@ -237,9 +250,7 @@ def test_candidate_is_constructed_relowered_optimized_and_atomically_staged(
         "ordinary_lowering",
         "physical_optimization",
     ]
-    assert outcome.staged_candidate_path == (
-        workspace / "ready" / plan.candidate_id
-    )
+    assert outcome.staged_candidate_path == (workspace / "ready" / plan.candidate_id)
     assert outcome.staged_candidate_path.is_dir()
     assert not list((workspace / ".staging").iterdir())
     validate_staged_candidate(
@@ -273,10 +284,7 @@ def test_candidate_is_constructed_relowered_optimized_and_atomically_staged(
         for path in outcome.staged_candidate_path.rglob("*")
         if path.is_file()
     )
-    assert (
-        record["resource_measurements"]["peak_staging_bytes"]
-        >= staged_bytes
-    )
+    assert record["resource_measurements"]["peak_staging_bytes"] >= staged_bytes
     relowering = (
         outcome.staged_candidate_path / "contracts" / "relowering_request.json"
     ).read_text()
@@ -333,9 +341,9 @@ def test_declared_source_input_is_digest_checked_and_sealed(
     )
 
     assert outcome.status == "completed"
-    sealed_source = outcome.record.to_json()["source_seal"][
-        "source_inputs"
-    ]["weights/source.bin"]
+    sealed_source = outcome.record.to_json()["source_seal"]["source_inputs"][
+        "weights/source.bin"
+    ]
     assert sealed_source["digest"] == staged_artifact_digest(
         b"immutable source parameter"
     )
@@ -343,6 +351,32 @@ def test_declared_source_input_is_digest_checked_and_sealed(
         b"immutable source parameter"
     )
     assert source_path.read_bytes() == b"immutable source parameter"
+
+
+def test_multiple_artifacts_can_be_emitted_from_one_source_pass(
+    tmp_path: Path,
+) -> None:
+    package_dir, session = _package(tmp_path)
+    plan = _plan()
+    session = _session_with_candidate(session, plan)
+
+    outcome = stage_candidate(
+        package_dir=package_dir,
+        source_artifacts=PackageSourceArtifactResolver(package_dir),
+        workspace_root=tmp_path / "workspace",
+        plan=plan,
+        session=session,
+        semantic_constructor=CompleteSemanticConstructor([], paired_stream=True),
+        ordinary_relowerer=CompleteRelowerer([]),
+        physical_optimizer=CompletePhysicalOptimizer([]),
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.staged_candidate_path is not None
+    for path in ("codebooks/table.bin", "corrections/residual.bin"):
+        assert (outcome.staged_candidate_path / path).read_bytes() == (
+            f"fixture:{path}".encode()
+        )
 
 
 def test_declared_source_regions_are_streamed_and_whole_file_digest_checked(
@@ -427,9 +461,7 @@ def test_source_signature_drift_is_rejected_without_rehashing(
     )
 
     assert outcome.status == "failed"
-    assert "source package changed" in " ".join(
-        outcome.record.to_json()["diagnostics"]
-    )
+    assert "source package changed" in " ".join(outcome.record.to_json()["diagnostics"])
 
 
 def test_failed_phase_is_isolated_and_leaves_no_candidate_artifacts(
@@ -776,9 +808,7 @@ def test_orphaned_atomic_publication_is_removed_before_clean_retry(
     ]
     assert retried.status == "completed"
     assert retried.record != first.record
-    assert retried.staged_candidate_path == (
-        workspace / "ready" / plan.candidate_id
-    )
+    assert retried.staged_candidate_path == (workspace / "ready" / plan.candidate_id)
     assert len(list((workspace / "records").glob("*.json"))) == 1
     load_staged_candidate(workspace, plan.candidate_id)
 
@@ -790,11 +820,7 @@ def test_abandoned_private_workspace_is_removed_before_construction(
     plan = _plan()
     session = _session_with_candidate(session, plan)
     workspace = tmp_path / "workspace"
-    abandoned = (
-        workspace
-        / ".staging"
-        / f"{plan.candidate_id}.interrupted-process"
-    )
+    abandoned = workspace / ".staging" / f"{plan.candidate_id}.interrupted-process"
     abandoned.mkdir(parents=True)
     (abandoned / "partial.bin").write_bytes(b"partial")
     abandoned_record = (
@@ -857,9 +883,7 @@ def test_construction_measurement_includes_source_sealing(
     )
 
     assert (
-        outcome.record.to_json()["resource_measurements"][
-            "construction_time_ns"
-        ]
+        outcome.record.to_json()["resource_measurements"]["construction_time_ns"]
         >= measured["duration_ns"]
     )
 
@@ -881,15 +905,13 @@ def test_integrity_manifest_bytes_are_subject_to_staging_limit(
         physical_optimizer=CompletePhysicalOptimizer([]),
     )
     assert first.staged_candidate_path is not None
-    integrity_bytes = (
-        first.staged_candidate_path / "integrity.json"
-    ).stat().st_size
+    integrity_bytes = (first.staged_candidate_path / "integrity.json").stat().st_size
     measured_peak = first.record.to_json()["resource_measurements"][
         "peak_staging_bytes"
     ]
     build = plan.construction_requirements.to_json()
-    build["resource_limits"]["maximum_staging_bytes"] = (
-        measured_peak - (integrity_bytes // 2)
+    build["resource_limits"]["maximum_staging_bytes"] = measured_peak - (
+        integrity_bytes // 2
     )
     limited_plan = replace(
         plan,
@@ -903,9 +925,7 @@ def test_integrity_manifest_bytes_are_subject_to_staging_limit(
 
     outcome = stage_candidate(
         package_dir=limited_package,
-        source_artifacts=PackageSourceArtifactResolver(
-            limited_package
-        ),
+        source_artifacts=PackageSourceArtifactResolver(limited_package),
         workspace_root=tmp_path / "limited-workspace",
         plan=limited_plan,
         session=limited_session,
@@ -915,13 +935,9 @@ def test_integrity_manifest_bytes_are_subject_to_staging_limit(
     )
 
     assert outcome.status == "failed"
-    assert "staging bytes exceeded" in " ".join(
-        outcome.record.to_json()["diagnostics"]
-    )
+    assert "staging bytes exceeded" in " ".join(outcome.record.to_json()["diagnostics"])
     assert outcome.staged_candidate_path is None
-    assert not (
-        tmp_path / "limited-workspace" / "ready" / plan.candidate_id
-    ).exists()
+    assert not (tmp_path / "limited-workspace" / "ready" / plan.candidate_id).exists()
 
 
 def test_loader_reports_missing_construction_record_as_contract_error(

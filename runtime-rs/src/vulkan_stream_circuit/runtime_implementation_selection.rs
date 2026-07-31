@@ -1137,7 +1137,6 @@ fn validate_output_transducer_logical_contract(
         || overlay_spec.input_signal_id != source_spec.input_signal_id
         || overlay_spec.node_ids != source_spec.node_ids
         || overlay_spec.norm_parameter_shape != source_spec.norm_parameter_shape
-        || overlay_spec.projection_parameter_shape != source_spec.projection_parameter_shape
         || overlay_spec.input_frame_byte_capacity != source_spec.input_frame_byte_capacity
         || overlay_spec.normalized_frame_byte_capacity
             != source_spec.normalized_frame_byte_capacity
@@ -1159,7 +1158,6 @@ fn validate_draft_output_transducer_logical_contract(
         || overlay.hidden_signal_id != source.hidden_signal_id
         || overlay.logits_signal_id != source.logits_signal_id
         || overlay.norm_parameter_shape != source.norm_parameter_shape
-        || overlay.projection_parameter_shape != source.projection_parameter_shape
         || overlay.input_frame_byte_capacity != source.input_frame_byte_capacity
         || overlay.output_hidden_byte_capacity != source.output_hidden_byte_capacity
         || overlay.logits_byte_capacity != source.logits_byte_capacity

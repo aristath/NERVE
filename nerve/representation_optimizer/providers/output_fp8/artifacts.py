@@ -10,10 +10,13 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
 
 WEIGHT_PATH = "parameters/output_projection.safetensors"
 SCALE_PATH = "parameters/output_projection_scales.safetensors"
+DRAFT_WEIGHT_PATH = "parameters/speculative_output_projection_int4.safetensors"
+DRAFT_SCALE_PATH = "parameters/speculative_output_projection_int4_scales.safetensors"
 TENSOR_FRAGMENT_PATH = "parameters/tensors.json"
 OVERLAY_PATH = "overlays/output_transducer.json"
 DECODE_SHADER_PATH = "kernels/output_projection.spv"
 BATCH_SHADER_PATH = "kernels/output_projection_batch.spv"
+DRAFT_DECODE_SHADER_PATH = "kernels/speculative_output_projection_int4.spv"
 ERROR_REPORT_PATH = "proofs/quantization_error.json"
 COMPONENT_FIXTURE_PATH = "fixtures/output_projection_inputs.json"
 CONVERSATION_FIXTURE_PATH = "fixtures/conversation.json"
@@ -21,7 +24,16 @@ PRODUCT_CONVERSATION_FIXTURE_PATH = "fixtures/product_conversation.json"
 MODEL_LIMITS_PATH = "fixtures/model_limits.json"
 
 
-def artifact_paths() -> tuple[str, ...]:
+def artifact_paths(*, role_specialized_draft: bool) -> tuple[str, ...]:
+    conditional = (
+        (
+            DRAFT_DECODE_SHADER_PATH,
+            DRAFT_SCALE_PATH,
+            DRAFT_WEIGHT_PATH,
+        )
+        if role_specialized_draft
+        else ()
+    )
     return tuple(
         sorted(
             (
@@ -36,6 +48,7 @@ def artifact_paths() -> tuple[str, ...]:
                 SCALE_PATH,
                 TENSOR_FRAGMENT_PATH,
                 WEIGHT_PATH,
+                *conditional,
             )
         )
     )
@@ -69,6 +82,9 @@ __all__ = [
     "COMPONENT_FIXTURE_PATH",
     "CONVERSATION_FIXTURE_PATH",
     "DECODE_SHADER_PATH",
+    "DRAFT_DECODE_SHADER_PATH",
+    "DRAFT_SCALE_PATH",
+    "DRAFT_WEIGHT_PATH",
     "ERROR_REPORT_PATH",
     "MODEL_LIMITS_PATH",
     "OVERLAY_PATH",

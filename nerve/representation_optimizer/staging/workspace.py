@@ -142,9 +142,7 @@ class CandidateConstructionContext:
     def observe_total_staging_bytes(self, total_bytes: int) -> None:
         """Account for engine-owned files such as the integrity manifest."""
         if isinstance(total_bytes, bool) or total_bytes < self._staging_bytes:
-            raise ModelCompileError(
-                "candidate total staging bytes are inconsistent"
-            )
+            raise ModelCompileError("candidate total staging bytes are inconsistent")
         self._peak_staging_bytes = max(
             self._peak_staging_bytes,
             total_bytes,
@@ -190,8 +188,7 @@ class CandidateConstructionContext:
         artifact = self._source_artifacts.resolve_path(relative_path)
         if artifact.digest != expected:
             raise ModelCompileError(
-                f"candidate source artifact digest mismatch: "
-                f"{relative_path!r}"
+                f"candidate source artifact digest mismatch: {relative_path!r}"
             )
         self.checkpoint()
         payloads = self._source_artifacts.read_path_regions(
@@ -252,9 +249,7 @@ class CandidateConstructionContext:
                 digest.update(chunk)
                 self.checkpoint()
                 yield chunk
-        actual = (
-            f"{STAGED_ARTIFACT_DIGEST_SCHEMA}:{digest.hexdigest()}"
-        )
+        actual = f"{STAGED_ARTIFACT_DIGEST_SCHEMA}:{digest.hexdigest()}"
         if actual != expected:
             raise ModelCompileError(
                 f"candidate source artifact digest mismatch: {relative_path!r}"
@@ -280,53 +275,99 @@ class CandidateConstructionContext:
         relative_path: str,
         chunks: Iterable[bytes],
     ) -> None:
-        declaration = self._declared_outputs.get(relative_path)
-        if declaration is None:
+        self.write_artifact_streams(
+            (relative_path,),
+            ((chunk,) for chunk in chunks),
+        )
+
+    def write_artifact_streams(
+        self,
+        relative_paths: tuple[str, ...],
+        chunks: Iterable[tuple[bytes, ...]],
+    ) -> None:
+        if not relative_paths or len(set(relative_paths)) != len(relative_paths):
             raise ModelCompileError(
-                f"candidate attempted to write undeclared artifact "
-                f"{relative_path!r}"
+                "candidate artifact stream paths must be non-empty and unique"
             )
-        if declaration["producer_phase"] != self.phase:
-            raise ModelCompileError(
-                f"candidate artifact {relative_path!r} belongs to phase "
-                f"{declaration['producer_phase']!r}, not {self.phase!r}"
+        paths = []
+        for relative_path in relative_paths:
+            declaration = self._declared_outputs.get(relative_path)
+            if declaration is None:
+                raise ModelCompileError(
+                    "candidate attempted to write undeclared artifact "
+                    f"{relative_path!r}"
+                )
+            if declaration["producer_phase"] != self.phase:
+                raise ModelCompileError(
+                    f"candidate artifact {relative_path!r} belongs to phase "
+                    f"{declaration['producer_phase']!r}, not {self.phase!r}"
+                )
+            if relative_path in self._written_outputs:
+                raise ModelCompileError(
+                    f"candidate artifact {relative_path!r} was written more than once"
+                )
+            path = _contained_path(
+                self._staging_dir,
+                relative_path,
+                "candidate artifact",
             )
-        if relative_path in self._written_outputs:
-            raise ModelCompileError(
-                f"candidate artifact {relative_path!r} was written more than once"
-            )
-        path = _contained_path(self._staging_dir, relative_path, "candidate artifact")
-        path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.append(path)
+
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags, 0o644)
+        descriptors: list[int] = []
+        streams = []
+        created_paths: list[Path] = []
         try:
-            try:
-                with os.fdopen(descriptor, "wb", closefd=False) as stream:
-                    for index, chunk in enumerate(chunks):
-                        if not isinstance(chunk, bytes):
-                            raise ModelCompileError(
-                                "candidate artifact stream chunk "
-                                f"{index} is not bytes"
-                            )
-                        stream.write(chunk)
-                        self._staging_bytes += len(chunk)
-                        self._peak_staging_bytes = max(
-                            self._peak_staging_bytes,
-                            self._staging_bytes,
+            for path in paths:
+                descriptor = os.open(path, flags, 0o644)
+                created_paths.append(path)
+                descriptors.append(descriptor)
+                streams.append(os.fdopen(descriptor, "wb", closefd=False))
+            for index, payloads in enumerate(chunks):
+                if not isinstance(payloads, tuple) or len(payloads) != len(streams):
+                    raise ModelCompileError(
+                        "candidate multi-artifact stream chunk "
+                        f"{index} must contain {len(streams)} byte payloads"
+                    )
+                for stream, payload in zip(streams, payloads, strict=True):
+                    if not isinstance(payload, bytes):
+                        raise ModelCompileError(
+                            "candidate multi-artifact stream chunk "
+                            f"{index} contains a non-bytes payload"
                         )
-                        self.checkpoint()
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                _fsync_directory(path.parent)
-            except BaseException:
+                    stream.write(payload)
+                    self._staging_bytes += len(payload)
+                self._peak_staging_bytes = max(
+                    self._peak_staging_bytes,
+                    self._staging_bytes,
+                )
+                self.checkpoint()
+            for stream in streams:
+                stream.flush()
+                os.fsync(stream.fileno())
+            for parent in {path.parent for path in paths}:
+                _fsync_directory(parent)
+        except BaseException:
+            for stream in streams:
+                stream.close()
+            streams.clear()
+            for descriptor in descriptors:
+                os.close(descriptor)
+            descriptors.clear()
+            for path in created_paths:
                 path.unlink(missing_ok=True)
-                _fsync_directory(path.parent)
-                raise
+            for parent in {path.parent for path in paths}:
+                _fsync_directory(parent)
+            raise
         finally:
-            os.close(descriptor)
-        self._written_outputs.add(relative_path)
+            for stream in streams:
+                stream.close()
+            for descriptor in descriptors:
+                os.close(descriptor)
+        self._written_outputs.update(relative_paths)
         self.checkpoint()
 
     def write_json_artifact(self, relative_path: str, document: Json) -> None:

@@ -1,0 +1,163 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer NormalizedFrame {
+    uint words[];
+} normalized_frame;
+
+layout(set = 0, binding = 1) readonly buffer ProjectionWeight {
+    uint words[];
+} projection_weight;
+
+layout(set = 0, binding = 2) buffer Logits {
+    float values[];
+} logits;
+
+layout(set = 0, binding = 3) readonly buffer ProjectionWeightScale {
+    uint words[];
+} projection_weight_scale;
+
+const uint GROUP_COLUMNS = {{GROUP_COLUMNS}}u;
+const uint INPUT_SIZE = {{INPUT_SIZE}}u;
+const uint VOCAB_SIZE = {{VOCAB_SIZE}}u;
+const uint OUTPUT_TILE_ROWS = {{OUTPUT_TILE_ROWS}}u;
+const uint INPUT_INT8_BLOCK_COLUMNS = 32u;
+const uint INPUT_INT8_BLOCKS = INPUT_SIZE / INPUT_INT8_BLOCK_COLUMNS;
+const uint INPUT_INT8_WORDS = INPUT_SIZE / 4u;
+const uint PACKED_WEIGHT_COLUMNS = INPUT_SIZE / 8u;
+const uint SCALE_COLUMNS = INPUT_SIZE / GROUP_COLUMNS;
+const uint INPUT_QUANTIZATION_CLUSTER_LANES = 8u;
+const uint INPUT_QUANTIZATION_CLUSTERS = 128u;
+const uint ROW_CLUSTER_LANES = 32u;
+const float OUTPUT_SCALE = {{OUTPUT_SCALE}};
+
+shared uint quantized_input[INPUT_INT8_WORDS];
+shared float input_scales[INPUT_INT8_BLOCKS];
+shared float output_rows[OUTPUT_TILE_ROWS];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+float read_bf16_word(uint packed, uint index) {
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+
+vec4 read_inputx4(uint column) {
+    uint offset = column >> 1u;
+    uint lo = normalized_frame.words[offset];
+    uint hi = normalized_frame.words[offset + 1u];
+    return vec4(
+        bf16_to_f32(lo),
+        bf16_to_f32(lo >> 16u),
+        bf16_to_f32(hi),
+        bf16_to_f32(hi >> 16u)
+    );
+}
+
+uint quantize_inputx4(vec4 values, float scale) {
+    ivec4 quantized = ivec4(clamp(round(values / scale), -127.0, 127.0));
+    return (uint(quantized.x) & 255u)
+        | ((uint(quantized.y) & 255u) << 8u)
+        | ((uint(quantized.z) & 255u) << 16u)
+        | ((uint(quantized.w) & 255u) << 24u);
+}
+
+uint unpack_weight_i8x4(uint packed, uint nibble_offset) {
+    int a = int((packed >> ((nibble_offset + 0u) * 4u)) & 15u) - 8;
+    int b = int((packed >> ((nibble_offset + 1u) * 4u)) & 15u) - 8;
+    int c = int((packed >> ((nibble_offset + 2u) * 4u)) & 15u) - 8;
+    int d = int((packed >> ((nibble_offset + 3u) * 4u)) & 15u) - 8;
+    return (uint(a) & 255u)
+        | ((uint(b) & 255u) << 8u)
+        | ((uint(c) & 255u) << 16u)
+        | ((uint(d) & 255u) << 24u);
+}
+
+float read_weight_scale(uint row, uint group) {
+    uint index = row * SCALE_COLUMNS + group;
+    return read_bf16_word(projection_weight_scale.words[index >> 1u], index);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint quantization_cluster = lane / INPUT_QUANTIZATION_CLUSTER_LANES;
+    uint quantization_lane = lane & (INPUT_QUANTIZATION_CLUSTER_LANES - 1u);
+    for (
+        uint block = quantization_cluster;
+        block < INPUT_INT8_BLOCKS;
+        block += INPUT_QUANTIZATION_CLUSTERS
+    ) {
+        uint word = block * INPUT_QUANTIZATION_CLUSTER_LANES + quantization_lane;
+        vec4 input_value = read_inputx4(word * 4u);
+        float lane_max = max(
+            max(abs(input_value.x), abs(input_value.y)),
+            max(abs(input_value.z), abs(input_value.w))
+        );
+        float block_max = subgroupClusteredMax(
+            lane_max,
+            INPUT_QUANTIZATION_CLUSTER_LANES
+        );
+        float scale = block_max > 0.0 ? block_max / 127.0 : 1.0;
+        if (quantization_lane == 0u) {
+            input_scales[block] = scale;
+        }
+        quantized_input[word] = quantize_inputx4(input_value, scale);
+    }
+    barrier();
+
+    uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
+    uint rows_per_subgroup = gl_SubgroupSize / ROW_CLUSTER_LANES;
+    uint row_cluster = gl_SubgroupInvocationID / ROW_CLUSTER_LANES;
+    uint row_lane = gl_SubgroupInvocationID & (ROW_CLUSTER_LANES - 1u);
+    uint local_row = gl_SubgroupID * rows_per_subgroup + row_cluster;
+    uint row = first_row + local_row;
+    float sum = 0.0;
+    if (local_row < OUTPUT_TILE_ROWS && row < VOCAB_SIZE) {
+        for (
+            uint packed_column = row_lane;
+            packed_column < PACKED_WEIGHT_COLUMNS;
+            packed_column += ROW_CLUSTER_LANES
+        ) {
+            uint packed_weight = projection_weight.words[
+                row * PACKED_WEIGHT_COLUMNS + packed_column
+            ];
+            uint input_word = packed_column * 2u;
+            int packed_dot =
+                dotPacked4x8EXT(
+                    int32_t(quantized_input[input_word]),
+                    int32_t(unpack_weight_i8x4(packed_weight, 0u))
+                )
+                + dotPacked4x8EXT(
+                    int32_t(quantized_input[input_word + 1u]),
+                    int32_t(unpack_weight_i8x4(packed_weight, 4u))
+                );
+            uint input_block = (packed_column * 8u) / INPUT_INT8_BLOCK_COLUMNS;
+            uint weight_group = (packed_column * 8u) / GROUP_COLUMNS;
+            sum = fma(
+                float(packed_dot),
+                input_scales[input_block] * read_weight_scale(row, weight_group),
+                sum
+            );
+        }
+    }
+    sum = subgroupClusteredAdd(sum, ROW_CLUSTER_LANES);
+    if (local_row < OUTPUT_TILE_ROWS && row_lane == 0u) {
+        output_rows[local_row] = sum;
+    }
+    barrier();
+
+    if (lane < OUTPUT_TILE_ROWS) {
+        uint output_row = first_row + lane;
+        if (output_row < VOCAB_SIZE) {
+            logits.values[output_row] = output_rows[lane] * OUTPUT_SCALE;
+        }
+    }
+}

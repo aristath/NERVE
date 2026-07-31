@@ -37,6 +37,7 @@ class OutputProjectionOpportunity:
     vocabulary_size: int
     output_scale_token: str
     fp8_process_names: tuple[str, ...]
+    speculative_decoder_ids: tuple[str, ...]
     max_context_activations: int
 
     @property
@@ -50,22 +51,40 @@ class OutputProjectionOpportunity:
     @property
     def scale_shape(self) -> tuple[int, int]:
         return (
-            (self.vocabulary_size + self.block_rows - 1)
-            // self.block_rows,
+            (self.vocabulary_size + self.block_rows - 1) // self.block_rows,
             self.hidden_size // self.block_columns,
         )
 
     @property
     def candidate_weight_name(self) -> str:
-        return (
-            f"nerve.optimizer.output_fp8.{self.scope_id}.weight"
-        )
+        return f"nerve.optimizer.output_fp8.{self.scope_id}.weight"
 
     @property
     def candidate_scale_name(self) -> str:
+        return f"nerve.optimizer.output_fp8.{self.scope_id}.scale_inv"
+
+    @property
+    def has_role_specialized_draft(self) -> bool:
+        return bool(self.speculative_decoder_ids)
+
+    @property
+    def draft_group_columns(self) -> int:
+        return 128
+
+    @property
+    def draft_scale_shape(self) -> tuple[int, int]:
         return (
-            f"nerve.optimizer.output_fp8.{self.scope_id}.scale_inv"
+            self.vocabulary_size,
+            self.hidden_size // self.draft_group_columns,
         )
+
+    @property
+    def draft_weight_name(self) -> str:
+        return f"nerve.optimizer.output_fp8.{self.scope_id}.draft_int4_weight"
+
+    @property
+    def draft_scale_name(self) -> str:
+        return f"nerve.optimizer.output_fp8.{self.scope_id}.draft_int4_scale"
 
 
 @dataclass(frozen=True)
@@ -112,7 +131,8 @@ def discover_output_projection(
             if process["availability"] == "available"
             and process["programmability"] != "none"
             and "f8_e4m3" in process["numeric_formats"]
-            and process["name"] in {
+            and process["name"]
+            in {
                 "packed_dot_product",
                 "shader_vector",
             }
@@ -121,10 +141,7 @@ def discover_output_projection(
     if "packed_dot_product" not in fp8_processes:
         return DiscoveryResult(
             None,
-            (
-                "target does not expose programmable native F8 E4M3 packed "
-                "dot products",
-            ),
+            ("target does not expose programmable native F8 E4M3 packed dot products",),
         )
     evidence_ids = tuple(
         sorted(
@@ -162,11 +179,7 @@ def discover_output_projection(
     shape = spec.get("projection_parameter_shape")
     tensor_name = spec.get("projection_parameter_tensor")
     shader_path = output.get("projection_shader_path")
-    shader_name = (
-        shader_path.rsplit("/", 1)[-1]
-        if isinstance(shader_path, str)
-        else ""
-    )
+    shader_name = shader_path.rsplit("/", 1)[-1] if isinstance(shader_path, str) else ""
     shader_match = _SOURCE_SHADER.fullmatch(shader_name)
     if (
         component_id != scoped_component_id
@@ -177,9 +190,7 @@ def discover_output_projection(
         or not isinstance(shape, list)
         or len(shape) != 2
         or any(
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value <= 0
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
             for value in shape
         )
         or not isinstance(tensor_name, str)
@@ -188,10 +199,7 @@ def discover_output_projection(
     ):
         return DiscoveryResult(
             None,
-            (
-                "output transducer is not a supported BF16 tied linear "
-                "projection",
-            ),
+            ("output transducer is not a supported BF16 tied linear projection",),
             evidence_ids,
         )
     vocabulary_size, hidden_size = map(int, shape)
@@ -213,10 +221,7 @@ def discover_output_projection(
         for record in scope["boundary"]["parameters"]
     }
     exact_refs = tuple(
-        sorted(
-            str(path)
-            for path in contract["exact_reference"]["artifact_refs"]
-        )
+        sorted(str(path) for path in contract["exact_reference"]["artifact_refs"])
     )
     circuit_matches = []
     for path in exact_refs:
@@ -270,6 +275,19 @@ def discover_output_projection(
         if projection_parameter_ref_id.endswith(".weight")
         else f"{projection_parameter_ref_id}_scale_inv"
     )
+    speculative_decoder_ids = tuple(
+        sorted(
+            str(decoder["id"])
+            for decoder in manifest.get("speculative_decoders", [])
+            if (
+                isinstance(decoder, dict)
+                and isinstance(decoder.get("id"), str)
+                and isinstance(decoder.get("output_transducer"), dict)
+                and decoder["output_transducer"].get("projection_parameter_tensor")
+                == tensor_name
+            )
+        )
+    )
     return DiscoveryResult(
         OutputProjectionOpportunity(
             scope_id=str(scope["scope_id"]),
@@ -278,9 +296,7 @@ def discover_output_projection(
             physical_node_id=physical_node_id,
             norm_parameter_ref_id=norm_parameter_ref_id,
             projection_parameter_ref_id=projection_parameter_ref_id,
-            projection_scale_parameter_ref_id=(
-                projection_scale_parameter_ref_id
-            ),
+            projection_scale_parameter_ref_id=(projection_scale_parameter_ref_id),
             source_node_ids=tuple(scope["members"]["source_node_ids"]),
             evidence_ids=evidence_ids,
             source_artifact_refs=exact_refs,
@@ -292,9 +308,8 @@ def discover_output_projection(
             vocabulary_size=vocabulary_size,
             output_scale_token=shader_match.group(1),
             fp8_process_names=fp8_processes,
-            max_context_activations=int(
-                manifest["max_context_activations"]
-            ),
+            speculative_decoder_ids=speculative_decoder_ids,
+            max_context_activations=int(manifest["max_context_activations"]),
         ),
         (
             "discovered a standalone BF16 output projection on a target "
@@ -325,11 +340,7 @@ def discover_output_projections(
         lambda: tuple(
             opportunity
             for scoped_context in context.single_scope_contexts()
-            if (
-                opportunity := discover_output_projection(
-                    scoped_context
-                ).opportunity
-            )
+            if (opportunity := discover_output_projection(scoped_context).opportunity)
             is not None
         ),
     )  # type: ignore[return-value]
@@ -340,10 +351,7 @@ def source_inputs(
     opportunity: OutputProjectionOpportunity,
 ) -> list[Json]:
     resolver = context.source_artifacts
-    artifacts = {
-        source["path"]: source
-        for source in opportunity.tensor.source_inputs
-    }
+    artifacts = {source["path"]: source for source in opportunity.tensor.source_inputs}
     for path in (
         *opportunity.source_artifact_refs,
         opportunity.manifest_ref,

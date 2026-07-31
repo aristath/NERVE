@@ -34,19 +34,26 @@ fn speculative_decoder_additional_parameter_tensors<'a>(
     decoder: &'a VulkanResidentSpeculativeDecoderPackageSpec,
     mut target_has_tensor: impl FnMut(&str) -> bool,
 ) -> Vec<&'a str> {
+    std::iter::once(input_embedding.parameter_tensor.as_str())
+        .chain(speculative_decoder_output_parameter_tensors(
+            &decoder.output_transducer,
+        ))
+        .filter(|tensor| !target_has_tensor(tensor))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn speculative_decoder_output_parameter_tensors(
+    output: &VulkanResidentDraftOutputTransducerPackageSpec,
+) -> impl Iterator<Item = &str> {
     [
-        input_embedding.parameter_tensor.as_str(),
-        decoder.output_transducer.norm_parameter_tensor.as_str(),
-        decoder
-            .output_transducer
-            .projection_parameter_tensor
-            .as_str(),
+        Some(output.norm_parameter_tensor.as_str()),
+        Some(output.projection_parameter_tensor.as_str()),
+        output.projection_scale_parameter_tensor.as_deref(),
     ]
     .into_iter()
-    .filter(|tensor| !target_has_tensor(tensor))
-    .collect::<BTreeSet<_>>()
-    .into_iter()
-    .collect()
+    .flatten()
 }
 
 impl VulkanResidentSpeculativeDecoderModelPackage {

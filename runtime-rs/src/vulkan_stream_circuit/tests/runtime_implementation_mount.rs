@@ -660,6 +660,57 @@ fn output_transducer_overlay_mounts_target_representation_as_one_unit() {
 }
 
 #[test]
+fn output_transducer_logical_contract_allows_packed_parameter_storage() {
+    let source = VulkanResidentDraftOutputTransducerPackageSpec {
+        component_id: "draft_output".to_string(),
+        input_signal_id: "input".to_string(),
+        hidden_signal_id: "hidden".to_string(),
+        logits_signal_id: "logits".to_string(),
+        norm_parameter_tensor: "norm".to_string(),
+        norm_parameter_dtype: "BF16".to_string(),
+        norm_parameter_shape: vec![5120],
+        norm_parameter_byte_capacity: 10240,
+        projection_parameter_tensor: "bf16_projection".to_string(),
+        projection_parameter_dtype: "BF16".to_string(),
+        projection_parameter_shape: vec![248320, 5120],
+        projection_parameter_byte_capacity: 2_542_796_800,
+        projection_scale_parameter_tensor: None,
+        projection_scale_parameter_dtype: None,
+        projection_scale_parameter_shape: None,
+        projection_scale_parameter_byte_capacity: None,
+        input_frame_byte_capacity: 10240,
+        output_hidden_byte_capacity: 10240,
+        logits_byte_capacity: 993280,
+        vocabulary_size: 248320,
+        hidden_size: 5120,
+        projection_workgroup_count_x: 7760,
+        norm_local_size_x: 64,
+        projection_local_size_x: 1024,
+        norm_shader_path: "norm.spv".to_string(),
+        projection_shader_path: "bf16_projection.spv".to_string(),
+    };
+    let mut packed = source.clone();
+    packed.projection_parameter_tensor = "packed_int4_projection".to_string();
+    packed.projection_parameter_dtype = "U8".to_string();
+    packed.projection_parameter_shape = vec![248320, 2560];
+    packed.projection_parameter_byte_capacity = 635_699_200;
+    packed.projection_scale_parameter_tensor = Some("packed_int4_scale".to_string());
+    packed.projection_scale_parameter_dtype = Some("BF16".to_string());
+    packed.projection_scale_parameter_shape = Some(vec![248320, 40]);
+    packed.projection_scale_parameter_byte_capacity = Some(19_865_600);
+    packed.projection_shader_path = "packed_int4_projection.spv".to_string();
+
+    validate_draft_output_transducer_logical_contract(&source, &packed).unwrap();
+    assert_eq!(
+        speculative_decoder_output_parameter_tensors(&packed).collect::<Vec<_>>(),
+        vec!["norm", "packed_int4_projection", "packed_int4_scale"]
+    );
+
+    packed.hidden_size -= 1;
+    assert!(validate_draft_output_transducer_logical_contract(&source, &packed).is_err());
+}
+
+#[test]
 fn runtime_overlay_shader_resolution_rejects_path_spoofing_and_symlinks() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
