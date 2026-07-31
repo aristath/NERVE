@@ -3,6 +3,7 @@ from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     INT8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+    SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
     prequantization_spec,
 )
 from nerve.quantized_layouts import (
@@ -950,10 +951,24 @@ def physical_input_prequantization_spec(
 ) -> Json | None:
     fp8_spec = _fp8_prequantization_spec(circuit, node, tensor_index)
     if fp8_spec is not None:
+        contract = str(
+            fp8_spec.get("contract", FP8_PREQUANTIZATION_CONTRACT)
+        )
         return prequantization_spec(
-            FP8_PREQUANTIZATION_CONTRACT,
+            contract,
             input_size=int(fp8_spec["input_size"]),
             block_columns=int(fp8_spec["block_columns"]),
+            **{
+                key: int(value)
+                for key, value in fp8_spec.items()
+                if key
+                not in {
+                    "contract",
+                    "input_size",
+                    "block_rows",
+                    "block_columns",
+                }
+            },
         )
     if node.get("op") not in {"linear", "linear_residual"}:
         return None
@@ -1032,6 +1047,39 @@ def _fp8_prequantization_spec(
             "input_size": input_size,
             "block_rows": block_rows,
             "block_columns": block_columns,
+        }
+    if node.get("op") == "sparse_moe_down":
+        try:
+            if (
+                parameter_dtype_for_id(
+                    circuit, node["params"][0], tensor_index
+                )
+                != "F8_E4M3"
+            ):
+                return None
+            block_rows, block_columns = fp8_moe_block_shape_for_stage(
+                circuit,
+                node,
+                tensor_index,
+                stage="down",
+            )
+            intermediate_size = int(node["attrs"]["intermediate_size"])
+            experts_per_token = int(node["attrs"]["experts_per_token"])
+            input_size = intermediate_size * experts_per_token
+        except (KeyError, ModelCompileError):
+            return None
+        if (
+            intermediate_size <= 0
+            or experts_per_token <= 0
+            or intermediate_size % block_columns
+        ):
+            return None
+        return {
+            "contract": SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
+            "input_size": input_size,
+            "block_rows": block_rows,
+            "block_columns": block_columns,
+            "experts_per_token": experts_per_token,
         }
     if node.get("op") not in {
         "linear",

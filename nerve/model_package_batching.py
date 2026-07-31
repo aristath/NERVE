@@ -64,7 +64,8 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     ):
         return shader_file.replace("moe_topk_", "moe_topk_batch1_", 1)
     if re.fullmatch(
-        r"sparse_moe_(?:gate_up|down)_(?:bf16|(?:prequant_)?fp8_e4m3_b\d+x\d+|"
+        r"sparse_moe_(?:gate_up|down)_(?:bf16|"
+        r"(?:prequant_)?(?:emit_intermediate_)?fp8_e4m3_b\d+x\d+|"
         r"int4_ct_s(?:f16|bf16)_g\d+)_"
         r"h\d+_i\d+_e\d+_k\d+\.comp",
         shader_file,
@@ -99,7 +100,8 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
 
 def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     match = re.fullmatch(
-        r"sparse_moe_(gate_up|down)_(?:bf16|(?:prequant_)?fp8_e4m3_b\d+x\d+|"
+        r"sparse_moe_(gate_up|down)_(?:bf16|"
+        r"(?:prequant_)?(?:emit_intermediate_)?fp8_e4m3_b\d+x\d+|"
         r"int4_ct_s(?:f16|bf16)_g\d+)_"
         r"h(\d+)_i(\d+)_e\d+_k(\d+)\.comp",
         shader_file,
@@ -109,7 +111,9 @@ def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     stage, hidden_size, intermediate_size, experts_per_token = match.groups()
     output_rows = int(intermediate_size) if stage == "gate_up" else int(hidden_size)
     tile_rows = (
-        FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS
+        FP8_SPARSE_GATE_UP_REPRESENTATION_TILE_ROWS
+        if stage == "gate_up" and "_emit_intermediate_fp8_" in shader_file
+        else FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS
         if stage == "gate_up" and "_prequant_fp8_" in shader_file
         else FP8_SPARSE_GATE_UP_TILE_ROWS
         if stage == "gate_up" and "_fp8_" in shader_file
@@ -151,7 +155,8 @@ def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
         or len(inputs) < 2
         or not all(isinstance(signal, str) and signal for signal in inputs)
         or not isinstance(outputs, list)
-        or len(outputs) != 1
+        or not outputs
+        or not all(isinstance(signal, str) and signal for signal in outputs)
     ):
         raise ModelCompileError(
             f"sparse gate node {node.get('id')!r} has no valid descriptor interface"

@@ -167,6 +167,148 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
     ]
 
 
+def test_sparse_down_reuses_one_route_aware_fp8_intermediate() -> None:
+    circuit = {
+        "parameters": {
+            "refs": {
+                "moe_output": {"tensor": "experts.down"},
+                "moe_output_scale_inv": {"tensor": "experts.down_scale"},
+            }
+        }
+    }
+    node = {
+        "id": "sparse_moe_down",
+        "op": "sparse_moe_down",
+        "inputs": [
+            "intermediate_fp8",
+            "intermediate_scale",
+            "route_map",
+            "routes",
+        ],
+        "outputs": ["expert_outputs"],
+        "params": ["moe_output", "moe_output_scale_inv"],
+        "attrs": {
+            "hidden_size": 2048,
+            "intermediate_size": 512,
+            "num_experts": 256,
+            "experts_per_token": 8,
+            "physical_input_contract": (
+                "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_"
+                "u32_route_map.v1"
+            ),
+        },
+    }
+    tensor_index = {
+        "tensors": {
+            "experts.down": {
+                "dtype": "F8_E4M3",
+                "shape": [256, 2048, 512],
+                "layout": "row_major",
+            },
+            "experts.down_scale": {
+                "dtype": "BF16",
+                "shape": [256, 16, 4],
+                "layout": "row_major",
+            },
+        }
+    }
+    expected = (
+        "sparse_moe_down_prequant_fp8_e4m3_"
+        "b128x128_h2048_i512_e256_k8.comp"
+    )
+
+    assert physical_input_prequantization_spec(circuit, node, tensor_index) == {
+        "contract": (
+            "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_"
+            "u32_route_map.v1"
+        ),
+        "input_size": 4096,
+        "block_columns": 128,
+        "experts_per_token": 8,
+    }
+    assert shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 2048, "intermediate_size": 512},
+    ) == expected
+    assert workgroup_count_x_for_node(circuit, node, tensor_index) == 256
+    assert local_size_x_for_shader_file(expected, node) == 512
+    assert frame_parallel_batch_shader_file(expected) == expected.replace(
+        "_down_", "_down_batch1_", 1
+    )
+
+
+def test_compiler_renders_route_aware_sparse_moe_fp8_intermediate(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        (
+            "sparse_moe_down_prequant_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        ),
+        (
+            "sparse_moe_down_batch1_prequant_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        ),
+        (
+            "sparse_moe_gate_up_prequant_emit_intermediate_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        ),
+        (
+            "sparse_moe_gate_up_batch1_prequant_emit_intermediate_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        ),
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    down = (
+        tmp_path
+        / (
+            "sparse_moe_down_prequant_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        )
+    ).read_text()
+    batch_down = (
+        tmp_path
+        / (
+            "sparse_moe_down_batch1_prequant_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        )
+    ).read_text()
+    emitting_gate_up = (
+        tmp_path
+        / (
+            "sparse_moe_gate_up_prequant_emit_intermediate_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        )
+    ).read_text()
+    emitting_batch_gate_up = (
+        tmp_path
+        / (
+            "sparse_moe_gate_up_batch1_prequant_emit_intermediate_fp8_e4m3_"
+            "b128x128_h2048_i512_e256_k8.comp"
+        )
+    ).read_text()
+    assert "readonly buffer RouteMap" in down
+    assert "shared fe4m3vec4 cached_intermediate" in down
+    assert "subgroupClusteredMax" not in down
+    assert "readonly buffer RouteMaps" in batch_down
+    assert "const uint TILE_ROWS = 128u;" in emitting_gate_up
+    assert "binding = 8) readonly buffer DynamicParameterSlots" in emitting_gate_up
+    assert "expert_route_map.values[route] = route;" in emitting_gate_up
+    assert "compact_batch * EXPERTS_PER_TOKEN" in emitting_batch_gate_up
+    assert "buffer ExpertIntermediates" in emitting_gate_up
+    assert "buffer ExpertIntermediates" in emitting_batch_gate_up
+    assert all(
+        "{{" not in (tmp_path / shader_file).read_text()
+        for shader_file in shader_files
+    )
+    compile_shader_artifacts(tmp_path)
+
+
 def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     circuit = {

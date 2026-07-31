@@ -433,6 +433,14 @@ def _lower_prequantized_inputs(
         contract = physical_representation_contract(contract_id)
         input_size = int(spec["input_size"])
         block_columns = int(spec["block_columns"])
+        metadata = {
+            field: (
+                input_size
+                if field == "element_count"
+                else deepcopy(spec[field])
+            )
+            for field in contract.metadata_fields
+        }
         if (
             not inputs
             or input_size <= 0
@@ -442,7 +450,11 @@ def _lower_prequantized_inputs(
             raise ValueError(
                 f"node {node.get('id')!r} has an invalid prequantization description"
             )
-        key = (contract_id, str(inputs[0]), input_size, block_columns)
+        key = (
+            contract_id,
+            str(inputs[0]),
+            tuple((field, metadata[field]) for field in contract.metadata_fields),
+        )
         output_signals = [
             f"{node['id']}__input_{suffix}"
             for suffix in contract.output_signal_suffixes
@@ -460,6 +472,7 @@ def _lower_prequantized_inputs(
                 "logical_signal": key[1],
                 "input_size": input_size,
                 "block_columns": block_columns,
+                "metadata": metadata,
             },
         )
         scope["consumer_node_ids"].append(node["id"])
@@ -481,13 +494,17 @@ def _lower_prequantized_inputs(
     for key, scope in scopes.items():
         producer = producer_by_signal.get(key[1])
         if producer is None or can_emit is None or not can_emit(producer, scope):
-            scope["provider_id"] = scope["helper_id"]
+            scope["provider_id"] = (
+                scope["helper_id"]
+                if scope["helper_op"] is not None
+                else None
+            )
             continue
         scope["provider_id"] = producer["id"]
         producer_scopes[producer["id"]].append(scope)
 
     compiled: list[Json] = []
-    emitted_scopes: set[tuple[str, str, int, int]] = set()
+    emitted_scopes: set[tuple[Any, ...]] = set()
     for node, spec in prepared:
         emitted = producer_scopes.get(node["id"], [])
         if emitted:
@@ -503,8 +520,7 @@ def _lower_prequantized_inputs(
                         "logical_signal": scope["logical_signal"],
                         "outputs": scope["output_signals"],
                         "consumer_node_ids": scope["consumer_node_ids"],
-                        "element_count": scope["input_size"],
-                        "block_columns": scope["block_columns"],
+                        **deepcopy(scope["metadata"]),
                     }
                 )
             node["attrs"]["physical_output_representations"] = representations
@@ -513,13 +529,24 @@ def _lower_prequantized_inputs(
             continue
         node_attrs = node.setdefault("attrs", {})
         inputs = node["inputs"]
+        contract = physical_representation_contract(str(spec["contract"]))
+        metadata = {
+            field: (
+                int(spec["input_size"])
+                if field == "element_count"
+                else deepcopy(spec[field])
+            )
+            for field in contract.metadata_fields
+        }
         key = (
             str(spec["contract"]),
             str(inputs[0]),
-            int(spec["input_size"]),
-            int(spec["block_columns"]),
+            tuple((field, metadata[field]) for field in contract.metadata_fields),
         )
         scope = scopes[key]
+        if scope["provider_id"] is None:
+            compiled.append(node)
+            continue
         if key not in emitted_scopes:
             if scope["provider_id"] == scope["helper_id"]:
                 compiled.append(
@@ -534,8 +561,7 @@ def _lower_prequantized_inputs(
                             "semantic_source_node_ids": scope[
                                 "semantic_source_node_ids"
                             ],
-                            "element_count": scope["input_size"],
-                            "block_columns": scope["block_columns"],
+                            **deepcopy(scope["metadata"]),
                             "output_element_bytes": scope["output_element_bytes"],
                         },
                     }

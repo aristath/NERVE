@@ -714,6 +714,141 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
         )
         self.assertEqual([2], projection["attrs"]["output_element_bytes"])
 
+    def test_sparse_gate_up_emits_down_representation_without_helper_dispatch(
+        self,
+    ) -> None:
+        contract = (
+            "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_"
+            "u32_route_map.v1"
+        )
+        circuit = {
+            "nodes": [
+                {
+                    "id": "sparse_moe_gate_up",
+                    "op": "sparse_moe_gate_up",
+                    "inputs": ["normalized", "routes"],
+                    "outputs": ["expert_intermediates"],
+                    "params": ["gate_up_weight", "gate_up_scale"],
+                    "attrs": {
+                        "hidden_size": 2048,
+                        "intermediate_size": 512,
+                        "num_experts": 256,
+                        "experts_per_token": 8,
+                    },
+                },
+                {
+                    "id": "sparse_moe_down",
+                    "op": "sparse_moe_down",
+                    "inputs": ["expert_intermediates", "routes"],
+                    "outputs": ["expert_outputs"],
+                    "params": ["down_weight", "down_scale"],
+                    "attrs": {
+                        "hidden_size": 2048,
+                        "intermediate_size": 512,
+                        "num_experts": 256,
+                        "experts_per_token": 8,
+                    },
+                },
+            ]
+        }
+
+        def describe(node):
+            if node["op"] == "sparse_moe_gate_up":
+                return {
+                    "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
+                    "input_size": 2048,
+                    "block_columns": 128,
+                }
+            if node["op"] == "sparse_moe_down":
+                return {
+                    "contract": contract,
+                    "input_size": 4096,
+                    "block_columns": 128,
+                    "experts_per_token": 8,
+                }
+            return None
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            prequantization_spec=describe,
+            can_emit_representation=lambda producer, scope: (
+                producer["op"] == "sparse_moe_gate_up"
+                and scope["contract"] == contract
+            ),
+        )
+
+        self.assertEqual(
+            [
+                "quantize_fp8_e4m3",
+                "sparse_moe_gate_up",
+                "sparse_moe_down",
+            ],
+            [node["op"] for node in optimized["nodes"]],
+        )
+        _, gate_up, down = optimized["nodes"]
+        representation = gate_up["attrs"]["physical_output_representations"][0]
+        self.assertEqual(contract, representation["contract"])
+        self.assertEqual(8, representation["experts_per_token"])
+        self.assertEqual(
+            [
+                "expert_intermediates",
+                *representation["outputs"],
+            ],
+            gate_up["outputs"],
+        )
+        self.assertEqual(
+            [*representation["outputs"], "routes"],
+            down["inputs"],
+        )
+        self.assertEqual(
+            "sparse_moe_gate_up",
+            down["attrs"]["physical_input_provider_id"],
+        )
+
+    def test_sparse_representation_without_fused_producer_stays_logical(
+        self,
+    ) -> None:
+        contract = (
+            "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_"
+            "u32_route_map.v1"
+        )
+        down = {
+            "id": "sparse_moe_down",
+            "op": "sparse_moe_down",
+            "inputs": ["external_intermediates", "routes"],
+            "outputs": ["expert_outputs"],
+            "params": ["down_weight", "down_scale"],
+            "attrs": {
+                "hidden_size": 2048,
+                "intermediate_size": 512,
+                "num_experts": 256,
+                "experts_per_token": 8,
+            },
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            {"nodes": [down]},
+            prequantization_spec=lambda _node: {
+                "contract": contract,
+                "input_size": 4096,
+                "block_columns": 128,
+                "experts_per_token": 8,
+            },
+            can_emit_representation=lambda _producer, _scope: False,
+        )
+
+        self.assertEqual(1, len(optimized["nodes"]))
+        optimized_down = optimized["nodes"][0]
+        self.assertEqual("sparse_moe_down", optimized_down["op"])
+        self.assertEqual(
+            ["external_intermediates", "routes"],
+            optimized_down["inputs"],
+        )
+        self.assertNotIn(
+            "physical_input_contract",
+            optimized_down["attrs"],
+        )
+
     def test_shares_fp8_input_quantization_across_compatible_consumers(self) -> None:
         circuit = {
             "nodes": [

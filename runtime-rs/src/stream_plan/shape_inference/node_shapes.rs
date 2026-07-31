@@ -347,6 +347,10 @@ fn apply_physical_output_representation_shapes(
             .get("block_columns")
             .and_then(serde_json::Value::as_u64)
             .and_then(|value| usize::try_from(value).ok());
+        let experts_per_token = representation
+            .get("experts_per_token")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
         let (Some(logical_signal), Some(outputs), Some(element_count), Some(block_columns)) =
             (logical_signal, outputs, element_count, block_columns)
         else {
@@ -363,13 +367,31 @@ fn apply_physical_output_representation_shapes(
             Some(
                 "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1",
             ) => 3,
+            Some(
+                "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1",
+            ) => 3,
             _ => 0,
         };
+        let sparse_moe_representation = contract
+            == Some(
+                "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1",
+            );
         if outputs.len() != expected_outputs
             || expected_outputs == 0
             || element_count == 0
             || block_columns == 0
             || element_count % block_columns != 0
+            || (
+                sparse_moe_representation
+                    && (
+                        experts_per_token.is_none()
+                            || experts_per_token == Some(0)
+                            || element_count % experts_per_token.unwrap() != 0
+                            || (element_count / experts_per_token.unwrap())
+                                % block_columns
+                                != 0
+                    )
+            )
         {
             return Err(CircuitPlanError(format!(
                 "{component_id} node {} has invalid blockwise physical output geometry",
@@ -386,10 +408,29 @@ fn apply_physical_output_representation_shapes(
                     node.id
                 ))
             })?;
+        let logical_element_count = if sparse_moe_representation {
+            element_count
+                .checked_add(experts_per_token.unwrap().checked_mul(2).ok_or_else(
+                    || {
+                        CircuitPlanError(format!(
+                            "{component_id} node {} sparse MoE route map size overflowed",
+                            node.id
+                        ))
+                    },
+                )?)
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} sparse MoE logical shape overflowed",
+                        node.id
+                    ))
+                })?
+        } else {
+            element_count
+        };
         if shapes[logical_index]
             .as_deref()
             .and_then(product)
-            .is_some_and(|elements| elements != element_count)
+            .is_some_and(|elements| elements != logical_element_count)
         {
             return Err(CircuitPlanError(format!(
                 "{component_id} node {} physical representation has {element_count} elements but logical output {logical_signal:?} has shape {:?}",
@@ -397,7 +438,13 @@ fn apply_physical_output_representation_shapes(
             )));
         }
         let block_count = element_count / block_columns;
-        let physical_shapes = if expected_outputs == 3 {
+        let physical_shapes = if sparse_moe_representation {
+            vec![
+                vec![element_count],
+                vec![block_count],
+                vec![experts_per_token.unwrap()],
+            ]
+        } else if expected_outputs == 3 {
             vec![
                 vec![element_count],
                 vec![block_count],

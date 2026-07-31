@@ -539,6 +539,87 @@ def test_exact_candidate_gate_accepts_fused_physical_representation_provider() -
         )
 
 
+def test_exact_candidate_gate_accepts_route_aware_sparse_moe_representation() -> None:
+    contract = (
+        "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_"
+        "u32_route_map.v1"
+    )
+    source = {
+        "nodes": [
+            {
+                "id": "sparse_moe_gate_up",
+                "op": "sparse_moe_gate_up",
+                "inputs": ["normalized", "routes"],
+                "outputs": ["expert_intermediates"],
+                "params": ["gate_up_weight", "gate_up_scale"],
+                "attrs": {
+                    "hidden_size": 2048,
+                    "intermediate_size": 512,
+                    "num_experts": 256,
+                    "experts_per_token": 8,
+                },
+            },
+            {
+                "id": "sparse_moe_down",
+                "op": "sparse_moe_down",
+                "inputs": ["expert_intermediates", "routes"],
+                "outputs": ["expert_outputs"],
+                "params": ["down_weight", "down_scale"],
+                "attrs": {
+                    "hidden_size": 2048,
+                    "intermediate_size": 512,
+                    "num_experts": 256,
+                    "experts_per_token": 8,
+                },
+            }
+        ]
+    }
+    physical_outputs = [
+        "expert_intermediate_fp8",
+        "expert_intermediate_scale",
+        "expert_route_map",
+    ]
+    candidate = deepcopy(source)
+    candidate["nodes"][0]["outputs"].extend(physical_outputs)
+    candidate["nodes"][0]["attrs"].update(
+        {
+            "output_element_bytes": [2, 1, 4, 4],
+            "physical_output_representations": [
+                {
+                    "contract": contract,
+                    "logical_signal": "expert_intermediates",
+                    "outputs": physical_outputs,
+                    "consumer_node_ids": ["sparse_moe_down"],
+                    "element_count": 4096,
+                    "block_columns": 128,
+                    "experts_per_token": 8,
+                }
+            ],
+        }
+    )
+    candidate["nodes"][1] = {
+        **candidate["nodes"][1],
+        "inputs": [*physical_outputs, "routes"],
+        "attrs": {
+            **candidate["nodes"][1]["attrs"],
+            "physical_input_contract": contract,
+            "physical_input_provider_id": "sparse_moe_gate_up",
+            "physical_logical_inputs": [
+                "expert_intermediates",
+                "routes",
+            ],
+            "output_element_bytes": [2],
+        },
+    }
+
+    evidence = prove_exact_circuit_candidate(
+        component_id="layer_00", source=source, candidate=candidate
+    )
+
+    assert evidence["status"] == "passed"
+    assert evidence["physical_representation_count"] == 1
+
+
 def test_exact_candidate_gate_rejects_dropped_source_behavior() -> None:
     source = source_circuit()
     candidate = deepcopy(source)

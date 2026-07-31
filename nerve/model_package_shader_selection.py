@@ -1081,9 +1081,14 @@ def shader_file_for_node(
             block_rows, block_columns = fp8_moe_block_shape_for_stage(
                 circuit, node, tensor_index, stage=stage
             )
+            emits_intermediate = (
+                op == "sparse_moe_gate_up"
+                and emits_sparse_moe_fp8_intermediate(node)
+            )
             return (
                 f"sparse_moe_{stage}"
                 f"{'_prequant' if uses_prequantized_fp8_input(node) else ''}"
+                f"{'_emit_intermediate' if emits_intermediate else ''}"
                 f"_fp8_e4m3_b{block_rows}x{block_columns}_"
                 f"h{attrs['hidden_size']}_i{attrs['intermediate_size']}_"
                 f"e{attrs['num_experts']}_k{attrs['experts_per_token']}.comp"
@@ -1315,7 +1320,9 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
         if parameter_dtype == "F8_E4M3":
             tile_rows = (
-                FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS
+                FP8_SPARSE_GATE_UP_REPRESENTATION_TILE_ROWS
+                if emits_sparse_moe_fp8_intermediate(node)
+                else FP8_SPARSE_PREQUANT_GATE_UP_TILE_ROWS
                 if uses_prequantized_fp8_input(node)
                 else FP8_SPARSE_GATE_UP_TILE_ROWS
             )
@@ -1397,7 +1404,13 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
         return attention_workgroup_shape(int(node["attrs"]["head_width"]))[0]
     if shader_file.startswith("append_gqa_attention_partition_reduce_bf16_"):
         return int(node["attrs"]["attention"]["head_width"])
-    if shader_file.startswith("sparse_moe_gate_up_prequant_fp8_"):
+    if shader_file.startswith(
+        (
+            "sparse_moe_gate_up_prequant_fp8_",
+            "sparse_moe_gate_up_prequant_emit_intermediate_fp8_",
+            "sparse_moe_down_prequant_fp8_",
+        )
+    ):
         return 512
     if shader_file.startswith(("sparse_moe_gate_up_fp8_", "sparse_moe_down_fp8_")):
         return 512
@@ -1431,9 +1444,21 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
 
 
 def uses_prequantized_fp8_input(node: Json) -> bool:
-    return (
-        node.get("attrs", {}).get("physical_input_contract")
-        == "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+    return node.get("attrs", {}).get("physical_input_contract") in {
+        FP8_PREQUANTIZATION_CONTRACT,
+        SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
+    }
+
+
+def emits_sparse_moe_fp8_intermediate(node: Json) -> bool:
+    representations = node.get("attrs", {}).get(
+        "physical_output_representations"
+    )
+    return isinstance(representations, list) and any(
+        isinstance(representation, dict)
+        and representation.get("contract")
+        == SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT
+        for representation in representations
     )
 
 

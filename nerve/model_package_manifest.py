@@ -15,6 +15,7 @@ from nerve.model_package_tensors import *
 from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+    SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
 )
 from nerve.resource_residency_planning import (
     build_planned_resource_residency_contract,
@@ -42,6 +43,27 @@ def can_emit_physical_representation_from_producer(
                 and int(scope["block_columns"])
                 == int(producer.get("attrs", {}).get("value_head_width", 0))
             )
+        )
+        feature_supported = all(
+            {"shader_float8", "shader_int8"}
+            <= set(device.get("shader_features", []))
+            for device in compiler_target.get("devices", [])
+        )
+        expected_block_columns = 128
+    elif contract == SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT:
+        attrs = producer.get("attrs", {})
+        try:
+            intermediate_size = int(attrs["intermediate_size"])
+            experts_per_token = int(attrs["experts_per_token"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        operation_shape_supported = (
+            operation == "sparse_moe_gate_up"
+            and int(scope["input_size"])
+            == intermediate_size * experts_per_token
+            and intermediate_size % int(scope["block_columns"]) == 0
+            and int(scope["metadata"]["experts_per_token"])
+            == experts_per_token
         )
         feature_supported = all(
             {"shader_float8", "shader_int8"}

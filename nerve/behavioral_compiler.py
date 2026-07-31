@@ -10,6 +10,7 @@ from typing import Any
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.physical_representations import (
+    SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
     physical_representation_contract,
     physical_representation_contract_for_helper,
 )
@@ -437,7 +438,7 @@ def _validate_physical_representation_providers(
                 != contract_id
                 or target_attrs.get("physical_input_provider_id") != helper_id
                 or target_attrs.get("output_element_bytes")
-                != [2] * len(target.get("outputs", []))
+                != _expected_node_output_element_bytes(target)
                 or (
                     contract.mirrors_consumer_state_reads
                     and helper.get("state_reads")
@@ -527,16 +528,15 @@ def _validate_physical_representation_providers(
             contract = physical_representation_contract(
                 str(representation.get("contract", ""))
             )
+            expected_representation_keys = {
+                "contract",
+                "logical_signal",
+                "outputs",
+                "consumer_node_ids",
+                *contract.metadata_fields,
+            }
             if (
-                set(representation)
-                != {
-                    "contract",
-                    "logical_signal",
-                    "outputs",
-                    "consumer_node_ids",
-                    "element_count",
-                    "block_columns",
-                }
+                set(representation) != expected_representation_keys
                 or logical_signal not in logical_outputs
                 or not isinstance(outputs, list)
                 or len(outputs) != len(contract.output_element_bytes)
@@ -544,11 +544,9 @@ def _validate_physical_representation_providers(
                 or not consumer_node_ids
                 or len(set(consumer_node_ids)) != len(consumer_node_ids)
                 or any(not isinstance(target_id, str) for target_id in consumer_node_ids)
-                or not isinstance(representation.get("element_count"), int)
-                or representation["element_count"] <= 0
-                or not isinstance(representation.get("block_columns"), int)
-                or representation["block_columns"] <= 0
-                or representation["element_count"] % representation["block_columns"]
+                or not _valid_physical_representation_metadata(
+                    contract.id, representation
+                )
                 or any(output in boundary_outputs for output in outputs)
                 or any(consumers.get(output) != set(consumer_node_ids) for output in outputs)
             ):
@@ -582,7 +580,7 @@ def _validate_physical_representation_providers(
                     != contract.id
                     or target_attrs.get("physical_input_provider_id") != provider["id"]
                     or target_attrs.get("output_element_bytes")
-                    != [2] * len(target.get("outputs", []))
+                    != _expected_node_output_element_bytes(target)
                 ):
                     raise ModelCompileError(
                         f"candidate circuit {component_id!r} has an invalid physical "
@@ -603,6 +601,41 @@ def _validate_physical_representation_providers(
             f"representation providers: {unlinked_targets}"
         )
     return helper_ids, representation_count
+
+
+def _expected_node_output_element_bytes(node: Json) -> list[int] | None:
+    outputs = node.get("outputs", [])
+    if not isinstance(outputs, list):
+        return None
+    representations = node.get("attrs", {}).get(
+        "physical_output_representations"
+    )
+    if representations is None:
+        return [2] * len(outputs)
+    if not isinstance(representations, list) or not representations:
+        return None
+    physical_outputs: list[str] = []
+    physical_bytes: list[int] = []
+    for representation in representations:
+        if not isinstance(representation, dict):
+            return None
+        representation_outputs = representation.get("outputs")
+        if not isinstance(representation_outputs, list):
+            return None
+        contract = physical_representation_contract(
+            str(representation.get("contract", ""))
+        )
+        if len(representation_outputs) != len(contract.output_element_bytes):
+            return None
+        physical_outputs.extend(representation_outputs)
+        physical_bytes.extend(contract.output_element_bytes)
+    physical_output_set = set(physical_outputs)
+    logical_outputs = [
+        output for output in outputs if output not in physical_output_set
+    ]
+    if outputs != [*logical_outputs, *physical_outputs]:
+        return None
+    return [*([2] * len(logical_outputs)), *physical_bytes]
 
 
 def _valid_physical_representation_metadata(
@@ -647,7 +680,7 @@ def _valid_physical_representation_metadata(
         )
     element_count = attrs.get("element_count")
     block_columns = attrs.get("block_columns")
-    return (
+    blockwise_valid = (
         isinstance(element_count, int)
         and not isinstance(element_count, bool)
         and element_count > 0
@@ -656,6 +689,18 @@ def _valid_physical_representation_metadata(
         and block_columns > 0
         and element_count % block_columns == 0
     )
+    if not blockwise_valid:
+        return False
+    if contract_id == SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT:
+        experts_per_token = attrs.get("experts_per_token")
+        return (
+            isinstance(experts_per_token, int)
+            and not isinstance(experts_per_token, bool)
+            and experts_per_token > 0
+            and element_count % experts_per_token == 0
+            and (element_count // experts_per_token) % block_columns == 0
+        )
+    return True
 
 
 def model_contract_digest(model_graph: Json, tensor_index: Json) -> str:

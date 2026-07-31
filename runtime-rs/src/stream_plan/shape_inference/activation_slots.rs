@@ -555,6 +555,64 @@ mod tests {
     }
 
     #[test]
+    fn sparse_gate_up_physical_output_preserves_logical_schedule_shape() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "sparse_moe_gate_up".to_string(),
+            op: "sparse_moe_gate_up".to_string(),
+            inputs: Vec::new(),
+            outputs: vec![
+                "expert_intermediates".to_string(),
+                "expert_intermediate_fp8".to_string(),
+                "expert_intermediate_scales".to_string(),
+                "expert_route_map".to_string(),
+            ],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "hidden_size": 2048,
+                "intermediate_size": 512,
+                "num_experts": 256,
+                "experts_per_token": 8,
+                "output_element_bytes": [2, 1, 4, 4],
+                "physical_output_representations": [{
+                    "contract": concat!(
+                        "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_",
+                        "f32_scale_u32_route_map.v1"
+                    ),
+                    "logical_signal": "expert_intermediates",
+                    "outputs": [
+                        "expert_intermediate_fp8",
+                        "expert_intermediate_scales",
+                        "expert_route_map"
+                    ],
+                    "consumer_node_ids": ["sparse_moe_down"],
+                    "element_count": 4096,
+                    "block_columns": 128,
+                    "experts_per_token": 8
+                }]
+            }),
+        };
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![
+                Some(vec![4_112]),
+                Some(vec![4_096]),
+                Some(vec![32]),
+                Some(vec![8]),
+            ]
+        );
+    }
+
+    #[test]
     fn infers_fused_append_attention_output_shape_from_query_frame() {
         let node = crate::stream_circuit::CircuitNode {
             id: "append_attention".to_string(),

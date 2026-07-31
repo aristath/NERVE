@@ -20,9 +20,9 @@ layout(local_size_x = {{LOCAL_SIZE_X}}, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer QuantizedHidden { uint words[]; } quantized_hidden;
 layout(set = 0, binding = 1) readonly buffer HiddenScales { float values[]; } hidden_scales;
 layout(set = 0, binding = 2) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
-layout(set = 0, binding = 3) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
-layout(set = 0, binding = 4) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
-layout(set = 0, binding = 5) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
+{{OUTPUT_BINDINGS}}
+layout(set = 0, binding = {{DYNAMIC_RESOURCE_BINDING}}) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
+layout(set = 0, binding = {{DYNAMIC_SLOT_BINDING}}) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
 layout(push_constant) uniform DispatchControl { uint expert_start; } dispatch_control;
 
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
@@ -182,19 +182,6 @@ void main() {
     barrier();
 
     uint lane = gl_LocalInvocationID.x;
-    if (lane < TILE_ROWS / 2u) {
-        uint row = first_row + lane * 2u;
-        if (row < INTERMEDIATE_SIZE) {
-            uint hi = row + 1u < INTERMEDIATE_SIZE
-                ? f32_to_bf16(
-                    activated_rows[lane * 2u + 1u]
-                )
-                : 0u;
-            expert_intermediates.words[route * INTERMEDIATE_WORDS + row / 2u] =
-                (hi << 16u)
-                | f32_to_bf16(
-                    activated_rows[lane * 2u]
-                );
-        }
-    }
+{{LOGICAL_OUTPUT_WRITE}}
+{{EMIT_INTERMEDIATE}}
 }
