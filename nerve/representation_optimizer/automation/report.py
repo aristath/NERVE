@@ -414,6 +414,7 @@ def _validate_scope_indexes(scopes: list[Json]) -> None:
         if scope["status"] not in {
             "analyzed",
             "budget_skipped",
+            "provider_skipped",
             "cancelled",
             "failed",
         }:

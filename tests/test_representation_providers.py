@@ -51,6 +51,7 @@ class FixtureProvider:
     fail_at: str | None = None
     omit_structural_evidence: bool = False
     mutate_scope_copy: bool = False
+    accepted_scope_kinds: tuple[str, ...] | None = None
     calls: list[str] = field(default_factory=list)
 
     @property
@@ -61,6 +62,14 @@ class FixtureProvider:
         self.calls.append(name)
         if self.fail_at == name:
             raise RuntimeError(f"fixture failure at {name}")
+
+    def may_optimize_scope(self, scope, source_contract):
+        self._called("may_optimize_scope")
+        del source_contract
+        return (
+            self.accepted_scope_kinds is None
+            or scope["kind"] in self.accepted_scope_kinds
+        )
 
     def match_semantics(self, context):
         self._called("match_semantics")

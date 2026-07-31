@@ -146,6 +146,28 @@ def run_automated_optimizer(
         for scope in scopes:
             check_compile_cancelled(cancel_requested)
             scope_id = str(scope["scope_id"])
+            if not providers.accepts_scope(scope, contracts[scope_id]):
+                reason = (
+                    "scope skipped before analysis: no registered "
+                    "representation provider accepts its static contract"
+                )
+                scope_records.append(
+                    {
+                        "scope_id": scope_id,
+                        "kind": scope["kind"],
+                        "status": "provider_skipped",
+                        "reason": reason,
+                        "analysis_ref": None,
+                        "structures": [],
+                    }
+                )
+                journal.record(
+                    phase="analysis",
+                    status="provider_skipped",
+                    scope_id=scope_id,
+                    details={"reason": reason},
+                )
+                continue
             admitted, reason = ledger.admit_scope()
             if not admitted:
                 record = {
@@ -240,6 +262,14 @@ def run_automated_optimizer(
 
         for target in targets:
             check_compile_cancelled(cancel_requested)
+            if not analyzed_scopes:
+                journal.record(
+                    phase="provider_evaluation",
+                    status="skipped",
+                    target_id=target.target_id,
+                    details={"reason": "no provider-routed scope completed analysis"},
+                )
+                continue
             problem = ProviderProblem.from_documents(
                 package_id=str(catalog["package_id"]),
                 scopes=analyzed_scopes,

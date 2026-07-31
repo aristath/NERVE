@@ -57,6 +57,13 @@ LOOKUP_CODEBOOK_DESCRIPTOR_ID = (
 )
 
 
+def _has_head_norm_static_shape(scope: Json) -> bool:
+    return (
+        len(scope["members"]["component_ids"]) == 1
+        and len(scope["boundary"]["parameters"]) == 2
+    )
+
+
 class ExactHeadNormCodebookProvider:
     identity = ProviderIdentity(
         "nerve.exact_head_norm_codebook",
@@ -64,12 +71,19 @@ class ExactHeadNormCodebookProvider:
     )
     descriptor_id = LOOKUP_CODEBOOK_DESCRIPTOR_ID
 
+    def may_optimize_scope(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> bool:
+        del source_contract
+        return _has_head_norm_static_shape(scope)
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         eligible = [
             scope
             for scope in context.scopes
-            if len(scope["members"]["component_ids"]) == 1
-            and len(scope["boundary"]["parameters"]) == 2
+            if _has_head_norm_static_shape(scope)
         ]
         matched = bool(eligible)
         return MatchAssessment(

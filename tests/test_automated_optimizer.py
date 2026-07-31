@@ -318,6 +318,83 @@ def test_unattended_loop_publishes_only_faster_fully_valid_candidate(
     assert not (package / "optimization" / "implementations").exists()
 
 
+def test_scope_routing_skips_irrelevant_scopes_before_analysis_and_budget(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, _lease = _target()
+
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
+        output_package_dir=tmp_path / "optimized",
+        run_root=tmp_path / "run",
+        providers=_providers(
+            FixtureProvider(
+                "fixture.sampler-only",
+                _descriptor_id(),
+                accepted_scope_kinds=("sampler",),
+            )
+        ),
+        targets=(target,),
+        budget=_budget(),
+    )
+
+    analyzed = [
+        scope
+        for scope in outcome.report["scopes"]
+        if scope["status"] == "analyzed"
+    ]
+    skipped = [
+        scope
+        for scope in outcome.report["scopes"]
+        if scope["status"] == "provider_skipped"
+    ]
+    assert len(analyzed) == 1
+    assert analyzed[0]["kind"] == "sampler"
+    assert len(skipped) == 9
+    assert outcome.report["budget_usage"]["scopes"] == 1
+    assert outcome.report["summary"]["analyzed_scope_count"] == 1
+    assert {
+        path.name for path in (tmp_path / "run" / "analysis").iterdir()
+    } == {analyzed[0]["scope_id"]}
+
+
+def test_optimizer_completes_without_changes_when_no_provider_accepts_a_scope(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, lease = _target()
+
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
+        output_package_dir=tmp_path / "unused-output",
+        run_root=tmp_path / "run",
+        providers=_providers(
+            FixtureProvider(
+                "fixture.no-static-match",
+                _descriptor_id(),
+                accepted_scope_kinds=("nonexistent_scope_kind",),
+            )
+        ),
+        targets=(target,),
+        budget=_budget(),
+    )
+
+    assert outcome.report["status"] == "completed_no_changes"
+    assert outcome.output_package_dir == package
+    assert outcome.report["budget_usage"]["scopes"] == 0
+    assert outcome.report["summary"]["analyzed_scope_count"] == 0
+    assert all(
+        scope["status"] == "provider_skipped"
+        for scope in outcome.report["scopes"]
+    )
+    assert outcome.report["provider_evaluations"] == []
+    assert lease.acquisitions == 0
+    assert not (tmp_path / "unused-output").exists()
+
+
 def test_budget_rejects_whole_candidate_without_running_partial_experiment(
     tmp_path: Path,
 ) -> None:

@@ -47,6 +47,7 @@ from nerve.representation_optimizer.validation.contracts import (
 
 
 _REQUIRED_METHODS = (
+    "may_optimize_scope",
     "match_semantics",
     "match_structure",
     "analyze_evidence",
@@ -123,6 +124,28 @@ class ProviderRegistry:
                 )
             ),
         )
+
+    def accepts_scope(self, scope: Json, source_contract: Json) -> bool:
+        """Return whether any provider can usefully analyze this scope.
+
+        Providers receive isolated copies so this evidence-free routing pass
+        cannot mutate the compiler's canonical scope catalog.
+        """
+
+        for provider in self.providers:
+            accepted = provider.may_optimize_scope(
+                deepcopy(scope),
+                deepcopy(source_contract),
+            )
+            if not isinstance(accepted, bool):
+                raise ContractValidationError(
+                    f"representation provider "
+                    f"{provider.identity.provider_id!r} returned a non-boolean "
+                    "scope-routing decision"
+                )
+            if accepted:
+                return True
+        return False
 
     def run(
         self,

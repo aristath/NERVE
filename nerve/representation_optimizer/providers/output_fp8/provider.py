@@ -48,6 +48,13 @@ from nerve.representation_optimizer.providers.types import (
 )
 
 
+def _is_standalone_output_scope(scope: Json) -> bool:
+    return (
+        scope["kind"] == "output_transducer"
+        and len(scope["members"]["component_ids"]) == 1
+    )
+
+
 class BlockScaledOutputProjectionProvider:
     identity = ProviderIdentity(
         "nerve.block_scaled_output_projection",
@@ -55,12 +62,19 @@ class BlockScaledOutputProjectionProvider:
     )
     descriptor_id = BLOCK_SCALED_OUTPUT_DESCRIPTOR_ID
 
+    def may_optimize_scope(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> bool:
+        del source_contract
+        return _is_standalone_output_scope(scope)
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         eligible = [
             scope
             for scope in context.scopes
-            if scope["kind"] == "output_transducer"
-            and len(scope["members"]["component_ids"]) == 1
+            if _is_standalone_output_scope(scope)
         ]
         return MatchAssessment(
             matched=bool(eligible),

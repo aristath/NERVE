@@ -18,6 +18,19 @@ class RepresentationProvider(Protocol):
     identity: ProviderIdentity
     descriptor_id: str
 
+    def may_optimize_scope(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> bool:
+        """Conservatively route static scope contracts before analysis.
+
+        Returning false promises that this provider cannot produce a candidate
+        for the scope regardless of what algebraic analysis would discover.
+        Implementations must return true whenever the static contract alone is
+        insufficient to decide.
+        """
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         """Decide whether the scope's responsibility can use this representation."""
 

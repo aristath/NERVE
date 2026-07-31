@@ -36,6 +36,7 @@ from nerve.representation_optimizer.providers.codebook.member_paths import (
 )
 from nerve.representation_optimizer.providers.codebook.provider import (
     LOOKUP_CODEBOOK_DESCRIPTOR_ID,
+    _has_head_norm_static_shape,
 )
 from nerve.representation_optimizer.providers.codebook.representation_bundle import (
     bundle_representation_graphs,
@@ -60,12 +61,19 @@ class ExactEmbeddedHeadNormParameterProgramProvider:
     )
     descriptor_id = LOOKUP_CODEBOOK_DESCRIPTOR_ID
 
+    def may_optimize_scope(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> bool:
+        del source_contract
+        return _has_head_norm_static_shape(scope)
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         eligible = [
             scope
             for scope in context.scopes
-            if len(scope["members"]["component_ids"]) == 1
-            and len(scope["boundary"]["parameters"]) == 2
+            if _has_head_norm_static_shape(scope)
         ]
         matched = bool(eligible)
         return MatchAssessment(
