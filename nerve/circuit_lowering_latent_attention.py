@@ -66,14 +66,20 @@ def latent_sparse_attention_nodes(
                 "op": "rms_norm_per_head_unscaled",
                 "inputs": ["query_heads"],
                 "outputs": ["query_heads_normed"],
-                "attrs": {**_norm_attrs(numerics), **heads},
+                "attrs": {
+                    **_norm_attrs(numerics),
+                    **heads,
+                    "head_count": int(heads["query_heads"]),
+                },
             },
             {
                 "id": "query_rope",
                 "op": "rotary_position_embedding",
                 "inputs": ["query_heads_normed"],
                 "outputs": ["query_positioned"],
-                "attrs": _rope_attrs(numerics, heads),
+                "attrs": _rope_attrs(
+                    numerics, heads, head_count=int(heads["query_heads"])
+                ),
             },
             {
                 "id": "key_value_projection",
@@ -95,7 +101,9 @@ def latent_sparse_attention_nodes(
                 "op": "rotary_position_embedding",
                 "inputs": ["key_value_normed"],
                 "outputs": ["key_value_positioned"],
-                "attrs": _rope_attrs(numerics, heads),
+                "attrs": _rope_attrs(
+                    numerics, heads, head_count=int(heads["key_value_heads"])
+                ),
             },
             {
                 "id": "local_memory_update",
@@ -177,7 +185,11 @@ def latent_sparse_attention_nodes(
                     "inputs": ["query_key_value_normed"],
                     "outputs": ["query_key_value_positioned"],
                     "attrs": {
-                        **_rope_attrs(numerics, heads),
+                        **_rope_attrs(
+                            numerics,
+                            heads,
+                            head_count=int(heads["key_value_heads"]),
+                        ),
                         "position_offset": int(
                             execution_contract["query_position_offset"]
                         ),
@@ -300,7 +312,21 @@ def latent_sparse_attention_nodes(
                 "op": "inverse_rotary_position_embedding",
                 "inputs": ["attention_heads"],
                 "outputs": ["attention_unpositioned"],
-                "attrs": _rope_attrs(numerics, heads),
+                "attrs": {
+                    **_rope_attrs(
+                        numerics, heads, head_count=int(heads["query_heads"])
+                    ),
+                    **(
+                        {
+                            "position_offset": int(
+                                execution_contract["query_position_offset"]
+                            ),
+                            "position_mode": "parallel_block",
+                        }
+                        if parallel_context
+                        else {}
+                    ),
+                },
             },
             {
                 "id": "grouped_output_projection",
@@ -455,7 +481,7 @@ def _hyper_connection_attrs(mixer: Json) -> Json:
     }
 
 
-def _rope_attrs(numerics: Json, heads: Json) -> Json:
+def _rope_attrs(numerics: Json, heads: Json, *, head_count: int) -> Json:
     return {
         "position_source": "stream_tick",
         "theta": float(numerics["rope_theta"]),
@@ -464,4 +490,5 @@ def _rope_attrs(numerics: Json, heads: Json) -> Json:
         "interleaved": bool(numerics["rope_interleaved"]),
         "rotary_width": int(numerics["rotary_width"]),
         **heads,
+        "head_count": head_count,
     }

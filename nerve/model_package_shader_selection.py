@@ -227,6 +227,40 @@ def shader_file_for_node(
             prefix += "_bias"
         prefix += "_bf16"
         return f"{prefix}_{in_features}x{out_features}.comp"
+    if op == "grouped_linear":
+        attrs = node.get("attrs", {})
+        groups = int(attrs.get("groups", 0))
+        rank_per_group = int(attrs.get("rank_per_group", 0))
+        out_features, group_input_features = parameter_shape_for_node(
+            circuit, node, tensor_index
+        )
+        parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
+        if (
+            groups <= 0
+            or rank_per_group <= 0
+            or rank_per_group % 2
+            or int(out_features) != groups * rank_per_group
+            or int(group_input_features) <= 0
+            or int(group_input_features) % 128
+            or parameter_dtype != "F8_E4M3"
+            or len(node.get("inputs", [])) != 1
+            or len(node.get("outputs", [])) != 1
+            or len(node.get("params", [])) != 2
+            or node.get("state_reads")
+            or node.get("state_writes")
+        ):
+            raise ModelCompileError(
+                f"grouped linear node {node['id']!r} has an invalid contract"
+            )
+        block_rows, block_columns = fp8_block_shape_for_node(
+            circuit, node, tensor_index
+        )
+        scale_suffix = fp8_scale_shader_suffix_for_node(circuit, node, tensor_index)
+        total_input_features = groups * int(group_input_features)
+        return (
+            f"grouped_linear_fp8_e4m3{scale_suffix}_b{block_rows}x{block_columns}_"
+            f"g{groups}_{total_input_features}x{out_features}.comp"
+        )
     if op == "mixed_parallel_linear_4way":
         attrs = node.get("attrs", {})
         if (
@@ -678,8 +712,38 @@ def shader_file_for_node(
     if op == "scalar_multiply":
         return f"scalar_multiply_bf16_{int(node['attrs']['element_count'])}.comp"
     if op == "rolling_state_update":
-        temporal_memory = state_port(circuit, "temporal_memory")
-        frames, state_hidden = temporal_memory["shape"]
+        state_reads = node.get("state_reads", [])
+        attrs = node.get("attrs", {})
+        if (
+            len(node.get("inputs", [])) != 2
+            or len(node.get("outputs", [])) != 1
+            or len(state_reads) != 1
+            or state_reads != node.get("state_writes")
+            or node["inputs"][1] != state_reads[0]
+            or attrs.get("update") not in {"ring_append", "shift_append"}
+        ):
+            raise ModelCompileError(
+                f"rolling-state node {node['id']!r} has an invalid contract"
+            )
+        temporal_memory = state_port(circuit, state_reads[0])
+        if "shape" in temporal_memory:
+            frames, state_hidden = map(int, temporal_memory["shape"])
+        else:
+            per_token_shape = list(
+                map(int, temporal_memory.get("shape_per_token", []))
+            )
+            frames = int(temporal_memory.get("capacity", 0))
+            state_hidden = math.prod(per_token_shape) if per_token_shape else 0
+        if (
+            temporal_memory.get("dtype") != "BF16"
+            or frames <= 0
+            or state_hidden <= 0
+            or state_hidden % 2
+            or int(attrs.get("capacity", frames)) != frames
+        ):
+            raise ModelCompileError(
+                f"rolling-state node {node['id']!r} has incompatible state geometry"
+            )
         return f"rolling_state_update_bf16_{frames}x{state_hidden}.comp"
     if op == "depthwise_conv1d":
         temporal_memory = state_port(circuit, "temporal_memory")
@@ -809,6 +873,28 @@ def shader_file_for_node(
                 )
             return f"silu_multiply_quantize_int8_pairpacked_b32_h{element_count}.comp"
         return f"silu_multiply_bf16_{element_count}.comp"
+    if op == "bounded_silu_multiply":
+        attrs = node.get("attrs", {})
+        element_count = int(attrs.get("element_count", 0))
+        limit = float(attrs.get("limit", 0.0))
+        if (
+            element_count <= 0
+            or element_count % 2
+            or not math.isfinite(limit)
+            or limit <= 0.0
+            or len(node.get("inputs", [])) != 2
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or node.get("state_reads")
+            or node.get("state_writes")
+        ):
+            raise ModelCompileError(
+                f"bounded SiLU-multiply node {node['id']!r} has an invalid contract"
+            )
+        return (
+            f"bounded_silu_multiply_bf16_{element_count}_"
+            f"limit{shader_float_token(limit)}.comp"
+        )
     if op == "sigmoid_multiply":
         representations = node.get("attrs", {}).get("physical_output_representations")
         if representations:
@@ -974,13 +1060,40 @@ def shader_file_for_node(
             f"_mps{shader_float_token(float(attrs['model_projection_scale']))}"
             f"_cs{shader_float_token(float(attrs['combination_scale']))}__sc{binding}.comp"
         )
-    if op == "rotary_position_embedding":
+    if op in {"rotary_position_embedding", "inverse_rotary_position_embedding"}:
+        attrs = node["attrs"]
+        head_count = int(attrs.get("head_count", 0))
+        head_width = int(attrs.get("head_width", 0))
+        rotary_width = int(attrs.get("rotary_width", 0))
+        theta = float(attrs.get("theta", 0.0))
+        if (
+            head_count <= 0
+            or head_width <= 0
+            or head_width % 2
+            or rotary_width <= 0
+            or rotary_width % 2
+            or rotary_width > head_width
+            or not math.isfinite(theta)
+            or theta <= 0.0
+            or attrs.get("position_source") != "stream_tick"
+            or len(node.get("inputs", [])) != 1
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or node.get("state_reads")
+            or node.get("state_writes")
+        ):
+            raise ModelCompileError(
+                f"rotary node {node['id']!r} has an invalid contract"
+            )
         binding = stream_control_binding_for_node(circuit, node)
+        prefix = "inverse_rotary" if op.startswith("inverse_") else "rotary"
+        position_offset = int(attrs.get("position_offset", 0))
         return (
-            f"rotary_bf16_{node['attrs']['head_count']}x"
-            f"{node['attrs']['head_width']}"
-            f"_r{node['attrs']['rotary_width']}"
-            f"_{rope_shader_suffix(node['attrs'])}"
+            f"{prefix}_bf16_{head_count}x"
+            f"{head_width}"
+            f"_r{rotary_width}"
+            f"_{rope_shader_suffix(attrs)}"
+            f"{f'_po{position_offset}' if position_offset else ''}"
             f"__sc{binding}.comp"
         )
     if op == "append_state_update":
@@ -1431,8 +1544,13 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         "rms_norm_per_head",
         "rms_norm_per_head_unscaled",
         "rotary_position_embedding",
+        "inverse_rotary_position_embedding",
     }:
         return int(node["attrs"]["head_count"])
+    if node["op"] == "grouped_linear":
+        out_features, _ = parameter_shape_for_node(circuit, node, tensor_index)
+        tile_rows = fp8_linear_tile_rows(int(out_features))
+        return (int(out_features) + tile_rows - 1) // tile_rows
     return 1
 
 
@@ -1503,12 +1621,12 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
     if "_prequant_fp8_e4m3_" in shader_file:
         return 1024
     if re.fullmatch(
-        r"(linear|linear_residual)_fp8_e4m3_b\d+x\d+_\d+x\d+\.comp",
+        r"(linear|linear_residual)_fp8_e4m3_(?:se8m0_)?b\d+x\d+_\d+x\d+\.comp",
         shader_file,
     ) or re.fullmatch(
         r"parallel_linear_silu_multiply_fp8_e4m3_b\d+x\d+_\d+x\d+\.comp",
         shader_file,
-    ):
+    ) or shader_file.startswith("grouped_linear_fp8_e4m3_"):
         return 1024
     return local_size_x_for_node(node)
 

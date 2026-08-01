@@ -25,6 +25,8 @@ const float ROPE_FACTOR = {{ROPE_FACTOR}};
 const float ROPE_CORRECTION_LOW = {{ROPE_CORRECTION_LOW}};
 const float ROPE_CORRECTION_HIGH = {{ROPE_CORRECTION_HIGH}};
 const float ROPE_ATTENTION_FACTOR = {{ROPE_ATTENTION_FACTOR}};
+const float ROPE_DIRECTION = {{ROPE_DIRECTION}};
+const int POSITION_OFFSET = {{POSITION_OFFSET}};
 
 float bf16_to_f32(uint value) {
     return uintBitsToFloat((value & 0xffffu) << 16);
@@ -87,13 +89,15 @@ float rope_angle(uint dim) {
             return 0.0;
         }
         float inv_freq = rope_inverse_frequency(frequency_index, HEAD_WIDTH);
-        return float(stream_control.words[1]) * inv_freq;
+        return (float(stream_control.words[1]) + float(POSITION_OFFSET)) *
+            inv_freq * ROPE_DIRECTION;
     }
     uint frequency_index = ROPE_INTERLEAVED
         ? dim / 2u
         : dim % (ROTARY_WIDTH / 2u);
     float inv_freq = rope_inverse_frequency(frequency_index, ROTARY_WIDTH);
-    return float(stream_control.words[1]) * inv_freq;
+    return (float(stream_control.words[1]) + float(POSITION_OFFSET)) *
+        inv_freq * ROPE_DIRECTION;
 }
 
 float rotate(uint base, uint dim) {

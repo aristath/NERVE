@@ -24,7 +24,10 @@ layout(set = 0, binding = 3) readonly buffer WeightScaleInv { uint words[]; } we
 const uint BLOCK_ROWS = {{BLOCK_ROWS}}u;
 const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
 const uint INPUT_SIZE = {{INPUT_SIZE}}u;
+const uint TOTAL_INPUT_SIZE = {{TOTAL_INPUT_SIZE}}u;
 const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
+const uint GROUP_COUNT = {{GROUP_COUNT}}u;
+const uint OUTPUTS_PER_GROUP = {{OUTPUTS_PER_GROUP}}u;
 const uint OUTPUT_TILE_ROWS = {{OUTPUT_TILE_ROWS}}u;
 const uint INPUT_FP8_WORDS = INPUT_SIZE / 4u;
 const uint INPUT_BLOCKS = INPUT_SIZE / BLOCK_COLUMNS;
@@ -47,8 +50,8 @@ float read_bf16_word(uint packed, uint index) {
     return bf16_to_f32(packed >> ((index & 1u) * 16u));
 }
 
-vec4 read_inputx4(uint column) {
-    uint offset = column >> 1u;
+vec4 read_inputx4(uint group, uint column) {
+    uint offset = (group * INPUT_SIZE + column) >> 1u;
     uint lo = input_frame.words[offset];
     uint hi = input_frame.words[offset + 1u];
     return vec4(
@@ -79,9 +82,11 @@ void main() {
     uint lane = gl_LocalInvocationID.x;
     uint cluster = lane >> 5u;
     uint cluster_lane = lane & 31u;
+    uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
+    uint group = first_row / OUTPUTS_PER_GROUP;
     for (uint block = cluster; block < INPUT_BLOCKS; block += 32u) {
         uint word = block * BLOCK_FP8_WORDS + cluster_lane;
-        vec4 input_value = read_inputx4(word * 4u);
+        vec4 input_value = read_inputx4(group, word * 4u);
         float lane_max = max(
             max(abs(input_value.x), abs(input_value.y)),
             max(abs(input_value.z), abs(input_value.w))
@@ -95,7 +100,6 @@ void main() {
     }
     barrier();
 
-    uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS;
     uint local_row = gl_SubgroupID;
     uint row = first_row + local_row;
     float sum = 0.0;

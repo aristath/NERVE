@@ -261,6 +261,11 @@ def test_composes_latent_attention_independent_experts_and_hyper_connections() -
     ] == [4, 4, 4]
     assert nodes["hyper_attention_reduce"]["attrs"]["output_element_bytes"] == [2]
     assert nodes["operator_residual"]["attrs"]["output_element_bytes"] == [2]
+    assert nodes["query_head_norm"]["attrs"]["head_count"] == 4
+    assert nodes["query_rope"]["attrs"]["head_count"] == 4
+    assert nodes["key_value_rope"]["attrs"]["head_count"] == 1
+    assert nodes["attention_inverse_rope"]["attrs"]["head_count"] == 4
+    assert nodes["attention_inverse_rope"]["attrs"].get("position_offset", 0) == 0
     node_ids = [node["id"] for node in circuit["nodes"]]
     assert node_ids.index("hyper_attention_reduce") < node_ids.index("operator_norm")
     assert node_ids.index("operator_residual") < node_ids.index(
@@ -330,6 +335,9 @@ def test_lowers_parallel_query_context_as_committed_state_and_transient_block() 
     )
     assert nodes["query_key_value_projection"]["inputs"] == ["operator_norm_out"]
     assert nodes["query_key_value_rope"]["attrs"]["position_mode"] == ("parallel_block")
+    assert nodes["query_rope"]["attrs"]["position_offset"] == 1
+    assert nodes["query_key_value_rope"]["attrs"]["position_offset"] == 1
+    assert nodes["attention_inverse_rope"]["attrs"]["position_offset"] == 1
     assert nodes["sparse_attention_read"]["attrs"]["causal"] is False
     assert nodes["sparse_attention_read"]["attrs"]["intra_block_visibility"] == "all"
     assert nodes["sparse_attention_read"]["attrs"]["query_state"] == ("transient")

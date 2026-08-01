@@ -154,6 +154,15 @@ fn recurrent_gate_kernel_receives_stream_control_metadata() {
 }
 
 #[test]
+fn inverse_rotary_kernel_receives_stream_control_metadata() {
+    let metadata =
+        VulkanKernelStreamMetadata::for_op("inverse_rotary_position_embedding");
+
+    assert!(metadata.uses_stream_tick);
+    assert!(metadata.push_constants().is_empty());
+}
+
+#[test]
 fn sparse_moe_kernels_receive_an_explicit_expert_start() {
     for op in ["sparse_moe_gate_up", "sparse_moe_down"] {
         let metadata = VulkanKernelStreamMetadata::for_op(op);

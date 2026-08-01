@@ -1951,8 +1951,65 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "BLOCK_ROWS": str(block_rows),
                 "BLOCK_COLUMNS": str(block_columns),
                 "INPUT_SIZE": str(input_size),
+                "TOTAL_INPUT_SIZE": str(input_size),
                 "OUTPUT_SIZE": str(output_size),
+                "GROUP_COUNT": "1",
+                "OUTPUTS_PER_GROUP": str(output_size),
                 "OUTPUT_TILE_ROWS": str(fp8_linear_tile_rows(output_size)),
+                "WEIGHT_SCALE_READ": (
+                    "uint packed = weight_scale_inv.words[index >> 2u];\n"
+                    "    uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu;\n"
+                    "    return uintBitsToFloat(e8m0 << 23u);"
+                    if scale_dtype == "se8m0"
+                    else (
+                        "return read_bf16_word("
+                        "weight_scale_inv.words[index >> 1u], index);"
+                    )
+                ),
+            },
+        )
+
+    grouped_fp8_linear = re.fullmatch(
+        r"grouped_linear_fp8_e4m3_(?:(se8m0)_)?b(\d+)x(\d+)_"
+        r"g(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if grouped_fp8_linear is not None:
+        scale_dtype = grouped_fp8_linear.group(1) or "bf16"
+        block_rows, block_columns, groups, total_input_size, output_size = map(
+            int, grouped_fp8_linear.groups()[1:]
+        )
+        if (
+            block_rows <= 0
+            or block_columns != 128
+            or groups <= 0
+            or total_input_size <= 0
+            or total_input_size % groups
+            or output_size <= 0
+            or output_size % groups
+        ):
+            raise ModelCompileError(
+                f"invalid grouped FP8 linear shader shape {shader_file!r}"
+            )
+        input_size = total_input_size // groups
+        outputs_per_group = output_size // groups
+        output_tile_rows = fp8_linear_tile_rows(output_size)
+        if input_size % block_columns or outputs_per_group % output_tile_rows:
+            raise ModelCompileError(
+                f"grouped FP8 linear shader {shader_file!r} crosses group tiles"
+            )
+        return render_shader_template(
+            source_dir,
+            "linear_fp8_e4m3.comp.template",
+            {
+                "BLOCK_ROWS": str(block_rows),
+                "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
+                "TOTAL_INPUT_SIZE": str(total_input_size),
+                "OUTPUT_SIZE": str(output_size),
+                "GROUP_COUNT": str(groups),
+                "OUTPUTS_PER_GROUP": str(outputs_per_group),
+                "OUTPUT_TILE_ROWS": str(output_tile_rows),
                 "WEIGHT_SCALE_READ": (
                     "uint packed = weight_scale_inv.words[index >> 2u];\n"
                     "    uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu;\n"
@@ -2374,6 +2431,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("ELEMENT_COUNT",),
         ),
         (
+            r"bounded_silu_multiply_bf16_(\d+)_limit([0-9eE+.-]+)\.comp",
+            "bounded_silu_multiply_bf16.comp.template",
+            ("ELEMENT_COUNT", "LIMIT"),
+        ),
+        (
             r"silu_multiply_batch(\d+)_bf16_(\d+)\.comp",
             "silu_multiply_batch_bf16.comp.template",
             ("BATCH_TILE_WIDTH", "ELEMENT_COUNT"),
@@ -2611,11 +2673,13 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("HEAD_COUNT", "HEAD_WIDTH", "ROTARY_WIDTH", "ROPE_THETA", "ROPE_LAYOUT"),
         ),
         (
-            r"rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"(inverse_)?rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
             r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
-            r"_a([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
+            r"_a([0-9eE+.-]+)_(half|interleaved|proportional)"
+            r"(?:_po(-?\d+))?\.comp",
             "rotary_bf16.comp.template",
             (
+                "INVERSE_PREFIX",
                 "HEAD_COUNT",
                 "HEAD_WIDTH",
                 "ROTARY_WIDTH",
@@ -2625,12 +2689,22 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "ROPE_CORRECTION_HIGH",
                 "ROPE_ATTENTION_FACTOR",
                 "ROPE_LAYOUT",
+                "POSITION_OFFSET",
             ),
         ),
         (
-            r"rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
+            r"(inverse_)?rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_(half|interleaved|proportional)(?:_po(-?\d+))?\.comp",
             "rotary_bf16.comp.template",
-            ("HEAD_COUNT", "HEAD_WIDTH", "ROTARY_WIDTH", "ROPE_THETA", "ROPE_LAYOUT"),
+            (
+                "INVERSE_PREFIX",
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+                "POSITION_OFFSET",
+            ),
         ),
         (
             r"append_kv_state_bf16_(\d+)x(\d+)\.comp",
@@ -2817,6 +2891,13 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 replacements.setdefault("ROPE_CORRECTION_LOW", "0.0")
                 replacements.setdefault("ROPE_CORRECTION_HIGH", "1.0")
                 replacements.setdefault("ROPE_ATTENTION_FACTOR", "1.0")
+            if template == "rotary_bf16.comp.template":
+                replacements["ROPE_DIRECTION"] = (
+                    "-1.0" if replacements.pop("INVERSE_PREFIX") else "1.0"
+                )
+                replacements["POSITION_OFFSET"] = (
+                    replacements.get("POSITION_OFFSET") or "0"
+                )
             temporal_control_bindings = {
                 "parallel_head_norm_rope_2way_temporal_bf16.comp.template": "6",
                 "rotary_temporal_bf16.comp.template": "2",

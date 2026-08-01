@@ -126,6 +126,7 @@ impl VulkanKernelStreamMetadata {
             uses_stream_tick: matches!(
                 op,
                 "rotary_position_embedding"
+                    | "inverse_rotary_position_embedding"
                     | "parallel_head_norm_rope_2way"
                     | "parallel_head_norm_rope_2way_codebook_u8"
                     | "parallel_head_norm_rope_2way_embedded_parameters"
