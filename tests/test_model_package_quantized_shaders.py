@@ -161,6 +161,97 @@ def test_parallel_linear_shader_selector_supports_fp8_weight_scale_pairs() -> No
     assert workgroup_count_x_for_node(circuit, node, tensor_index) == 320
 
 
+def test_linear_shader_selector_preserves_native_e8m0_block_scales(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "id": "projection",
+        "op": "linear",
+        "inputs": ["hidden"],
+        "outputs": ["projected"],
+        "params": ["projection_weight", "projection_scale"],
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "projection_weight": {"tensor": "projection.weight"},
+                "projection_scale": {"tensor": "projection.scale"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "projection.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [4096, 12288],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "projection.scale": {
+                "dtype": "F8_E8M0",
+                "shape": [32, 96],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+
+    shader_file = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 4096, "intermediate_size": 12288},
+    )
+
+    assert shader_file == (
+        "linear_fp8_e4m3_se8m0_b128x128_12288x4096.comp"
+    )
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
+    shader = (tmp_path / shader_file).read_text()
+    assert "uint e8m0 =" in shader
+    assert "uintBitsToFloat(e8m0 << 23u)" in shader
+    assert "read_bf16_word(weight_scale" not in shader
+
+
+def test_fp8_linear_rejects_non_scale_parameter_after_weight() -> None:
+    node = {
+        "id": "projection",
+        "op": "linear",
+        "inputs": ["hidden"],
+        "outputs": ["projected"],
+        "params": ["projection_weight", "projection_bias"],
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "projection_weight": {"tensor": "projection.weight"},
+                "projection_bias": {"tensor": "projection.bias"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "projection.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [4096, 12288],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "projection.bias": {
+                "dtype": "BF16",
+                "shape": [4096],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+
+    with pytest.raises(ModelCompileError, match="invalid scale shape"):
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 12288},
+        )
+
+
 def test_contiguous_swiglu_fusion_requires_compatible_fp8_partition() -> None:
     projection = {
         "id": "gate_up",

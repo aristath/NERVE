@@ -1778,13 +1778,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
 
     native_fp8_linear = re.fullmatch(
         r"(linear|linear_bias|linear_residual)_fp8_e4m3_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        r"(?:(se8m0)_)?b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if native_fp8_linear is not None:
         operation = native_fp8_linear.group(1)
+        scale_dtype = native_fp8_linear.group(2) or "bf16"
         block_rows, block_columns, input_size, output_size = map(
-            int, native_fp8_linear.groups()[1:]
+            int, native_fp8_linear.groups()[2:]
         )
         if (
             block_rows <= 0
@@ -1806,6 +1807,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "INPUT_SIZE": str(input_size),
                 "OUTPUT_SIZE": str(output_size),
                 "OUTPUT_TILE_ROWS": str(fp8_linear_tile_rows(output_size)),
+                "WEIGHT_SCALE_READ": (
+                    "uint packed = weight_scale_inv.words[index >> 2u];\n"
+                    "    uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu;\n"
+                    "    return uintBitsToFloat(e8m0 << 23u);"
+                    if scale_dtype == "se8m0"
+                    else (
+                        "return read_bf16_word("
+                        "weight_scale_inv.words[index >> 1u], index);"
+                    )
+                ),
             },
         )
 

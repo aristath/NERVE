@@ -120,12 +120,15 @@ def shader_file_for_node(
             block_rows, block_columns = fp8_block_shape_for_node(
                 circuit, node, tensor_index
             )
+            scale_suffix = fp8_scale_shader_suffix_for_node(
+                circuit, node, tensor_index
+            )
             has_bias = len(node.get("params", [])) == 3
             prefix = "linear_bias" if has_bias else "linear"
             if uses_prequantized_fp8_input(node):
                 prefix += "_prequant"
             return (
-                f"{prefix}_fp8_e4m3_b{block_rows}x{block_columns}_"
+                f"{prefix}_fp8_e4m3{scale_suffix}_b{block_rows}x{block_columns}_"
                 f"{in_features}x{out_features}.comp"
             )
         if parameter_dtype == "Q8_0":

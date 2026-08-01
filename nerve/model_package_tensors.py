@@ -1769,21 +1769,23 @@ def fp8_block_shape_for_node(
     circuit: Json, node: Json, tensor_index: Json
 ) -> tuple[int, int]:
     weight_id = str(node["params"][0])
-    scale_id = f"{weight_id}_scale_inv"
-    if len(node.get("params", [])) < 2 or node["params"][1] != scale_id:
+    if len(node.get("params", [])) < 2:
         raise ModelCompileError(
-            f"FP8 linear node {node['id']!r} does not bind {scale_id!r} "
+            f"FP8 linear node {node['id']!r} does not bind a block scale "
             "immediately after its weight"
         )
+    scale_id = str(node["params"][1])
     out_features, in_features = parameter_shape_for_id(circuit, weight_id, tensor_index)
     scale_shape = parameter_shape_for_id(circuit, scale_id, tensor_index)
     if len(scale_shape) != 2 or any(value <= 0 for value in scale_shape):
         raise ModelCompileError(
             f"FP8 linear node {node['id']!r} has invalid scale shape {scale_shape}"
         )
-    if parameter_dtype_for_id(circuit, scale_id, tensor_index) != "BF16":
+    scale_dtype = parameter_dtype_for_id(circuit, scale_id, tensor_index)
+    if scale_dtype not in {"BF16", "F8_E8M0"}:
         raise ModelCompileError(
-            f"FP8 linear node {node['id']!r} requires a BF16 block scale"
+            f"FP8 linear node {node['id']!r} has unsupported block scale dtype "
+            f"{scale_dtype!r}"
         )
     if parameter_layout_for_id(circuit, scale_id, tensor_index) != ROW_MAJOR_LAYOUT:
         raise ModelCompileError(
@@ -1813,6 +1815,18 @@ def fp8_block_shape_for_node(
             f"{[out_features, in_features]}"
         )
     return block_rows, block_columns
+
+
+def fp8_scale_dtype_for_node(circuit: Json, node: Json, tensor_index: Json) -> str:
+    fp8_block_shape_for_node(circuit, node, tensor_index)
+    return parameter_dtype_for_id(circuit, str(node["params"][1]), tensor_index)
+
+
+def fp8_scale_shader_suffix_for_node(
+    circuit: Json, node: Json, tensor_index: Json
+) -> str:
+    scale_dtype = fp8_scale_dtype_for_node(circuit, node, tensor_index)
+    return "_se8m0" if scale_dtype == "F8_E8M0" else ""
 
 
 def fp8_moe_block_shape_for_stage(
