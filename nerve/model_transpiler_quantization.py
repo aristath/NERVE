@@ -6,6 +6,13 @@ from nerve.quantized_layouts import (
 )
 
 
+MXFP4_EXPERT_WEIGHT_PATTERN = re.compile(r"^.+\.ffn\.experts\.\d+\.w[123]\.weight$")
+MXFP4_FORMAT = "mxfp4_e2m1"
+MXFP4_GROUP_SIZE = 32
+MXFP4_VALUES_PER_BYTE = 2
+MXFP4_PACKING_ORDER = "low_nibble_then_high_nibble_along_k"
+
+
 def tensor_matrix_shape(tensors: dict[str, Json], tensor_name: str) -> list[int]:
     info = tensors[tensor_name]
     return [int(value) for value in info.get("logical_shape") or info["shape"]]
@@ -273,6 +280,7 @@ def annotate_quantized_linear_tensors(
     model_dir: Path, tensors: dict[str, Json]
 ) -> None:
     config = read_json(model_dir / "config.json")
+    annotate_mxfp4_expert_tensors(config, tensors)
     quantization = config.get("quantization_config")
     if not isinstance(quantization, dict):
         return
@@ -385,6 +393,112 @@ def annotate_quantized_linear_tensors(
                     "qzeros": qzeros_name,
                 }
             )
+
+
+def annotate_mxfp4_expert_tensors(config: Json, tensors: dict[str, Json]) -> None:
+    """Describe packed E2M1 expert weights without changing their bytes.
+
+    Safetensors currently exposes ``float4_e2m1fn_x2`` payloads as I8 storage.
+    The I8 label alone is not an executable numerical contract: each byte stores
+    two floating-point values along K and every 32 logical values share an E8M0
+    power-of-two scale. Preserve the physical shape and dtype while recording
+    the logical matrix and exact source representation for later kernel choice.
+    """
+
+    configured_formats: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        configured = value.get("expert_dtype")
+        if configured is not None:
+            configured_formats.add(str(configured).lower())
+        for nested in value.values():
+            if isinstance(nested, dict):
+                visit(nested)
+
+    visit(config)
+    if len(configured_formats) > 1:
+        raise ModelTranspileError(
+            "source contains conflicting expert_dtype declarations: "
+            + ", ".join(sorted(configured_formats))
+        )
+    if configured_formats != {"fp4"}:
+        return
+
+    matched = 0
+    for name, info in tensors.items():
+        if MXFP4_EXPERT_WEIGHT_PATTERN.fullmatch(name) is None:
+            continue
+        matched += 1
+        shape = [int(value) for value in info.get("shape", [])]
+        if info.get("dtype") != "I8" or len(shape) != 2:
+            raise ModelTranspileError(
+                f"MXFP4 expert tensor {name!r} must use packed I8 matrix storage; "
+                f"got dtype {info.get('dtype')!r} and shape {shape}"
+            )
+        output_rows, packed_k = shape
+        logical_k = packed_k * MXFP4_VALUES_PER_BYTE
+        if output_rows <= 0 or logical_k <= 0 or logical_k % MXFP4_GROUP_SIZE:
+            raise ModelTranspileError(
+                f"MXFP4 expert tensor {name!r} has invalid packed shape {shape}; "
+                f"logical K must be aligned to {MXFP4_GROUP_SIZE} values"
+            )
+        expected_bytes = output_rows * packed_k
+        if "byte_count" in info and int(info["byte_count"]) != expected_bytes:
+            raise ModelTranspileError(
+                f"MXFP4 expert tensor {name!r} stores {info['byte_count']} bytes, "
+                f"expected {expected_bytes} for packed shape {shape}"
+            )
+        logical_shape = [output_rows, logical_k]
+        existing_logical_shape = info.get("logical_shape")
+        if (
+            existing_logical_shape is not None
+            and [int(value) for value in existing_logical_shape] != logical_shape
+        ):
+            raise ModelTranspileError(
+                f"MXFP4 expert tensor {name!r} declares incompatible logical shape "
+                f"{existing_logical_shape}; expected {logical_shape}"
+            )
+        scale_name = name.removesuffix(".weight") + ".scale"
+        scale = tensors.get(scale_name)
+        expected_scale_shape = [output_rows, logical_k // MXFP4_GROUP_SIZE]
+        scale_shape = (
+            [int(value) for value in scale.get("shape", [])]
+            if isinstance(scale, dict)
+            else []
+        )
+        if (
+            not isinstance(scale, dict)
+            or scale.get("dtype") != "F8_E8M0"
+            or scale_shape != expected_scale_shape
+        ):
+            raise ModelTranspileError(
+                f"MXFP4 expert tensor {name!r} requires F8_E8M0 scale "
+                f"{scale_name!r} with shape {expected_scale_shape}; got "
+                f"dtype {scale.get('dtype') if isinstance(scale, dict) else None!r} "
+                f"and shape {scale_shape}"
+            )
+        info["logical_shape"] = logical_shape
+        info["parameter_count"] = output_rows * logical_k
+        info["quantization"] = {
+            "format": MXFP4_FORMAT,
+            "bits": 4,
+            "element_type": "float",
+            "values_per_byte": MXFP4_VALUES_PER_BYTE,
+            "packing_axis": 1,
+            "packing_order": MXFP4_PACKING_ORDER,
+            "group_size": MXFP4_GROUP_SIZE,
+            "scales": scale_name,
+            "scale_dtype": "F8_E8M0",
+            "scale_mode": "power_of_two_per_output_row_k_group",
+        }
+
+    if matched == 0:
+        raise ModelTranspileError(
+            "source declares FP4 experts but exposes no structurally recognizable "
+            "packed expert weights"
+        )
 
 
 def annotate_compressed_tensors_channel_fp8_linears(

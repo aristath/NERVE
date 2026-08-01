@@ -203,6 +203,78 @@ def test_preserves_native_e8m0_block_scale_without_conversion() -> None:
     }
 
 
+def test_annotates_native_mxfp4_expert_storage_without_expansion(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.json").write_text('{"text_config":{"expert_dtype":"fp4"}}')
+    weight_name = "layers.0.ffn.experts.7.w1.weight"
+    scale_name = "layers.0.ffn.experts.7.w1.scale"
+    tensors = {
+        weight_name: {**_tensor([6, 32], "I8"), "byte_count": 192},
+        scale_name: {**_tensor([6, 2], "F8_E8M0"), "byte_count": 12},
+    }
+
+    annotate_quantized_linear_tensors(tmp_path, tensors)
+
+    assert tensors[weight_name]["dtype"] == "I8"
+    assert tensors[weight_name]["shape"] == [6, 32]
+    assert tensors[weight_name]["byte_count"] == 192
+    assert tensors[weight_name]["parameter_count"] == 384
+    assert tensors[weight_name]["logical_shape"] == [6, 64]
+    assert tensors[weight_name]["quantization"] == {
+        "format": "mxfp4_e2m1",
+        "bits": 4,
+        "element_type": "float",
+        "values_per_byte": 2,
+        "packing_axis": 1,
+        "packing_order": "low_nibble_then_high_nibble_along_k",
+        "group_size": 32,
+        "scales": scale_name,
+        "scale_dtype": "F8_E8M0",
+        "scale_mode": "power_of_two_per_output_row_k_group",
+    }
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "weight_dtype", "scale_shape", "scale_dtype", "message"),
+    [
+        ([6, 31], "I8", [6, 2], "F8_E8M0", "logical K must be aligned"),
+        ([6, 32], "F8_E4M3", [6, 2], "F8_E8M0", "packed I8 matrix"),
+        ([6, 32], "I8", [6, 1], "F8_E8M0", "requires F8_E8M0 scale"),
+        ([6, 32], "I8", [6, 2], "BF16", "requires F8_E8M0 scale"),
+    ],
+)
+def test_rejects_invalid_mxfp4_storage_contract(
+    tmp_path: Path,
+    weight_shape: list[int],
+    weight_dtype: str,
+    scale_shape: list[int],
+    scale_dtype: str,
+    message: str,
+) -> None:
+    (tmp_path / "config.json").write_text('{"expert_dtype":"fp4"}')
+    weight_name = "layers.0.ffn.experts.0.w2.weight"
+    tensors = {
+        weight_name: _tensor(weight_shape, weight_dtype),
+        "layers.0.ffn.experts.0.w2.scale": _tensor(scale_shape, scale_dtype),
+    }
+
+    with pytest.raises(ModelTranspileError, match=message):
+        annotate_quantized_linear_tensors(tmp_path, tensors)
+
+
+def test_does_not_reinterpret_int8_storage_without_fp4_contract(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    weight_name = "layers.0.ffn.experts.0.w1.weight"
+    tensors = {weight_name: _tensor([6, 32], "I8")}
+
+    annotate_quantized_linear_tensors(tmp_path, tensors)
+
+    assert tensors[weight_name] == _tensor([6, 32], "I8")
+
+
 def test_annotates_auto_gptq_storage_as_logical_packed_linear(
     tmp_path: Path,
 ) -> None:

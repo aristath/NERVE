@@ -134,3 +134,40 @@ def test_rejects_ambiguous_hash_and_score_routing() -> None:
 
     with pytest.raises(ModelTranspileError, match="ambiguous expert selection"):
         discover_model_structure(Path("synthetic"), config, tensors)
+
+
+def test_keeps_mxfp4_weight_and_scale_independently_selectable_per_expert() -> None:
+    config, tensors = _source()
+    for name, info in tuple(tensors.items()):
+        if ".ffn.experts." not in name or not name.endswith(".weight"):
+            continue
+        logical_shape = list(info["shape"])
+        info["dtype"] = "I8"
+        info["shape"] = [logical_shape[0], logical_shape[1] // 2]
+        info["logical_shape"] = logical_shape
+        scale = name.removesuffix(".weight") + ".scale"
+        info["quantization"] = {
+            "format": "mxfp4_e2m1",
+            "scales": scale,
+        }
+        tensors[scale] = _tensor([logical_shape[0], 1], "F8_E8M0")
+
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    component = make_layer(structure, structure.layers[0])
+    circuit = build_component_circuit(component, Path("layer_00.json"))
+    nodes = {node["id"]: node for node in circuit["nodes"]}
+
+    assert structure.layers[0].feed_forward_attributes["source_expert_format"] == (
+        "mxfp4_e2m1"
+    )
+    assert nodes["sparse_moe_gate_up"]["attrs"]["selected_parameter_accesses"][0][
+        "mapping"
+    ][1] == {
+        "selector": 1,
+        "parameter_ids": [
+            "routed_expert_001_w1",
+            "routed_expert_001_w1_scale",
+            "routed_expert_001_w3",
+            "routed_expert_001_w3_scale",
+        ],
+    }

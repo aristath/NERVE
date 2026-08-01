@@ -56,7 +56,14 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                     "id": "routed_experts",
                     "resource_count": len(expert_ids),
                     "selection_signal": "moe_routes",
-                    "resource_granularity": "expert",
+                    "encoding": {
+                        "element_type": "u32",
+                        "selection_count_per_activation": int(
+                            feed_forward["experts_per_token"]
+                        ),
+                        "index_shift": 0,
+                        "index_mask": (1 << (len(expert_ids) - 1).bit_length()) - 1,
+                    },
                 },
             },
         },

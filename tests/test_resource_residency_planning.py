@@ -49,7 +49,7 @@ def _routed_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                         "element_type": "u32",
                         "selection_count_per_activation": 2,
                         "index_shift": 0,
-                        "index_mask": 0xffff,
+                        "index_mask": 0xFFFF,
                     },
                 }
             },
@@ -111,7 +111,7 @@ def _optional_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                         "element_type": "u32",
                         "selection_count_per_activation": 1,
                         "index_shift": 0,
-                        "index_mask": 0xffff,
+                        "index_mask": 0xFFFF,
                     },
                 }
             },
@@ -137,6 +137,71 @@ def _optional_component() -> tuple[list[dict[str, object]], dict[str, object]]:
         "projection_bank": {"tensor": "tensor.projection_bank"},
         "always_bias": {"tensor": "tensor.always_bias"},
     }
+
+
+def _independent_component() -> tuple[list[dict[str, object]], dict[str, object]]:
+    nodes = [
+        {
+            "id": "choose",
+            "op": "choose",
+            "inputs": ["input"],
+            "outputs": ["chosen"],
+            "params": ["router"],
+            "attrs": {
+                "selection_domain": {
+                    "id": "selectable_units",
+                    "resource_count": 2,
+                    "selection_signal": "chosen",
+                    "encoding": {
+                        "element_type": "u32",
+                        "selection_count_per_activation": 1,
+                        "index_shift": 0,
+                        "index_mask": 0xFFFF,
+                    },
+                }
+            },
+        },
+        {
+            "id": "selected_compute",
+            "op": "selected_compute",
+            "inputs": ["input", "chosen"],
+            "outputs": ["output"],
+            "params": [
+                "unit_0_scale",
+                "unit_0_weight",
+                "unit_1_scale",
+                "unit_1_weight",
+            ],
+            "attrs": {
+                "selected_parameter_accesses": [
+                    {
+                        "selection_signal": "chosen",
+                        "mapping": [
+                            {
+                                "selector": 0,
+                                "parameter_ids": ["unit_0_scale", "unit_0_weight"],
+                            },
+                            {
+                                "selector": 1,
+                                "parameter_ids": ["unit_1_scale", "unit_1_weight"],
+                            },
+                        ],
+                    }
+                ]
+            },
+        },
+    ]
+    refs = {
+        parameter: {"tensor": f"tensor.{parameter}"}
+        for parameter in (
+            "router",
+            "unit_0_scale",
+            "unit_0_weight",
+            "unit_1_scale",
+            "unit_1_weight",
+        )
+    }
+    return nodes, refs
 
 
 def _component(
@@ -210,6 +275,61 @@ def test_discovers_structurally_different_optional_partition_pattern() -> None:
     assert analysis["groups"][0]["resume_node_id"] == "optional_projection"
 
 
+def test_discovers_independently_stored_selected_resources() -> None:
+    nodes, refs = _independent_component()
+    tensors = {
+        "tensors": {
+            "tensor.router": _tensor(4, [2]),
+            "tensor.unit_0_scale": _tensor(2, [2]),
+            "tensor.unit_0_weight": _tensor(8, [2, 4]),
+            "tensor.unit_1_scale": _tensor(2, [2]),
+            "tensor.unit_1_weight": _tensor(8, [2, 4]),
+        }
+    }
+
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensors,
+        require_direct_packaging=True,
+    )
+
+    assert analysis["spine_tensors"] == ["tensor.router"]
+    assert analysis["dynamic_tensors"] == {
+        f"tensor.unit_{unit}_{kind}": {"storage": "independent_resource"}
+        for unit in range(2)
+        for kind in ("scale", "weight")
+    }
+    assert partition_counts_for_packaging(analysis) == {}
+    group = analysis["groups"][0]
+    assert group["storage"] == "independent_resources"
+    assert group["partition_count"] == 2
+    assert {(access["selector"], access["tensor"]) for access in group["accesses"]} == {
+        (unit, f"tensor.unit_{unit}_{kind}")
+        for unit in range(2)
+        for kind in ("scale", "weight")
+    }
+
+
+def test_rejects_incomplete_independent_selector_table() -> None:
+    nodes, refs = _independent_component()
+    nodes[1]["attrs"]["selected_parameter_accesses"][0]["mapping"].pop()
+
+    with pytest.raises(ModelCompileError, match="must map every selector"):
+        analyze_resource_residency_components(
+            components=[_component(nodes, refs)],
+            tensor_index={
+                "tensors": {
+                    "tensor.router": _tensor(4, [2]),
+                    "tensor.unit_0_scale": _tensor(2, [2]),
+                    "tensor.unit_0_weight": _tensor(8, [2, 4]),
+                    "tensor.unit_1_scale": _tensor(2, [2]),
+                    "tensor.unit_1_weight": _tensor(8, [2, 4]),
+                }
+            },
+            require_direct_packaging=True,
+        )
+
+
 def test_rejects_selector_without_physical_selected_access() -> None:
     nodes, refs = _optional_component()
     nodes[1]["attrs"] = {}
@@ -263,14 +383,12 @@ def test_reuses_compatible_partitions_across_independent_selectors() -> None:
     second_nodes[0]["id"] = "second_switch"
     second_nodes[0]["outputs"] = ["second_index"]
     second_nodes[0]["attrs"]["selection_domain"]["id"] = "second_feature"
-    second_nodes[0]["attrs"]["selection_domain"][
-        "selection_signal"
-    ] = "second_index"
+    second_nodes[0]["attrs"]["selection_domain"]["selection_signal"] = "second_index"
     second_nodes[1]["id"] = "second_projection"
     second_nodes[1]["inputs"] = ["input", "second_index"]
-    second_nodes[1]["attrs"]["selected_parameter_accesses"][0][
-        "selection_signal"
-    ] = "second_index"
+    second_nodes[1]["attrs"]["selected_parameter_accesses"][0]["selection_signal"] = (
+        "second_index"
+    )
 
     analysis = analyze_resource_residency_components(
         components=[
@@ -300,9 +418,9 @@ def test_reuses_compatible_partitions_across_independent_selectors() -> None:
             "ambiguous selection domain",
         ),
         (
-            lambda nodes: nodes[1]["attrs"]["selected_parameter_accesses"][
-                0
-            ].update({"prefetch": True}),
+            lambda nodes: nodes[1]["attrs"]["selected_parameter_accesses"][0].update(
+                {"prefetch": True}
+            ),
             "ambiguous selected parameter access",
         ),
         (
@@ -428,8 +546,7 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
     table = package_dir / partition_metadata["digest_table_path"]
     assert table.stat().st_size == 3 * 32
     assert table.read_bytes() == b"".join(
-        sha256(bytes(range(start, start + 8))).digest()
-        for start in (0, 8, 16)
+        sha256(bytes(range(start, start + 8))).digest() for start in (0, 8, 16)
     )
     assert len(contract["resources"]) == 1
     assert len(contract["atomic_groups"]) == 1
@@ -448,8 +565,8 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
         )
         for selector in contract["selectors"]
     ] == [
-        ("feature_index", "u32", 1, 0, 0xffff),
-        ("feature_index", "u32", 1, 0, 0xffff),
+        ("feature_index", "u32", 1, 0, 0xFFFF),
+        ("feature_index", "u32", 1, 0, 0xFFFF),
     ]
     assert len(contract["checkpoints"]) == 2
     assert len(contract["bindings"]) == 4
@@ -464,9 +581,7 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
         if binding["parameter_id"] == "projection_bank"
     )
     assert dynamic_binding["mapping"]["kind"] == "partition_template_member"
-    assert (
-        dynamic_binding["mapping"]["partition_template_id"] == template["id"]
-    )
+    assert dynamic_binding["mapping"]["partition_template_id"] == template["id"]
     spine_binding = next(
         binding
         for binding in contract["bindings"]
@@ -487,14 +602,95 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
 
     def keys(value: object) -> set[str]:
         if isinstance(value, dict):
-            return set(value).union(
-                *(keys(child) for child in value.values())
-            )
+            return set(value).union(*(keys(child) for child in value.values()))
         if isinstance(value, list):
             return set().union(*(keys(child) for child in value))
         return set()
 
     assert keys(contract).isdisjoint(forbidden_runtime_policy_fields)
+
+
+def test_builds_concrete_group_table_for_independent_resources(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    tensor_index = {
+        "tensors": {
+            "tensor.router": _write_source_tensor(
+                source_dir,
+                tensor_name="tensor.router",
+                shape=[2],
+                payload=b"rt",
+            ),
+            **{
+                f"tensor.unit_{unit}_{kind}": _write_source_tensor(
+                    source_dir,
+                    tensor_name=f"tensor.unit_{unit}_{kind}",
+                    shape=[2] if kind == "scale" else [2, 4],
+                    payload=bytes([16 * unit + offset]) * (2 if kind == "scale" else 8),
+                )
+                for unit in range(2)
+                for offset, kind in enumerate(("scale", "weight"), start=1)
+            },
+        },
+        "totals": {
+            "tensor_count": 5,
+            "parameter_count": 22,
+            "byte_count": 22,
+        },
+    }
+    nodes, refs = _independent_component()
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensor_index,
+        require_direct_packaging=True,
+    )
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    packaged = copy_tensor_package(
+        tensor_index,
+        package_dir,
+        partition_counts=partition_counts_for_packaging(analysis),
+    )
+    manifest = {
+        "circuit_graph": {
+            "components": [
+                {
+                    "component_id": "component",
+                    "circuit": {"nodes": nodes},
+                    "params": {"refs": refs},
+                }
+            ]
+        },
+        "speculative_decoders": [],
+    }
+
+    contract = build_planned_resource_residency_contract(
+        package_dir=package_dir,
+        tensor_index=packaged,
+        manifest=manifest,
+    )
+
+    selector = contract["selectors"][0]
+    assert selector["mapping"]["kind"] == "group_table"
+    assert len(selector["mapping"]["atomic_group_ids"]) == 2
+    assert contract["partition_templates"] == []
+    assert len(contract["resources"]) == 5
+    assert len(contract["atomic_groups"]) == 3
+    dynamic_bindings = [
+        binding
+        for binding in contract["bindings"]
+        if binding["parameter_id"] != "router"
+    ]
+    assert len(dynamic_bindings) == 4
+    assert {
+        binding["mapping"]["atomic_group_id"] for binding in dynamic_bindings
+    } == set(selector["mapping"]["atomic_group_ids"])
+    assert all(
+        binding["mapping"]["kind"] == "atomic_group" for binding in dynamic_bindings
+    )
+    validate_resource_residency_contract(package_dir, contract, manifest)
 
 
 def test_composite_packaging_hashes_output_partitions_across_source_parts(
@@ -551,13 +747,10 @@ def test_composite_packaging_hashes_output_partitions_across_source_parts(
         partition_counts={"tensor.composite_bank": 3},
     )
 
-    integrity = packaged["tensors"]["tensor.composite_bank"][
-        "partition_integrity"
-    ]
+    integrity = packaged["tensors"]["tensor.composite_bank"]["partition_integrity"]
     table = (package_dir / integrity["digest_table_path"]).read_bytes()
     assert table == b"".join(
-        sha256(payload[start : start + 8]).digest()
-        for start in (0, 8, 16)
+        sha256(payload[start : start + 8]).digest() for start in (0, 8, 16)
     )
 
 
@@ -574,8 +767,6 @@ def test_planner_implementation_has_no_model_or_operator_special_cases(
     forbidden: str,
 ) -> None:
     source = (
-        Path(__file__).parents[1]
-        / "nerve"
-        / "resource_residency_planning.py"
+        Path(__file__).parents[1] / "nerve" / "resource_residency_planning.py"
     ).read_text()
     assert forbidden not in source.lower()

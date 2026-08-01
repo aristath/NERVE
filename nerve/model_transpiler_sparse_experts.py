@@ -57,7 +57,7 @@ def discover_independent_sparse_experts(
 
     parameters: dict[str, str] = {}
     intermediate_size: int | None = None
-    source_expert_format = str(config.get("expert_dtype") or "native").lower()
+    source_expert_formats: set[str] = set()
     for expert in expert_ids:
         found = projections[expert]
         if set(found) != {"w1", "w2", "w3"}:
@@ -65,15 +65,12 @@ def discover_independent_sparse_experts(
                 f"layer prefix {prefix!r} expert {expert} is incomplete: "
                 f"found {sorted(found)}, expected ['w1', 'w2', 'w3']"
             )
-        w1_shape = _logical_weight_shape(
-            tensors, found["w1"], source_expert_format=source_expert_format
+        source_expert_formats.update(
+            _source_weight_format(tensors[name]) for name in found.values()
         )
-        w2_shape = _logical_weight_shape(
-            tensors, found["w2"], source_expert_format=source_expert_format
-        )
-        w3_shape = _logical_weight_shape(
-            tensors, found["w3"], source_expert_format=source_expert_format
-        )
+        w1_shape = _logical_weight_shape(tensors, found["w1"])
+        w2_shape = _logical_weight_shape(tensors, found["w2"])
+        w3_shape = _logical_weight_shape(tensors, found["w3"])
         expert_intermediate = w1_shape[0]
         if (
             w1_shape != [expert_intermediate, hidden_size]
@@ -96,6 +93,12 @@ def discover_independent_sparse_experts(
             _attach_source_scale(tensors, parameters, parameter_id, name)
 
     assert intermediate_size is not None
+    if len(source_expert_formats) != 1:
+        raise ModelTranspileError(
+            f"layer prefix {prefix!r} mixes routed expert representations: "
+            + ", ".join(sorted(source_expert_formats))
+        )
+    source_expert_format = next(iter(source_expert_formats))
     router = f"{prefix}.ffn.gate.weight"
     if router not in tensors:
         raise ModelTranspileError(
@@ -192,21 +195,35 @@ def discover_independent_sparse_experts(
     )
 
 
-def _logical_weight_shape(
-    tensors: dict[str, Json], name: str, *, source_expert_format: str
-) -> list[int]:
-    shape = _shape(tensors, name)
+def _logical_weight_shape(tensors: dict[str, Json], name: str) -> list[int]:
+    shape = [
+        int(value)
+        for value in tensors[name].get("logical_shape", tensors[name].get("shape", []))
+    ]
     if len(shape) != 2:
         raise ModelTranspileError(f"expert tensor {name!r} must be a matrix")
-    if source_expert_format == "fp4" and tensors[name].get("dtype") == "I8":
-        return [shape[0], shape[1] * 2]
     return shape
+
+
+def _source_weight_format(info: Json) -> str:
+    quantization = info.get("quantization")
+    if isinstance(quantization, dict) and quantization.get("format"):
+        return str(quantization["format"])
+    return str(info.get("dtype") or "unknown")
 
 
 def _attach_source_scale(
     tensors: dict[str, Json], parameters: dict[str, str], parameter_id: str, weight: str
 ) -> None:
-    scale = weight.removesuffix(".weight") + ".scale"
+    quantization = tensors[weight].get("quantization")
+    declared_scale = (
+        quantization.get("scales") if isinstance(quantization, dict) else None
+    )
+    scale = (
+        str(declared_scale)
+        if isinstance(declared_scale, str) and declared_scale
+        else weight.removesuffix(".weight") + ".scale"
+    )
     if scale in tensors:
         parameters[f"{parameter_id}_scale"] = scale
     elif tensors[weight].get("dtype") in {"I8", "F8_E4M3"}:

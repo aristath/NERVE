@@ -1,10 +1,9 @@
 from nerve.model_transpiler_types import *
 from nerve.model_transpiler_quantization import annotate_quantized_linear_tensors
 
+
 def make_tensor_index(model_dir: Path) -> Json:
     tensor_entries: Json = {}
-    total_params = 0
-    total_bytes = 0
     source_files: list[Json] = []
 
     for weights_file in discover_safetensor_files(model_dir):
@@ -23,8 +22,6 @@ def make_tensor_index(model_dir: Path) -> Json:
             offsets = info["data_offsets"]
             params = math.prod(shape)
             byte_count = offsets[1] - offsets[0]
-            total_params += params
-            total_bytes += byte_count
             tensor_entries[name] = {
                 "dtype": info["dtype"],
                 "shape": shape,
@@ -46,8 +43,12 @@ def make_tensor_index(model_dir: Path) -> Json:
         },
         "totals": {
             "tensor_count": len(tensor_entries),
-            "parameter_count": total_params,
-            "byte_count": total_bytes,
+            "parameter_count": sum(
+                int(info["parameter_count"]) for info in tensor_entries.values()
+            ),
+            "byte_count": sum(
+                int(info["byte_count"]) for info in tensor_entries.values()
+            ),
         },
         "tensors": tensor_entries,
     }
