@@ -47,34 +47,15 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         )
         == "quantize_batch16_int8_symmetric_pairpacked_b32_h5120.comp"
     )
-    assert (
-        weight_shared_batch_shader_file(
-            "linear_prequant_pairpacked_int4_gptq_sf16_g128_5120x17408.comp"
-        )
-        == (
-            "linear_prequant_pairpacked_batch16_int4_gptq_"
-            "sf16_g128_5120x17408.comp"
-        )
-    )
-    assert (
-        weight_shared_batch_shader_file(
-            "rms_norm_quantize_int8_pairpacked_b32_"
-            "h5120_eps1e-06_offset1.comp"
-        )
-        == (
-            "rms_norm_quantize_batch16_int8_pairpacked_b32_"
-            "h5120_eps1e-06_offset1.comp"
-        )
-    )
-    assert (
-        weight_shared_batch_shader_file(
-            "silu_multiply_quantize_int8_pairpacked_b32_h17408.comp"
-        )
-        == (
-            "silu_multiply_quantize_batch16_int8_pairpacked_"
-            "b32_h17408.comp"
-        )
-    )
+    assert weight_shared_batch_shader_file(
+        "linear_prequant_pairpacked_int4_gptq_sf16_g128_5120x17408.comp"
+    ) == ("linear_prequant_pairpacked_batch16_int4_gptq_sf16_g128_5120x17408.comp")
+    assert weight_shared_batch_shader_file(
+        "rms_norm_quantize_int8_pairpacked_b32_h5120_eps1e-06_offset1.comp"
+    ) == ("rms_norm_quantize_batch16_int8_pairpacked_b32_h5120_eps1e-06_offset1.comp")
+    assert weight_shared_batch_shader_file(
+        "silu_multiply_quantize_int8_pairpacked_b32_h17408.comp"
+    ) == ("silu_multiply_quantize_batch16_int8_pairpacked_b32_h17408.comp")
     assert (
         weight_shared_batch_shader_file(
             "linear_residual_int4_ct_sbf16_g32_16384x5376.comp"
@@ -112,13 +93,9 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         "b128x128_bf16_2048x8192_4096_32_32.comp"
     )
     assert weight_shared_batch_shader_file(
-        "contiguous_linear_swiglu_prequant_fp8_e4m3_"
-        "b128x128_2048x512.comp",
+        "contiguous_linear_swiglu_prequant_fp8_e4m3_b128x128_2048x512.comp",
         tile_width=4,
-    ) == (
-        "contiguous_linear_swiglu_prequant_batch4_fp8_e4m3_"
-        "b128x128_2048x512.comp"
-    )
+    ) == ("contiguous_linear_swiglu_prequant_batch4_fp8_e4m3_b128x128_2048x512.comp")
     assert (
         weight_shared_batch_shader_file("linear_bf16_1024x1024.comp")
         == "linear_batch16_bf16_1024x1024.comp"
@@ -164,15 +141,9 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         )
         == "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp"
     )
-    assert (
-        weight_shared_batch_shader_file(
-            "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.comp"
-        )
-        == (
-            "linear_sigmoid_scalar_multiply_residual2_batch16_bf16_"
-            "2048x2048.comp"
-        )
-    )
+    assert weight_shared_batch_shader_file(
+        "linear_sigmoid_scalar_multiply_residual2_bf16_2048x2048.comp"
+    ) == ("linear_sigmoid_scalar_multiply_residual2_batch16_bf16_2048x2048.comp")
     assert (
         weight_shared_batch_shader_file("add_bf16_2048.comp")
         == "add_batch16_bf16_2048.comp"
@@ -298,8 +269,7 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         == 272
     )
     contiguous_swiglu_cooperative = cooperative_float8_e4m3_batch_shader_file(
-        "contiguous_linear_swiglu_prequant_fp8_e4m3_"
-        "b128x128_2048x512.comp",
+        "contiguous_linear_swiglu_prequant_fp8_e4m3_b128x128_2048x512.comp",
         shape=(16, 16, 16),
     )
     assert contiguous_swiglu_cooperative == (
@@ -308,16 +278,14 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     )
     assert (
         cooperative_float8_e4m3_batch_shader_file(
-            "contiguous_linear_swiglu_prequant_fp8_e4m3_"
-            "b128x128_2048x520.comp",
+            "contiguous_linear_swiglu_prequant_fp8_e4m3_b128x128_2048x520.comp",
             shape=(16, 16, 16),
         )
         is None
     )
     assert (
         cooperative_float8_e4m3_workgroup_count_x(
-            "contiguous_linear_swiglu_prequant_fp8_e4m3_"
-            "b128x128_2048x512.comp",
+            "contiguous_linear_swiglu_prequant_fp8_e4m3_b128x128_2048x512.comp",
             shape=(16, 16, 16),
         )
         == 16
@@ -340,6 +308,7 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
     assert frame_parallel["lane_tile_width"] == 1
     assert frame_parallel["independent_candidate_compatible"] is True
     assert frame_parallel["causal_sequence_compatible"] is True
+    assert frame_parallel["parallel_block_compatible"] is True
     assert frame_parallel["device_requirements"] == {
         "vulkan_device_extensions": [],
         "vulkan_features": [],
@@ -362,6 +331,10 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
     )
     assert all(
         implementation["causal_sequence_compatible"] is True
+        for implementation in portable
+    )
+    assert all(
+        implementation["parallel_block_compatible"] is True
         for implementation in portable
     )
 
@@ -564,6 +537,7 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     assert temporal["execution_domain"] == "prefill"
     assert temporal["independent_candidate_compatible"] is False
     assert temporal["causal_sequence_compatible"] is True
+    assert temporal["parallel_block_compatible"] is False
 
 
 def test_stateful_causal_scans_expose_transactional_snapshots(
@@ -572,8 +546,7 @@ def test_stateful_causal_scans_expose_transactional_snapshots(
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
         "causal_conv1d_silu_temporal_bf16_c8192_k4__pbc31.comp",
-        "gated_delta_scan_k16x128_v32x128_af32_dtbf16_nf32_"
-        "eps1e-06__pbc31.comp",
+        "gated_delta_scan_k16x128_v32x128_af32_dtbf16_nf32_eps1e-06__pbc31.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
@@ -734,6 +707,7 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
         "lane_tile_width": 64,
         "independent_candidate_compatible": False,
         "causal_sequence_compatible": True,
+        "parallel_block_compatible": False,
         "device_requirements": {
             "vulkan_device_extensions": [],
             "vulkan_features": [],
@@ -770,6 +744,7 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
             "lane_tile_width": tile_width,
             "independent_candidate_compatible": True,
             "causal_sequence_compatible": True,
+            "parallel_block_compatible": True,
             "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -830,6 +805,7 @@ def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
         "lane_tile_width": 64,
         "independent_candidate_compatible": False,
         "causal_sequence_compatible": True,
+        "parallel_block_compatible": False,
         "device_requirements": {
             "vulkan_device_extensions": [],
             "vulkan_features": [],
@@ -1017,16 +993,12 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
 
-    odd_linear_source = (
-        tmp_path / "linear_batch16_bf16_2048x1.comp"
-    ).read_text()
+    odd_linear_source = (tmp_path / "linear_batch16_bf16_2048x1.comp").read_text()
     assert "uint16_t values[]" in odd_linear_source
     assert "batch_index * OUTPUT_SIZE" in odd_linear_source
     assert "output_frames.words" not in odd_linear_source
     assert "gl_WorkGroupID.x / BATCH_TILE_WIDTH" in odd_linear_source
-    even_linear_source = (
-        tmp_path / "linear_batch16_bf16_1024x4096.comp"
-    ).read_text()
+    even_linear_source = (tmp_path / "linear_batch16_bf16_1024x4096.comp").read_text()
     assert "uint words[]" in even_linear_source
     assert "output_frames.words" in even_linear_source
     scalar_gate_source = (
@@ -1036,8 +1008,7 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
     assert "gate_logits.values[batch_index]" in scalar_gate_source
     assert "uint batch_lane = gl_WorkGroupID.x;" in scalar_gate_source
     fused_scalar_gate_source = (
-        tmp_path
-        / "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp"
+        tmp_path / "linear_sigmoid_scalar_multiply_batch16_bf16_2048x2048.comp"
     ).read_text()
     assert "float rounded_gate = bf16_to_f32(f32_to_bf16(gate_sum));" in (
         fused_scalar_gate_source
@@ -1047,9 +1018,7 @@ def test_compiler_renders_weight_shared_component_batch_shaders(tmp_path: Path) 
         tmp_path
         / "linear_sigmoid_scalar_multiply_residual2_batch16_bf16_2048x2048.comp"
     ).read_text()
-    assert "uint combined_lo = f32_to_bf16(" in (
-        fused_scalar_gate_residual_source
-    )
+    assert "uint combined_lo = f32_to_bf16(" in (fused_scalar_gate_residual_source)
     assert "bf16_to_f32(combined_lo) + bf16_to_f32(second)" in (
         fused_scalar_gate_residual_source
     )

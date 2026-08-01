@@ -21,7 +21,7 @@ impl VulkanResidentComponentBatchKernelArtifact {
                 self.causal_sequence_compatible
             }
             VulkanComponentBatchExecutionMode::ParallelBlock => {
-                self.parallel_block_compatible || self.independent_candidate_compatible
+                self.parallel_block_compatible
             }
         }
     }

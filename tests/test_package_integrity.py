@@ -694,6 +694,7 @@ def test_package_integrity_rejects_batch_requirements_that_do_not_match_spirv(
             "lane_tile_width": 4,
             "independent_candidate_compatible": True,
             "causal_sequence_compatible": True,
+            "parallel_block_compatible": True,
             "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": ["shader_int8"],

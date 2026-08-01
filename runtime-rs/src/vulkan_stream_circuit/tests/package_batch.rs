@@ -490,7 +490,28 @@ fn component_batches_select_only_mode_compatible_kernels() {
         )
         .is_some()
     );
-
+    assert!(select_component_batch_kernel_artifact(
+        &artifacts,
+        "processor",
+        "project",
+        VulkanComponentBatchExecutionMode::ParallelBlock,
+        7,
+    )
+    .is_none());
+    let mut explicit_parallel = artifact(8, true, true);
+    explicit_parallel.parallel_block_compatible = true;
+    assert_eq!(
+        select_component_batch_kernel_artifact(
+            &[explicit_parallel],
+            "processor",
+            "project",
+            VulkanComponentBatchExecutionMode::ParallelBlock,
+            7,
+        )
+        .unwrap()
+        .lane_tile_width,
+        8
+    );
 }
 
 #[test]

@@ -254,10 +254,9 @@ def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
 def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] | None:
     causal_scan_shader = causal_scan_batch_shader_file(shader_file)
     if causal_scan_shader is not None:
-        captures_static_state = (
-            causal_scan_shader.startswith("causal_conv1d_silu_temporal_")
-            or causal_scan_shader.startswith("gated_delta_scan_")
-        )
+        captures_static_state = causal_scan_shader.startswith(
+            "causal_conv1d_silu_temporal_"
+        ) or causal_scan_shader.startswith("gated_delta_scan_")
         temporal_binding = (
             6
             if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
@@ -278,11 +277,7 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
                 causal_scan_shader,
                 local_size_x,
                 causal_scan_workgroup_count_x(shader_file),
-                payload=(
-                    "width_state_snapshots"
-                    if captures_static_state
-                    else "width"
-                ),
+                payload=("width_state_snapshots" if captures_static_state else "width"),
                 state_snapshot_binding=30 if captures_static_state else None,
             )
         ]
@@ -566,9 +561,7 @@ def cooperative_float8_e4m3_batch_shader_file(
         shader_file,
     )
     if contiguous_swiglu is not None:
-        block_rows, block_columns, input_size, output_size = (
-            contiguous_swiglu.groups()
-        )
+        block_rows, block_columns, input_size, output_size = contiguous_swiglu.groups()
         if (
             int(block_columns) % k
             or int(input_size) % int(block_columns)
@@ -727,9 +720,7 @@ def weight_shared_batch_shader_file(
             f"quantize_batch{tile}_int8_symmetric_",
             1,
         )
-    if re.fullmatch(
-        r"quantize_int8_symmetric_pairpacked_b32_h\d+\.comp", shader_file
-    ):
+    if re.fullmatch(r"quantize_int8_symmetric_pairpacked_b32_h\d+\.comp", shader_file):
         return shader_file.replace(
             "quantize_int8_symmetric_pairpacked_",
             f"quantize_batch{tile}_int8_symmetric_pairpacked_",
@@ -1109,6 +1100,7 @@ def mixed_parallel_projection_batch_implementations(
                 "lane_tile_width": 4 * shape[1],
                 "independent_candidate_compatible": False,
                 "causal_sequence_compatible": True,
+                "parallel_block_compatible": False,
                 "device_requirements": {
                     "vulkan_device_extensions": [],
                     "vulkan_features": [],
@@ -1166,6 +1158,7 @@ def mixed_parallel_projection_batch_implementations(
                 "lane_tile_width": tile_width,
                 "independent_candidate_compatible": True,
                 "causal_sequence_compatible": True,
+                "parallel_block_compatible": True,
                 "device_requirements": {
                     "vulkan_device_extensions": [],
                     "vulkan_features": [],

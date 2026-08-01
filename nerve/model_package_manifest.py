@@ -1205,6 +1205,7 @@ def component_kernel_spec(
                 "lane_tile_width": CAUSAL_SCAN_LANE_TILE_WIDTH,
                 "independent_candidate_compatible": False,
                 "causal_sequence_compatible": True,
+                "parallel_block_compatible": False,
                 "device_requirements": {
                     "vulkan_device_extensions": [],
                     "vulkan_features": [],
@@ -1221,6 +1222,7 @@ def component_kernel_spec(
                     "lane_tile_width": 4 * shape[1],
                     "independent_candidate_compatible": False,
                     "causal_sequence_compatible": True,
+                    "parallel_block_compatible": False,
                     "device_requirements": {
                         "vulkan_device_extensions": [],
                         "vulkan_features": [],
@@ -1250,6 +1252,7 @@ def component_kernel_spec(
                     "lane_tile_width": COOPERATIVE_BATCH_LANE_TILE_WIDTH,
                     "independent_candidate_compatible": False,
                     "causal_sequence_compatible": True,
+                    "parallel_block_compatible": False,
                     "device_requirements": {
                         "vulkan_device_extensions": [],
                         "vulkan_features": [],
@@ -1312,6 +1315,7 @@ def component_kernel_spec(
                     "lane_tile_width": 1,
                     "independent_candidate_compatible": True,
                     "causal_sequence_compatible": True,
+                    "parallel_block_compatible": True,
                     "device_requirements": {
                         "vulkan_device_extensions": [],
                         "vulkan_features": [],
@@ -1337,6 +1341,7 @@ def component_kernel_spec(
                     "lane_tile_width": tile_width,
                     "independent_candidate_compatible": True,
                     "causal_sequence_compatible": True,
+                    "parallel_block_compatible": True,
                     "device_requirements": {
                         "vulkan_device_extensions": [],
                         "vulkan_features": [],

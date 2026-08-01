@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 Json = dict[str, Any]
 
-PACKAGE_SCHEMA = "nerve.vulkan_resident_model_package.v5"
+PACKAGE_SCHEMA = "nerve.vulkan_resident_model_package.v6"
 DEFAULT_COMPILED_MODELS_DIR = Path("compiled_models")
 
 

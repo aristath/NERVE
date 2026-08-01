@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v5",
+  "schema": "nerve.vulkan_resident_model_package.v6",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
@@ -1824,6 +1824,7 @@
               "lane_tile_width": 1,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -1852,6 +1853,7 @@
               "lane_tile_width": 2,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -1879,6 +1881,7 @@
               "lane_tile_width": 4,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -1906,6 +1909,7 @@
               "lane_tile_width": 8,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -1933,6 +1937,7 @@
               "lane_tile_width": 16,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -1980,6 +1985,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [
                   "VK_KHR_cooperative_matrix",
@@ -2022,6 +2028,7 @@
               "lane_tile_width": 2,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2049,6 +2056,7 @@
               "lane_tile_width": 4,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2076,6 +2084,7 @@
               "lane_tile_width": 8,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2103,6 +2112,7 @@
               "lane_tile_width": 16,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2148,6 +2158,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2190,6 +2201,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2233,6 +2245,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2291,6 +2304,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [
                   "VK_KHR_cooperative_matrix",
@@ -2333,6 +2347,7 @@
               "lane_tile_width": 2,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2360,6 +2375,7 @@
               "lane_tile_width": 4,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2387,6 +2403,7 @@
               "lane_tile_width": 8,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2414,6 +2431,7 @@
               "lane_tile_width": 16,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2459,6 +2477,7 @@
               "lane_tile_width": 1,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2487,6 +2506,7 @@
               "lane_tile_width": 2,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2514,6 +2534,7 @@
               "lane_tile_width": 4,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2541,6 +2562,7 @@
               "lane_tile_width": 8,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2568,6 +2590,7 @@
               "lane_tile_width": 16,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2617,6 +2640,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [
                   "VK_KHR_cooperative_matrix",
@@ -2660,6 +2684,7 @@
               "lane_tile_width": 2,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2687,6 +2712,7 @@
               "lane_tile_width": 4,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2714,6 +2740,7 @@
               "lane_tile_width": 8,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2741,6 +2768,7 @@
               "lane_tile_width": 16,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2788,6 +2816,7 @@
               "lane_tile_width": 64,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
               "device_requirements": {
                 "vulkan_device_extensions": [
                   "VK_KHR_cooperative_matrix",
@@ -2830,6 +2859,7 @@
               "lane_tile_width": 2,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2857,6 +2887,7 @@
               "lane_tile_width": 4,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2884,6 +2915,7 @@
               "lane_tile_width": 8,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],
@@ -2911,6 +2943,7 @@
               "lane_tile_width": 16,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
+              "parallel_block_compatible": true,
               "device_requirements": {
                 "vulkan_device_extensions": [],
                 "vulkan_features": [],

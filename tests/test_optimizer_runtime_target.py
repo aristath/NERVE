@@ -39,7 +39,7 @@ def test_runtime_executor_command_asks_cargo_to_verify_source_freshness(
     runtime = repository / "runtime-rs"
     manifest = runtime / "Cargo.toml"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text("[package]\nname = \"fixture\"\n")
+    manifest.write_text('[package]\nname = "fixture"\n')
     binary = runtime / "target" / "release" / "fixture-executor"
     binary.parent.mkdir(parents=True)
     binary.write_text("#!/bin/sh\nexit 0\n")
@@ -57,9 +57,7 @@ def test_runtime_executor_command_asks_cargo_to_verify_source_freshness(
     monkeypatch.delenv("FIXTURE_EXECUTOR_BIN", raising=False)
     monkeypatch.setattr(
         "nerve.representation_optimizer.automation.runtime_target.shutil.which",
-        lambda executable: (
-            "/usr/bin/cargo" if executable == "cargo" else None
-        ),
+        lambda executable: "/usr/bin/cargo" if executable == "cargo" else None,
     )
     monkeypatch.setattr(
         "nerve.representation_optimizer.automation.runtime_target.subprocess.run",
@@ -150,9 +148,7 @@ def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
     (duplicate_fds / "5").symlink_to(drm_client)
     (duplicate_fds / "6").symlink_to(drm_client)
     duplicated_client = (
-        "drm-pdev:\t0000:03:00.0\n"
-        "drm-memory-vram:\t40 MiB\n"
-        "drm-memory-gtt:\t4 MiB\n"
+        "drm-pdev:\t0000:03:00.0\ndrm-memory-vram:\t40 MiB\ndrm-memory-gtt:\t4 MiB\n"
     )
     (small_context / "fdinfo" / "5").write_text(duplicated_client)
     (small_context / "fdinfo" / "6").write_text(duplicated_client)
@@ -435,14 +431,9 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
     assert prepared.excluded_devices[0]["device_id"] == _device_id("0000:03:00.0")
     assert len(prepared.targets) == 1
     optimization_target = prepared.targets[0]
+    assert optimization_target.qualification_regime.speculative_draft_tokens == 2
     assert (
-        optimization_target.qualification_regime.speculative_draft_tokens
-        == 2
-    )
-    assert (
-        optimization_target.matched_conditions["controls"][
-            "speculative_draft_tokens"
-        ]
+        optimization_target.matched_conditions["controls"]["speculative_draft_tokens"]
         == 2
     )
     assert len(optimization_target.hardware_profiles) == 2
@@ -503,9 +494,7 @@ def test_runtime_target_counts_transient_working_set_before_selecting_topology(
 
     assert len(prepared.targets[0].hardware_profiles) == 2
     planned = prepared.residency_plans[0]["device_plans"]
-    assert [
-        device["initial_device_resident_bytes"] for device in planned
-    ] == [
+    assert [device["initial_device_resident_bytes"] for device in planned] == [
         100,
         100,
     ]
@@ -551,20 +540,12 @@ def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
     admission = prepared.targets[0].matched_conditions["environment"][
         "residency_admission"
     ]
-    safe_capacity = next(
-        iter(admission["safe_device_capacity_bytes"].values())
-    )
+    safe_capacity = next(iter(admission["safe_device_capacity_bytes"].values()))
     assert plan["residency_policy"] == "demand_retained"
     assert device["initial_device_resident_bytes"] == 100
-    assert (
-        device["parameter_residency"]["maximum_addressable_bytes"]
-        == 10_100
-    )
+    assert device["parameter_residency"]["maximum_addressable_bytes"] == 10_100
     assert device["initial_device_resident_bytes"] < safe_capacity
-    assert (
-        device["parameter_residency"]["maximum_addressable_bytes"]
-        > safe_capacity
-    )
+    assert device["parameter_residency"]["maximum_addressable_bytes"] > safe_capacity
 
 
 def test_runtime_target_records_post_context_idle_floor(
@@ -668,12 +649,8 @@ def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
                 tmp_path / "component",
                 runtime_fingerprint=stale,
             ),
-            validation_executor_bin=_executable(
-                tmp_path / "validation"
-            ),
-            residency_planner_bin=_residency_planner(
-                tmp_path / "residency"
-            ),
+            validation_executor_bin=_executable(tmp_path / "validation"),
+            residency_planner_bin=_residency_planner(tmp_path / "residency"),
             vulkan_driver_files=(_driver(tmp_path),),
             idle_probe=probe,
             live_target=target,
@@ -709,9 +686,7 @@ def test_explicit_busy_optimizer_device_is_never_substituted(
             live_target=target,
             component_executor_bin=_executable(tmp_path / "component"),
             validation_executor_bin=_executable(tmp_path / "validation"),
-            residency_planner_bin=_residency_planner(
-                tmp_path / "residency"
-            ),
+            residency_planner_bin=_residency_planner(tmp_path / "residency"),
         )
 
 
@@ -779,12 +754,8 @@ def test_balanced_placement_attaches_output_to_last_processor_device(
         tensor_sizes=(10, 100, 100, 10),
     )
     manifest = json.loads(package.read_bytes())
-    manifest["circuit_graph"]["components"][0]["runtime_role"] = (
-        "input_transducer"
-    )
-    manifest["circuit_graph"]["components"][3]["runtime_role"] = (
-        "output_transducer"
-    )
+    manifest["circuit_graph"]["components"][0]["runtime_role"] = "input_transducer"
+    manifest["circuit_graph"]["components"][3]["runtime_role"] = "output_transducer"
     first, second = (
         _device_id("0000:03:00.0"),
         _device_id("0000:07:00.0"),
@@ -921,7 +892,7 @@ def _package(
         for index in range(len(tensor_sizes))
     ]
     manifest = {
-        "schema": "nerve.vulkan_resident_model_package.v5",
+        "schema": "nerve.vulkan_resident_model_package.v6",
         "package_id": "fixture-package",
         "tensor_index_path": "tensors.json",
         "compiler_target": target.to_json(),
@@ -1000,9 +971,7 @@ def _residency_planner(
     path: Path,
     *,
     extra_bytes_per_device_by_count: dict[int, int] | None = None,
-    maximum_dynamic_bytes_per_device_by_count: (
-        dict[int, int] | None
-    ) = None,
+    maximum_dynamic_bytes_per_device_by_count: (dict[int, int] | None) = None,
     runtime_fingerprint: str = RUNTIME_IMPLEMENTATION_FINGERPRINT,
 ) -> Path:
     extras = extra_bytes_per_device_by_count or {}
