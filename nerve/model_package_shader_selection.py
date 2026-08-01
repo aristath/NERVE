@@ -2,6 +2,7 @@ from nerve.model_package_common import *
 from nerve.model_package_assets import stream_control_binding_for_node
 from nerve.model_package_tensors import *
 
+
 def feed_forward_intermediate_size(circuit: Json) -> int:
     for node in circuit.get("nodes", []):
         if node.get("id") == "ffn_gate_activation":
@@ -22,6 +23,44 @@ def shader_file_for_node(
     hidden_size = int(dimensions["hidden_size"])
     op = node["op"]
 
+    if op == "anchor_noise_embedding_block":
+        attrs = node.get("attrs", {})
+        block_size = int(attrs.get("block_size", 0))
+        minimum_block_size = int(attrs.get("minimum_block_size", 0))
+        multiplicity = int(attrs.get("stream_multiplicity", 0))
+        node_hidden_size = int(attrs.get("hidden_size", 0))
+        noise_token_id = int(attrs.get("noise_token_id", -1))
+        embedding_shape = parameter_shape_for_node(circuit, node, tensor_index)
+        if (
+            node.get("inputs") != ["anchor_token_id"]
+            or node.get("outputs") != ["query_frames"]
+            or len(node.get("params", [])) != 1
+            or attrs.get("output_layout") != "block_stream_hidden"
+            or attrs.get("anchor_position") != 0
+            or attrs.get("runtime_extensible") is not False
+            or attrs.get("runtime_selectable_prefix") is not True
+            or block_size < minimum_block_size
+            or minimum_block_size <= 0
+            or multiplicity <= 0
+            or node_hidden_size != hidden_size
+            or hidden_size <= 0
+            or hidden_size % 2
+            or len(embedding_shape) != 2
+            or int(embedding_shape[1]) != hidden_size
+            or noise_token_id < 0
+            or noise_token_id >= int(embedding_shape[0])
+            or parameter_dtype_for_node(circuit, node, tensor_index) != "BF16"
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+        ):
+            raise ModelCompileError(
+                f"anchor/noise embedding node {node['id']!r} has an invalid contract"
+            )
+        return (
+            f"anchor_noise_embedding_block_b{block_size}_m{multiplicity}_"
+            f"h{hidden_size}_noise{noise_token_id}.comp"
+        )
+
     if op == "quantize_fp8_e4m3":
         return (
             f"quantize_fp8_e4m3_b{int(node['attrs']['block_columns'])}"
@@ -39,9 +78,7 @@ def shader_file_for_node(
             f"_h{int(node['attrs']['element_count'])}.comp"
         )
     if op == "rms_norm":
-        representations = node.get("attrs", {}).get(
-            "physical_output_representations"
-        )
+        representations = node.get("attrs", {}).get("physical_output_representations")
         if representations:
             valid_common = (
                 len(representations) != 1
@@ -51,22 +88,26 @@ def shader_file_for_node(
             )
             contract = representations[0].get("contract")
             block_columns = int(representations[0].get("block_columns", 0))
-            if valid_common or (
-                contract == FP8_PREQUANTIZATION_CONTRACT
-                and block_columns != 128
-            ) or (
-                contract == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
-                and block_columns != 32
-            ) or contract not in {
-                FP8_PREQUANTIZATION_CONTRACT,
-                PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
-            }:
+            if (
+                valid_common
+                or (contract == FP8_PREQUANTIZATION_CONTRACT and block_columns != 128)
+                or (
+                    contract == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
+                    and block_columns != 32
+                )
+                or contract
+                not in {
+                    FP8_PREQUANTIZATION_CONTRACT,
+                    PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
+                }
+            ):
                 raise ModelCompileError(
                     f"RMS normalization node {node['id']!r} has an invalid "
                     "physical output representation"
                 )
             representation_token = (
-                "fp8_e4m3" if contract == FP8_PREQUANTIZATION_CONTRACT
+                "fp8_e4m3"
+                if contract == FP8_PREQUANTIZATION_CONTRACT
                 else "int8_pairpacked"
             )
             return (
@@ -120,9 +161,7 @@ def shader_file_for_node(
             block_rows, block_columns = fp8_block_shape_for_node(
                 circuit, node, tensor_index
             )
-            scale_suffix = fp8_scale_shader_suffix_for_node(
-                circuit, node, tensor_index
-            )
+            scale_suffix = fp8_scale_shader_suffix_for_node(circuit, node, tensor_index)
             has_bias = len(node.get("params", [])) == 3
             prefix = "linear_bias" if has_bias else "linear"
             if uses_prequantized_fp8_input(node):
@@ -162,8 +201,7 @@ def shader_file_for_node(
             or len(node.get("params", [])) != 6
             or attrs.get("branch_count") != 4
             or attrs.get("branch_parameter_counts") != [2, 2, 1, 1]
-            or attrs.get("branch_dtypes")
-            != ["F8_E4M3", "F8_E4M3", "BF16", "BF16"]
+            or attrs.get("branch_dtypes") != ["F8_E4M3", "F8_E4M3", "BF16", "BF16"]
             or not uses_prequantized_fp8_input(node)
         ):
             raise ModelCompileError(
@@ -239,8 +277,7 @@ def shader_file_for_node(
             or part_width % 2
             or int(parameter_shape[0]) != 2 * part_width
             or int(parameter_shape[1]) <= 0
-            or parameter_dtype_for_node(circuit, node, tensor_index)
-            != "F8_E4M3"
+            or parameter_dtype_for_node(circuit, node, tensor_index) != "F8_E4M3"
             or parameter_layout_for_node(circuit, node, tensor_index)
             != ROW_MAJOR_LAYOUT
         ):
@@ -397,7 +434,7 @@ def shader_file_for_node(
                 raise ModelCompileError(
                     f"fused FFN projection node {node['id']!r} has incompatible "
                     f"parameters {shapes}"
-            )
+                )
             block_shape = None
             q8_shape = dtypes == {"Q8_0"}
             if q8_shape:
@@ -474,8 +511,7 @@ def shader_file_for_node(
             )
         if q8_shape:
             return (
-                "parallel_linear_silu_multiply_q8_0_"
-                f"{input_width}x{output_width}.comp"
+                f"parallel_linear_silu_multiply_q8_0_{input_width}x{output_width}.comp"
             )
         return f"parallel_linear_silu_multiply_bf16_{input_width}x{output_width}.comp"
     if op == "linear_split_3way":
@@ -722,9 +758,7 @@ def shader_file_for_node(
         return f"gelu_tanh_bf16_{int(node['attrs']['element_count'])}.comp"
     if op == "silu_multiply":
         element_count = int(node["attrs"]["element_count"])
-        representations = node.get("attrs", {}).get(
-            "physical_output_representations"
-        )
+        representations = node.get("attrs", {}).get("physical_output_representations")
         if representations:
             if (
                 len(representations) != 1
@@ -732,23 +766,17 @@ def shader_file_for_node(
                 != PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
                 or representations[0].get("logical_signal")
                 != node.get("outputs", [None])[0]
-                or int(representations[0].get("element_count", 0))
-                != element_count
+                or int(representations[0].get("element_count", 0)) != element_count
                 or int(representations[0].get("block_columns", 0)) != 32
             ):
                 raise ModelCompileError(
                     f"SiLU-multiply node {node['id']!r} has an invalid "
                     "physical output representation"
                 )
-            return (
-                "silu_multiply_quantize_int8_pairpacked_b32_"
-                f"h{element_count}.comp"
-            )
+            return f"silu_multiply_quantize_int8_pairpacked_b32_h{element_count}.comp"
         return f"silu_multiply_bf16_{element_count}.comp"
     if op == "sigmoid_multiply":
-        representations = node.get("attrs", {}).get(
-            "physical_output_representations"
-        )
+        representations = node.get("attrs", {}).get("physical_output_representations")
         if representations:
             if (
                 len(representations) != 1
@@ -795,9 +823,7 @@ def shader_file_for_node(
             raise ModelCompileError(
                 f"linear scalar-gate node {node['id']!r} has unsupported geometry"
             )
-        return (
-            f"linear_sigmoid_scalar_multiply_bf16_{in_features}x{hidden_size}.comp"
-        )
+        return f"linear_sigmoid_scalar_multiply_bf16_{in_features}x{hidden_size}.comp"
     if op == "linear_sigmoid_scalar_multiply_residual2":
         out_features, in_features = parameter_shape_for_node(
             circuit, node, tensor_index
@@ -857,10 +883,14 @@ def shader_file_for_node(
             "rope_type": {str(rope.get("rope_type", "default")) for rope in ropes},
             "interleaved": {bool(rope["interleaved"]) for rope in ropes},
         }
-        if any(len(values) != 1 for values in common_fields.values()) or any(
-            int(norm["head_count"]) != int(rope["head_count"])
-            for norm, rope in zip(norms, ropes, strict=True)
-        ) or ropes[0].get("scaling") != ropes[1].get("scaling"):
+        if (
+            any(len(values) != 1 for values in common_fields.values())
+            or any(
+                int(norm["head_count"]) != int(rope["head_count"])
+                for norm, rope in zip(norms, ropes, strict=True)
+            )
+            or ropes[0].get("scaling") != ropes[1].get("scaling")
+        ):
             raise ModelCompileError(
                 f"parallel head-norm/rope node {node['id']!r} mixes incompatible branch geometry"
             )
@@ -961,11 +991,7 @@ def shader_file_for_node(
                 else "append_gqa_attention_bf16_"
             )
             + f"q{attrs['query_heads']}_kv{attrs['key_value_heads']}_d{attrs['head_width']}"
-            + (
-                f"_s{int(partition_count)}"
-                if partition_count is not None
-                else ""
-            )
+            + (f"_s{int(partition_count)}" if partition_count is not None else "")
             + f"_scale{shader_float_token(float(attrs['scale']))}"
         )
         if attrs.get("window_size") is not None:
@@ -1015,9 +1041,7 @@ def shader_file_for_node(
                     f"gated-delta node {node['id']!r} has an invalid physical "
                     "FP8 output representation"
                 )
-            shader_file += (
-                f"_qfp8b{int(representations[0]['block_columns'])}"
-            )
+            shader_file += f"_qfp8b{int(representations[0]['block_columns'])}"
         return f"{shader_file}.comp"
     if op == "rg_lru_step":
         attrs = node["attrs"]
@@ -1085,8 +1109,7 @@ def shader_file_for_node(
                 circuit, node, tensor_index, stage=stage
             )
             emits_intermediate = (
-                op == "sparse_moe_gate_up"
-                and emits_sparse_moe_fp8_intermediate(node)
+                op == "sparse_moe_gate_up" and emits_sparse_moe_fp8_intermediate(node)
             )
             return (
                 f"sparse_moe_{stage}"
@@ -1133,6 +1156,15 @@ def shader_file_for_node(
 
 
 def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
+    if node["op"] == "anchor_noise_embedding_block":
+        attrs = node["attrs"]
+        output_words = (
+            int(attrs["block_size"])
+            * int(attrs["stream_multiplicity"])
+            * int(attrs["hidden_size"])
+            // 2
+        )
+        return (output_words + 63) // 64
     if node["op"] == "causal_conv1d_silu":
         channels = int(node["attrs"]["channels"])
         if channels <= 0 or channels % 2 != 0:
@@ -1159,12 +1191,13 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         )
     if node["op"] == "mixed_parallel_linear_4way":
         output_sizes = [
-            int(parameter_shape_for_id(circuit, node["params"][offset], tensor_index)[0])
+            int(
+                parameter_shape_for_id(circuit, node["params"][offset], tensor_index)[0]
+            )
             for offset in (0, 2)
         ]
         return max(
-            (output_size + FP8_PREQUANT_TILE_ROWS - 1)
-            // FP8_PREQUANT_TILE_ROWS
+            (output_size + FP8_PREQUANT_TILE_ROWS - 1) // FP8_PREQUANT_TILE_ROWS
             for output_size in output_sizes
         )
     if node["op"] == "contiguous_linear_swiglu":
@@ -1180,9 +1213,7 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         and node.get("attrs", {}).get("layout") == "per_head_interleaved"
     ):
         attrs = node["attrs"]
-        output_words = (
-            int(attrs["blocks"]) * int(attrs["block_part_width"]) + 1
-        ) // 2
+        output_words = (int(attrs["blocks"]) * int(attrs["block_part_width"]) + 1) // 2
         return (
             output_words + HEAD_INTERLEAVED_SPLIT_LOCAL_SIZE - 1
         ) // HEAD_INTERLEAVED_SPLIT_LOCAL_SIZE
@@ -1262,11 +1293,10 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
                 if uses_prequantized_fp8_input(node)
                 else FP8_FUSED_FFN_TILE_ROWS
             )
-        if (
-            parameter_dtype_for_id(circuit, node["params"][0], tensor_index)
-            == "Q8_0"
-        ):
-            return (int(out_features) + Q8_0_OUTPUT_TILE_ROWS - 1) // Q8_0_OUTPUT_TILE_ROWS
+        if parameter_dtype_for_id(circuit, node["params"][0], tensor_index) == "Q8_0":
+            return (
+                int(out_features) + Q8_0_OUTPUT_TILE_ROWS - 1
+            ) // Q8_0_OUTPUT_TILE_ROWS
         return (int(out_features) + 1) // 2
     if node["op"] in {"linear", "linear_residual", "linear_split_3way"}:
         out_features, _ = parameter_shape_for_node(circuit, node, tensor_index)
@@ -1330,8 +1360,7 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
                 else FP8_SPARSE_GATE_UP_TILE_ROWS
             )
             return int(attrs["experts_per_token"]) * (
-                (int(attrs["intermediate_size"]) + tile_rows - 1)
-                // tile_rows
+                (int(attrs["intermediate_size"]) + tile_rows - 1) // tile_rows
             )
         if parameter_dtype == "I32":
             return int(attrs["experts_per_token"]) * (
@@ -1357,9 +1386,7 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         return int(attrs["experts_per_token"]) * ((int(attrs["hidden_size"]) + 1) // 2)
     if node["op"] == "moe_reduce":
         hidden_words = (int(node["attrs"]["hidden_size"]) + 1) // 2
-        return (
-            hidden_words + MOE_REDUCE_LOCAL_SIZE - 1
-        ) // MOE_REDUCE_LOCAL_SIZE
+        return (hidden_words + MOE_REDUCE_LOCAL_SIZE - 1) // MOE_REDUCE_LOCAL_SIZE
     if node["op"] in {
         "rms_norm_per_head",
         "rms_norm_per_head_unscaled",
@@ -1454,13 +1481,10 @@ def uses_prequantized_fp8_input(node: Json) -> bool:
 
 
 def emits_sparse_moe_fp8_intermediate(node: Json) -> bool:
-    representations = node.get("attrs", {}).get(
-        "physical_output_representations"
-    )
+    representations = node.get("attrs", {}).get("physical_output_representations")
     return isinstance(representations, list) and any(
         isinstance(representation, dict)
-        and representation.get("contract")
-        == SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT
+        and representation.get("contract") == SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT
         for representation in representations
     )
 

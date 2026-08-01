@@ -4,12 +4,20 @@ from pathlib import Path
 
 import pytest
 
+from nerve.compilation import ModelCompileError
 from nerve.circuit_ir import validate_circuit
 from nerve.circuit_lowering import lower_parallel_markov_draft_graph
 from nerve.circuit_lowering_system import build_draft_system_circuits
 from nerve.model_transpiler_discovery import discover_model_structure
 from nerve.model_transpiler_graph import make_model_graph
 from nerve.model_transpiler_types import ModelTranspileError
+from nerve.model_package import (
+    ROW_MAJOR_LAYOUT,
+    compile_shader_artifacts,
+    copy_shader_templates,
+    shader_file_for_node,
+    workgroup_count_x_for_node,
+)
 
 
 def _tensor(shape: list[int], dtype: str = "BF16") -> dict[str, object]:
@@ -168,16 +176,33 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
         "main_context",
         "anchor_token_passthrough",
     ]
+    query_output = input_circuit["boundary"]["outputs"][0]
+    assert query_output["shape"] == [5, 4, 8]
+    assert input_circuit["boundary"]["outputs"][2]["source"] == "anchor_token_id"
+    concatenations = [
+        node for node in input_circuit["nodes"] if node["op"] == "concatenate"
+    ]
+    assert [node["attrs"]["part_widths"] for node in concatenations] == [
+        [8, 8],
+        [16, 8],
+    ]
     query_block = next(
-        node for node in input_circuit["nodes"] if node["id"] == "query_token_block"
+        node for node in input_circuit["nodes"] if node["id"] == "query_embedding_block"
     )
+    assert query_block["op"] == "anchor_noise_embedding_block"
+    assert query_block["params"] == ["token_embedding"]
     assert query_block["attrs"] == {
         "minimum_block_size": 5,
         "block_size": 5,
         "noise_token_id": 31,
         "anchor_position": 0,
-        "runtime_extensible": True,
+        "runtime_extensible": False,
+        "runtime_selectable_prefix": True,
+        "hidden_size": 8,
+        "stream_multiplicity": 4,
+        "output_layout": "block_stream_hidden",
     }
+    assert all(node["op"] != "identity" for node in input_circuit["nodes"])
     markov = next(
         node for node in output_circuit["nodes"] if node["id"] == "sequential_markov"
     )
@@ -192,6 +217,54 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
         "draft_logits",
         "confidence_logits",
     ]
+
+
+def test_compiles_anchor_noise_embedding_block_as_one_copy_kernel(
+    tmp_path: Path,
+) -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    model = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    [draft] = model["graph"]["draft_execution_graphs"]
+    input_circuit, _ = build_draft_system_circuits(model, draft)
+    node = next(
+        item
+        for item in input_circuit["nodes"]
+        if item["op"] == "anchor_noise_embedding_block"
+    )
+    tensor_index = {
+        "tensors": {
+            name: {**tensor, "layout": ROW_MAJOR_LAYOUT}
+            for name, tensor in tensors.items()
+        }
+    }
+
+    shader_file = shader_file_for_node(
+        input_circuit,
+        node,
+        tensor_index,
+        model["dimensions"],
+    )
+
+    assert shader_file == "anchor_noise_embedding_block_b5_m4_h8_noise31.comp"
+    assert workgroup_count_x_for_node(input_circuit, node, tensor_index) == 2
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
+    shader = (tmp_path / shader_file).read_text()
+    assert "token_id * HIDDEN_WORDS" in shader
+    assert "frame_index == 0u" in shader
+    assert "stream_index" in shader
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+
+    node["attrs"]["noise_token_id"] = 32
+    with pytest.raises(ModelCompileError, match="invalid contract"):
+        shader_file_for_node(
+            input_circuit,
+            node,
+            tensor_index,
+            model["dimensions"],
+        )
 
 
 def test_compiles_source_owned_recommended_parallel_draft_width(

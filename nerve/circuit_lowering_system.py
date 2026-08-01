@@ -345,6 +345,8 @@ def build_draft_system_circuits(model: Json, draft: Json) -> list[Json]:
 def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> list[Json]:
     hidden_size = int(model["dimensions"]["hidden_size"])
     vocab_size = int(model["dimensions"]["vocab_size"])
+    stream_mixer = dict(draft["output_transducer"]["attrs"]["stream_mixer"])
+    stream_multiplicity = int(stream_mixer["multiplicity"])
     adapter = draft["input_adapter"]
     adapter_id = f"{draft['id']}_input_adapter"
     adapter_params = {
@@ -362,6 +364,32 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         "eps": float(adapter["attrs"]["eps"]),
         "weight_offset": float(adapter["attrs"]["weight_offset"]),
     }
+    concatenation_nodes = []
+    combined_target_signal = target_signal_ids[0]
+    combined_target_width = hidden_size
+    for index, target_signal_id in enumerate(target_signal_ids[1:], start=1):
+        output_signal = (
+            "combined_target_features"
+            if index == len(target_signal_ids) - 1
+            else f"combined_target_features_{index:02d}"
+        )
+        concatenation_nodes.append(
+            {
+                "id": f"target_feature_concat_{index:02d}",
+                "op": "concatenate",
+                "inputs": [combined_target_signal, target_signal_id],
+                "outputs": [output_signal],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "axis": "channel",
+                    "part_widths": [combined_target_width, hidden_size],
+                },
+            }
+        )
+        combined_target_signal = output_signal
+        combined_target_width += hidden_size
     input_circuit = _system_circuit(
         component_id=adapter_id,
         operator_type="draft_input_adapter",
@@ -382,8 +410,8 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         outputs=[
             _system_port(
                 "query_frames",
-                "frame_block",
-                [block_size, hidden_size],
+                "stream_frame_block",
+                [block_size, stream_multiplicity, hidden_size],
                 "query_frames",
                 source="query_frames",
             ),
@@ -399,28 +427,16 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                 "token_id",
                 [1],
                 "anchor_token_passthrough",
-                source="anchor_token_passthrough",
+                source="anchor_token_id",
             ),
         ],
         parameters=adapter_params,
         nodes=[
-            {
-                "id": "target_feature_concat",
-                "op": "concatenate",
-                "inputs": target_signal_ids,
-                "outputs": ["combined_target_features"],
-                "params": [],
-                "state_reads": [],
-                "state_writes": [],
-                "attrs": {
-                    "axis": "channel",
-                    "part_widths": [hidden_size] * len(target_signal_ids),
-                },
-            },
+            *concatenation_nodes,
             {
                 "id": "target_projection",
                 "op": "linear",
-                "inputs": ["combined_target_features"],
+                "inputs": [combined_target_signal],
                 "outputs": ["projected_target_features"],
                 "params": _linear_params("target_projection", adapter_params),
                 "state_reads": [],
@@ -438,11 +454,11 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                 "attrs": norm_attrs,
             },
             {
-                "id": "query_token_block",
-                "op": "anchor_noise_token_block",
+                "id": "query_embedding_block",
+                "op": "anchor_noise_embedding_block",
                 "inputs": ["anchor_token_id"],
-                "outputs": ["query_token_ids"],
-                "params": [],
+                "outputs": ["query_frames"],
+                "params": ["token_embedding"],
                 "state_reads": [],
                 "state_writes": [],
                 "attrs": {
@@ -450,28 +466,12 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                     "block_size": block_size,
                     "noise_token_id": noise_token_id,
                     "anchor_position": 0,
-                    "runtime_extensible": True,
+                    "runtime_extensible": False,
+                    "runtime_selectable_prefix": True,
+                    "hidden_size": hidden_size,
+                    "stream_multiplicity": stream_multiplicity,
+                    "output_layout": "block_stream_hidden",
                 },
-            },
-            {
-                "id": "query_embedding",
-                "op": "token_embedding_block",
-                "inputs": ["query_token_ids"],
-                "outputs": ["query_frames"],
-                "params": ["token_embedding"],
-                "state_reads": [],
-                "state_writes": [],
-                "attrs": {"hidden_size": hidden_size},
-            },
-            {
-                "id": "anchor_passthrough",
-                "op": "identity",
-                "inputs": ["anchor_token_id"],
-                "outputs": ["anchor_token_passthrough"],
-                "params": [],
-                "state_reads": [],
-                "state_writes": [],
-                "attrs": {},
             },
         ],
     )
@@ -482,7 +482,6 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         name: _system_param_ref(ref, f"{output_id}.{name}")
         for name, ref in output["params"].items()
     }
-    stream_mixer = dict(output["attrs"]["stream_mixer"])
     markov_rank = int(output["attrs"]["markov_rank"])
     output_circuit = _system_circuit(
         component_id=output_id,

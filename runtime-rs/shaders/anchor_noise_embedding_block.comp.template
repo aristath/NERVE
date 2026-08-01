@@ -1,0 +1,34 @@
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer AnchorTokenId {
+    uint value;
+} anchor_token_id;
+layout(set = 0, binding = 1) buffer QueryFrames {
+    uint words[];
+} query_frames;
+layout(set = 0, binding = 2) readonly buffer TokenEmbedding {
+    uint words[];
+} token_embedding;
+
+const uint BLOCK_SIZE = {{BLOCK_SIZE}}u;
+const uint STREAM_MULTIPLICITY = {{STREAM_MULTIPLICITY}}u;
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
+const uint OUTPUT_WORDS = BLOCK_SIZE * STREAM_MULTIPLICITY * HIDDEN_WORDS;
+const uint NOISE_TOKEN_ID = {{NOISE_TOKEN_ID}}u;
+
+void main() {
+    uint output_word = gl_GlobalInvocationID.x;
+    if (output_word >= OUTPUT_WORDS) {
+        return;
+    }
+    uint hidden_word = output_word % HIDDEN_WORDS;
+    uint row_index = output_word / HIDDEN_WORDS;
+    uint stream_index = row_index % STREAM_MULTIPLICITY;
+    uint frame_index = row_index / STREAM_MULTIPLICITY;
+    uint token_id = frame_index == 0u ? anchor_token_id.value : NOISE_TOKEN_ID;
+    query_frames.words[output_word] =
+        token_embedding.words[token_id * HIDDEN_WORDS + hidden_word];
+}

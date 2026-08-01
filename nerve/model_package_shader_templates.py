@@ -52,6 +52,34 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     if source.exists():
         return source.read_text()
 
+    anchor_noise_embedding = re.fullmatch(
+        r"anchor_noise_embedding_block_b(\d+)_m(\d+)_h(\d+)_noise(\d+)\.comp",
+        shader_file,
+    )
+    if anchor_noise_embedding is not None:
+        block_size, stream_multiplicity, hidden_size, noise_token_id = map(
+            int, anchor_noise_embedding.groups()
+        )
+        if (
+            block_size <= 0
+            or stream_multiplicity <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+        ):
+            raise ModelCompileError(
+                f"invalid anchor/noise embedding shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "anchor_noise_embedding_block.comp.template",
+            {
+                "BLOCK_SIZE": str(block_size),
+                "STREAM_MULTIPLICITY": str(stream_multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+                "NOISE_TOKEN_ID": str(noise_token_id),
+            },
+        )
+
     persistent_batch_control_variant = re.fullmatch(
         r"(.+)__pbc(\d+)\.comp",
         shader_file,
@@ -867,8 +895,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or output_size % 2
         ):
             raise ModelCompileError(
-                f"invalid cooperative contiguous SwiGLU shader shape "
-                f"{shader_file!r}"
+                f"invalid cooperative contiguous SwiGLU shader shape {shader_file!r}"
             )
         return render_shader_template(
             source_dir,
@@ -1035,10 +1062,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or any(output_size <= 0 or output_size % 2 for output_size in output_sizes)
             or (output_c_size + output_d_size) // 2
             > max(
-                (output_a_size + FP8_PREQUANT_TILE_ROWS - 1)
-                // FP8_PREQUANT_TILE_ROWS,
-                (output_b_size + FP8_PREQUANT_TILE_ROWS - 1)
-                // FP8_PREQUANT_TILE_ROWS,
+                (output_a_size + FP8_PREQUANT_TILE_ROWS - 1) // FP8_PREQUANT_TILE_ROWS,
+                (output_b_size + FP8_PREQUANT_TILE_ROWS - 1) // FP8_PREQUANT_TILE_ROWS,
             )
         ):
             raise ModelCompileError(
@@ -1143,13 +1168,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             + ".words[index >> 1u], index);"
         )
         weight_reads = "\n".join(
-            f"    if (branch == {index}u) "
-            f"return weight_{label.lower()}.values[index];"
+            f"    if (branch == {index}u) return weight_{label.lower()}.values[index];"
             for index, label in enumerate(labels[:-1])
         )
-        weight_reads += (
-            f"\n    return weight_{labels[-1].lower()}.values[index];"
-        )
+        weight_reads += f"\n    return weight_{labels[-1].lower()}.values[index];"
         output_index = (
             "batch_index * OUTPUT_{label}_WORDS + row / 2u"
             if batch_tile_width is not None
@@ -1172,8 +1194,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             template_file = "parallel_linear_prequant_fp8_e4m3.comp.template"
         elif block_rows == 1:
             template_file = (
-                "parallel_linear_prequant_batch_fp8_e4m3_row_scaled"
-                ".comp.template"
+                "parallel_linear_prequant_batch_fp8_e4m3_row_scaled.comp.template"
             )
         else:
             template_file = "parallel_linear_prequant_batch_fp8_e4m3.comp.template"
@@ -2052,9 +2073,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 f"pair-packed INT8 input requires GPTQ weights in {shader_file!r}"
             )
         scale_dtype = native_int4_linear.group(4)
-        group_size, input_size, output_size = map(
-            int, native_int4_linear.groups()[4:]
-        )
+        group_size, input_size, output_size = map(int, native_int4_linear.groups()[4:])
         output_tile_rows = (
             INT4_GPTQ_OUTPUT_TILE_ROWS
             if quantization_format == "gptq"
@@ -2822,9 +2841,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "ATTENTION_WINDOW": attention_window or "0",
                 "LOCAL_SIZE": str(local_size),
                 "TILE_TOKENS": str(tile_tokens),
-                "TILE_REDUCTION_WIDTH": str(
-                    1 << (tile_tokens - 1).bit_length()
-                ),
+                "TILE_REDUCTION_WIDTH": str(1 << (tile_tokens - 1).bit_length()),
                 "STATE_READ_BINDING": "5",
                 "CONTROL_DECLARATION": (
                     "layout(set = 0, binding = 6) readonly buffer BatchControl "
