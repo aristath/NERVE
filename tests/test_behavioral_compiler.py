@@ -77,6 +77,78 @@ def fused_candidate(source: dict) -> dict:
     return candidate
 
 
+def hyper_connection_source_and_candidate() -> tuple[dict, dict]:
+    source = {
+        "schema": "nerve.layer_circuit.v1",
+        "source": {"component_id": "layer_00"},
+        "runtime_role": "signal_processor",
+        "boundary": {
+            "inputs": [{"id": "input_frame"}],
+            "outputs": [
+                {"id": "operator_input", "source": "operator_input"},
+                {"id": "post", "source": "post"},
+                {"id": "combination", "source": "combination"},
+            ],
+        },
+        "state_ports": [],
+        "parameters": {"refs": {}},
+        "behavioral_error_contract": {"kind": "exact"},
+        "nodes": [
+            {
+                "id": "function",
+                "op": "normalized_linear",
+                "inputs": ["input_frame"],
+                "outputs": ["mixes"],
+                "params": ["function"],
+                "attrs": {
+                    "multiplicity": 4,
+                    "normalization": "root_mean_square",
+                    "normalization_epsilon": 1e-6,
+                },
+            },
+            {
+                "id": "sinkhorn",
+                "op": "hyper_connection_sinkhorn",
+                "inputs": ["mixes"],
+                "outputs": ["pre", "post", "combination"],
+                "params": ["scale", "base"],
+                "attrs": {
+                    "epsilon": 1e-6,
+                    "multiplicity": 4,
+                    "sinkhorn_iterations": 20,
+                },
+            },
+            {
+                "id": "reduce",
+                "op": "hyper_connection_reduce",
+                "inputs": ["input_frame", "pre"],
+                "outputs": ["operator_input"],
+                "params": [],
+                "attrs": {"multiplicity": 4},
+            },
+        ],
+    }
+    candidate = deepcopy(source)
+    candidate["nodes"] = [
+        {
+            "id": "function__sinkhorn__reduce",
+            "op": "hyper_connection_pre",
+            "inputs": ["input_frame"],
+            "outputs": ["operator_input", "post", "combination"],
+            "params": ["function", "scale", "base"],
+            "attrs": {
+                "compiled_from": ["function", "sinkhorn", "reduce"],
+                "epsilon": 1e-6,
+                "intermediate_rounding": "BF16",
+                "multiplicity": 4,
+                "normalization_epsilon": 1e-6,
+                "sinkhorn_iterations": 20,
+            },
+        }
+    ]
+    return source, candidate
+
+
 def test_exact_candidate_gate_proves_complete_fusion_coverage() -> None:
     source = source_circuit()
     candidate = fused_candidate(source)
@@ -655,6 +727,23 @@ def test_exact_candidate_gate_rejects_reordered_interface_and_specialization() -
     candidate["nodes"][0]["inputs"] = ["x", "gate"]
     candidate["nodes"][0]["attrs"]["intermediate_rounding"] = "F32"
     with pytest.raises(ModelCompileError, match="exact rewrite attributes"):
+        prove_exact_circuit_candidate(
+            component_id="layer_00", source=source, candidate=candidate
+        )
+
+
+def test_hyper_connection_fusion_has_a_strict_exactness_proof() -> None:
+    source, candidate = hyper_connection_source_and_candidate()
+    proof = prove_exact_circuit_candidate(
+        component_id="layer_00", source=source, candidate=candidate
+    )
+    assert proof["candidate_kind"] == "exact_reference"
+    assert proof["rewrites"][0]["proof_contract"] == (
+        "hyper_connection_pre_exact_bf16.v1"
+    )
+
+    candidate["nodes"][0]["attrs"]["sinkhorn_iterations"] = 19
+    with pytest.raises(ModelCompileError, match="changes exact rewrite attributes"):
         prove_exact_circuit_candidate(
             component_id="layer_00", source=source, candidate=candidate
         )

@@ -22,6 +22,8 @@ CONTRACT_DIGEST_ALGORITHM = "nerve.json_tree_sha256.v1"
 EXACT_REWRITE_CONTRACTS = {
     "append_scaled_dot_product_attention": "append_attention_exact_bf16.v1",
     "contiguous_linear_swiglu": "contiguous_linear_swiglu_exact_bf16.v1",
+    "hyper_connection_pre": "hyper_connection_pre_exact_bf16.v1",
+    "hyper_connection_post_pre": "hyper_connection_post_pre_exact_bf16.v1",
     "linear_residual": "linear_residual_exact_bf16.v1",
     "linear_sigmoid_scalar_multiply": (
         "linear_sigmoid_scalar_multiply_exact_bf16.v1"
@@ -45,6 +47,17 @@ EXACT_REWRITE_SOURCE_OPS = {
         ("append_state_update", "scaled_dot_product_attention")
     },
     "contiguous_linear_swiglu": {("linear", "split", "silu_multiply")},
+    "hyper_connection_pre": {
+        ("normalized_linear", "hyper_connection_sinkhorn", "hyper_connection_reduce")
+    },
+    "hyper_connection_post_pre": {
+        (
+            "hyper_connection_post",
+            "normalized_linear",
+            "hyper_connection_sinkhorn",
+            "hyper_connection_reduce",
+        )
+    },
     "linear_residual": {("linear", "residual_add")},
     "linear_sigmoid_scalar_multiply": {
         ("linear", "sigmoid_scalar_multiply")
@@ -941,6 +954,58 @@ def _validate_exact_rewrite_semantics(
             "weight_partition": "contiguous_gate_up",
             "intermediate_rounding": "BF16",
         }
+    elif op in {"hyper_connection_pre", "hyper_connection_post_pre"}:
+        offset = 1 if op == "hyper_connection_post_pre" else 0
+        post = region[0] if offset else None
+        function, sinkhorn, reduce = region[offset:]
+        function_attrs = _logical_candidate_node(function).get("attrs", {})
+        sinkhorn_attrs = _logical_candidate_node(sinkhorn).get("attrs", {})
+        reduce_attrs = _logical_candidate_node(reduce).get("attrs", {})
+        post_attrs = (
+            _logical_candidate_node(post).get("attrs", {})
+            if post is not None
+            else None
+        )
+        multiplicity = function_attrs.get("multiplicity")
+        if (
+            not isinstance(multiplicity, int)
+            or multiplicity <= 0
+            or set(function_attrs)
+            != {"multiplicity", "normalization", "normalization_epsilon"}
+            or function_attrs.get("normalization") != "root_mean_square"
+            or set(sinkhorn_attrs)
+            != {"epsilon", "multiplicity", "sinkhorn_iterations"}
+            or sinkhorn_attrs.get("multiplicity") != multiplicity
+            or not isinstance(sinkhorn_attrs.get("sinkhorn_iterations"), int)
+            or sinkhorn_attrs["sinkhorn_iterations"] <= 0
+            or set(reduce_attrs) != {"multiplicity"}
+            or reduce_attrs.get("multiplicity") != multiplicity
+            or (
+                post is not None
+                and (
+                    set(post_attrs)
+                    != {"epsilon", "multiplicity", "sinkhorn_iterations"}
+                    or post_attrs.get("multiplicity") != multiplicity
+                    or post_attrs.get("epsilon") != sinkhorn_attrs.get("epsilon")
+                    or post_attrs.get("sinkhorn_iterations")
+                    != sinkhorn_attrs.get("sinkhorn_iterations")
+                )
+            )
+        ):
+            raise ModelCompileError(
+                f"candidate circuit {component_id!r} rewrite "
+                f"{candidate_node['id']!r} cannot prove hyper-connection source attributes"
+            )
+        expected_attrs = {
+            "compiled_from": source_ids,
+            "epsilon": sinkhorn_attrs["epsilon"],
+            "intermediate_rounding": "BF16",
+            "multiplicity": multiplicity,
+            "normalization_epsilon": function_attrs["normalization_epsilon"],
+            "sinkhorn_iterations": sinkhorn_attrs["sinkhorn_iterations"],
+        }
+        if post is not None:
+            expected_attrs["post_rounding"] = "BF16"
     elif op == "linear_residual":
         _require_empty_attrs(component_id, op, region)
         expected_attrs = {
@@ -1166,6 +1231,16 @@ def _validate_rewrite_interface(
         if signal in boundary_outputs
         or any(consumer not in region_ids for consumer in consumers.get(signal, set()))
     )
+    if candidate_node["op"] == "hyper_connection_pre":
+        preferred = [region[-1]["outputs"][0], *region[-2]["outputs"][1:]]
+        outputs = [signal for signal in preferred if signal in outputs]
+    elif candidate_node["op"] == "hyper_connection_post_pre":
+        preferred = [
+            region[0]["outputs"][0],
+            region[-1]["outputs"][0],
+            *region[-2]["outputs"][1:],
+        ]
+        outputs = [signal for signal in preferred if signal in outputs]
     params = [param for node in region for param in node.get("params", [])]
     state_reads = _ordered_unique(
         state for node in region for state in node.get("state_reads", [])
