@@ -199,6 +199,10 @@ def build_system_circuits(model: Json) -> list[Json]:
 
 
 def build_draft_system_circuits(model: Json, draft: Json) -> list[Json]:
+    if draft.get("type") == "parallel_backbone_markov":
+        return build_parallel_markov_draft_system_circuits(model, draft)
+    if draft.get("type") != "multi_token_prediction":
+        raise ValueError(f"unsupported draft execution type {draft.get('type')!r}")
     hidden_size = int(model["dimensions"]["hidden_size"])
     vocab_size = int(model["dimensions"]["vocab_size"])
     adapter = draft["input_adapter"]
@@ -332,6 +336,272 @@ def build_draft_system_circuits(model: Json, draft: Json) -> list[Json]:
                     "scale": float(output["attrs"]["scale"]),
                     "soft_cap": output["attrs"].get("soft_cap"),
                 },
+            },
+        ],
+    )
+    return [input_circuit, output_circuit]
+
+
+def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> list[Json]:
+    hidden_size = int(model["dimensions"]["hidden_size"])
+    vocab_size = int(model["dimensions"]["vocab_size"])
+    adapter = draft["input_adapter"]
+    adapter_id = f"{draft['id']}_input_adapter"
+    adapter_params = {
+        name: _system_param_ref(ref, f"{adapter_id}.{name}")
+        for name, ref in adapter["params"].items()
+    }
+    target_inputs = list(adapter["inputs"])
+    if not target_inputs:
+        raise ValueError("parallel Markov draft must consume target features")
+    target_signal_ids = [str(item["id"]) for item in target_inputs]
+    minimum_block_size = int(draft["proposal_contract"]["minimum_draft_tokens"])
+    block_size = int(draft["proposal_contract"]["default_draft_tokens"])
+    noise_token_id = int(draft["proposal_contract"]["noise_token_id"])
+    norm_attrs = {
+        "eps": float(adapter["attrs"]["eps"]),
+        "weight_offset": float(adapter["attrs"]["weight_offset"]),
+    }
+    input_circuit = _system_circuit(
+        component_id=adapter_id,
+        operator_type="draft_input_adapter",
+        runtime_role="draft_input_adapter",
+        implementation="compiled_parallel_markov_input_adapter_v1",
+        inputs=[
+            _system_port("anchor_token_id", "token_id", [1], "anchor_token"),
+            *[
+                _system_port(
+                    signal_id,
+                    "frame",
+                    [hidden_size],
+                    signal_id,
+                )
+                for signal_id in target_signal_ids
+            ],
+        ],
+        outputs=[
+            _system_port(
+                "query_frames",
+                "frame_block",
+                [block_size, hidden_size],
+                "query_frames",
+                source="query_frames",
+            ),
+            _system_port(
+                "main_context",
+                "frame",
+                [hidden_size],
+                "main_context",
+                source="main_context",
+            ),
+            _system_port(
+                "anchor_token_passthrough",
+                "token_id",
+                [1],
+                "anchor_token_passthrough",
+                source="anchor_token_passthrough",
+            ),
+        ],
+        parameters=adapter_params,
+        nodes=[
+            {
+                "id": "target_feature_concat",
+                "op": "concatenate",
+                "inputs": target_signal_ids,
+                "outputs": ["combined_target_features"],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "axis": "channel",
+                    "part_widths": [hidden_size] * len(target_signal_ids),
+                },
+            },
+            {
+                "id": "target_projection",
+                "op": "linear",
+                "inputs": ["combined_target_features"],
+                "outputs": ["projected_target_features"],
+                "params": _linear_params("target_projection", adapter_params),
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {},
+            },
+            {
+                "id": "target_norm",
+                "op": "rms_norm",
+                "inputs": ["projected_target_features"],
+                "outputs": ["main_context"],
+                "params": ["target_norm"],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": norm_attrs,
+            },
+            {
+                "id": "query_token_block",
+                "op": "anchor_noise_token_block",
+                "inputs": ["anchor_token_id"],
+                "outputs": ["query_token_ids"],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "minimum_block_size": minimum_block_size,
+                    "block_size": block_size,
+                    "noise_token_id": noise_token_id,
+                    "anchor_position": 0,
+                    "runtime_extensible": True,
+                },
+            },
+            {
+                "id": "query_embedding",
+                "op": "token_embedding_block",
+                "inputs": ["query_token_ids"],
+                "outputs": ["query_frames"],
+                "params": ["token_embedding"],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {"hidden_size": hidden_size},
+            },
+            {
+                "id": "anchor_passthrough",
+                "op": "identity",
+                "inputs": ["anchor_token_id"],
+                "outputs": ["anchor_token_passthrough"],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {},
+            },
+        ],
+    )
+
+    output = draft["output_transducer"]
+    output_id = f"{draft['id']}_output_transducer"
+    output_params = {
+        name: _system_param_ref(ref, f"{output_id}.{name}")
+        for name, ref in output["params"].items()
+    }
+    stream_mixer = dict(output["attrs"]["stream_mixer"])
+    markov_rank = int(output["attrs"]["markov_rank"])
+    output_circuit = _system_circuit(
+        component_id=output_id,
+        operator_type="draft_output_transducer",
+        runtime_role="draft_output_transducer",
+        implementation="compiled_parallel_markov_output_transducer_v1",
+        inputs=[
+            _system_port(
+                "input_frames",
+                "stream_frame_block",
+                [block_size, int(stream_mixer["multiplicity"]), hidden_size],
+                "input_frames",
+            ),
+            _system_port("anchor_token_id", "token_id", [1], "anchor_token"),
+        ],
+        outputs=[
+            _system_port(
+                "draft_token_ids",
+                "token_id_block",
+                [block_size],
+                "draft_token_ids",
+                source="draft_token_ids",
+            ),
+            _system_port(
+                "draft_logits",
+                "logits_block",
+                [block_size, vocab_size],
+                "draft_logits",
+                source="draft_logits",
+            ),
+            _system_port(
+                "confidence_logits",
+                "scalar_block",
+                [block_size],
+                "confidence_logits",
+                source="confidence_logits",
+            ),
+        ],
+        parameters=output_params,
+        nodes=[
+            {
+                "id": "stream_head",
+                "op": "sinkhorn_hyper_connection_head",
+                "inputs": ["input_frames"],
+                "outputs": ["head_hidden"],
+                "params": ["head_function", "head_scale", "head_base"],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "multiplicity": int(stream_mixer["multiplicity"]),
+                    "sinkhorn_iterations": int(stream_mixer["sinkhorn_iterations"]),
+                    "epsilon": float(stream_mixer["epsilon"]),
+                    "normalization": "root_mean_square",
+                    "activation": "sigmoid",
+                },
+            },
+            {
+                "id": "output_norm",
+                "op": "rms_norm",
+                "inputs": ["head_hidden"],
+                "outputs": ["normalized_hidden"],
+                "params": ["norm"],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "eps": float(output["attrs"]["eps"]),
+                    "weight_offset": float(output["attrs"]["weight_offset"]),
+                },
+            },
+            {
+                "id": "base_projection",
+                "op": "linear_projection",
+                "inputs": ["normalized_hidden"],
+                "outputs": ["base_logits"],
+                "params": _linear_params("projection", output_params),
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {},
+            },
+            {
+                "id": "sequential_markov",
+                "op": "sequential_markov_greedy",
+                "inputs": ["base_logits", "anchor_token_id"],
+                "outputs": [
+                    "draft_token_ids",
+                    "markov_embeddings",
+                    "draft_logits",
+                ],
+                "params": ["markov_embedding", "markov_projection"],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "rank": markov_rank,
+                    "sampling": "greedy",
+                    "dependency": "previous_sampled_token",
+                },
+            },
+            {
+                "id": "confidence_input",
+                "op": "concatenate",
+                "inputs": ["head_hidden", "markov_embeddings"],
+                "outputs": ["confidence_features"],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "axis": "channel",
+                    "part_widths": [hidden_size, markov_rank],
+                },
+            },
+            {
+                "id": "confidence_projection",
+                "op": "linear",
+                "inputs": ["confidence_features"],
+                "outputs": ["confidence_logits"],
+                "params": ["confidence_projection"],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {"output_activation": None},
             },
         ],
     )

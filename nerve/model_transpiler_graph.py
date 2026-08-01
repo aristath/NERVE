@@ -9,6 +9,7 @@ def make_layer(
     *,
     component_id: str | None = None,
     runtime_role: str = "signal_processor",
+    execution_contract: Json | None = None,
 ) -> Json:
     hidden_size = structure.hidden_size
     component_id = component_id or f"layer_{layer.index:02d}"
@@ -79,7 +80,20 @@ def make_layer(
         },
         "ports": {
             "inputs": [
-                {"id": "input", "signal": "frame", "shape": list(layer.boundary_shape)}
+                {"id": "input", "signal": "frame", "shape": list(layer.boundary_shape)},
+                *(
+                    [
+                        {
+                            "id": "main_context",
+                            "signal": "frame",
+                            "shape": [hidden_size],
+                        }
+                    ]
+                    if execution_contract is not None
+                    and execution_contract.get("type")
+                    == "parallel_query_with_external_kv_context"
+                    else []
+                ),
             ],
             "outputs": [
                 {"id": "output", "signal": "frame", "shape": list(layer.boundary_shape)}
@@ -92,6 +106,7 @@ def make_layer(
             ),
         },
         "residual_mixer": deepcopy(layer.residual_mixer),
+        "execution_contract": deepcopy(execution_contract),
         "state_ports": make_state_ports(structure, layer),
         "parameter_block": make_parameter_block(
             layer.operator_type, layer.feed_forward_type, layer.tensors
@@ -338,20 +353,19 @@ def make_parallel_markov_draft_descriptor(
                 "concatenation_order": [item["id"] for item in target_inputs],
             },
             "params": {
-                name: tensor_ref(tensor)
-                for name, tensor in draft.tensors.items()
-                if name in adapter_param_ids
+                "token_embedding": tensor_ref(structure.tensors["token_embedding"]),
+                **{
+                    name: tensor_ref(tensor)
+                    for name, tensor in draft.tensors.items()
+                    if name in adapter_param_ids
+                },
             },
         },
         "query_block": {
             "type": "anchor_then_noise_embeddings",
             "token_embedding": tensor_ref(structure.tensors["token_embedding"]),
-            "block_size": draft.attributes["proposal_contract"][
-                "configured_block_size"
-            ],
-            "noise_token_id": draft.attributes["proposal_contract"][
-                "noise_token_id"
-            ],
+            "block_size": draft.attributes["proposal_contract"]["default_draft_tokens"],
+            "noise_token_id": draft.attributes["proposal_contract"]["noise_token_id"],
         },
         "execution_graph": {
             "topology": "series_with_shared_context",
@@ -395,6 +409,12 @@ def make_parallel_markov_draft_descriptor(
                 "eps": structure.norm_eps,
                 "weight_offset": structure.rms_norm_weight_offset,
                 "markov_rank": draft.attributes["markov_rank"],
+                "configured_block_size": draft.attributes["proposal_contract"][
+                    "configured_block_size"
+                ],
+                "default_draft_tokens": draft.attributes["proposal_contract"][
+                    "default_draft_tokens"
+                ],
                 "stream_mixer": deepcopy(draft.attributes["stream_mixer"]),
             },
             "params": {
@@ -514,9 +534,7 @@ def make_reference_decomposition(
     operator: Json,
 ) -> Json:
     if layer.residual_mixer is not None:
-        return make_hyper_connected_reference_decomposition(
-            structure, layer, operator
-        )
+        return make_hyper_connected_reference_decomposition(structure, layer, operator)
     hidden_size = structure.hidden_size
     return {
         "source": "source_transformers_layer",
@@ -564,7 +582,9 @@ def make_hyper_connected_reference_decomposition(
 ) -> Json:
     mixer = layer.residual_mixer
     if mixer is None or mixer.get("type") != "sinkhorn_hyper_connection":
-        raise ModelTranspileError("hyper-connected decomposition has no supported mixer")
+        raise ModelTranspileError(
+            "hyper-connected decomposition has no supported mixer"
+        )
     hidden_size = structure.hidden_size
     mixer_attrs = {
         "multiplicity": int(mixer["multiplicity"]),

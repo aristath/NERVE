@@ -219,6 +219,9 @@ def _token_mixer_modules(component: Json) -> list[Json]:
         ]
     if operator_type == "latent_sparse_attention":
         state_ports = {str(port["id"]) for port in component.get("state_ports", [])}
+        parallel_context = (component.get("execution_contract") or {}).get(
+            "type"
+        ) == "parallel_query_with_external_kv_context"
         return [
             *common,
             _module(
@@ -231,6 +234,14 @@ def _token_mixer_modules(component: Json) -> list[Json]:
                     "query_input_norm",
                     "query_head_projection",
                     "query_head_norm",
+                    *(
+                        [
+                            "query_key_value_projection",
+                            "query_key_value_norm",
+                        ]
+                        if parallel_context
+                        else []
+                    ),
                 ],
             ),
             _module(
@@ -241,6 +252,7 @@ def _token_mixer_modules(component: Json) -> list[Json]:
                 nodes=[
                     "query_rope",
                     "key_value_rope",
+                    *(["query_key_value_rope"] if parallel_context else []),
                     "attention_inverse_rope",
                 ],
             ),

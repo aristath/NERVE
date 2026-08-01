@@ -314,6 +314,13 @@ def lower_draft_execution_graph(
         )
 
     input_ref, output_ref = system_refs
+    if draft["type"] == "parallel_backbone_markov":
+        return lower_parallel_markov_draft_graph(
+            draft,
+            layer_refs=layer_refs,
+            input_ref=input_ref,
+            output_ref=output_ref,
+        )
     forward_chain = [input_ref, *layer_refs, output_ref]
     return {
         "id": draft["id"],
@@ -376,5 +383,114 @@ def lower_draft_execution_graph(
                 },
             ],
         },
+        "state_contract": dict(draft["state_contract"]),
+    }
+
+
+def lower_parallel_markov_draft_graph(
+    draft: Json,
+    *,
+    layer_refs: list[Json],
+    input_ref: Json,
+    output_ref: Json,
+) -> Json:
+    query_chain = [*layer_refs, output_ref]
+    query_edges = []
+    for index, destination in enumerate(query_chain):
+        source = input_ref if index == 0 else layer_refs[index - 1]
+        query_edges.append(
+            {
+                "id": f"{draft['id']}_query_edge_{index:04d}",
+                "connection": {"kind": "forward"},
+                "source": {
+                    "component_id": source["id"],
+                    "port_id": "query_frames" if index == 0 else "output_frame",
+                },
+                "destination": {
+                    "component_id": destination["id"],
+                    "port_id": (
+                        "input_frames"
+                        if destination["runtime_role"] == "draft_output_transducer"
+                        else "input_frame"
+                    ),
+                },
+            }
+        )
+    context_edges = [
+        {
+            "id": f"{draft['id']}_context_edge_{index:04d}",
+            "connection": {
+                "kind": "shared_context",
+                "state_update": "committed_target_only",
+            },
+            "source": {
+                "component_id": input_ref["id"],
+                "port_id": "main_context",
+            },
+            "destination": {
+                "component_id": layer_ref["id"],
+                "port_id": "main_context",
+            },
+        }
+        for index, layer_ref in enumerate(layer_refs)
+    ]
+    anchor_edge = {
+        "id": f"{draft['id']}_anchor_passthrough",
+        "connection": {"kind": "forward"},
+        "source": {
+            "component_id": input_ref["id"],
+            "port_id": "anchor_token_passthrough",
+        },
+        "destination": {
+            "component_id": output_ref["id"],
+            "port_id": "anchor_token_id",
+        },
+    }
+    target_inputs = draft["input_adapter"]["inputs"]
+    return {
+        "id": draft["id"],
+        "type": draft["type"],
+        "source_prefix": draft["source_prefix"],
+        "topology": "explicit_parallel_query_graph",
+        "circuits": [input_ref, *layer_refs, output_ref],
+        "edges": [*query_edges, *context_edges, anchor_edge],
+        "boundary": {
+            "external_inputs": [
+                {
+                    "id": "anchor_token_id",
+                    "endpoint": {
+                        "component_id": input_ref["id"],
+                        "port_id": "anchor_token_id",
+                    },
+                },
+                *[
+                    {
+                        "id": target_input["id"],
+                        "source_layer_index": target_input["source_layer_index"],
+                        "lane_reduction": draft["target_features"]["lane_reduction"],
+                        "endpoint": {
+                            "component_id": input_ref["id"],
+                            "port_id": target_input["id"],
+                        },
+                    }
+                    for target_input in target_inputs
+                ],
+            ],
+            "public_outputs": [
+                {
+                    "id": output_id,
+                    "endpoint": {
+                        "component_id": output_ref["id"],
+                        "port_id": output_id,
+                    },
+                }
+                for output_id in (
+                    "draft_token_ids",
+                    "draft_logits",
+                    "confidence_logits",
+                )
+            ],
+        },
+        "proposal_contract": dict(draft["proposal_contract"]),
         "state_contract": dict(draft["state_contract"]),
     }

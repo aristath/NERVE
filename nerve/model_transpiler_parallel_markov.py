@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 from nerve.model_transpiler_hyper_connections import discover_stream_mixer
 from nerve.model_transpiler_quantization import (
@@ -23,6 +24,7 @@ _NUMBERED_COMPONENT = re.compile(r"^(?P<root>.+)\.(?P<index>\d+)\.(?P<suffix>.+)
 def discover_parallel_markov_drafts(
     *,
     tensors: dict[str, Json],
+    model_dir: Path,
     decoder_config: Json,
     primary_layer_root: str,
     main_layer_count: int,
@@ -95,6 +97,9 @@ def discover_parallel_markov_drafts(
         )
         if block_size <= 0:
             raise ModelTranspileError("parallel Markov block size must be positive")
+        default_draft_tokens = discover_recommended_draft_token_count(
+            model_dir, minimum=block_size
+        )
         if noise_token_id < 0 or noise_token_id >= vocabulary_size:
             raise ModelTranspileError(
                 "parallel Markov noise token must belong to the model vocabulary"
@@ -161,6 +166,8 @@ def discover_parallel_markov_drafts(
                     "proposal_contract": {
                         "schedule": "parallel_backbone_then_sequential_markov",
                         "configured_block_size": block_size,
+                        "minimum_draft_tokens": block_size,
+                        "default_draft_tokens": default_draft_tokens,
                         "noise_token_id": noise_token_id,
                         "sampling": "greedy",
                         "confidence_prefix": ("first_sigmoid_below_runtime_threshold"),
@@ -172,6 +179,25 @@ def discover_parallel_markov_drafts(
             )
         )
     return tuple(discovered)
+
+
+def discover_recommended_draft_token_count(model_dir: Path, *, minimum: int) -> int:
+    model_card = model_dir / "README.md"
+    if not model_card.is_file():
+        return minimum
+    try:
+        source = model_card.read_text(errors="replace")
+    except OSError:
+        return minimum
+    recommendations = {
+        int(match.group("count"))
+        for match in re.finditer(
+            r'["\']num_speculative_tokens["\']\s*:\s*(?P<count>\d+)',
+            source,
+        )
+    }
+    eligible = sorted(count for count in recommendations if count >= minimum)
+    return eligible[0] if eligible else minimum
 
 
 def _config_values_with_suffix(value: Json, suffix: str) -> list[object]:

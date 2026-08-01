@@ -143,12 +143,11 @@ def _base_circuit(
 ) -> Json:
     input_ports = component["ports"]["inputs"]
     output_ports = component["ports"]["outputs"]
-    if len(input_ports) != 1 or len(output_ports) != 1:
+    if not input_ports or len(output_ports) != 1:
         raise ValueError(
-            f"layer component {component.get('id')!r} must expose exactly one frame input and "
-            f"one frame output; found {len(input_ports)} inputs and {len(output_ports)} outputs"
+            f"layer component {component.get('id')!r} must expose at least one frame input and "
+            f"exactly one frame output; found {len(input_ports)} inputs and {len(output_ports)} outputs"
         )
-    input_port = input_ports[0]
     output_port = output_ports[0]
     params = component["parameter_block"]["params"]
     operator_type = component["operator_type"]
@@ -167,11 +166,12 @@ def _base_circuit(
         "boundary": {
             "inputs": [
                 {
-                    "id": "input_frame",
+                    "id": "input_frame" if index == 0 else input_port["id"],
                     "signal": input_port["signal"],
                     "shape": input_port["shape"],
                     "component_port": input_port["id"],
                 }
+                for index, input_port in enumerate(input_ports)
             ],
             "outputs": [
                 {

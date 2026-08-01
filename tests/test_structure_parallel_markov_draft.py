@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from nerve.circuit_ir import validate_circuit
+from nerve.circuit_lowering import lower_parallel_markov_draft_graph
+from nerve.circuit_lowering_system import build_draft_system_circuits
 from nerve.model_transpiler_discovery import discover_model_structure
 from nerve.model_transpiler_graph import make_model_graph
 from nerve.model_transpiler_types import ModelTranspileError
@@ -112,12 +115,15 @@ def test_discovers_parallel_backbone_markov_draft_from_tensor_contract(
     assert graph["proposal_contract"] == {
         "schedule": "parallel_backbone_then_sequential_markov",
         "configured_block_size": 5,
+        "minimum_draft_tokens": 5,
+        "default_draft_tokens": 5,
         "noise_token_id": 31,
         "sampling": "greedy",
         "confidence_prefix": "first_sigmoid_below_runtime_threshold",
         "verification": "lossless_target_longest_matching_prefix",
     }
     assert graph["input_adapter"]["params"] == {
+        "token_embedding": {"tensor": "embed.weight"},
         "target_projection": {"tensor": "mtp.0.main_proj.weight"},
         "target_norm": {"tensor": "mtp.0.main_norm.weight"},
     }
@@ -139,3 +145,121 @@ def test_rejects_parallel_markov_draft_when_confidence_shape_is_incompatible() -
 
     with pytest.raises(ModelTranspileError, match="confidence"):
         discover_model_structure(Path("synthetic"), config, tensors)
+
+
+def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    model = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    [draft] = model["graph"]["draft_execution_graphs"]
+
+    input_circuit, output_circuit = build_draft_system_circuits(model, draft)
+
+    assert validate_circuit(input_circuit).ok
+    assert validate_circuit(output_circuit).ok
+    assert [port["id"] for port in input_circuit["boundary"]["inputs"]] == [
+        "anchor_token_id",
+        "target_hidden_0",
+        "target_hidden_1",
+        "target_hidden_2",
+    ]
+    assert [port["id"] for port in input_circuit["boundary"]["outputs"]] == [
+        "query_frames",
+        "main_context",
+        "anchor_token_passthrough",
+    ]
+    query_block = next(
+        node for node in input_circuit["nodes"] if node["id"] == "query_token_block"
+    )
+    assert query_block["attrs"] == {
+        "minimum_block_size": 5,
+        "block_size": 5,
+        "noise_token_id": 31,
+        "anchor_position": 0,
+        "runtime_extensible": True,
+    }
+    markov = next(
+        node for node in output_circuit["nodes"] if node["id"] == "sequential_markov"
+    )
+    assert markov["inputs"] == ["base_logits", "anchor_token_id"]
+    assert markov["attrs"] == {
+        "rank": 2,
+        "sampling": "greedy",
+        "dependency": "previous_sampled_token",
+    }
+    assert [port["id"] for port in output_circuit["boundary"]["outputs"]] == [
+        "draft_token_ids",
+        "draft_logits",
+        "confidence_logits",
+    ]
+
+
+def test_compiles_source_owned_recommended_parallel_draft_width(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "README.md").write_text(
+        "Launch with {'num_speculative_tokens': 7} for the recommended path."
+    )
+    config, tensors = _source()
+
+    structure = discover_model_structure(tmp_path, config, tensors)
+    [draft] = structure.draft_execution_graphs
+    graph = make_model_graph(structure, Path("transpiled"), {"source": {}})["graph"][
+        "draft_execution_graphs"
+    ][0]
+
+    assert draft.attributes["proposal_contract"]["minimum_draft_tokens"] == 5
+    assert draft.attributes["proposal_contract"]["default_draft_tokens"] == 7
+    assert graph["query_block"]["block_size"] == 7
+
+
+def test_lowers_explicit_query_context_and_target_feature_wiring() -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    [draft] = make_model_graph(structure, Path("transpiled"), {"source": {}})["graph"][
+        "draft_execution_graphs"
+    ]
+    input_ref = {
+        "id": "draft_00_input_adapter",
+        "runtime_role": "draft_input_adapter",
+    }
+    layer_refs = [
+        {
+            "id": f"draft_00_layer_{index:02d}",
+            "runtime_role": "draft_processor",
+        }
+        for index in range(3)
+    ]
+    output_ref = {
+        "id": "draft_00_output_transducer",
+        "runtime_role": "draft_output_transducer",
+    }
+
+    lowered = lower_parallel_markov_draft_graph(
+        draft,
+        layer_refs=layer_refs,
+        input_ref=input_ref,
+        output_ref=output_ref,
+    )
+
+    assert lowered["topology"] == "explicit_parallel_query_graph"
+    assert len(lowered["edges"]) == 8
+    context_edges = [
+        edge
+        for edge in lowered["edges"]
+        if edge["connection"]["kind"] == "shared_context"
+    ]
+    assert [edge["destination"]["component_id"] for edge in context_edges] == [
+        "draft_00_layer_00",
+        "draft_00_layer_01",
+        "draft_00_layer_02",
+    ]
+    assert all(
+        edge["connection"]["state_update"] == "committed_target_only"
+        for edge in context_edges
+    )
+    assert [
+        item["source_layer_index"]
+        for item in lowered["boundary"]["external_inputs"]
+        if "source_layer_index" in item
+    ] == [0, 1, 2]

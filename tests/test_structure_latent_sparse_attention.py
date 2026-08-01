@@ -285,3 +285,39 @@ def test_rejects_partial_learned_indexer_tensor_contract() -> None:
 
     with pytest.raises(ModelTranspileError, match="incomplete attention indexer"):
         discover_model_structure(Path("synthetic"), config, tensors)
+
+
+def test_lowers_parallel_query_context_as_committed_state_and_transient_block() -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    component = make_layer(
+        structure,
+        structure.layers[0],
+        component_id="draft_00_layer_00",
+        runtime_role="draft_processor",
+        execution_contract={
+            "type": "parallel_query_with_external_kv_context",
+            "context_input": "main_context",
+            "context_state_update": "committed_target_only",
+            "query_state": "transient",
+            "intra_block_visibility": "all",
+            "query_position_offset": 1,
+        },
+    )
+
+    circuit = build_component_circuit(component, Path("draft_00_layer_00.json"))
+    nodes = {node["id"]: node for node in circuit["nodes"]}
+
+    assert [port["id"] for port in circuit["boundary"]["inputs"]] == [
+        "input_frame",
+        "main_context",
+    ]
+    assert nodes["key_value_projection"]["inputs"] == ["main_context"]
+    assert nodes["local_memory_update"]["attrs"]["source"] == (
+        "committed_target_context"
+    )
+    assert nodes["query_key_value_projection"]["inputs"] == ["operator_norm_out"]
+    assert nodes["query_key_value_rope"]["attrs"]["position_mode"] == ("parallel_block")
+    assert nodes["sparse_attention_read"]["attrs"]["causal"] is False
+    assert nodes["sparse_attention_read"]["attrs"]["intra_block_visibility"] == "all"
+    assert nodes["sparse_attention_read"]["attrs"]["query_state"] == ("transient")

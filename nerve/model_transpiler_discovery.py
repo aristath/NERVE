@@ -137,6 +137,7 @@ def discover_model_structure(
     )
     parallel_markov_drafts = discover_parallel_markov_drafts(
         tensors=tensors,
+        model_dir=model_dir,
         decoder_config=decoder_config,
         primary_layer_root=layer_root,
         main_layer_count=layer_count,
@@ -342,7 +343,9 @@ def discover_layer_structure(
     config_index = (
         layer_index if configured_layer_index is None else configured_layer_index
     )
-    configured = configured_layer_types[config_index] if configured_layer_types else None
+    configured = (
+        configured_layer_types[config_index] if configured_layer_types else None
+    )
     has_explicit_feed_forward_pre_norm = (
         find_optional_layer_tensor(tensors, prefix, FFN_PRE_NORM_SUFFIXES) is not None
     )

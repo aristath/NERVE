@@ -111,6 +111,81 @@ def latent_sparse_attention_nodes(
         ]
     )
 
+    execution_contract = component.get("execution_contract") or {}
+    parallel_context = (
+        execution_contract.get("type") == "parallel_query_with_external_kv_context"
+    )
+    if parallel_context:
+        by_id = {node["id"]: node for node in nodes}
+        by_id["query_rope"]["attrs"].update(
+            {
+                "position_offset": int(execution_contract["query_position_offset"]),
+                "position_mode": "parallel_block",
+            }
+        )
+        by_id["key_value_projection"].update(
+            {
+                "inputs": ["main_context"],
+                "outputs": ["context_key_value_latent"],
+            }
+        )
+        by_id["key_value_norm"].update(
+            {
+                "inputs": ["context_key_value_latent"],
+                "outputs": ["context_key_value_normed"],
+            }
+        )
+        by_id["key_value_rope"].update(
+            {
+                "inputs": ["context_key_value_normed"],
+                "outputs": ["context_key_value_positioned"],
+            }
+        )
+        by_id["key_value_rope"]["attrs"].update(
+            {"position_offset": 0, "position_mode": "committed_context"}
+        )
+        by_id["local_memory_update"].update(
+            {
+                "inputs": ["context_key_value_positioned", "local_kv_memory"],
+                "attrs": {
+                    **by_id["local_memory_update"]["attrs"],
+                    "source": "committed_target_context",
+                },
+            }
+        )
+        nodes.extend(
+            [
+                {
+                    "id": "query_key_value_projection",
+                    "op": "linear",
+                    "inputs": ["operator_norm_out"],
+                    "outputs": ["query_key_value_latent"],
+                    "params": _linear_params("kv_projection", parameters),
+                },
+                {
+                    "id": "query_key_value_norm",
+                    "op": "rms_norm",
+                    "inputs": ["query_key_value_latent"],
+                    "outputs": ["query_key_value_normed"],
+                    "params": ["kv_norm"],
+                    "attrs": _norm_attrs(numerics),
+                },
+                {
+                    "id": "query_key_value_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["query_key_value_normed"],
+                    "outputs": ["query_key_value_positioned"],
+                    "attrs": {
+                        **_rope_attrs(numerics, heads),
+                        "position_offset": int(
+                            execution_contract["query_position_offset"]
+                        ),
+                        "position_mode": "parallel_block",
+                    },
+                },
+            ]
+        )
+
     compression = attributes["compression"]
     if compression is not None:
         nodes.extend(
@@ -190,6 +265,8 @@ def latent_sparse_attention_nodes(
         )
 
     attention_inputs = ["query_positioned", "local_kv_values"]
+    if parallel_context:
+        attention_inputs.append("query_key_value_positioned")
     if compression is not None:
         attention_inputs.extend(["compressed_kv_values", "compressed_indices"])
     nodes.extend(
@@ -201,9 +278,19 @@ def latent_sparse_attention_nodes(
                 "outputs": ["attention_heads"],
                 "params": ["attention_sinks"],
                 "attrs": {
-                    "causal": True,
+                    "causal": not parallel_context,
                     "scale": float(numerics["attention_scale"]),
                     "window_size": int(attributes["window_size"]),
+                    **(
+                        {
+                            "intra_block_visibility": execution_contract[
+                                "intra_block_visibility"
+                            ],
+                            "query_state": execution_contract["query_state"],
+                        }
+                        if parallel_context
+                        else {}
+                    ),
                     **heads,
                 },
             },

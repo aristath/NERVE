@@ -6,6 +6,7 @@ from nerve.model_transpiler_graph import *
 from nerve.model_transpiler_tensor_index import *
 from nerve.model_transpiler_quantization import *
 
+
 def transpile_model(
     model_dir: Path,
     output_dir: Path,
@@ -39,15 +40,37 @@ def transpile_model(
     )
 
     emitted_layers = [
-        (layer, f"layer_{layer.index:02d}", "layers") for layer in structure.layers
+        (layer, f"layer_{layer.index:02d}", "layers", None)
+        for layer in structure.layers
     ]
     emitted_layers.extend(
-        (layer, f"{draft.id}_layer_{layer.index:02d}", f"drafts/{draft.id}/layers")
+        (
+            layer,
+            f"{draft.id}_layer_{layer.index:02d}",
+            f"drafts/{draft.id}/layers",
+            (
+                {
+                    "type": "parallel_query_with_external_kv_context",
+                    "context_input": "main_context",
+                    "context_state_update": "committed_target_only",
+                    "query_state": "transient",
+                    "intra_block_visibility": "all",
+                    "query_position_offset": 1,
+                }
+                if draft.draft_type == "parallel_backbone_markov"
+                else None
+            ),
+        )
         for draft in structure.draft_execution_graphs
         for layer in draft.layers
     )
     total = len(emitted_layers)
-    for current, (layer, component_id, relative_dir) in enumerate(emitted_layers, start=1):
+    for current, (
+        layer,
+        component_id,
+        relative_dir,
+        execution_contract,
+    ) in enumerate(emitted_layers, start=1):
         check_compile_cancelled(cancel_requested)
         write_json(
             output_dir / relative_dir / f"{component_id}.json",
@@ -60,6 +83,7 @@ def transpile_model(
                     if relative_dir == "layers"
                     else "draft_processor"
                 ),
+                execution_contract=execution_contract,
             ),
         )
         if progress is not None:
