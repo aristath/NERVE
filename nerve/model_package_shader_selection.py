@@ -1,5 +1,10 @@
 from nerve.model_package_common import *
 from nerve.model_package_assets import stream_control_binding_for_node
+from nerve.model_package_independent_experts import (
+    INDEPENDENT_MXFP4_DOWN_TILE_ROWS,
+    INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS,
+    independent_sparse_moe_shader_file,
+)
 from nerve.model_package_moe_routing import independent_moe_route_shader_file
 from nerve.model_package_tensors import *
 
@@ -1365,6 +1370,11 @@ def shader_file_for_node(
         )
     if op == "moe_route":
         return independent_moe_route_shader_file(circuit, node, tensor_index)
+    if op in {
+        "independent_sparse_moe_gate_up",
+        "independent_sparse_moe_down",
+    }:
+        return independent_sparse_moe_shader_file(circuit, node, tensor_index)
     if op in {"sparse_moe_gate_up", "sparse_moe_down"}:
         attrs = node["attrs"]
         parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
@@ -1620,6 +1630,18 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         return int(node["attrs"]["value_heads"])
     if node["op"] == "rg_lru_step":
         return int(node["attrs"]["heads"])
+    if node["op"] == "independent_sparse_moe_gate_up":
+        attrs = node["attrs"]
+        return int(attrs["experts_per_token"]) * (
+            (int(attrs["intermediate_size"]) + INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS - 1)
+            // INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS
+        )
+    if node["op"] == "independent_sparse_moe_down":
+        attrs = node["attrs"]
+        return int(attrs["experts_per_token"]) * (
+            (int(attrs["hidden_size"]) + INDEPENDENT_MXFP4_DOWN_TILE_ROWS - 1)
+            // INDEPENDENT_MXFP4_DOWN_TILE_ROWS
+        )
     if node["op"] == "sparse_moe_gate_up":
         attrs = node["attrs"]
         parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
@@ -1709,6 +1731,11 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if (
+        shader_file.startswith("independent_sparse_moe_")
+        and "_mxfp4_e2m1_" in shader_file
+    ):
+        return 512
     if shader_file.startswith("attention_partition_partials_bf16_"):
         return attention_workgroup_shape(int(node["attrs"]["head_width"]))[0]
     if shader_file.startswith("append_gqa_attention_partition_reduce_bf16_"):

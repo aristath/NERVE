@@ -1,6 +1,10 @@
 from nerve.model_package_common import *
 
 
+def is_sparse_moe_projection_shader(shader_file: str) -> bool:
+    return shader_file.startswith(("sparse_moe_", "independent_sparse_moe_"))
+
+
 def persistent_batch_control_shader_file(shader_file: str, *, binding: int) -> str:
     return shader_file.removesuffix(".comp") + f"__pbc{binding}.comp"
 
@@ -55,6 +59,17 @@ def persistent_batch_control_stage(
 
 
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
+    if re.fullmatch(
+        r"independent_sparse_moe_(?:gate_up|down)_mxfp4_e2m1_g32_"
+        r"h\d+_i\d+_e\d+_k\d+(?:_limit[0-9eE+.-]+)?\.comp",
+        shader_file,
+    ):
+        return re.sub(
+            r"^(independent_sparse_moe_(?:gate_up|down))_",
+            r"\1_batch1_",
+            shader_file,
+            count=1,
+        )
     if re.fullmatch(
         r"moe_router_(?:score_topk|token_table)_"
         r"(?:sigmoid|softmax|sqrtsoftplus)_bf16_e\d+_k\d+_"
@@ -139,6 +154,20 @@ def parallel_block_attention_stages(
 
 
 def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
+    independent = re.fullmatch(
+        r"independent_sparse_moe_(gate_up|down)_mxfp4_e2m1_g32_"
+        r"h(\d+)_i(\d+)_e\d+_k(\d+)(?:_limit[0-9eE+.-]+)?\.comp",
+        shader_file,
+    )
+    if independent is not None:
+        stage, hidden_size, intermediate_size, experts_per_token = independent.groups()
+        output_rows = int(intermediate_size) if stage == "gate_up" else int(hidden_size)
+        tile_rows = 32 if stage == "gate_up" else 64
+        operation = "compact" if stage == "gate_up" else "count"
+        return (
+            f"moe_route_{operation}_batch1_i{intermediate_size}_"
+            f"k{experts_per_token}_t{(output_rows + tile_rows - 1) // tile_rows}.comp"
+        )
     match = re.fullmatch(
         r"sparse_moe_(gate_up|down)_(?:bf16|"
         r"(?:prequant_)?(?:emit_intermediate_)?fp8_e4m3_b\d+x\d+|"
@@ -184,7 +213,12 @@ def sparse_moe_route_scheduling_workgroup_count_x(shader_file: str) -> int:
 
 
 def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
-    if node.get("op") not in {"sparse_moe_gate_up", "sparse_moe_down"}:
+    if node.get("op") not in {
+        "sparse_moe_gate_up",
+        "sparse_moe_down",
+        "independent_sparse_moe_gate_up",
+        "independent_sparse_moe_down",
+    }:
         raise ModelCompileError(
             "sparse route scheduling requires a sparse MoE projection node"
         )
@@ -207,7 +241,7 @@ def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
             "source_binding": len(inputs) - 1,
         },
     ]
-    if node["op"] == "sparse_moe_gate_up":
+    if node["op"] in {"sparse_moe_gate_up", "independent_sparse_moe_gate_up"}:
         bindings.append(
             {
                 "binding": 2,

@@ -1260,16 +1260,16 @@ def component_kernel_spec(
                     workgroup_count_x,
                     payload=(
                         "width_expert_range_indirect"
-                        if frame_parallel_shader_file.startswith("sparse_moe_")
+                        if is_sparse_moe_projection_shader(frame_parallel_shader_file)
                         else "width"
                     ),
                     indirect_dispatch_byte_offset=(
                         16
-                        if frame_parallel_shader_file.startswith("sparse_moe_")
+                        if is_sparse_moe_projection_shader(frame_parallel_shader_file)
                         else None
                     ),
                     dispatch_y_from_batch_width=(
-                        not frame_parallel_shader_file.startswith("sparse_moe_")
+                        not is_sparse_moe_projection_shader(frame_parallel_shader_file)
                     ),
                 )
             )

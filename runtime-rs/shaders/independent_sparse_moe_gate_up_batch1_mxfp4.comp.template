@@ -1,0 +1,250 @@
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_float_e4m3 : require
+#extension GL_EXT_spirv_intrinsics : require
+#extension GL_EXT_buffer_reference2 : require
+
+spirv_instruction(
+    extensions = ["SPV_VALVE_mixed_float_dot_product"],
+    capabilities = [6915],
+    id = 6918
+)
+float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
+
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer HiddenFrames { uint words[]; } hidden_frames;
+layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
+layout(set = 0, binding = 2) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
+layout(set = 0, binding = 3) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
+layout(set = 0, binding = 4) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
+    uint words[];
+};
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint expert_start;
+    uint expert_count;
+    uint owned_route_count;
+    uint dispatch_x;
+    uint dispatch_y;
+    uint dispatch_z;
+} batch_control;
+
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint INTERMEDIATE_SIZE = {{INTERMEDIATE_SIZE}}u;
+const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
+const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
+const uint TILE_ROWS = {{TILE_ROWS}}u;
+const float SWIGLU_LIMIT = {{SWIGLU_LIMIT}};
+const uint TILES_PER_ROUTE = (INTERMEDIATE_SIZE + TILE_ROWS - 1u) / TILE_ROWS;
+const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
+const uint HIDDEN_FP8_WORDS = HIDDEN_SIZE / 4u;
+const uint HIDDEN_BLOCKS = HIDDEN_SIZE / 128u;
+const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
+const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
+const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
+const uint WEIGHT_ROW_BYTES = HIDDEN_SIZE / 2u;
+const uint SCALE_ROW_BYTES = HIDDEN_SIZE / 32u;
+const uint ADDRESS_RECORD_WORDS = 8u;
+const uint DYNAMIC_PARAMETER_COUNT = 4u;
+const uint UNBOUND_PARAMETER_SLOT = 0xffffffffu;
+const float MXFP4_VALUES[8] = float[8](
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+);
+
+shared fe4m3vec4 quantized_hidden[HIDDEN_FP8_WORDS];
+shared float hidden_scales[HIDDEN_BLOCKS];
+shared float activated_rows[TILE_ROWS];
+
+float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16); }
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16;
+}
+
+float round_bf16(float value) { return bf16_to_f32(f32_to_bf16(value)); }
+
+vec4 read_hiddenx4(uint batch_index, uint column) {
+    uint offset = batch_index * HIDDEN_WORDS + column / 2u;
+    uint lo = hidden_frames.words[offset];
+    uint hi = hidden_frames.words[offset + 1u];
+    return vec4(
+        bf16_to_f32(lo), bf16_to_f32(lo >> 16u),
+        bf16_to_f32(hi), bf16_to_f32(hi >> 16u)
+    );
+}
+
+uint dynamic_parameter_slot(uint expert, uint parameter) {
+    return dynamic_parameter_slots.words[
+        expert * DYNAMIC_PARAMETER_COUNT + parameter
+    ];
+}
+
+DynamicU32Buffer dynamic_parameter(uint expert, uint parameter) {
+    uint record = dynamic_parameter_slot(expert, parameter) * ADDRESS_RECORD_WORDS;
+    uint64_t address = uint64_t(dynamic_resource_addresses.words[record])
+        | (uint64_t(dynamic_resource_addresses.words[record + 1u]) << 32u);
+    return DynamicU32Buffer(address);
+}
+
+uint read_u8(DynamicU32Buffer source, uint index) {
+    return (source.words[index >> 2u] >> ((index & 3u) * 8u)) & 0xffu;
+}
+
+float decode_mxfp4(uint nibble) {
+    float magnitude = MXFP4_VALUES[nibble & 7u];
+    return (nibble & 8u) != 0u ? -magnitude : magnitude;
+}
+
+fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
+    uint byte_index = row * WEIGHT_ROW_BYTES + column / 2u;
+    uint lo = read_u8(weight, byte_index);
+    uint hi = read_u8(weight, byte_index + 1u);
+    return fe4m3vec4(vec4(
+        decode_mxfp4(lo & 0x0fu), decode_mxfp4(lo >> 4u),
+        decode_mxfp4(hi & 0x0fu), decode_mxfp4(hi >> 4u)
+    ));
+}
+
+float read_e8m0_scale(DynamicU32Buffer scale, uint row, uint block) {
+    uint scale_byte = read_u8(scale, row * SCALE_ROW_BYTES + block);
+    if (scale_byte == 0u) return uintBitsToFloat(0x00400000u);
+    return uintBitsToFloat(scale_byte << 23u);
+}
+
+float rounded_fp8_scale(float block_max) {
+    float ratio = max(block_max, 1e-4) / 448.0;
+    uint bits = floatBitsToUint(ratio);
+    int exponent = int((bits >> 23u) & 0xffu) - 127;
+    if ((bits & 0x7fffffu) != 0u) exponent++;
+    return uintBitsToFloat(uint(exponent + 127) << 23u);
+}
+
+void quantize_hidden(uint lane, uint batch_index) {
+    if (lane >= 64u) return;
+    uint cluster = lane >> 5u;
+    uint cluster_lane = lane & 31u;
+    for (uint block = cluster; block < HIDDEN_BLOCKS; block += 2u) {
+        uint word = block * 32u + cluster_lane;
+        vec4 hidden = read_hiddenx4(batch_index, word * 4u);
+        float lane_max = max(
+            max(abs(hidden.x), abs(hidden.y)),
+            max(abs(hidden.z), abs(hidden.w))
+        );
+        float block_max = subgroupClusteredMax(lane_max, 32u);
+        float scale = rounded_fp8_scale(block_max);
+        if (cluster_lane == 0u) hidden_scales[block] = scale;
+        quantized_hidden[word] = fe4m3vec4(hidden / scale);
+    }
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    uint linear_route = group / TILES_PER_ROUTE;
+    bool route_native = batch_control.expert_count != 0u;
+    uint compact_batch = route_native
+        ? linear_route / EXPERTS_PER_TOKEN
+        : gl_WorkGroupID.y;
+    uint compact_route = route_native
+        ? linear_route % EXPERTS_PER_TOKEN
+        : linear_route;
+    uint tile = group % TILES_PER_ROUTE;
+    if (
+        (route_native && linear_route >= batch_control.owned_route_count)
+        || (!route_native && compact_batch >= batch_control.batch_width)
+        || (!route_native && compact_route >= EXPERTS_PER_TOKEN)
+    ) return;
+    uint route_index = expert_intermediates.words[
+        compact_batch * EXPERT_FRAME_WORDS + EXPERT_DATA_WORDS + compact_route
+    ];
+    uint batch_index = route_index / EXPERTS_PER_TOKEN;
+    uint route = route_index % EXPERTS_PER_TOKEN;
+    uint expert = expert_routes.words[
+        batch_index * EXPERTS_PER_TOKEN + route
+    ] & 0xffffu;
+    if (expert >= NUM_EXPERTS) return;
+    for (uint parameter = 0u; parameter < DYNAMIC_PARAMETER_COUNT; parameter++) {
+        if (dynamic_parameter_slot(expert, parameter) == UNBOUND_PARAMETER_SLOT) return;
+    }
+    DynamicU32Buffer gate_weight = dynamic_parameter(expert, 0u);
+    DynamicU32Buffer gate_scale = dynamic_parameter(expert, 1u);
+    DynamicU32Buffer up_weight = dynamic_parameter(expert, 2u);
+    DynamicU32Buffer up_scale = dynamic_parameter(expert, 3u);
+
+    uint lane = gl_LocalInvocationID.x;
+    quantize_hidden(lane, batch_index);
+    barrier();
+    uint first_row = tile * TILE_ROWS;
+    for (
+        uint local_row = gl_SubgroupID;
+        local_row < TILE_ROWS;
+        local_row += gl_NumSubgroups
+    ) {
+        uint row = first_row + local_row;
+        float gate = 0.0;
+        float up = 0.0;
+        if (row < INTERMEDIATE_SIZE) {
+            for (
+                uint word = gl_SubgroupInvocationID;
+                word < HIDDEN_FP8_WORDS;
+                word += gl_SubgroupSize
+            ) {
+                uint column = word * 4u;
+                uint activation_block = column / 128u;
+                uint weight_block = column / 32u;
+                float activation_scale = hidden_scales[activation_block];
+                fe4m3vec4 hidden = quantized_hidden[word];
+                gate = fma(
+                    fp8_dot4_acc32(hidden, read_mxfp4x4(gate_weight, row, column), 0.0),
+                    activation_scale * read_e8m0_scale(gate_scale, row, weight_block),
+                    gate
+                );
+                up = fma(
+                    fp8_dot4_acc32(hidden, read_mxfp4x4(up_weight, row, column), 0.0),
+                    activation_scale * read_e8m0_scale(up_scale, row, weight_block),
+                    up
+                );
+            }
+        }
+        gate = subgroupAdd(gate);
+        up = subgroupAdd(up);
+        if (gl_SubgroupInvocationID == 0u) {
+            if (row < INTERMEDIATE_SIZE) {
+                float gate_value = round_bf16(gate);
+                float up_value = round_bf16(up);
+                if (SWIGLU_LIMIT > 0.0) {
+                    gate_value = min(gate_value, SWIGLU_LIMIT);
+                    up_value = clamp(up_value, -SWIGLU_LIMIT, SWIGLU_LIMIT);
+                }
+                activated_rows[local_row] = round_bf16(
+                    (gate_value / (1.0 + exp(-gate_value))) * up_value
+                );
+            } else {
+                activated_rows[local_row] = 0.0;
+            }
+        }
+    }
+    barrier();
+    if (lane < TILE_ROWS / 2u) {
+        uint row = first_row + lane * 2u;
+        if (row < INTERMEDIATE_SIZE) {
+            uint high = row + 1u < INTERMEDIATE_SIZE
+                ? f32_to_bf16(activated_rows[lane * 2u + 1u])
+                : 0u;
+            uint output_offset = batch_index * EXPERT_FRAME_WORDS;
+            expert_intermediates.words[
+                output_offset + route * INTERMEDIATE_WORDS + row / 2u
+            ] = (high << 16u) | f32_to_bf16(activated_rows[lane * 2u]);
+        }
+    }
+}

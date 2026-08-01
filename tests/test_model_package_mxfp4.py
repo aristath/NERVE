@@ -4,7 +4,18 @@ import json
 import struct
 from pathlib import Path
 
+from nerve.model_package_batching import (
+    frame_parallel_batch_shader_file,
+    is_sparse_moe_projection_shader,
+    sparse_moe_route_scheduling_shader_file,
+)
 from nerve.model_package_assets import copy_tensor_package
+from nerve.model_package_shader_compiler import compile_shader_artifacts
+from nerve.model_package_shader_selection import (
+    shader_file_for_node,
+    workgroup_count_x_for_node,
+)
+from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_transpiler_tensor_index import make_tensor_index
 
 
@@ -64,3 +75,162 @@ def test_packages_mxfp4_experts_as_independent_byte_exact_resources(
             assert info["quantization"]["format"] == "mxfp4_e2m1"
             assert info["quantization"]["scales"] == name.replace(".weight", ".scale")
     assert len(packaged_paths) == len(tensor_payloads)
+
+
+def test_renders_demand_addressed_native_mxfp4_expert_kernels(
+    tmp_path: Path,
+) -> None:
+    hidden_size = 128
+    intermediate_size = 128
+    num_experts = 2
+    experts_per_token = 1
+    refs: dict[str, dict[str, str]] = {}
+    tensors: dict[str, dict[str, object]] = {}
+    gate_mapping = []
+    down_mapping = []
+
+    def add_matrix(expert: int, projection: str, rows: int, columns: int) -> list[str]:
+        prefix = f"expert_{expert}.{projection}"
+        weight_id = f"expert_{expert}_{projection}"
+        scale_id = f"{weight_id}_scale"
+        refs[weight_id] = {"tensor": f"{prefix}.weight"}
+        refs[scale_id] = {"tensor": f"{prefix}.scale"}
+        tensors[f"{prefix}.weight"] = {
+            "dtype": "I8",
+            "shape": [rows, columns // 2],
+            "logical_shape": [rows, columns],
+            "layout": "row_major",
+            "quantization": {
+                "format": "mxfp4_e2m1",
+                "bits": 4,
+                "element_type": "float",
+                "values_per_byte": 2,
+                "packing_axis": 1,
+                "packing_order": "low_nibble_then_high_nibble_along_k",
+                "group_size": 32,
+                "scales": f"{prefix}.scale",
+                "scale_dtype": "F8_E8M0",
+                "scale_mode": "power_of_two_per_output_row_k_group",
+            },
+        }
+        tensors[f"{prefix}.scale"] = {
+            "dtype": "F8_E8M0",
+            "shape": [rows, columns // 32],
+            "layout": "row_major",
+        }
+        return [weight_id, scale_id]
+
+    for expert in range(num_experts):
+        gate_mapping.append(
+            {
+                "selector": expert,
+                "parameter_ids": [
+                    *add_matrix(expert, "w1", intermediate_size, hidden_size),
+                    *add_matrix(expert, "w3", intermediate_size, hidden_size),
+                ],
+            }
+        )
+        down_mapping.append(
+            {
+                "selector": expert,
+                "parameter_ids": add_matrix(
+                    expert, "w2", hidden_size, intermediate_size
+                ),
+            }
+        )
+
+    circuit = {"parameters": {"refs": refs}}
+    common_attrs = {
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+        "experts_per_token": experts_per_token,
+    }
+    gate = {
+        "id": "gate_up",
+        "op": "independent_sparse_moe_gate_up",
+        "inputs": ["hidden", "routes"],
+        "outputs": ["intermediates"],
+        "params": [
+            parameter for entry in gate_mapping for parameter in entry["parameter_ids"]
+        ],
+        "attrs": {
+            **common_attrs,
+            "swiglu_limit": 10.0,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": gate_mapping}
+            ],
+        },
+    }
+    down = {
+        "id": "down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": [
+            parameter for entry in down_mapping for parameter in entry["parameter_ids"]
+        ],
+        "attrs": {
+            **common_attrs,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": down_mapping}
+            ],
+        },
+    }
+    tensor_index = {"tensors": tensors}
+    dimensions = {
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+    }
+    gate_shader = (
+        "independent_sparse_moe_gate_up_mxfp4_e2m1_g32_h128_i128_e2_k1_limit10.comp"
+    )
+    down_shader = "independent_sparse_moe_down_mxfp4_e2m1_g32_h128_i128_e2_k1.comp"
+    gate_batch_shader = gate_shader.replace(
+        "independent_sparse_moe_gate_up_",
+        "independent_sparse_moe_gate_up_batch1_",
+    )
+    down_batch_shader = down_shader.replace(
+        "independent_sparse_moe_down_",
+        "independent_sparse_moe_down_batch1_",
+    )
+
+    assert shader_file_for_node(circuit, gate, tensor_index, dimensions) == gate_shader
+    assert shader_file_for_node(circuit, down, tensor_index, dimensions) == down_shader
+    assert frame_parallel_batch_shader_file(gate_shader) == gate_batch_shader
+    assert frame_parallel_batch_shader_file(down_shader) == down_batch_shader
+    assert is_sparse_moe_projection_shader(gate_batch_shader)
+    assert sparse_moe_route_scheduling_shader_file(gate_shader) == (
+        "moe_route_compact_batch1_i128_k1_t4.comp"
+    )
+    assert sparse_moe_route_scheduling_shader_file(down_shader) == (
+        "moe_route_count_batch1_i128_k1_t2.comp"
+    )
+    assert workgroup_count_x_for_node(circuit, gate, tensor_index) == 4
+    assert workgroup_count_x_for_node(circuit, down, tensor_index) == 2
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {gate_shader, gate_batch_shader, down_shader, down_batch_shader},
+    )
+    gate_source = (tmp_path / gate_shader).read_text()
+    gate_batch_source = (tmp_path / gate_batch_shader).read_text()
+    down_source = (tmp_path / down_shader).read_text()
+    assert "const uint DYNAMIC_PARAMETER_COUNT = 4u;" in gate_source
+    assert "const uint DYNAMIC_PARAMETER_COUNT = 2u;" in down_source
+    assert "const float MXFP4_VALUES[8]" in gate_source
+    assert "0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0" in gate_source
+    assert "uintBitsToFloat(scale_byte << 23u)" in gate_source
+    assert "float rounded_fp8_scale(float block_max)" in gate_source
+    assert "fp8_dot4_acc32" in gate_source
+    assert "fe4m3vec4 read_mxfp4x4" in gate_source
+    assert "min(gate_value, SWIGLU_LIMIT)" in gate_source
+    assert "clamp(up_value, -SWIGLU_LIMIT, SWIGLU_LIMIT)" in gate_source
+    assert "expert * DYNAMIC_PARAMETER_COUNT + parameter" in gate_source
+    assert "batch_control.owned_route_count" in gate_batch_source
+    assert "batch_index * HIDDEN_WORDS" in gate_batch_source
+    assert "{{" not in gate_source
+    assert "{{" not in gate_batch_source
+    assert "{{" not in down_source
+    compile_shader_artifacts(tmp_path)

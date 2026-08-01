@@ -253,7 +253,7 @@ fn infer_node_output_shapes(
             let output_shape = attr_usize(node, "experts_per_token").map(|routes| vec![routes, 2]);
             Ok(repeat_shape(output_shape, outputs))
         }
-        "sparse_moe_gate_up" => {
+        "sparse_moe_gate_up" | "independent_sparse_moe_gate_up" => {
             let output_shape = attr_usize(node, "experts_per_token")
                 .zip(attr_usize(node, "intermediate_size"))
                 .and_then(|(routes, intermediate)| {
@@ -268,7 +268,7 @@ fn infer_node_output_shapes(
                 });
             Ok(repeat_shape(output_shape, outputs))
         }
-        "sparse_moe_down" => {
+        "sparse_moe_down" | "independent_sparse_moe_down" => {
             let output_shape = attr_usize(node, "experts_per_token")
                 .zip(attr_usize(node, "hidden_size"))
                 .map(|(routes, hidden)| vec![routes, hidden]);

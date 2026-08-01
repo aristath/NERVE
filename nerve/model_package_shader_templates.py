@@ -3615,6 +3615,51 @@ if (
             },
         )
 
+    independent_mxfp4_expert_shape = re.fullmatch(
+        r"independent_sparse_moe_(gate_up|down)(?:_(batch1))?_"
+        r"mxfp4_e2m1_g32_h(\d+)_i(\d+)_e(\d+)_k(\d+)"
+        r"(?:_limit([0-9eE+.-]+))?\.comp",
+        shader_file,
+    )
+    if independent_mxfp4_expert_shape is not None:
+        (
+            stage,
+            batch_mode,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            swiglu_limit,
+        ) = independent_mxfp4_expert_shape.groups()
+        hidden_size, intermediate_size, num_experts, experts_per_token = map(
+            int,
+            (hidden_size, intermediate_size, num_experts, experts_per_token),
+        )
+        if (
+            hidden_size <= 0
+            or hidden_size % 128
+            or intermediate_size <= 0
+            or intermediate_size % 128
+            or not 0 < experts_per_token <= num_experts
+            or (stage == "gate_up") != (swiglu_limit is not None)
+        ):
+            raise ModelCompileError(
+                f"invalid demand-addressed MXFP4 expert kernel {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            f"independent_sparse_moe_{stage}"
+            f"{'_batch1' if batch_mode else ''}_mxfp4.comp.template",
+            {
+                "HIDDEN_SIZE": str(hidden_size),
+                "INTERMEDIATE_SIZE": str(intermediate_size),
+                "NUM_EXPERTS": str(num_experts),
+                "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "TILE_ROWS": str(32 if stage == "gate_up" else 64),
+                "SWIGLU_LIMIT": swiglu_limit or "0",
+            },
+        )
+
     independent_score_router_shape = re.fullmatch(
         r"moe_router(?:_(batch1))?_score_topk_"
         r"(sigmoid|softmax|sqrtsoftplus)_bf16_e(\d+)_k(\d+)_"

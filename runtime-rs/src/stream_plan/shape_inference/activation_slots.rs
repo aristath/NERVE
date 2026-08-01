@@ -549,7 +549,29 @@ mod tests {
         assert_eq!(
             infer_node_output_shapes(
                 "layer_00",
+                &node("independent_sparse_moe_gate_up"),
+                &signals,
+                &params,
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![4_112])]
+        );
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
                 &node("sparse_moe_down"),
+                &signals,
+                &params,
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![8, 2048])]
+        );
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node("independent_sparse_moe_down"),
                 &signals,
                 &params,
                 None,
