@@ -210,6 +210,207 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    repeat_stream_lanes = re.fullmatch(
+        r"repeat_stream_lanes_bf16_m(\d+)_h(\d+)\.comp",
+        shader_file,
+    )
+    if repeat_stream_lanes is not None:
+        multiplicity, hidden_size = map(int, repeat_stream_lanes.groups())
+        if multiplicity <= 0 or hidden_size <= 0 or hidden_size % 2:
+            raise ModelCompileError(
+                f"invalid stream-repeat shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "repeat_stream_lanes_bf16.comp.template",
+            {
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+            },
+        )
+
+    hyper_head_block = re.fullmatch(
+        r"hyper_head_block_b(\d+)_m(\d+)_h(\d+)_eps([0-9eE+.-]+)\.comp",
+        shader_file,
+    )
+    if hyper_head_block is not None:
+        block_width, multiplicity, hidden_size = map(int, hyper_head_block.groups()[:3])
+        epsilon = float(hyper_head_block.group(4))
+        if (
+            block_width <= 0
+            or multiplicity <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+            or not math.isfinite(epsilon)
+            or epsilon <= 0.0
+        ):
+            raise ModelCompileError(f"invalid hyper-head block shader {shader_file!r}")
+        return render_shader_template(
+            source_dir,
+            "hyper_head_block.comp.template",
+            {
+                "BLOCK_WIDTH": str(block_width),
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+                "EPSILON": shader_float_glsl(epsilon),
+            },
+        )
+
+    rms_norm_block = re.fullmatch(
+        r"rms_norm_block_b(\d+)_bf16_h(\d+)_eps([0-9eE+.-]+)_offset([0-9eE+.-]+)\.comp",
+        shader_file,
+    )
+    if rms_norm_block is not None:
+        block_width = int(rms_norm_block.group(1))
+        hidden_size = int(rms_norm_block.group(2))
+        epsilon = float(rms_norm_block.group(3))
+        weight_offset = float(rms_norm_block.group(4))
+        if (
+            block_width <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+            or not math.isfinite(epsilon)
+            or epsilon <= 0.0
+            or not math.isfinite(weight_offset)
+        ):
+            raise ModelCompileError(f"invalid block RMS norm shader {shader_file!r}")
+        return render_shader_template(
+            source_dir,
+            "rms_norm_block_bf16.comp.template",
+            {
+                "BLOCK_WIDTH": str(block_width),
+                "HIDDEN_SIZE": str(hidden_size),
+                "NORM_EPS": shader_float_glsl(epsilon),
+                "WEIGHT_OFFSET": shader_float_glsl(weight_offset),
+            },
+        )
+
+    projection_block = re.fullmatch(
+        r"linear_projection_block_b(\d+)_bf16_(\d+)x(\d+)_f32\.comp",
+        shader_file,
+    )
+    if projection_block is not None:
+        block_width, input_size, output_size = map(int, projection_block.groups())
+        if block_width <= 0 or input_size <= 0 or input_size % 2 or output_size <= 0:
+            raise ModelCompileError(
+                f"invalid block output projection shader {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "linear_projection_block_bf16_f32.comp.template",
+            {
+                "BLOCK_WIDTH": str(block_width),
+                "INPUT_SIZE": str(input_size),
+                "OUTPUT_SIZE": str(output_size),
+            },
+        )
+
+    markov_partials = re.fullmatch(
+        r"markov_argmax_partials_b(\d+)_p(\d+)_v(\d+)_r(\d+)_t(\d+)\.comp",
+        shader_file,
+    )
+    if markov_partials is not None:
+        block_width, position, vocabulary_size, rank, tile_width = map(
+            int, markov_partials.groups()
+        )
+        if (
+            block_width <= 0
+            or position < 0
+            or position >= block_width
+            or vocabulary_size <= 0
+            or rank <= 0
+            or rank % 2
+            or tile_width != 256
+        ):
+            raise ModelCompileError(f"invalid Markov partial shader {shader_file!r}")
+        return render_shader_template(
+            source_dir,
+            "markov_argmax_partials.comp.template",
+            {
+                "BLOCK_WIDTH": str(block_width),
+                "POSITION": str(position),
+                "VOCABULARY_SIZE": str(vocabulary_size),
+                "RANK": str(rank),
+                "TILE_WIDTH": str(tile_width),
+            },
+        )
+
+    argmax_reduce = re.fullmatch(r"argmax_candidate_reduce_c(\d+)\.comp", shader_file)
+    if argmax_reduce is not None:
+        candidate_count = int(argmax_reduce.group(1))
+        if candidate_count <= 0 or candidate_count > 1024:
+            raise ModelCompileError(f"invalid argmax reduction shader {shader_file!r}")
+        return render_shader_template(
+            source_dir,
+            "argmax_candidate_reduce.comp.template",
+            {"CANDIDATE_COUNT": str(candidate_count)},
+        )
+
+    confidence_block = re.fullmatch(
+        r"confidence_projection_block_b(\d+)_bf16_h(\d+)_r(\d+)\.comp",
+        shader_file,
+    )
+    if confidence_block is not None:
+        block_width, hidden_size, rank = map(int, confidence_block.groups())
+        if (
+            block_width <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+            or rank <= 0
+            or rank % 2
+        ):
+            raise ModelCompileError(f"invalid confidence block shader {shader_file!r}")
+        embedding_declarations = "\n".join(
+            f"layout(set = 0, binding = {index + 1}) readonly buffer MarkovEmbedding{index} "
+            f"{{ uint words[]; }} markov_embedding_{index};"
+            for index in range(block_width)
+        )
+        embedding_reads = "\n".join(
+            f"    if (position == {index}u) {{\n"
+            f"        uint packed = markov_embedding_{index}.words[channel >> 1u];\n"
+            f"        return bf16_to_f32(((channel & 1u) == 0u) ? packed : (packed >> 16u));\n"
+            f"    }}"
+            for index in range(block_width)
+        )
+        return render_shader_template(
+            source_dir,
+            "confidence_projection_block_bf16.comp.template",
+            {
+                "BLOCK_WIDTH": str(block_width),
+                "HIDDEN_SIZE": str(hidden_size),
+                "RANK": str(rank),
+                "OUTPUT_BINDING": str(block_width + 1),
+                "WEIGHT_BINDING": str(block_width + 2),
+                "EMBEDDING_DECLARATIONS": embedding_declarations,
+                "EMBEDDING_READS": embedding_reads,
+            },
+        )
+
+    token_pack = re.fullmatch(r"pack_token_block_b(\d+)\.comp", shader_file)
+    if token_pack is not None:
+        block_width = int(token_pack.group(1))
+        if block_width <= 0:
+            raise ModelCompileError(f"invalid token-pack shader {shader_file!r}")
+        input_declarations = "\n".join(
+            f"layout(set = 0, binding = {index}) readonly buffer Token{index} "
+            f"{{ uint value; }} token_{index};"
+            for index in range(block_width)
+        )
+        input_reads = "\n".join(
+            f"    if (index == {index}u) return token_{index}.value;"
+            for index in range(block_width)
+        )
+        return render_shader_template(
+            source_dir,
+            "pack_token_block.comp.template",
+            {
+                "BLOCK_WIDTH": str(block_width),
+                "OUTPUT_BINDING": str(block_width),
+                "INPUT_DECLARATIONS": input_declarations,
+                "INPUT_READS": input_reads,
+            },
+        )
+
     persistent_batch_control_variant = re.fullmatch(
         r"(.+)__pbc(\d+)\.comp",
         shader_file,
@@ -3755,10 +3956,7 @@ if (
         num_experts, experts_per_token, vocab_size = map(
             int, (num_experts, experts_per_token, vocab_size)
         )
-        if (
-            not 0 < experts_per_token <= num_experts <= 4096
-            or vocab_size <= 0
-        ):
+        if not 0 < experts_per_token <= num_experts <= 4096 or vocab_size <= 0:
             raise ModelCompileError(
                 f"invalid token-table sparse expert routing e{num_experts} "
                 f"k{experts_per_token} v{vocab_size}"

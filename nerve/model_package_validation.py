@@ -130,7 +130,16 @@ def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
                 f"compiled package edge {edge_id!r} has no connection contract"
             )
         connection_kind = connection.get("kind")
-        if connection_kind not in {"forward", "temporal_feedback"}:
+        instantaneous_connection_kinds = {
+            "forward",
+            "shared_context",
+            "parallel_block_scatter",
+            "parallel_block_gather",
+        }
+        if connection_kind not in {
+            *instantaneous_connection_kinds,
+            "temporal_feedback",
+        }:
             raise ModelCompileError(
                 f"compiled package edge {edge_id!r} has unsupported connection kind {connection_kind!r}"
             )
@@ -140,7 +149,25 @@ def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
                 raise ModelCompileError(
                     f"compiled package temporal feedback edge {edge_id!r} must delay at least one activation"
                 )
-        if source_id == destination_id and connection_kind == "forward":
+        elif connection_kind == "shared_context":
+            state_update = connection.get("state_update")
+            if not isinstance(state_update, str) or not state_update.strip():
+                raise ModelCompileError(
+                    f"compiled package shared-context edge {edge_id!r} has no state-update contract"
+                )
+        elif connection_kind in {
+            "parallel_block_scatter",
+            "parallel_block_gather",
+        }:
+            width = connection.get("width")
+            if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+                raise ModelCompileError(
+                    f"compiled package parallel-block edge {edge_id!r} must have a positive width"
+                )
+        if (
+            source_id == destination_id
+            and connection_kind in instantaneous_connection_kinds
+        ):
             raise ModelCompileError(
                 f"compiled package edge {edge_id!r} creates an instantaneous self-loop"
             )
@@ -155,16 +182,38 @@ def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
             raise ModelCompileError(
                 f"compiled package edge {edge_id!r} references an unknown port"
             )
-        if output.get("signal") != input_port.get("signal") or output.get(
-            "shape"
-        ) != input_port.get("shape"):
+        output_shape = output.get("shape")
+        input_shape = input_port.get("shape")
+        width = connection.get("width")
+        if connection_kind == "parallel_block_scatter":
+            compatible_geometry = (
+                isinstance(output_shape, list)
+                and bool(output_shape)
+                and output_shape[0] == width
+                and output_shape[1:] == input_shape
+            )
+        elif connection_kind == "parallel_block_gather":
+            compatible_geometry = (
+                isinstance(input_shape, list)
+                and bool(input_shape)
+                and input_shape[0] == width
+                and input_shape[1:] == output_shape
+            )
+        else:
+            compatible_geometry = (
+                output.get("signal") == input_port.get("signal")
+                and output_shape == input_shape
+            )
+        if not compatible_geometry:
             raise ModelCompileError(
                 f"compiled package edge {edge_id!r} connects incompatible ports"
             )
         source_endpoint = (source_id, source["port_id"])
         destination_endpoint = (destination_id, destination["port_id"])
         destination_set = (
-            forward_inputs if connection_kind == "forward" else feedback_inputs
+            forward_inputs
+            if connection_kind in instantaneous_connection_kinds
+            else feedback_inputs
         )
         if destination_endpoint in destination_set:
             raise ModelCompileError(
@@ -173,7 +222,7 @@ def validate_compiled_circuit_graph(manifest: Json) -> dict[str, Json]:
         destination_set.add(destination_endpoint)
         connected_outputs.add(source_endpoint)
         connected_inputs.add(destination_endpoint)
-        if connection_kind == "forward":
+        if connection_kind in instantaneous_connection_kinds:
             forward_indegree[destination_id] += 1
             forward_destinations[source_id].append(destination_id)
 
@@ -299,9 +348,38 @@ def validate_compiled_speculative_decoders(manifest: Json) -> dict[str, Json]:
                 f"compiled package contains invalid or duplicate speculative decoder {decoder_id!r}"
             )
         decoder_ids.add(decoder_id)
-        if decoder.get("type") != "multi_token_prediction":
+        decoder_type = decoder.get("type")
+        if not isinstance(decoder_type, str) or not decoder_type:
             raise ModelCompileError(
-                f"speculative decoder {decoder_id!r} has unsupported type {decoder.get('type')!r}"
+                f"speculative decoder {decoder_id!r} has no source decoder type"
+            )
+        execution_contract = decoder.get("execution_contract")
+        if not isinstance(execution_contract, dict):
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} has no execution contract"
+            )
+        execution_mode = execution_contract.get("mode")
+        output_schedule = execution_contract.get("output_schedule")
+        if execution_mode == "autoregressive_feedback":
+            valid_execution_contract = (
+                execution_contract.get("processor_schedule") == "one_token_per_tick"
+                and output_schedule == "dedicated_token_transducer"
+                and "block_width" not in execution_contract
+            )
+        elif execution_mode == "parallel_block":
+            block_width = execution_contract.get("block_width")
+            valid_execution_contract = (
+                isinstance(block_width, int)
+                and not isinstance(block_width, bool)
+                and block_width > 0
+                and execution_contract.get("processor_schedule") == "parallel_lanes"
+                and output_schedule == "compiled_component_graph"
+            )
+        else:
+            valid_execution_contract = False
+        if not valid_execution_contract:
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} has an unsupported execution contract"
             )
         graph = decoder.get("circuit_graph")
         graph_candidates = validate_compiled_circuit_graph({"circuit_graph": graph})
@@ -336,6 +414,8 @@ def validate_compiled_speculative_decoders(manifest: Json) -> dict[str, Json]:
         executable_ids = set(roles["draft_input_adapter"]) | set(
             roles["draft_processor"]
         )
+        if output_schedule == "compiled_component_graph":
+            executable_ids.add(roles["draft_output_transducer"][0])
         if set(execution_by_component) != executable_ids:
             raise ModelCompileError(
                 f"speculative decoder {decoder_id!r} executions do not cover its executable components"
@@ -363,31 +443,37 @@ def validate_compiled_speculative_decoders(manifest: Json) -> dict[str, Json]:
                         f"speculative decoder {decoder_id!r} kernel {component_id}.{index} "
                         "does not match its circuit node"
                     )
-        output_id = roles["draft_output_transducer"][0]
-        output_spec = decoder.get("output_transducer")
-        output_refs = graph_candidates[output_id]["parameters"]["refs"]
-        if (
-            not isinstance(output_spec, dict)
-            or output_spec.get("component_id") != output_id
-            or output_spec.get("norm_parameter_tensor")
-            != output_refs.get("norm", {}).get("tensor")
-            or output_spec.get("projection_parameter_tensor")
-            != output_refs.get("projection", {}).get("tensor")
-            or any(
-                not isinstance(output_spec.get(field), str) or not output_spec[field]
-                for field in ("norm_shader_path", "projection_shader_path")
-            )
-        ):
-            raise ModelCompileError(
-                f"speculative decoder {decoder_id!r} output execution does not match its circuit"
-            )
+        if output_schedule == "dedicated_token_transducer":
+            output_id = roles["draft_output_transducer"][0]
+            output_spec = decoder.get("output_transducer")
+            output_refs = graph_candidates[output_id]["parameters"]["refs"]
+            if (
+                not isinstance(output_spec, dict)
+                or output_spec.get("component_id") != output_id
+                or output_spec.get("norm_parameter_tensor")
+                != output_refs.get("norm", {}).get("tensor")
+                or output_spec.get("projection_parameter_tensor")
+                != output_refs.get("projection", {}).get("tensor")
+                or any(
+                    not isinstance(output_spec.get(field), str)
+                    or not output_spec[field]
+                    for field in ("norm_shader_path", "projection_shader_path")
+                )
+            ):
+                raise ModelCompileError(
+                    f"speculative decoder {decoder_id!r} output execution does not match its circuit"
+                )
         expected_state_contract = {
             "ownership": "per_stream_per_node_instance",
             "draft_updates": "tentative",
             "acceptance": "commit_accepted_prefix",
             "rejection": "restore_last_committed_state",
         }
-        if decoder.get("state_contract") != expected_state_contract:
+        state_contract = decoder.get("state_contract")
+        if not isinstance(state_contract, dict) or any(
+            state_contract.get(key) != value
+            for key, value in expected_state_contract.items()
+        ):
             raise ModelCompileError(
                 f"speculative decoder {decoder_id!r} has no transactional state contract"
             )

@@ -1,0 +1,91 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrames { uint words[]; } input_frames;
+layout(set = 0, binding = 1) buffer OutputFrames { uint words[]; } output_frames;
+layout(set = 0, binding = 2) readonly buffer HeadFunction { float values[]; } head_function;
+layout(set = 0, binding = 3) readonly buffer HeadScale { float values[]; } head_scale;
+layout(set = 0, binding = 4) readonly buffer HeadBase { float values[]; } head_base;
+
+const uint BLOCK_WIDTH = {{BLOCK_WIDTH}}u;
+const uint MULTIPLICITY = {{MULTIPLICITY}}u;
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint FLAT_SIZE = MULTIPLICITY * HIDDEN_SIZE;
+const uint FLAT_WORDS = FLAT_SIZE / 2u;
+const uint OUTPUT_WORDS = HIDDEN_SIZE / 2u;
+const float EPSILON = {{EPSILON}};
+
+shared float reduction[64];
+shared float mixes[MULTIPLICITY];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float read_input(uint position, uint index) {
+    uint packed = input_frames.words[position * FLAT_WORDS + (index >> 1u)];
+    return bf16_to_f32(((index & 1u) == 0u) ? packed : (packed >> 16u));
+}
+
+float reduce_sum(float value) {
+    value = subgroupAdd(value);
+    if (gl_SubgroupInvocationID == 0u) reduction[gl_SubgroupID] = value;
+    barrier();
+    float total = 0.0;
+    for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+        total += reduction[subgroup];
+    }
+    barrier();
+    return total;
+}
+
+void main() {
+    uint position = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (position >= BLOCK_WIDTH) return;
+
+    float squares = 0.0;
+    for (uint index = lane; index < FLAT_SIZE; index += 64u) {
+        float value = read_input(position, index);
+        squares = fma(value, value, squares);
+    }
+    float inv_rms = inversesqrt(reduce_sum(squares) / float(FLAT_SIZE) + EPSILON);
+
+    for (uint mix = 0u; mix < MULTIPLICITY; mix++) {
+        float sum = 0.0;
+        uint weight_offset = mix * FLAT_SIZE;
+        for (uint index = lane; index < FLAT_SIZE; index += 64u) {
+            sum = fma(read_input(position, index), head_function.values[weight_offset + index], sum);
+        }
+        sum = reduce_sum(sum);
+        if (lane == 0u) {
+            float gate = sum * inv_rms * head_scale.values[0] + head_base.values[mix];
+            mixes[mix] = 1.0 / (1.0 + exp(-gate)) + EPSILON;
+        }
+        barrier();
+    }
+
+    for (uint word = lane; word < OUTPUT_WORDS; word += 64u) {
+        uint lo_index = word * 2u;
+        uint hi_index = lo_index + 1u;
+        float lo = 0.0;
+        float hi = 0.0;
+        for (uint stream = 0u; stream < MULTIPLICITY; stream++) {
+            uint offset = stream * HIDDEN_SIZE;
+            lo = fma(mixes[stream], read_input(position, offset + lo_index), lo);
+            hi = fma(mixes[stream], read_input(position, offset + hi_index), hi);
+        }
+        output_frames.words[position * OUTPUT_WORDS + word] =
+            (f32_to_bf16(hi) << 16u) | f32_to_bf16(lo);
+    }
+}

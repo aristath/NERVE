@@ -2,7 +2,7 @@ from nerve.circuit_lowering_common import *
 from nerve.circuit_lowering_helpers import *
 
 
-def build_system_circuits(model: Json) -> list[Json]:
+def build_system_circuits(model: Json) -> Json:
     dimensions = model["dimensions"]
     hidden_size = dimensions["hidden_size"]
     vocab_size = dimensions["vocab_size"]
@@ -20,15 +20,12 @@ def build_system_circuits(model: Json) -> list[Json]:
         int(value) for value in input_attrs.get("output_shape", [hidden_size])
     ]
     stream_expansion = input_attrs.get("stream_expansion")
-    embedding_output = (
-        "embedded_frame" if stream_expansion is not None else "output_frame"
-    )
     input_nodes: list[Json] = [
         {
             "id": input_component.get("id", "token_embedding"),
             "op": input_component["type"],
             "inputs": ["input_token"],
-            "outputs": [embedding_output],
+            "outputs": ["output_frame"],
             "params": list(input_params),
             "state_reads": [],
             "state_writes": [],
@@ -39,27 +36,6 @@ def build_system_circuits(model: Json) -> list[Json]:
             },
         }
     ]
-    if stream_expansion is not None:
-        if stream_expansion.get("type") != "repeat":
-            raise ValueError(
-                f"unsupported input stream expansion {stream_expansion.get('type')!r}"
-            )
-        input_nodes.append(
-            {
-                "id": "stream_expansion",
-                "op": "repeat_stream_lanes",
-                "inputs": [embedding_output],
-                "outputs": ["output_frame"],
-                "params": [],
-                "state_reads": [],
-                "state_writes": [],
-                "attrs": {
-                    "multiplicity": int(stream_expansion["multiplicity"]),
-                    "input_shape": [hidden_size],
-                    "output_shape": input_shape,
-                },
-            }
-        )
     input_circuit = _system_circuit(
         component_id="input_transducer",
         operator_type="input_transducer",
@@ -70,7 +46,7 @@ def build_system_circuits(model: Json) -> list[Json]:
             _system_port(
                 "output_frame",
                 "frame",
-                input_shape,
+                [hidden_size],
                 "frame",
                 source="output_frame",
             )
@@ -78,6 +54,151 @@ def build_system_circuits(model: Json) -> list[Json]:
         parameters=input_params,
         nodes=input_nodes,
     )
+
+    pre_processors = []
+    if stream_expansion is not None:
+        if stream_expansion.get("type") != "repeat":
+            raise ValueError(
+                f"unsupported input stream expansion {stream_expansion.get('type')!r}"
+            )
+        multiplicity = int(stream_expansion["multiplicity"])
+        if input_shape != [multiplicity, hidden_size]:
+            raise ValueError(
+                "input stream expansion shape does not match its repeat contract"
+            )
+        pre_processors.append(
+            _system_circuit(
+                component_id="input_stream_adapter",
+                operator_type="stream_adapter",
+                runtime_role="signal_processor",
+                implementation="compiled_repeat_stream_adapter_v1",
+                inputs=[_system_port("input_frame", "frame", [hidden_size], "frame")],
+                outputs=[
+                    _system_port(
+                        "output_frame",
+                        "frame",
+                        input_shape,
+                        "frame",
+                        source="output_frame",
+                    )
+                ],
+                parameters={},
+                nodes=[
+                    {
+                        "id": "stream_expansion",
+                        "op": "repeat_stream_lanes",
+                        "inputs": ["input_frame"],
+                        "outputs": ["output_frame"],
+                        "params": [],
+                        "state_reads": [],
+                        "state_writes": [],
+                        "attrs": {
+                            "multiplicity": multiplicity,
+                            "hidden_size": hidden_size,
+                            "input_shape": [hidden_size],
+                            "output_shape": input_shape,
+                        },
+                    }
+                ],
+            )
+        )
+
+    if len(output_components) < 2 or [
+        component["type"] for component in output_components[-2:]
+    ] != ["rms_norm", "linear_projection"]:
+        raise ValueError(
+            "output transducer must end in RMS normalization and linear projection"
+        )
+    output_adapter_components = output_components[:-2]
+    output_components = output_components[-2:]
+    post_processors = []
+    if output_adapter_components:
+        adapter_params: Json = {}
+        adapter_nodes: list[Json] = []
+        adapter_input_shape = [
+            int(value)
+            for value in output_adapter_components[0]
+            .get("attrs", {})
+            .get("input_shape", [hidden_size])
+        ]
+        signal = "input_frame"
+        adapter_output_shape = adapter_input_shape
+        for component_index, component in enumerate(output_adapter_components):
+            component_id = component.get("id", f"component_{component_index}")
+            attrs = dict(component.get("attrs", {}))
+            adapter_output_shape = [
+                int(value) for value in attrs.get("output_shape", [hidden_size])
+            ]
+            if component["type"] == "sinkhorn_hyper_connection_head":
+                multiplicity = int(adapter_input_shape[0])
+                semantic_params = (
+                    ("function", "head_function"),
+                    ("scale", "head_scale"),
+                    ("base", "head_base"),
+                )
+                param_ids = []
+                for source_name, parameter_id in semantic_params:
+                    adapter_params[parameter_id] = _system_param_ref(
+                        component["params"][source_name],
+                        f"output_stream_adapter.{parameter_id}",
+                    )
+                    param_ids.append(parameter_id)
+                attrs.update(
+                    {
+                        "block_width": 1,
+                        "multiplicity": multiplicity,
+                        "hidden_size": hidden_size,
+                        "output_element_bytes": [2],
+                    }
+                )
+            else:
+                param_ids = []
+                for name, ref in component.get("params", {}).items():
+                    parameter_id = f"{component_id}.{name}"
+                    adapter_params[parameter_id] = _system_param_ref(
+                        ref, f"output_stream_adapter.{parameter_id}"
+                    )
+                    param_ids.append(parameter_id)
+            output_signal = (
+                "output_frame"
+                if component_index + 1 == len(output_adapter_components)
+                else f"{component_id}_output"
+            )
+            adapter_nodes.append(
+                {
+                    "id": component_id,
+                    "op": component["type"],
+                    "inputs": [signal],
+                    "outputs": [output_signal],
+                    "params": param_ids,
+                    "state_reads": [],
+                    "state_writes": [],
+                    "attrs": attrs,
+                }
+            )
+            signal = output_signal
+        post_processors.append(
+            _system_circuit(
+                component_id="output_stream_adapter",
+                operator_type="stream_adapter",
+                runtime_role="signal_processor",
+                implementation="compiled_output_stream_adapter_v1",
+                inputs=[
+                    _system_port("input_frame", "frame", adapter_input_shape, "frame")
+                ],
+                outputs=[
+                    _system_port(
+                        "output_frame",
+                        "frame",
+                        adapter_output_shape,
+                        "frame",
+                        source="output_frame",
+                    )
+                ],
+                parameters=adapter_params,
+                nodes=adapter_nodes,
+            )
+        )
 
     output_params: Json = {}
     output_nodes: list[Json] = []
@@ -195,7 +316,13 @@ def build_system_circuits(model: Json) -> list[Json]:
             }
         ],
     )
-    return [input_circuit, output_circuit, sampler_circuit]
+    return {
+        "input_transducer": input_circuit,
+        "pre_processors": pre_processors,
+        "post_processors": post_processors,
+        "output_transducer": output_circuit,
+        "sampler": sampler_circuit,
+    }
 
 
 def build_draft_system_circuits(model: Json, draft: Json) -> list[Json]:
@@ -483,6 +610,56 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         for name, ref in output["params"].items()
     }
     markov_rank = int(output["attrs"]["markov_rank"])
+    vocabulary_tile_width = 256
+    candidate_count = (vocab_size + vocabulary_tile_width - 1) // vocabulary_tile_width
+    markov_nodes = []
+    draft_token_signals = []
+    markov_embedding_signals = []
+    previous_token_signal = "anchor_token_id"
+    for position in range(block_size):
+        candidate_signal = f"markov_candidates_{position:02d}"
+        embedding_signal = f"markov_embedding_{position:02d}"
+        token_signal = f"draft_token_{position:02d}"
+        markov_nodes.extend(
+            [
+                {
+                    "id": f"markov_argmax_partials_{position:02d}",
+                    "op": "markov_argmax_partials",
+                    "inputs": ["base_logits", previous_token_signal],
+                    "outputs": [candidate_signal, embedding_signal],
+                    "params": ["markov_embedding", "markov_projection"],
+                    "state_reads": [],
+                    "state_writes": [],
+                    "attrs": {
+                        "rank": markov_rank,
+                        "sampling": "greedy",
+                        "dependency": "previous_sampled_token",
+                        "position": position,
+                        "block_width": block_size,
+                        "vocabulary_size": vocab_size,
+                        "vocabulary_tile_width": vocabulary_tile_width,
+                        "output_element_bytes": [4, 2],
+                    },
+                },
+                {
+                    "id": f"markov_argmax_reduce_{position:02d}",
+                    "op": "argmax_candidate_reduce",
+                    "inputs": [candidate_signal],
+                    "outputs": [token_signal],
+                    "params": [],
+                    "state_reads": [],
+                    "state_writes": [],
+                    "attrs": {
+                        "candidate_count": candidate_count,
+                        "tie_break": "lowest_token_id",
+                        "output_element_bytes": [4],
+                    },
+                },
+            ]
+        )
+        draft_token_signals.append(token_signal)
+        markov_embedding_signals.append(embedding_signal)
+        previous_token_signal = token_signal
     output_circuit = _system_circuit(
         component_id=output_id,
         operator_type="draft_output_transducer",
@@ -506,13 +683,6 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                 source="draft_token_ids",
             ),
             _system_port(
-                "draft_logits",
-                "logits_block",
-                [block_size, vocab_size],
-                "draft_logits",
-                source="draft_logits",
-            ),
-            _system_port(
                 "confidence_logits",
                 "scalar_block",
                 [block_size],
@@ -532,10 +702,12 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                 "state_writes": [],
                 "attrs": {
                     "multiplicity": int(stream_mixer["multiplicity"]),
-                    "sinkhorn_iterations": int(stream_mixer["sinkhorn_iterations"]),
                     "epsilon": float(stream_mixer["epsilon"]),
                     "normalization": "root_mean_square",
                     "activation": "sigmoid",
+                    "block_width": block_size,
+                    "hidden_size": hidden_size,
+                    "output_element_bytes": [2],
                 },
             },
             {
@@ -549,6 +721,9 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                 "attrs": {
                     "eps": float(output["attrs"]["eps"]),
                     "weight_offset": float(output["attrs"]["weight_offset"]),
+                    "block_width": block_size,
+                    "hidden_size": hidden_size,
+                    "output_element_bytes": [2],
                 },
             },
             {
@@ -559,48 +734,41 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
                 "params": _linear_params("projection", output_params),
                 "state_reads": [],
                 "state_writes": [],
-                "attrs": {},
-            },
-            {
-                "id": "sequential_markov",
-                "op": "sequential_markov_greedy",
-                "inputs": ["base_logits", "anchor_token_id"],
-                "outputs": [
-                    "draft_token_ids",
-                    "markov_embeddings",
-                    "draft_logits",
-                ],
-                "params": ["markov_embedding", "markov_projection"],
-                "state_reads": [],
-                "state_writes": [],
                 "attrs": {
-                    "rank": markov_rank,
-                    "sampling": "greedy",
-                    "dependency": "previous_sampled_token",
+                    "block_width": block_size,
+                    "input_size": hidden_size,
+                    "output_size": vocab_size,
+                    "output_element_bytes": [4],
                 },
             },
-            {
-                "id": "confidence_input",
-                "op": "concatenate",
-                "inputs": ["head_hidden", "markov_embeddings"],
-                "outputs": ["confidence_features"],
-                "params": [],
-                "state_reads": [],
-                "state_writes": [],
-                "attrs": {
-                    "axis": "channel",
-                    "part_widths": [hidden_size, markov_rank],
-                },
-            },
+            *markov_nodes,
             {
                 "id": "confidence_projection",
-                "op": "linear",
-                "inputs": ["confidence_features"],
+                "op": "confidence_projection_block",
+                "inputs": ["head_hidden", *markov_embedding_signals],
                 "outputs": ["confidence_logits"],
                 "params": ["confidence_projection"],
                 "state_reads": [],
                 "state_writes": [],
-                "attrs": {"output_activation": None},
+                "attrs": {
+                    "output_activation": None,
+                    "block_width": block_size,
+                    "input_size": hidden_size + markov_rank,
+                    "output_element_bytes": [4],
+                },
+            },
+            {
+                "id": "draft_token_pack",
+                "op": "pack_token_block",
+                "inputs": draft_token_signals,
+                "outputs": ["draft_token_ids"],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "block_width": block_size,
+                    "output_element_bytes": [4],
+                },
             },
         ],
     )

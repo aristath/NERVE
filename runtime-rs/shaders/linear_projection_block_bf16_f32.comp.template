@@ -1,0 +1,74 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer InputFrames { uint words[]; } input_frames;
+layout(set = 0, binding = 1) buffer OutputFrames { float values[]; } output_frames;
+layout(set = 0, binding = 2) readonly buffer Weight { uint words[]; } weight;
+
+const uint BLOCK_WIDTH = {{BLOCK_WIDTH}}u;
+const uint INPUT_SIZE = {{INPUT_SIZE}}u;
+const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
+const uint INPUT_WORDS = INPUT_SIZE / 2u;
+const uint OUTPUT_WORDS = (OUTPUT_SIZE + 1u) / 2u;
+shared float subgroup_lo[BLOCK_WIDTH][64];
+shared float subgroup_hi[BLOCK_WIDTH][64];
+
+float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16u); }
+
+void main() {
+    uint output_word = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (output_word >= OUTPUT_WORDS) return;
+    uint lo_row = output_word * 2u;
+    uint hi_row = lo_row + 1u;
+    bool has_hi = hi_row < OUTPUT_SIZE;
+    float lo[BLOCK_WIDTH];
+    float hi[BLOCK_WIDTH];
+    for (uint position = 0u; position < BLOCK_WIDTH; position++) {
+        lo[position] = 0.0;
+        hi[position] = 0.0;
+    }
+    for (uint column_word = lane; column_word < INPUT_WORDS; column_word += 64u) {
+        uint lo_weight = weight.words[lo_row * INPUT_WORDS + column_word];
+        uint hi_weight = has_hi ? weight.words[hi_row * INPUT_WORDS + column_word] : 0u;
+        float wll = bf16_to_f32(lo_weight);
+        float wlh = bf16_to_f32(lo_weight >> 16u);
+        float whl = bf16_to_f32(hi_weight);
+        float whh = bf16_to_f32(hi_weight >> 16u);
+        for (uint position = 0u; position < BLOCK_WIDTH; position++) {
+            uint input_pair = input_frames.words[position * INPUT_WORDS + column_word];
+            float xlo = bf16_to_f32(input_pair);
+            float xhi = bf16_to_f32(input_pair >> 16u);
+            lo[position] = fma(xlo, wll, lo[position]);
+            lo[position] = fma(xhi, wlh, lo[position]);
+            if (has_hi) {
+                hi[position] = fma(xlo, whl, hi[position]);
+                hi[position] = fma(xhi, whh, hi[position]);
+            }
+        }
+    }
+    for (uint position = 0u; position < BLOCK_WIDTH; position++) {
+        lo[position] = subgroupAdd(lo[position]);
+        hi[position] = subgroupAdd(hi[position]);
+        if (gl_SubgroupInvocationID == 0u) {
+            subgroup_lo[position][gl_SubgroupID] = lo[position];
+            subgroup_hi[position][gl_SubgroupID] = hi[position];
+        }
+    }
+    barrier();
+    if (lane == 0u) {
+        for (uint position = 0u; position < BLOCK_WIDTH; position++) {
+            float lo_total = 0.0;
+            float hi_total = 0.0;
+            for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                lo_total += subgroup_lo[position][subgroup];
+                hi_total += subgroup_hi[position][subgroup];
+            }
+            output_frames.values[position * OUTPUT_SIZE + lo_row] = lo_total;
+            if (has_hi) output_frames.values[position * OUTPUT_SIZE + hi_row] = hi_total;
+        }
+    }
+}

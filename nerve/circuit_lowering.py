@@ -125,8 +125,15 @@ def lower_execution_graph(
         raise ValueError("cannot lower an empty execution graph")
 
     system_circuits = build_system_circuits(model)
+    system_circuit_sequence = [
+        system_circuits["input_transducer"],
+        *system_circuits["pre_processors"],
+        *system_circuits["post_processors"],
+        system_circuits["output_transducer"],
+        system_circuits["sampler"],
+    ]
     system_refs: dict[str, Json] = {}
-    for circuit in system_circuits:
+    for circuit in system_circuit_sequence:
         circuit_id = circuit["source"]["component_id"]
         circuit_out_dir = out_dir / circuit_id
         circuit_out_dir.mkdir(parents=True, exist_ok=True)
@@ -139,7 +146,7 @@ def lower_execution_graph(
         write_json(params_path, build_params_artifact(circuit))
         write_json(state_path, build_state_artifact(circuit))
         operator_counts[circuit["source"]["source_operator_type"]] += 1
-        system_refs[circuit["runtime_role"]] = {
+        system_refs[circuit_id] = {
             "id": circuit_id,
             "operator_type": circuit["source"]["source_operator_type"],
             "runtime_role": circuit["runtime_role"],
@@ -151,10 +158,25 @@ def lower_execution_graph(
         }
 
     input_ref = system_refs["input_transducer"]
+    pre_processor_refs = [
+        system_refs[circuit["source"]["component_id"]]
+        for circuit in system_circuits["pre_processors"]
+    ]
+    post_processor_refs = [
+        system_refs[circuit["source"]["component_id"]]
+        for circuit in system_circuits["post_processors"]
+    ]
     output_ref = system_refs["output_transducer"]
     sampler_ref = system_refs["sampler"]
-    all_circuits = [input_ref, *lowered, output_ref, sampler_ref]
-    forward_chain = [input_ref, *lowered, output_ref, sampler_ref]
+    all_circuits = [
+        input_ref,
+        *pre_processor_refs,
+        *lowered,
+        *post_processor_refs,
+        output_ref,
+        sampler_ref,
+    ]
+    forward_chain = all_circuits
 
     index = {
         "schema": "nerve.lowered_execution_graph.v1",
@@ -383,6 +405,11 @@ def lower_draft_execution_graph(
                 },
             ],
         },
+        "execution_contract": {
+            "mode": "autoregressive_feedback",
+            "processor_schedule": "one_token_per_tick",
+            "output_schedule": "dedicated_token_transducer",
+        },
         "state_contract": dict(draft["state_contract"]),
     }
 
@@ -459,7 +486,7 @@ def lower_parallel_markov_draft_graph(
         "id": draft["id"],
         "type": draft["type"],
         "source_prefix": draft["source_prefix"],
-        "topology": "explicit_parallel_query_graph",
+        "topology": "explicit_graph",
         "circuits": [input_ref, *layer_refs, output_ref],
         "edges": [*query_edges, *context_edges, anchor_edge],
         "boundary": {
@@ -494,10 +521,15 @@ def lower_parallel_markov_draft_graph(
                 }
                 for output_id in (
                     "draft_token_ids",
-                    "draft_logits",
                     "confidence_logits",
                 )
             ],
+        },
+        "execution_contract": {
+            "mode": "parallel_block",
+            "block_width": block_width,
+            "processor_schedule": "parallel_lanes",
+            "output_schedule": "compiled_component_graph",
         },
         "proposal_contract": dict(draft["proposal_contract"]),
         "state_contract": dict(draft["state_contract"]),

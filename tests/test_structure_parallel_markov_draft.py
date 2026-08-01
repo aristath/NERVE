@@ -204,19 +204,65 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
     }
     assert all(node["op"] != "identity" for node in input_circuit["nodes"])
     markov = next(
-        node for node in output_circuit["nodes"] if node["id"] == "sequential_markov"
+        node
+        for node in output_circuit["nodes"]
+        if node["id"] == "markov_argmax_partials_00"
     )
     assert markov["inputs"] == ["base_logits", "anchor_token_id"]
     assert markov["attrs"] == {
         "rank": 2,
         "sampling": "greedy",
         "dependency": "previous_sampled_token",
+        "position": 0,
+        "block_width": 5,
+        "vocabulary_size": 32,
+        "vocabulary_tile_width": 256,
+        "output_element_bytes": [4, 2],
     }
+    reductions = [
+        node
+        for node in output_circuit["nodes"]
+        if node["op"] == "argmax_candidate_reduce"
+    ]
+    assert len(reductions) == 5
+    assert reductions[-1]["outputs"] == ["draft_token_04"]
+    assert next(
+        node for node in output_circuit["nodes"] if node["id"] == "draft_token_pack"
+    )["inputs"] == [f"draft_token_{index:02d}" for index in range(5)]
+    assert all(
+        node["op"] != "sequential_markov_greedy" for node in output_circuit["nodes"]
+    )
     assert [port["id"] for port in output_circuit["boundary"]["outputs"]] == [
         "draft_token_ids",
-        "draft_logits",
         "confidence_logits",
     ]
+
+
+def test_lowers_proposal_execution_mode_from_graph_semantics() -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    model = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    [draft] = model["graph"]["draft_execution_graphs"]
+    input_ref = {"id": "input", "runtime_role": "draft_input_adapter"}
+    output_ref = {"id": "output", "runtime_role": "draft_output_transducer"}
+    layer_refs = [
+        {"id": f"processor_{index}", "runtime_role": "draft_processor"}
+        for index in range(3)
+    ]
+
+    lowered = lower_parallel_markov_draft_graph(
+        draft,
+        layer_refs=layer_refs,
+        input_ref=input_ref,
+        output_ref=output_ref,
+    )
+
+    assert lowered["execution_contract"] == {
+        "mode": "parallel_block",
+        "block_width": 5,
+        "processor_schedule": "parallel_lanes",
+        "output_schedule": "compiled_component_graph",
+    }
 
 
 def test_compiles_anchor_noise_embedding_block_as_one_copy_kernel(
@@ -267,6 +313,55 @@ def test_compiles_anchor_noise_embedding_block_as_one_copy_kernel(
         )
 
 
+def test_compiles_complete_parallel_markov_output_schedule(tmp_path: Path) -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    model = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    [draft] = model["graph"]["draft_execution_graphs"]
+    _, output_circuit = build_draft_system_circuits(model, draft)
+    tensor_index = {
+        "tensors": {
+            name: {**tensor, "layout": ROW_MAJOR_LAYOUT}
+            for name, tensor in tensors.items()
+        }
+    }
+
+    shader_files = {
+        node["id"]: shader_file_for_node(
+            output_circuit,
+            node,
+            tensor_index,
+            model["dimensions"],
+        )
+        for node in output_circuit["nodes"]
+    }
+
+    assert shader_files == {
+        "stream_head": "hyper_head_block_b5_m4_h8_eps1e-06.comp",
+        "output_norm": "rms_norm_block_b5_bf16_h8_eps1e-06_offset0.comp",
+        "base_projection": "linear_projection_block_b5_bf16_8x32_f32.comp",
+        **{
+            f"markov_argmax_partials_{position:02d}": (
+                f"markov_argmax_partials_b5_p{position}_v32_r2_t256.comp"
+            )
+            for position in range(5)
+        },
+        **{
+            f"markov_argmax_reduce_{position:02d}": ("argmax_candidate_reduce_c1.comp")
+            for position in range(5)
+        },
+        "confidence_projection": "confidence_projection_block_b5_bf16_h8_r2.comp",
+        "draft_token_pack": "pack_token_block_b5.comp",
+    }
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, set(shader_files.values()))
+    compile_shader_artifacts(tmp_path)
+    assert all(
+        (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+        for shader_file in shader_files.values()
+    )
+
+
 def test_compiles_source_owned_recommended_parallel_draft_width(
     tmp_path: Path,
 ) -> None:
@@ -315,7 +410,7 @@ def test_lowers_explicit_query_context_and_target_feature_wiring() -> None:
         output_ref=output_ref,
     )
 
-    assert lowered["topology"] == "explicit_parallel_query_graph"
+    assert lowered["topology"] == "explicit_graph"
     assert len(lowered["edges"]) == 8
     assert [edge["connection"] for edge in lowered["edges"][:4]] == [
         {"kind": "parallel_block_scatter", "width": 5},

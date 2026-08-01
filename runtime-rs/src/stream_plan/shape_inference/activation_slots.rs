@@ -232,6 +232,56 @@ mod tests {
     }
 
     #[test]
+    fn infers_parallel_proposal_intermediate_shapes() {
+        let node = |op: &str, outputs: &[&str], attrs: serde_json::Value| {
+            crate::stream_circuit::CircuitNode {
+                id: op.to_string(),
+                op: op.to_string(),
+                inputs: Vec::new(),
+                outputs: outputs.iter().map(|output| (*output).to_string()).collect(),
+                params: Vec::new(),
+                state_reads: Vec::new(),
+                state_writes: Vec::new(),
+                attrs,
+            }
+        };
+        assert_eq!(
+            infer_node_output_shapes(
+                "draft",
+                &node(
+                    "sinkhorn_hyper_connection_head",
+                    &["hidden"],
+                    serde_json::json!({"block_width": 7, "hidden_size": 4096}),
+                ),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![7, 4096])]
+        );
+        assert_eq!(
+            infer_node_output_shapes(
+                "draft",
+                &node(
+                    "markov_argmax_partials",
+                    &["candidates", "embedding"],
+                    serde_json::json!({
+                        "vocabulary_size": 129280,
+                        "vocabulary_tile_width": 256,
+                        "rank": 256,
+                    }),
+                ),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![505, 2]), Some(vec![256])]
+        );
+    }
+
+    #[test]
     fn conditional_append_output_is_a_state_view() {
         let node = crate::stream_circuit::CircuitNode {
             id: "compressed_memory_update".to_string(),

@@ -1,0 +1,59 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer BaseLogits { float values[]; } base_logits;
+layout(set = 0, binding = 1) readonly buffer PreviousToken { uint value; } previous_token;
+layout(set = 0, binding = 2) buffer Candidates { uint values[]; } candidates;
+layout(set = 0, binding = 3) buffer MarkovEmbeddingOutput { uint words[]; } markov_embedding_output;
+layout(set = 0, binding = 4) readonly buffer MarkovEmbeddingWeight { uint words[]; } markov_embedding_weight;
+layout(set = 0, binding = 5) readonly buffer MarkovProjectionWeight { uint words[]; } markov_projection_weight;
+
+const uint BLOCK_WIDTH = {{BLOCK_WIDTH}}u;
+const uint POSITION = {{POSITION}}u;
+const uint VOCABULARY_SIZE = {{VOCABULARY_SIZE}}u;
+const uint RANK = {{RANK}}u;
+const uint RANK_WORDS = RANK / 2u;
+const uint TILE_WIDTH = {{TILE_WIDTH}}u;
+shared float scores[TILE_WIDTH];
+shared uint token_ids[TILE_WIDTH];
+
+float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16u); }
+bool better(float left_score, uint left_id, float right_score, uint right_id) {
+    return left_score > right_score || (left_score == right_score && left_id < right_id);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint token_id = gl_WorkGroupID.x * TILE_WIDTH + lane;
+    uint previous = previous_token.value;
+    if (gl_WorkGroupID.x == 0u && lane < RANK_WORDS) {
+        markov_embedding_output.words[lane] =
+            markov_embedding_weight.words[previous * RANK_WORDS + lane];
+    }
+    float score = -uintBitsToFloat(0x7f800000u);
+    if (token_id < VOCABULARY_SIZE) {
+        score = base_logits.values[POSITION * VOCABULARY_SIZE + token_id];
+        uint previous_offset = previous * RANK_WORDS;
+        uint projection_offset = token_id * RANK_WORDS;
+        for (uint word = 0u; word < RANK_WORDS; word++) {
+            uint embedding_pair = markov_embedding_weight.words[previous_offset + word];
+            uint projection_pair = markov_projection_weight.words[projection_offset + word];
+            score = fma(bf16_to_f32(embedding_pair), bf16_to_f32(projection_pair), score);
+            score = fma(bf16_to_f32(embedding_pair >> 16u), bf16_to_f32(projection_pair >> 16u), score);
+        }
+    }
+    scores[lane] = score;
+    token_ids[lane] = token_id;
+    barrier();
+    for (uint stride = TILE_WIDTH / 2u; stride > 0u; stride >>= 1u) {
+        if (lane < stride && better(scores[lane + stride], token_ids[lane + stride], scores[lane], token_ids[lane])) {
+            scores[lane] = scores[lane + stride];
+            token_ids[lane] = token_ids[lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        candidates.values[gl_WorkGroupID.x * 2u] = floatBitsToUint(scores[0]);
+        candidates.values[gl_WorkGroupID.x * 2u + 1u] = token_ids[0];
+    }
+}

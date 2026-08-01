@@ -114,6 +114,135 @@ def shader_file_for_node(
             f"h{hidden_size}_noise{noise_token_id}.comp"
         )
 
+    if op == "repeat_stream_lanes":
+        attrs = node.get("attrs", {})
+        multiplicity = int(attrs.get("multiplicity", 0))
+        node_hidden_size = int(attrs.get("hidden_size", 0))
+        if (
+            len(node.get("inputs", [])) != 1
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or multiplicity <= 0
+            or node_hidden_size != hidden_size
+            or hidden_size <= 0
+            or hidden_size % 2
+            or attrs.get("input_shape") != [hidden_size]
+            or attrs.get("output_shape") != [multiplicity, hidden_size]
+        ):
+            raise ModelCompileError(
+                f"stream-repeat node {node['id']!r} has an invalid contract"
+            )
+        return f"repeat_stream_lanes_bf16_m{multiplicity}_h{hidden_size}.comp"
+
+    if op == "sinkhorn_hyper_connection_head":
+        attrs = node.get("attrs", {})
+        block_width = int(attrs.get("block_width", 0))
+        multiplicity = int(attrs.get("multiplicity", 0))
+        node_hidden_size = int(attrs.get("hidden_size", 0))
+        epsilon = float(attrs.get("epsilon", 0.0))
+        parameter_shapes = [
+            parameter_shape_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in node.get("params", [])
+        ]
+        parameter_dtypes = [
+            parameter_dtype_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in node.get("params", [])
+        ]
+        if (
+            len(node.get("inputs", [])) != 1
+            or len(node.get("outputs", [])) != 1
+            or node.get("params") != ["head_function", "head_scale", "head_base"]
+            or block_width <= 0
+            or multiplicity <= 0
+            or node_hidden_size != hidden_size
+            or hidden_size <= 0
+            or hidden_size % 2
+            or not math.isfinite(epsilon)
+            or epsilon <= 0.0
+            or parameter_shapes
+            != [
+                [multiplicity, multiplicity * hidden_size],
+                [1],
+                [multiplicity],
+            ]
+            or parameter_dtypes != ["F32", "F32", "F32"]
+            or attrs.get("output_element_bytes") != [2]
+        ):
+            raise ModelCompileError(
+                f"hyper head node {node['id']!r} has an invalid block contract"
+            )
+        return (
+            f"hyper_head_block_b{block_width}_m{multiplicity}_h{hidden_size}_"
+            f"eps{shader_float_token(epsilon)}.comp"
+        )
+
+    if op == "markov_argmax_partials":
+        attrs = node.get("attrs", {})
+        block_width = int(attrs.get("block_width", 0))
+        position = int(attrs.get("position", -1))
+        vocabulary_size = int(attrs.get("vocabulary_size", 0))
+        rank = int(attrs.get("rank", 0))
+        tile_width = int(attrs.get("vocabulary_tile_width", 0))
+        parameter_shapes = [
+            parameter_shape_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in node.get("params", [])
+        ]
+        parameter_dtypes = [
+            parameter_dtype_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in node.get("params", [])
+        ]
+        if (
+            len(node.get("inputs", [])) != 2
+            or len(node.get("outputs", [])) != 2
+            or position < 0
+            or position >= block_width
+            or vocabulary_size <= 0
+            or rank <= 0
+            or tile_width != 256
+            or parameter_shapes != [[vocabulary_size, rank], [vocabulary_size, rank]]
+            or parameter_dtypes != ["BF16", "BF16"]
+            or attrs.get("sampling") != "greedy"
+            or attrs.get("dependency") != "previous_sampled_token"
+            or attrs.get("output_element_bytes") != [4, 2]
+        ):
+            raise ModelCompileError(
+                f"Markov proposal node {node['id']!r} has an invalid contract"
+            )
+        return (
+            f"markov_argmax_partials_b{block_width}_p{position}_v{vocabulary_size}_"
+            f"r{rank}_t{tile_width}.comp"
+        )
+
+    if op == "argmax_candidate_reduce":
+        candidate_count = int(node.get("attrs", {}).get("candidate_count", 0))
+        if (
+            len(node.get("inputs", [])) != 1
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or candidate_count <= 0
+            or candidate_count > 1024
+            or node["attrs"].get("tie_break") != "lowest_token_id"
+            or node["attrs"].get("output_element_bytes") != [4]
+        ):
+            raise ModelCompileError(
+                f"argmax reduction node {node['id']!r} has an invalid contract"
+            )
+        return f"argmax_candidate_reduce_c{candidate_count}.comp"
+
+    if op == "pack_token_block":
+        block_width = int(node.get("attrs", {}).get("block_width", 0))
+        if (
+            block_width <= 0
+            or len(node.get("inputs", [])) != block_width
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or node["attrs"].get("output_element_bytes") != [4]
+        ):
+            raise ModelCompileError(
+                f"token-pack node {node['id']!r} has an invalid contract"
+            )
+        return f"pack_token_block_b{block_width}.comp"
+
     if op == "quantize_fp8_e4m3":
         return (
             f"quantize_fp8_e4m3_b{int(node['attrs']['block_columns'])}"
@@ -131,6 +260,34 @@ def shader_file_for_node(
             f"_h{int(node['attrs']['element_count'])}.comp"
         )
     if op == "rms_norm":
+        attrs = node.get("attrs", {})
+        block_width = int(attrs.get("block_width", 0))
+        if block_width > 0:
+            node_hidden_size = int(attrs.get("hidden_size", 0))
+            eps = float(attrs.get("eps", 0.0))
+            weight_offset = float(attrs.get("weight_offset", 0.0))
+            if (
+                node_hidden_size != hidden_size
+                or hidden_size <= 0
+                or hidden_size % 2
+                or len(node.get("inputs", [])) != 1
+                or len(node.get("outputs", [])) != 1
+                or len(node.get("params", [])) != 1
+                or parameter_shape_for_node(circuit, node, tensor_index)
+                != [hidden_size]
+                or parameter_dtype_for_node(circuit, node, tensor_index) != "BF16"
+                or not math.isfinite(eps)
+                or eps <= 0.0
+                or not math.isfinite(weight_offset)
+                or attrs.get("output_element_bytes") != [2]
+            ):
+                raise ModelCompileError(
+                    f"block RMS norm node {node['id']!r} has an invalid contract"
+                )
+            return (
+                f"rms_norm_block_b{block_width}_bf16_h{hidden_size}_"
+                f"eps{shader_float_token(eps)}_offset{shader_float_token(weight_offset)}.comp"
+            )
         representations = node.get("attrs", {}).get("physical_output_representations")
         if representations:
             valid_common = (
@@ -172,6 +329,62 @@ def shader_file_for_node(
             hidden_size,
             float(node["attrs"]["eps"]),
             float(node["attrs"]["weight_offset"]),
+        )
+    if (
+        op == "linear_projection"
+        and int(node.get("attrs", {}).get("block_width", 0)) > 0
+    ):
+        attrs = node["attrs"]
+        block_width = int(attrs["block_width"])
+        input_size = int(attrs.get("input_size", 0))
+        output_size = int(attrs.get("output_size", 0))
+        parameter_shape = parameter_shape_for_node(circuit, node, tensor_index)
+        parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
+        if (
+            block_width <= 0
+            or input_size != hidden_size
+            or output_size <= 0
+            or parameter_shape != [output_size, input_size]
+            or parameter_dtype != "BF16"
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+            or attrs.get("output_element_bytes") != [4]
+        ):
+            raise ModelCompileError(
+                f"block output projection node {node['id']!r} has an invalid contract"
+            )
+        return (
+            f"linear_projection_block_b{block_width}_bf16_"
+            f"{input_size}x{output_size}_f32.comp"
+        )
+    if op == "confidence_projection_block":
+        attrs = node["attrs"]
+        block_width = int(attrs["block_width"])
+        input_size = int(attrs.get("input_size", 0))
+        parameter_shape = parameter_shape_for_node(circuit, node, tensor_index)
+        parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
+        if (
+            block_width <= 0
+            or input_size <= 0
+            or input_size % 2
+            or len(node.get("inputs", [])) != block_width + 1
+            or parameter_shape != [1, input_size]
+            or parameter_dtype != "BF16"
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+            or attrs.get("output_element_bytes") != [4]
+        ):
+            raise ModelCompileError(
+                f"block confidence projection node {node['id']!r} has an invalid contract"
+            )
+        rank = input_size - hidden_size
+        if rank <= 0 or rank % 2:
+            raise ModelCompileError(
+                f"block confidence projection node {node['id']!r} has an invalid rank"
+            )
+        return (
+            f"confidence_projection_block_b{block_width}_bf16_"
+            f"h{hidden_size}_r{rank}.comp"
         )
     if op == "linear":
         parameter_shape = parameter_shape_for_node(circuit, node, tensor_index)
@@ -748,9 +961,7 @@ def shader_file_for_node(
         if "shape" in temporal_memory:
             frames, state_hidden = map(int, temporal_memory["shape"])
         else:
-            per_token_shape = list(
-                map(int, temporal_memory.get("shape_per_token", []))
-            )
+            per_token_shape = list(map(int, temporal_memory.get("shape_per_token", [])))
             frames = int(temporal_memory.get("capacity", 0))
             state_hidden = math.prod(per_token_shape) if per_token_shape else 0
         if (
@@ -1150,8 +1361,7 @@ def shader_file_for_node(
             or not math.isfinite(scale)
             or scale <= 0.0
             or parameter_dtype_for_node(circuit, node, tensor_index) != "F32"
-            or parameter_shape_for_node(circuit, node, tensor_index)
-            != [query_heads]
+            or parameter_shape_for_node(circuit, node, tensor_index) != [query_heads]
             or parameter_layout_for_node(circuit, node, tensor_index)
             != ROW_MAJOR_LAYOUT
         ):
@@ -1159,9 +1369,7 @@ def shader_file_for_node(
                 f"indexed sparse-attention node {node['id']!r} has an invalid contract"
             )
         binding = stream_control_binding_for_node(circuit, node)
-        common = (
-            f"q{query_heads}_kv{key_value_heads}_d{head_width}_w{window_size}_"
-        )
+        common = f"q{query_heads}_kv{key_value_heads}_d{head_width}_w{window_size}_"
         if attrs.get("causal") is False:
             if (
                 len(inputs) != 3
@@ -1218,9 +1426,7 @@ def shader_file_for_node(
                     else 0
                 )
             elif index_producer.get("op") == "chronological_compressed_index":
-                compression_ratio = int(
-                    index_producer.get("attrs", {}).get("ratio", 0)
-                )
+                compression_ratio = int(index_producer.get("attrs", {}).get("ratio", 0))
                 max_context = int(dimensions.get("max_position_embeddings", 0))
                 max_compressed_indices = (
                     (max_context + compression_ratio - 1) // compression_ratio
@@ -1444,6 +1650,36 @@ def shader_file_for_node(
 
 
 def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
+    if node["op"] == "repeat_stream_lanes":
+        attrs = node["attrs"]
+        output_words = int(attrs["multiplicity"]) * int(attrs["hidden_size"]) // 2
+        return (output_words + 63) // 64
+    if (
+        node["op"]
+        in {
+            "sinkhorn_hyper_connection_head",
+            "rms_norm",
+        }
+        and int(node.get("attrs", {}).get("block_width", 0)) > 0
+    ):
+        return int(node["attrs"]["block_width"])
+    if (
+        node["op"] == "linear_projection"
+        and int(node.get("attrs", {}).get("block_width", 0)) > 0
+    ):
+        output_size = int(node["attrs"]["output_size"])
+        return (output_size + 1) // 2
+    if node["op"] == "markov_argmax_partials":
+        attrs = node["attrs"]
+        return (
+            int(attrs["vocabulary_size"]) + int(attrs["vocabulary_tile_width"]) - 1
+        ) // int(attrs["vocabulary_tile_width"])
+    if node["op"] in {
+        "argmax_candidate_reduce",
+        "confidence_projection_block",
+        "pack_token_block",
+    }:
+        return 1
     if node["op"] in {
         "hyper_connection_pre",
         "hyper_connection_post_pre",
@@ -1773,6 +2009,8 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if shader_file.startswith(("markov_argmax_partials_", "argmax_candidate_reduce_")):
+        return 256
     if (
         shader_file.startswith("independent_sparse_moe_")
         and "_mxfp4_e2m1_" in shader_file
@@ -1810,13 +2048,17 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
         return 32
     if "_prequant_fp8_e4m3_" in shader_file:
         return 1024
-    if re.fullmatch(
-        r"(linear|linear_residual)_fp8_e4m3_(?:se8m0_)?b\d+x\d+_\d+x\d+\.comp",
-        shader_file,
-    ) or re.fullmatch(
-        r"parallel_linear_silu_multiply_fp8_e4m3_b\d+x\d+_\d+x\d+\.comp",
-        shader_file,
-    ) or shader_file.startswith("grouped_linear_fp8_e4m3_"):
+    if (
+        re.fullmatch(
+            r"(linear|linear_residual)_fp8_e4m3_(?:se8m0_)?b\d+x\d+_\d+x\d+\.comp",
+            shader_file,
+        )
+        or re.fullmatch(
+            r"parallel_linear_silu_multiply_fp8_e4m3_b\d+x\d+_\d+x\d+\.comp",
+            shader_file,
+        )
+        or shader_file.startswith("grouped_linear_fp8_e4m3_")
+    ):
         return 1024
     return local_size_x_for_node(node)
 

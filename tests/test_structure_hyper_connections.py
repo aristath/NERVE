@@ -8,6 +8,14 @@ from nerve.model_transpiler_discovery import discover_model_structure
 from nerve.model_transpiler_graph import make_layer, make_model_graph
 from nerve.model_transpiler_types import ModelTranspileError
 from nerve.circuit_lowering_system import build_system_circuits
+from nerve.circuit_ir import validate_circuit
+from nerve.model_package import (
+    ROW_MAJOR_LAYOUT,
+    compile_shader_artifacts,
+    copy_shader_templates,
+    shader_file_for_node,
+    workgroup_count_x_for_node,
+)
 
 
 def _tensor(shape: list[int], dtype: str = "BF16") -> dict[str, object]:
@@ -109,14 +117,26 @@ def test_discovers_sinkhorn_hyper_connection_from_tensor_contract() -> None:
         "base": {"tensor": "hc_head_base"},
         "scale": {"tensor": "hc_head_scale"},
     }
-    input_circuit, output_circuit, _ = build_system_circuits(graph)
-    assert input_circuit["boundary"]["outputs"][0]["shape"] == [4, 8]
+    system = build_system_circuits(graph)
+    input_circuit = system["input_transducer"]
+    [input_adapter] = system["pre_processors"]
+    [output_adapter] = system["post_processors"]
+    output_circuit = system["output_transducer"]
+    assert input_circuit["boundary"]["outputs"][0]["shape"] == [8]
     assert [node["op"] for node in input_circuit["nodes"]] == [
         "embedding_lookup",
-        "repeat_stream_lanes",
     ]
-    assert output_circuit["boundary"]["inputs"][0]["shape"] == [4, 8]
-    assert output_circuit["nodes"][0]["op"] == "sinkhorn_hyper_connection_head"
+    assert input_adapter["boundary"]["inputs"][0]["shape"] == [8]
+    assert input_adapter["boundary"]["outputs"][0]["shape"] == [4, 8]
+    assert input_adapter["nodes"][0]["op"] == "repeat_stream_lanes"
+    assert output_adapter["boundary"]["inputs"][0]["shape"] == [4, 8]
+    assert output_adapter["boundary"]["outputs"][0]["shape"] == [8]
+    assert output_adapter["nodes"][0]["op"] == "sinkhorn_hyper_connection_head"
+    assert output_circuit["boundary"]["inputs"][0]["shape"] == [8]
+    assert [node["op"] for node in output_circuit["nodes"]] == [
+        "rms_norm",
+        "linear_projection",
+    ]
 
 
 def test_rejects_incomplete_hyper_connection_tensor_set() -> None:
@@ -125,3 +145,41 @@ def test_rejects_incomplete_hyper_connection_tensor_set() -> None:
 
     with pytest.raises(ModelTranspileError, match="incomplete hyper-connection"):
         discover_model_structure(Path("synthetic"), config, tensors)
+
+
+def test_compiles_stream_boundary_adapters_as_normal_processors(
+    tmp_path: Path,
+) -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    graph = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    system = build_system_circuits(graph)
+    [input_adapter] = system["pre_processors"]
+    [output_adapter] = system["post_processors"]
+    tensor_index = {
+        "tensors": {
+            name: {**tensor, "layout": ROW_MAJOR_LAYOUT}
+            for name, tensor in tensors.items()
+        }
+    }
+
+    assert validate_circuit(input_adapter).ok
+    assert validate_circuit(output_adapter).ok
+    input_node = input_adapter["nodes"][0]
+    output_node = output_adapter["nodes"][0]
+    input_shader = shader_file_for_node(
+        input_adapter, input_node, tensor_index, graph["dimensions"]
+    )
+    output_shader = shader_file_for_node(
+        output_adapter, output_node, tensor_index, graph["dimensions"]
+    )
+
+    assert input_shader == "repeat_stream_lanes_bf16_m4_h8.comp"
+    assert output_shader == "hyper_head_block_b1_m4_h8_eps1e-06.comp"
+    assert workgroup_count_x_for_node(input_adapter, input_node, tensor_index) == 1
+    assert workgroup_count_x_for_node(output_adapter, output_node, tensor_index) == 1
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {input_shader, output_shader})
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / input_shader.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / output_shader.replace(".comp", ".spv")).is_file()

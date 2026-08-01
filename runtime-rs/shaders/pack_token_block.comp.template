@@ -1,0 +1,16 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+{{INPUT_DECLARATIONS}}
+layout(set = 0, binding = {{OUTPUT_BINDING}}) buffer OutputTokens { uint values[]; } output_tokens;
+const uint BLOCK_WIDTH = {{BLOCK_WIDTH}}u;
+
+uint read_token(uint index) {
+{{INPUT_READS}}
+    return 0u;
+}
+
+void main() {
+    uint index = gl_LocalInvocationID.x;
+    if (index < BLOCK_WIDTH) output_tokens.values[index] = read_token(index);
+}

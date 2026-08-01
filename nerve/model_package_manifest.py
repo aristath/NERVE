@@ -45,8 +45,7 @@ def can_emit_physical_representation_from_producer(
             )
         )
         feature_supported = all(
-            {"shader_float8", "shader_int8"}
-            <= set(device.get("shader_features", []))
+            {"shader_float8", "shader_int8"} <= set(device.get("shader_features", []))
             for device in compiler_target.get("devices", [])
         )
         expected_block_columns = 128
@@ -59,22 +58,18 @@ def can_emit_physical_representation_from_producer(
             return False
         operation_shape_supported = (
             operation == "sparse_moe_gate_up"
-            and int(scope["input_size"])
-            == intermediate_size * experts_per_token
+            and int(scope["input_size"]) == intermediate_size * experts_per_token
             and intermediate_size % int(scope["block_columns"]) == 0
-            and int(scope["metadata"]["experts_per_token"])
-            == experts_per_token
+            and int(scope["metadata"]["experts_per_token"]) == experts_per_token
         )
         feature_supported = all(
-            {"shader_float8", "shader_int8"}
-            <= set(device.get("shader_features", []))
+            {"shader_float8", "shader_int8"} <= set(device.get("shader_features", []))
             for device in compiler_target.get("devices", [])
         )
         expected_block_columns = 128
     elif contract == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT:
         operation_shape_supported = (
-            operation == "rms_norm"
-            and int(scope["input_size"]) == hidden_size
+            operation == "rms_norm" and int(scope["input_size"]) == hidden_size
         ) or (
             operation == "silu_multiply"
             and int(scope["input_size"])
@@ -940,10 +935,12 @@ def speculative_decoder_specs(
             for ref in circuit_refs
             if ref["runtime_role"] == "draft_output_transducer"
         )
+        execution_contract = deepcopy(draft["execution_contract"])
+        executable_roles = {"draft_input_adapter", "draft_processor"}
+        if execution_contract.get("output_schedule") == "compiled_component_graph":
+            executable_roles.add("draft_output_transducer")
         executable_refs = [
-            ref
-            for ref in circuit_refs
-            if ref["runtime_role"] in {"draft_input_adapter", "draft_processor"}
+            ref for ref in circuit_refs if ref["runtime_role"] in executable_roles
         ]
         executions = [
             component_execution_spec(
@@ -991,6 +988,7 @@ def speculative_decoder_specs(
                 "id": draft["id"],
                 "type": draft["type"],
                 "source_prefix": draft["source_prefix"],
+                "execution_contract": execution_contract,
                 "circuit_graph": package_auxiliary_circuit_graph(
                     draft, lowered_dir, compiled_circuits
                 ),
@@ -1115,9 +1113,7 @@ def component_kernel_spec(
                     shader_file,
                     local_size_x=local_size_x,
                     workgroup_count_x=workgroup_count_x,
-                    cooperative_float8_e4m3_shapes=(
-                        cooperative_float8_e4m3_shapes
-                    ),
+                    cooperative_float8_e4m3_shapes=(cooperative_float8_e4m3_shapes),
                 )
             ),
         }

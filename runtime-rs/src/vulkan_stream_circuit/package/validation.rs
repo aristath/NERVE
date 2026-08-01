@@ -507,6 +507,10 @@ fn validate_resident_package_paths(
         }
     }
     for decoder in &manifest.speculative_decoders {
+        decoder
+            .execution_contract
+            .validate(&decoder.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         validate_resident_package_relative_path(
             "draft output norm shader",
             &decoder.output_transducer.norm_shader_path,

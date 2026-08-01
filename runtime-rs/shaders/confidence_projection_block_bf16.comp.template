@@ -1,0 +1,53 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer HeadHidden { uint words[]; } head_hidden;
+{{EMBEDDING_DECLARATIONS}}
+layout(set = 0, binding = {{OUTPUT_BINDING}}) buffer Confidence { float values[]; } confidence;
+layout(set = 0, binding = {{WEIGHT_BINDING}}) readonly buffer Weight { uint words[]; } weight;
+
+const uint BLOCK_WIDTH = {{BLOCK_WIDTH}}u;
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint RANK = {{RANK}}u;
+const uint INPUT_SIZE = HIDDEN_SIZE + RANK;
+shared float reductions[BLOCK_WIDTH][64];
+
+float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16u); }
+float read_head(uint index) {
+    uint packed = head_hidden.words[index >> 1u];
+    return bf16_to_f32(((index & 1u) == 0u) ? packed : (packed >> 16u));
+}
+float read_weight(uint index) {
+    uint packed = weight.words[index >> 1u];
+    return bf16_to_f32(((index & 1u) == 0u) ? packed : (packed >> 16u));
+}
+float read_embedding(uint position, uint channel) {
+{{EMBEDDING_READS}}
+    return 0.0;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    for (uint position = 0u; position < BLOCK_WIDTH; position++) {
+        float sum = 0.0;
+        for (uint channel = lane; channel < INPUT_SIZE; channel += 64u) {
+            float input_value = channel < HIDDEN_SIZE
+                ? read_head(position * HIDDEN_SIZE + channel)
+                : read_embedding(position, channel - HIDDEN_SIZE);
+            sum = fma(input_value, read_weight(channel), sum);
+        }
+        sum = subgroupAdd(sum);
+        if (gl_SubgroupInvocationID == 0u) reductions[position][gl_SubgroupID] = sum;
+    }
+    barrier();
+    if (lane < BLOCK_WIDTH) {
+        float total = 0.0;
+        for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+            total += reductions[lane][subgroup];
+        }
+        confidence.values[lane] = total;
+    }
+}

@@ -1,0 +1,17 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrame { uint words[]; } input_frame;
+layout(set = 0, binding = 1) buffer OutputFrame { uint words[]; } output_frame;
+
+const uint MULTIPLICITY = {{MULTIPLICITY}}u;
+const uint HIDDEN_WORDS = {{HIDDEN_SIZE}}u / 2u;
+const uint OUTPUT_WORDS = MULTIPLICITY * HIDDEN_WORDS;
+
+void main() {
+    uint output_word = gl_GlobalInvocationID.x;
+    if (output_word < OUTPUT_WORDS) {
+        output_frame.words[output_word] = input_frame.words[output_word % HIDDEN_WORDS];
+    }
+}

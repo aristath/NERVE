@@ -295,12 +295,60 @@ pub struct VulkanResidentSpeculativeDecoderPackageSpec {
     #[serde(rename = "type")]
     pub decoder_type: String,
     pub source_prefix: String,
+    pub execution_contract: VulkanResidentSpeculativeExecutionContract,
     pub circuit_graph: VulkanResidentPackageCircuitGraph,
     pub input_adapter: VulkanResidentDraftInputAdapterPackageSpec,
     pub output_transducer: VulkanResidentDraftOutputTransducerPackageSpec,
     pub component_executions: Vec<VulkanResidentComponentExecutionSpec>,
     pub state_contract: Value,
     pub verification_contract: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum VulkanResidentSpeculativeExecutionContract {
+    AutoregressiveFeedback {
+        processor_schedule: String,
+        output_schedule: String,
+    },
+    ParallelBlock {
+        block_width: usize,
+        processor_schedule: String,
+        output_schedule: String,
+    },
+}
+
+impl VulkanResidentSpeculativeExecutionContract {
+    pub fn validate(&self, decoder_id: &str) -> Result<(), String> {
+        let valid = match self {
+            Self::AutoregressiveFeedback {
+                processor_schedule,
+                output_schedule,
+            } => {
+                processor_schedule == "one_token_per_tick"
+                    && output_schedule == "dedicated_token_transducer"
+            }
+            Self::ParallelBlock {
+                block_width,
+                processor_schedule,
+                output_schedule,
+            } => {
+                *block_width > 0
+                    && processor_schedule == "parallel_lanes"
+                    && output_schedule == "compiled_component_graph"
+            }
+        };
+        valid.then_some(()).ok_or_else(|| {
+            format!("speculative decoder {decoder_id:?} has an invalid execution contract")
+        })
+    }
+
+    pub fn block_width(&self) -> Option<usize> {
+        match self {
+            Self::AutoregressiveFeedback { .. } => None,
+            Self::ParallelBlock { block_width, .. } => Some(*block_width),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

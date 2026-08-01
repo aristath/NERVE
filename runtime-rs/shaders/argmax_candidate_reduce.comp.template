@@ -1,0 +1,37 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer Candidates { uint values[]; } candidates;
+layout(set = 0, binding = 1) buffer OutputToken { uint value; } output_token;
+const uint CANDIDATE_COUNT = {{CANDIDATE_COUNT}}u;
+shared float scores[256];
+shared uint token_ids[256];
+
+bool better(float left_score, uint left_id, float right_score, uint right_id) {
+    return left_score > right_score || (left_score == right_score && left_id < right_id);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    float best_score = -uintBitsToFloat(0x7f800000u);
+    uint best_id = 0xffffffffu;
+    for (uint index = lane; index < CANDIDATE_COUNT; index += 256u) {
+        float score = uintBitsToFloat(candidates.values[index * 2u]);
+        uint id = candidates.values[index * 2u + 1u];
+        if (better(score, id, best_score, best_id)) {
+            best_score = score;
+            best_id = id;
+        }
+    }
+    scores[lane] = best_score;
+    token_ids[lane] = best_id;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride && better(scores[lane + stride], token_ids[lane + stride], scores[lane], token_ids[lane])) {
+            scores[lane] = scores[lane + stride];
+            token_ids[lane] = token_ids[lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) output_token.value = token_ids[0];
+}

@@ -9,6 +9,27 @@ fn infer_node_output_shapes(
     let unknown = || Ok(vec![None; outputs]);
 
     let inferred = match node.op.as_str() {
+        "sinkhorn_hyper_connection_head" => {
+            let shape = attr_usize(node, "block_width")
+                .zip(attr_usize(node, "hidden_size"))
+                .map(|(block, hidden)| vec![block, hidden]);
+            Ok(repeat_shape(shape, outputs))
+        }
+        "markov_argmax_partials" => {
+            let candidates = attr_usize(node, "vocabulary_size")
+                .zip(attr_usize(node, "vocabulary_tile_width"))
+                .map(|(vocabulary, tile)| (vocabulary + tile - 1) / tile);
+            let rank = attr_usize(node, "rank");
+            Ok(vec![
+                candidates.map(|count| vec![count, 2]),
+                rank.map(|width| vec![width]),
+            ])
+        }
+        "argmax_candidate_reduce" => Ok(repeat_shape(Some(vec![1]), outputs)),
+        "confidence_projection_block" | "pack_token_block" => {
+            let shape = attr_usize(node, "block_width").map(|width| vec![width]);
+            Ok(repeat_shape(shape, outputs))
+        }
         "quantize_fp8_e4m3" | "quantize_int8_symmetric" => {
             let element_count = attr_usize(node, "element_count");
             let block_columns = attr_usize(node, "block_columns");
@@ -155,6 +176,12 @@ fn infer_node_output_shapes(
         | "parallel_linear_3way"
         | "mixed_parallel_linear_4way" => {
             infer_parallel_linear_output_shapes(component_id, node, signals, params, tensor_index)
+        }
+        "linear_projection" if attr_usize(node, "block_width").is_some() => {
+            let shape = attr_usize(node, "block_width")
+                .zip(attr_usize(node, "output_size"))
+                .map(|(block, output)| vec![block, output]);
+            Ok(repeat_shape(shape, outputs))
         }
         "linear" | "linear_residual" | "linear_projection" | "parallel_linear_silu_multiply" => {
             infer_linear_output_shapes(component_id, node, signals, params, tensor_index)
