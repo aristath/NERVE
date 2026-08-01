@@ -259,6 +259,13 @@ impl RuntimeModelEditor {
             .collect()
     }
 
+    pub fn layer_instances(&self) -> Vec<RuntimeEditorInstance> {
+        self.instances()
+            .into_iter()
+            .filter(|instance| instance.layer_index.is_some())
+            .collect()
+    }
+
     pub fn replace_layer_sequence(
         &mut self,
         layer_sequence: &[usize],
@@ -307,6 +314,120 @@ impl RuntimeModelEditor {
             .draft
             .clone()
             .with_signal_processor_chain(&self.source_graph, &chain)?;
+        Ok(())
+    }
+
+    pub fn duplicate_layer_instance_after(
+        &mut self,
+        instance_id: &str,
+    ) -> Result<String, RuntimeEditorError> {
+        let instance = self
+            .layer_instances()
+            .into_iter()
+            .find(|instance| instance.instance_id == instance_id)
+            .ok_or_else(|| {
+                RuntimeEditorError(format!(
+                    "runtime graph has no editable layer instance {instance_id:?}"
+                ))
+            })?;
+        let used_instance_ids = self
+            .draft
+            .instances
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect::<BTreeSet<_>>();
+        let occurrence = self
+            .draft
+            .instances
+            .iter()
+            .filter(|candidate| {
+                candidate.source_component_id == instance.source_id
+            })
+            .count()
+            + 1;
+        let duplicate_id = allocate_instance_id(
+            &instance.source_id,
+            occurrence,
+            &used_instance_ids,
+        );
+        let candidate = self.draft.clone().duplicate_after_instance(
+            &self.source_graph,
+            instance_id,
+            duplicate_id.clone(),
+        )?;
+        candidate.validate_against_graph(&self.source_graph)?;
+        self.draft = candidate;
+        Ok(duplicate_id)
+    }
+
+    pub fn remove_layer_instance(
+        &mut self,
+        instance_id: &str,
+    ) -> Result<(), RuntimeEditorError> {
+        let remaining = self
+            .layer_instances()
+            .into_iter()
+            .filter(|instance| instance.instance_id != instance_id)
+            .map(|instance| (instance.instance_id, instance.source_id))
+            .collect::<Vec<_>>();
+        if remaining.len() == self.layer_instances().len() {
+            return Err(RuntimeEditorError(format!(
+                "runtime graph has no editable layer instance {instance_id:?}"
+            )));
+        }
+        self.replace_signal_processor_instances(&remaining)
+    }
+
+    pub fn reorder_layer_instances(
+        &mut self,
+        ordered_instance_ids: &[String],
+    ) -> Result<(), RuntimeEditorError> {
+        let current = self.layer_instances();
+        let current_ids = current
+            .iter()
+            .map(|instance| instance.instance_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let ordered_ids = ordered_instance_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if ordered_instance_ids.len() != current.len()
+            || ordered_ids.len() != ordered_instance_ids.len()
+            || ordered_ids != current_ids
+        {
+            return Err(RuntimeEditorError(
+                "layer reorder must contain every existing instance exactly once".to_string(),
+            ));
+        }
+        let source_by_instance = current
+            .into_iter()
+            .map(|instance| (instance.instance_id, instance.source_id))
+            .collect::<BTreeMap<_, _>>();
+        let ordered = ordered_instance_ids
+            .iter()
+            .map(|instance_id| {
+                (
+                    instance_id.clone(),
+                    source_by_instance[instance_id].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.replace_signal_processor_instances(&ordered)
+    }
+
+    fn replace_signal_processor_instances(
+        &mut self,
+        instances: &[(String, String)],
+    ) -> Result<(), RuntimeEditorError> {
+        if instances.is_empty() {
+            return Err(RuntimeEditorError(
+                "layer sequence must contain at least one layer".to_string(),
+            ));
+        }
+        self.draft = self
+            .draft
+            .clone()
+            .with_signal_processor_chain(&self.source_graph, instances)?;
         Ok(())
     }
 
@@ -365,20 +486,13 @@ impl RuntimeModelEditor {
         instance_id: &str,
         device_id: &str,
     ) -> Result<(), RuntimeEditorError> {
-        let available = self.available_devices.iter().any(|device| {
-            device.device_id == device_id
-                && device.available
-                && device.can_host_runtime_components_on_physical_device != Some(false)
-        });
-        if !available {
-            return Err(RuntimeEditorError(format!(
-                "runtime device {device_id:?} is unavailable or cannot host this component"
-            )));
-        }
-        self.draft = self
+        self.validate_instance_device_compatibility(instance_id, device_id)?;
+        let candidate = self
             .draft
             .clone()
             .with_instance_device(instance_id, device_id)?;
+        candidate.validate_against_graph(&self.source_graph)?;
+        self.draft = candidate;
         Ok(())
     }
 
@@ -464,8 +578,8 @@ impl RuntimeModelEditor {
         instance_id: &str,
         state_policy: StreamCircuitNodeInstanceStatePolicy,
     ) -> Result<(), RuntimeEditorError> {
-        let instance = self
-            .draft
+        let mut candidate = self.draft.clone();
+        let instance = candidate
             .instances
             .iter_mut()
             .find(|instance| instance.instance_id == instance_id)
@@ -475,21 +589,46 @@ impl RuntimeModelEditor {
                 ))
             })?;
         instance.state_policy = state_policy;
+        candidate.validate_against_graph(&self.source_graph)?;
+        self.draft = candidate;
         Ok(())
+    }
+
+    pub fn state_policy_target_ids(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<String>, RuntimeEditorError> {
+        let source = self.source_component_for_instance(instance_id).ok_or_else(|| {
+            RuntimeEditorError(format!(
+                "runtime graph has no node instance {instance_id:?}"
+            ))
+        })?;
+        if source.state_ports.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .draft
+            .instances
+            .iter()
+            .filter(|candidate| candidate.instance_id != instance_id && candidate.enabled)
+            .filter(|candidate| {
+                self.source_components
+                    .iter()
+                    .find(|component| component.source_id == candidate.source_component_id)
+                    .is_some_and(|component| component.state_ports == source.state_ports)
+            })
+            .map(|candidate| candidate.instance_id.clone())
+            .collect())
     }
 
     pub fn validation(&self) -> RuntimeEditorValidation {
         let mut errors = Vec::new();
         for instance in &self.draft.instances {
-            if !self.available_devices.iter().any(|device| {
-                device.device_id == instance.device_id
-                    && device.available
-                    && device.can_host_runtime_components_on_physical_device != Some(false)
-            }) {
-                errors.push(format!(
-                    "instance {} is assigned to unavailable device {}",
-                    instance.instance_id, instance.device_id
-                ));
+            if let Err(error) = self.validate_instance_device_compatibility(
+                &instance.instance_id,
+                &instance.device_id,
+            ) {
+                errors.push(error.to_string());
             }
             if let Some(source) = self
                 .source_components

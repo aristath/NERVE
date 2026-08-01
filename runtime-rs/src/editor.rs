@@ -6,4 +6,5 @@ include!("editor/source_components.rs");
 include!("editor/representation_inspection.rs");
 include!("editor/controls.rs");
 include!("editor/devices.rs");
+include!("editor/device_compatibility.rs");
 include!("editor/placement.rs");

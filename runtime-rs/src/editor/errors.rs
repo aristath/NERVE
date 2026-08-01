@@ -15,7 +15,7 @@ use crate::{
     StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan, StreamCircuitRuntimeGraph,
     VulkanComputeDeviceCatalog,
     VulkanComputeDeviceInfo,
-    VulkanResidentModelPackageManifest,
+    VulkanResidentModelPackageManifest, VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA,
 };
 
 pub const RUNTIME_PACKAGE_MANIFEST_FILE: &str = "vulkan_resident_package.json";

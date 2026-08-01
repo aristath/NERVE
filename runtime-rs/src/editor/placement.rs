@@ -35,7 +35,13 @@ mod tests {
         let source = root.join("source");
         fs::create_dir_all(&package).unwrap();
         fs::create_dir_all(&source).unwrap();
-        fs::write(package.join(RUNTIME_PACKAGE_MANIFEST_FILE), b"{}").unwrap();
+        fs::write(
+            package.join(RUNTIME_PACKAGE_MANIFEST_FILE),
+            format!(
+                r#"{{"schema":"{VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA}","package_id":"fixture"}}"#
+            ),
+        )
+        .unwrap();
         fs::write(source.join("config.json"), b"{}").unwrap();
         fs::write(source.join("tokenizer.json"), b"{}").unwrap();
         fs::write(source.join("model.safetensors"), b"").unwrap();
@@ -54,6 +60,49 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_stale_compiled_package_schema_before_loading() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "nerve-editor-stale-path-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(RUNTIME_PACKAGE_MANIFEST_FILE),
+            r#"{"schema":"nerve.vulkan_resident_model_package.v4","package_id":"stale"}"#,
+        )
+        .unwrap();
+
+        let error = classify_runtime_model_path(&root).unwrap_err();
+        assert!(error.to_string().contains("recompile the model"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_source_artifacts_are_left_for_compiler_discovery_to_diagnose() {
+        let root = std::env::temp_dir().join(format!(
+            "nerve-editor-incomplete-source-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.json"), "{}").unwrap();
+
+        assert_eq!(
+            classify_runtime_model_path(&root).unwrap(),
+            RuntimeModelPathKind::SafetensorsSource {
+                model_dir: root.clone()
+            }
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
