@@ -1,3 +1,73 @@
 # TODO
 
-No outstanding items.
+## Goal
+
+Compile and run `/mnt/models/models/deepseek-v4/flash-0731/safetensors` as a
+daily-driver NERVE model. Preserve its source behavior, make its sparse routed
+experts independently demand-resident, expose runtime per-layer representation
+selection, and optimize real multi-turn agentic inference to at least 30 tok/s
+without regressing supported Qwen models.
+
+## Work queue
+
+1. Make structural discovery accept a root-level repeated `layers.N.*` graph.
+   Add adversarial tests proving it still selects the correct decoder root when
+   auxiliary repeated stacks exist, then rerun the real DeepSeek compilation.
+
+2. Convert all transpiler failures into structured compiler failures. The CLI
+   must not leak a traceback, staging output must be removed, and JSONL clients
+   must receive one terminal `Failed` event with a useful diagnostic.
+
+3. Discover and represent the DeepSeek V4 graph from topology rather than its
+   family name: root `embed`/`norm`/`head`, hyper-connections, compressed sparse
+   attention (ratios 4 and 128), indexer tensors, hash-routed early MoE layers,
+   sqrt-softplus routing, shared experts, and the 43 repeated processing layers.
+   Each structure needs focused negative tests and behavioral contract checks.
+
+4. Preserve the checkpoint's native mixed representations. Routed experts are
+   already packed FP4 with E8M0 scales; dense tensors mix FP8, BF16, and F32.
+   Package these without expanding them, keep each routed expert independently
+   addressable, and prove byte/shape/scale fidelity against source tensors.
+
+5. Compile the supplied `encoding/encoding_dsv4.py` behavior into a portable,
+   model-owned chat codec. Support multi-turn reasoning (`low`, `high`, `max`),
+   tool calls/results, stop tokens, and assistant response parsing without
+   embedding DeepSeek-specific rules in the generic runtime.
+
+6. Discover and compile the attached DSpark speculative module, including its
+   Markov/confidence state and seven-token draft contract. Validate acceptance,
+   rejection, and transient-state rollback before enabling it by default.
+
+7. Complete expert-granular demand-retained residency. Route before admission;
+   load only selected expert resources, retain hot experts, use a bounded and
+   observable eviction policy when necessary, and never require a whole MoE
+   layer to become resident. Demonstrate that the model can run on the four
+   currently workload-free AMD GPUs without using the display-resident GPU or
+   any NVIDIA device.
+
+8. Add runtime per-layer/per-component representation selection. Preserve a
+   native source representation when supported; otherwise choose only verified
+   alternatives. Add packed INT4 candidates for eligible dense components, but
+   promote them only when hardware benchmarks show a real speed or capacity
+   benefit and quality validation passes. Placement remains a runtime concern.
+
+9. Run real multi-turn DeepSeek conversations with the official thinking and
+   sampling defaults, 64K-or-larger output allowance, and enough context for
+   agentic coding. Validate coherent answers, reasoning, turn recall, tool-call
+   syntax, long-stream continuity, and clean teardown before benchmarking.
+
+10. Optimize measured inference until steady-state decode reaches at least
+    30 tok/s, then continue until no material bottleneck remains. Use warmup plus
+    repeated short real requests, report prefill and decode by default, compare
+    equivalent llama.cpp/vLLM implementations, and profile routing, expert
+    admission, kernels, synchronization, transfers, and DSpark acceptance.
+
+11. Before every runtime-performance commit, run the established Qwen3.6-35B
+    A3B and Qwen3.5-9B quality/performance checks sequentially on equivalent AMD
+    placement. Reject or revise any change that regresses correctness or causes
+    a material performance loss.
+
+12. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
+    stay self-contained and model-specific, runtime graph/placement/residency
+    remain editable, no model-family facts leak into the core engine, TODO is
+    empty, the worktree is clean, and every milestone is committed and pushed.
