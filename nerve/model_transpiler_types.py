@@ -54,6 +54,8 @@ class LayerStructure:
     feed_forward_type: str
     intermediate_size: int
     shared_intermediate_size: int | None
+    boundary_shape: tuple[int, ...]
+    residual_mixer: Json | None
     tensors: dict[str, str]
 
 
@@ -99,12 +101,15 @@ class ModelStructure:
     quantization: Json | None
     sampling: Json
     token_ids: Json
+    stream_shape: tuple[int, ...]
+    stream_mixer: Json | None
     tensors: dict[str, str]
     layers: tuple[LayerStructure, ...]
     draft_execution_graphs: tuple[DraftExecutionGraphStructure, ...]
 
 
 TOKEN_EMBEDDING_CANDIDATES = (
+    "embed.weight",
     "model.embed_tokens.weight",
     "model.tok_embeddings.weight",
     "transformer.wte.weight",
@@ -121,6 +126,7 @@ OUTPUT_NORM_CANDIDATES = (
 )
 
 OUTPUT_PROJECTION_CANDIDATES = (
+    "head.weight",
     "lm_head.weight",
     "output.weight",
     "embed_out.weight",

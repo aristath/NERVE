@@ -6,6 +6,10 @@ from nerve.model_transpiler_quantization import (
     attach_packed_linear_quantization,
     synthesize_packed_expert_tensors,
 )
+from nerve.model_transpiler_hyper_connections import (
+    discover_layer_residual_mixer,
+    discover_stream_mixer,
+)
 
 def discover_model_structure(
     model_dir: Path,
@@ -81,6 +85,11 @@ def discover_model_structure(
     per_layer_input = discover_per_layer_input_structure(
         decoder_config, tensors, model_prefix, layer_count
     )
+    stream_mixer = discover_stream_mixer(
+        tensors,
+        decoder_config,
+        hidden_size=hidden_size,
+    )
     shared_kv_sources = discover_shared_kv_sources(
         decoder_config, configured_layer_types, layer_count
     )
@@ -97,6 +106,8 @@ def discover_model_structure(
             shared_kv_source_layer=shared_kv_sources.get(index),
             per_layer_input=per_layer_input,
             token_embedding=token_embedding,
+            hidden_size=hidden_size,
+            stream_mixer=stream_mixer,
             layer_root=layer_root,
             layer_index=index,
         )
@@ -232,10 +243,24 @@ def discover_model_structure(
             ),
             "pad": decoder_config.get("pad_token_id"),
         },
+        stream_shape=(
+            (int(stream_mixer["multiplicity"]), hidden_size)
+            if stream_mixer is not None
+            else (hidden_size,)
+        ),
+        stream_mixer=stream_mixer,
         tensors={
             "token_embedding": token_embedding,
             "output_norm": output_norm,
             "output_projection": output_projection,
+            **(
+                {
+                    f"stream_head_{role}": tensor
+                    for role, tensor in stream_mixer["head"].items()
+                }
+                if stream_mixer is not None
+                else {}
+            ),
         },
         layers=layers,
         draft_execution_graphs=draft_execution_graphs,
@@ -255,6 +280,8 @@ def discover_layer_structure(
     shared_kv_source_layer: int | None,
     per_layer_input: Json | None,
     token_embedding: str,
+    hidden_size: int,
+    stream_mixer: Json | None,
     layer_root: str,
     layer_index: int,
 ) -> LayerStructure:
@@ -276,6 +303,13 @@ def discover_layer_structure(
             role="feed-forward norm",
         ),
     }
+    residual_mixer, residual_parameters = discover_layer_residual_mixer(
+        tensors,
+        prefix=prefix,
+        hidden_size=hidden_size,
+        stream_mixer=stream_mixer,
+    )
+    layer_tensors.update(residual_parameters)
     if has_explicit_feed_forward_pre_norm:
         layer_tensors["operator_post_norm"] = find_layer_tensor(
             tensors,
@@ -792,6 +826,12 @@ def discover_layer_structure(
             if "shared_mlp_input" in layer_tensors
             else None
         ),
+        boundary_shape=(
+            (int(stream_mixer["multiplicity"]), hidden_size)
+            if stream_mixer is not None
+            else (hidden_size,)
+        ),
+        residual_mixer=residual_mixer,
         tensors=layer_tensors,
     )
 

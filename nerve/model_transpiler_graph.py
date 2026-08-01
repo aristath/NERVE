@@ -74,10 +74,15 @@ def make_layer(
             "per_layer_input_scale": 2.0**-0.5,
         },
         "ports": {
-            "inputs": [{"id": "input", "signal": "frame", "shape": [hidden_size]}],
-            "outputs": [{"id": "output", "signal": "frame", "shape": [hidden_size]}],
+            "inputs": [
+                {"id": "input", "signal": "frame", "shape": list(layer.boundary_shape)}
+            ],
+            "outputs": [
+                {"id": "output", "signal": "frame", "shape": list(layer.boundary_shape)}
+            ],
             "controls": [],
         },
+        "residual_mixer": deepcopy(layer.residual_mixer),
         "state_ports": make_state_ports(structure, layer),
         "parameter_block": make_parameter_block(
             layer.operator_type, layer.feed_forward_type, layer.tensors
@@ -125,6 +130,28 @@ def make_model_graph(
     }
     if structure.tensors["output_projection"] == structure.tensors["token_embedding"]:
         output_projection["sharing"] = "same_parameter_object_as_token_embedding"
+
+    stream_collapse = (
+        [
+            {
+                "id": "stream_collapse",
+                "type": "sinkhorn_hyper_connection_head",
+                "attrs": {
+                    "input_shape": list(structure.stream_shape),
+                    "output_shape": [structure.hidden_size],
+                    "normalization": "root_mean_square",
+                    "activation": "sigmoid",
+                    "epsilon": float(structure.stream_mixer["epsilon"]),
+                },
+                "params": {
+                    role: tensor_ref(tensor)
+                    for role, tensor in structure.stream_mixer["head"].items()
+                },
+            }
+        ]
+        if structure.stream_mixer is not None
+        else []
+    )
 
     return {
         "schema": "nerve.model_graph.v1",
@@ -189,7 +216,20 @@ def make_model_graph(
                 "id": "token_embedding",
                 "type": "embedding_lookup",
                 "output": "stream_frame",
-                "attrs": {"scale": structure.embedding_scale},
+                "attrs": {
+                    "scale": structure.embedding_scale,
+                    "output_shape": list(structure.stream_shape),
+                    "stream_expansion": (
+                        {
+                            "type": "repeat",
+                            "multiplicity": int(
+                                structure.stream_mixer["multiplicity"]
+                            ),
+                        }
+                        if structure.stream_mixer is not None
+                        else None
+                    ),
+                },
                 "params": {"weight": tensor_ref(structure.tensors["token_embedding"])},
             },
             "execution_graph": {
@@ -198,6 +238,7 @@ def make_model_graph(
             },
             "output_transducer": {
                 "components": [
+                    *stream_collapse,
                     {
                         "id": "output_norm",
                         "type": "rms_norm",
@@ -848,4 +889,3 @@ def make_component_class(structure: ModelStructure, layer: LayerStructure) -> st
         )
 
     raise ModelTranspileError(f"unsupported component class for operator {operator_type!r}")
-
