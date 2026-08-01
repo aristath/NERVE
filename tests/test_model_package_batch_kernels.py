@@ -349,6 +349,7 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
     assert frame_parallel["stages"][0]["shader_path"] == (
         "shaders/rms_norm_batch1_bf16_h4096_eps1e-06_offset1__pbc31.comp"
     )
+    assert frame_parallel["stages"][0]["dispatch_y_from_batch_width"] is True
     assert [implementation["lane_tile_width"] for implementation in portable] == [
         2,
         4,

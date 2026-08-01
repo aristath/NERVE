@@ -1239,6 +1239,9 @@ def component_kernel_spec(
                         if frame_parallel_shader_file.startswith("sparse_moe_")
                         else None
                     ),
+                    dispatch_y_from_batch_width=(
+                        not frame_parallel_shader_file.startswith("sparse_moe_")
+                    ),
                 )
             )
             spec["batch_implementations"].append(
