@@ -233,6 +233,72 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
         return rendered
 
+    indexed_sparse_attention_main = re.fullmatch(
+        r"indexed_sparse_attention_main_bf16_q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
+        r"r(\d+)_k(\d+)_scale([0-9eE+.-]+)\.comp",
+        shader_file,
+    )
+    if indexed_sparse_attention_main is not None:
+        (
+            query_heads,
+            kv_heads,
+            head_width,
+            window,
+            compression_ratio,
+            max_compressed_indices,
+            scale,
+        ) = indexed_sparse_attention_main.groups()
+        (
+            query_heads,
+            kv_heads,
+            head_width,
+            window,
+            compression_ratio,
+            max_compressed_indices,
+        ) = map(
+            int,
+            (
+                query_heads,
+                kv_heads,
+                head_width,
+                window,
+                compression_ratio,
+                max_compressed_indices,
+            ),
+        )
+        has_compressed = compression_ratio > 0 and max_compressed_indices > 0
+        if (
+            query_heads <= 0
+            or kv_heads <= 0
+            or query_heads % kv_heads
+            or head_width <= 0
+            or head_width % 64
+            or head_width > 1024
+            or window <= 0
+            or (compression_ratio == 0) != (max_compressed_indices == 0)
+        ):
+            raise ModelCompileError(
+                f"invalid main indexed sparse-attention shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "indexed_sparse_attention_main_bf16.comp.template",
+            {
+                "LOCAL_SIZE": str(head_width),
+                "QUERY_HEADS": str(query_heads),
+                "KV_HEADS": str(kv_heads),
+                "HEAD_WIDTH": str(head_width),
+                "LOCAL_WINDOW": str(window),
+                "COMPRESSION_RATIO": str(compression_ratio),
+                "MAX_COMPRESSED_INDICES": str(max_compressed_indices),
+                "ATTENTION_SCALE": scale,
+                "HAS_COMPRESSED": "1" if has_compressed else "0",
+                "OUTPUT_BINDING": "4" if has_compressed else "2",
+                "SINK_BINDING": "5" if has_compressed else "3",
+                "CONTROL_BINDING": "8" if has_compressed else "5",
+            },
+        )
+
     indexed_sparse_attention = re.fullmatch(
         r"indexed_sparse_attention(_parallel)?_bf16_q(\d+)_kv(\d+)_d(\d+)_"
         r"w(\d+)_scale([0-9eE+.-]+)\.comp",

@@ -11,7 +11,12 @@ def stream_control_binding_for_node(circuit: Json, node: Json) -> int:
     state_view_signals = {
         output
         for producer in circuit["nodes"]
-        if producer.get("op") in {"append_state_update", "rolling_state_update"}
+        if producer.get("op")
+        in {
+            "append_state_update",
+            "conditional_append_state_update",
+            "rolling_state_update",
+        }
         for output in producer.get("outputs", [])
     }
     signal_bindings = [*node.get("inputs", []), *node.get("outputs", [])]

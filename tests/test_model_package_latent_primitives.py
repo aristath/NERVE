@@ -290,3 +290,88 @@ def test_rejects_indexed_attention_without_f32_per_head_sinks() -> None:
 
     with pytest.raises(ModelCompileError, match="invalid contract"):
         shader_file_for_node(circuit, node, tensor_index, {"hidden_size": 128})
+
+
+def test_compiles_causal_indexed_attention_with_compressed_memory(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _fixture()
+    circuit["state_ports"].append(
+        {
+            "id": "compressed_kv_memory",
+            "type": "append_only_attention_memory",
+            "shape_per_token": [128],
+            "dtype": "BF16",
+            "growth": "one_per_4_activations",
+        }
+    )
+    circuit["parameters"]["refs"]["attention_sinks"] = {
+        "tensor": "attention.sinks"
+    }
+    tensor_index["tensors"]["attention.sinks"] = {
+        "dtype": "F32",
+        "shape": [2],
+        "layout": ROW_MAJOR_LAYOUT,
+    }
+    circuit["nodes"].extend(
+        [
+            {
+                "id": "compress",
+                "op": "conditional_append_state_update",
+                "inputs": ["candidate", "compressed_kv_memory"],
+                "outputs": ["compressed_kv_values"],
+                "state_reads": ["compressed_kv_memory"],
+                "state_writes": ["compressed_kv_memory"],
+                "attrs": {"period": 4},
+            },
+            {
+                "id": "index",
+                "op": "chronological_compressed_index",
+                "inputs": ["compressed_kv_values"],
+                "outputs": ["compressed_indices"],
+                "attrs": {"ratio": 4, "causal": True},
+            },
+        ]
+    )
+    node = {
+        "id": "attend",
+        "op": "indexed_sparse_attention",
+        "inputs": [
+            "query",
+            "local_kv_values",
+            "compressed_kv_values",
+            "compressed_indices",
+        ],
+        "outputs": ["attention_heads"],
+        "params": ["attention_sinks"],
+        "attrs": {
+            "causal": True,
+            "scale": 0.125,
+            "window_size": 4,
+            "query_heads": 2,
+            "key_value_heads": 1,
+            "head_width": 64,
+        },
+    }
+    circuit["nodes"].append(node)
+
+    shader_file = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 128, "max_position_embeddings": 4096},
+    )
+
+    assert shader_file == (
+        "indexed_sparse_attention_main_bf16_q2_kv1_d64_w4_"
+        "r4_k1024_scale0.125__sc8.comp"
+    )
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
+    source = (tmp_path / shader_file).read_text()
+    assert "const uint COMPRESSION_RATIO = 4u;" in source
+    assert "const uint MAX_COMPRESSED_INDICES = 1024u;" in source
+    assert "index - LOCAL_WINDOW < compressed_count" in source
+    assert "binding = 8) readonly buffer StreamControl" in source
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()

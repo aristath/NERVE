@@ -1110,23 +1110,17 @@ def shader_file_for_node(
         )
     if op == "indexed_sparse_attention":
         attrs = node.get("attrs", {})
+        inputs = node.get("inputs", [])
         query_heads = int(attrs.get("query_heads", 0))
         key_value_heads = int(attrs.get("key_value_heads", 0))
         head_width = int(attrs.get("head_width", 0))
         window_size = int(attrs.get("window_size", 0))
         scale = float(attrs.get("scale", 0.0))
         if (
-            node.get("inputs")
-            != ["query_positioned", "local_kv_values", "query_key_value_positioned"]
-            and len(node.get("inputs", [])) != 3
-        ) or (
             len(node.get("outputs", [])) != 1
             or len(node.get("params", [])) != 1
             or node.get("state_reads")
             or node.get("state_writes")
-            or attrs.get("causal") is not False
-            or attrs.get("intra_block_visibility") != "all"
-            or attrs.get("query_state") != "transient"
             or query_heads <= 0
             or key_value_heads <= 0
             or query_heads % key_value_heads
@@ -1146,10 +1140,82 @@ def shader_file_for_node(
                 f"indexed sparse-attention node {node['id']!r} has an invalid contract"
             )
         binding = stream_control_binding_for_node(circuit, node)
+        common = (
+            f"q{query_heads}_kv{key_value_heads}_d{head_width}_w{window_size}_"
+        )
+        if attrs.get("causal") is False:
+            if (
+                len(inputs) != 3
+                or attrs.get("intra_block_visibility") != "all"
+                or attrs.get("query_state") != "transient"
+            ):
+                raise ModelCompileError(
+                    f"indexed sparse-attention node {node['id']!r} has an invalid contract"
+                )
+            return (
+                f"indexed_sparse_attention_bf16_{common}"
+                f"scale{shader_float_token(scale)}__sc{binding}.comp"
+            )
+        if (
+            attrs.get("causal") is not True
+            or len(inputs) not in {2, 4}
+            or attrs.get("intra_block_visibility") is not None
+            or attrs.get("query_state") is not None
+        ):
+            raise ModelCompileError(
+                f"indexed sparse-attention node {node['id']!r} has an invalid contract"
+            )
+        compression_ratio = 0
+        max_compressed_indices = 0
+        if len(inputs) == 4:
+            index_signal = inputs[3]
+            index_producer = next(
+                (
+                    producer
+                    for producer in circuit.get("nodes", [])
+                    if index_signal in producer.get("outputs", [])
+                ),
+                None,
+            )
+            if index_producer is None:
+                raise ModelCompileError(
+                    f"indexed sparse-attention node {node['id']!r} has no index producer"
+                )
+            if index_producer.get("op") == "learned_topk_index":
+                max_compressed_indices = int(
+                    index_producer.get("attrs", {}).get("top_k", 0)
+                )
+                compressor = next(
+                    (
+                        producer
+                        for producer in circuit.get("nodes", [])
+                        if producer.get("op") == "learned_gated_kv_compression"
+                    ),
+                    None,
+                )
+                compression_ratio = int(
+                    compressor.get("attrs", {}).get("ratio", 0)
+                    if compressor is not None
+                    else 0
+                )
+            elif index_producer.get("op") == "chronological_compressed_index":
+                compression_ratio = int(
+                    index_producer.get("attrs", {}).get("ratio", 0)
+                )
+                max_context = int(dimensions.get("max_position_embeddings", 0))
+                max_compressed_indices = (
+                    (max_context + compression_ratio - 1) // compression_ratio
+                    if compression_ratio > 0
+                    else 0
+                )
+            if compression_ratio <= 0 or max_compressed_indices <= 0:
+                raise ModelCompileError(
+                    f"indexed sparse-attention node {node['id']!r} has an invalid compressed-index contract"
+                )
         return (
-            f"indexed_sparse_attention_bf16_q{query_heads}_kv{key_value_heads}_"
-            f"d{head_width}_w{window_size}_scale{shader_float_token(scale)}"
-            f"__sc{binding}.comp"
+            f"indexed_sparse_attention_main_bf16_{common}"
+            f"r{compression_ratio}_k{max_compressed_indices}_"
+            f"scale{shader_float_token(scale)}__sc{binding}.comp"
         )
     if op == "scaled_dot_product_attention":
         attrs = node["attrs"]
