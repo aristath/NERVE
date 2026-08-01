@@ -163,7 +163,7 @@ impl StreamCircuitRuntimeGraph {
             .iter()
             .enumerate()
             .filter(|(_, edge)| {
-                edge.source.component_id == after_instance_id && edge.connection.is_forward()
+                edge.source.component_id == after_instance_id && edge.connection.is_instantaneous()
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
@@ -338,7 +338,7 @@ impl StreamCircuitRuntimeGraph {
             .edges
             .iter()
             .filter(|edge| {
-                edge.connection.is_forward()
+                edge.connection.is_instantaneous()
                     && !old_processor_ids.contains(edge.source.component_id.as_str())
                     && old_processor_ids.contains(edge.destination.component_id.as_str())
             })
@@ -348,7 +348,7 @@ impl StreamCircuitRuntimeGraph {
             .edges
             .iter()
             .filter(|edge| {
-                edge.connection.is_forward()
+                edge.connection.is_instantaneous()
                     && old_processor_ids.contains(edge.source.component_id.as_str())
                     && !old_processor_ids.contains(edge.destination.component_id.as_str())
             })
@@ -362,7 +362,7 @@ impl StreamCircuitRuntimeGraph {
             )));
         }
         if self.edges.iter().any(|edge| {
-            !edge.connection.is_forward()
+            !edge.connection.is_instantaneous()
                 && (old_processor_ids.contains(edge.source.component_id.as_str())
                     || old_processor_ids.contains(edge.destination.component_id.as_str()))
         }) {

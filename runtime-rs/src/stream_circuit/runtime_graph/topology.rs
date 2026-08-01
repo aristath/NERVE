@@ -8,7 +8,7 @@ fn effective_runtime_graph_edges(
         .collect::<BTreeMap<_, _>>();
     let outgoing = edges
         .iter()
-        .filter(|edge| edge.connection.is_forward())
+        .filter(|edge| edge.connection.is_instantaneous())
         .fold(
             BTreeMap::<&str, Vec<&StreamCircuitGraphEdge>>::new(),
             |mut map, edge| {
@@ -21,7 +21,7 @@ fn effective_runtime_graph_edges(
     let mut effective = edges
         .iter()
         .filter(|edge| {
-            !edge.connection.is_forward()
+            !edge.connection.is_instantaneous()
                 && enabled
                     .get(edge.source.component_id.as_str())
                     .copied()
@@ -33,7 +33,7 @@ fn effective_runtime_graph_edges(
         })
         .cloned()
         .collect::<Vec<_>>();
-    for edge in edges.iter().filter(|edge| edge.connection.is_forward()) {
+    for edge in edges.iter().filter(|edge| edge.connection.is_instantaneous()) {
         if !enabled
             .get(edge.source.component_id.as_str())
             .copied()
@@ -42,12 +42,20 @@ fn effective_runtime_graph_edges(
             continue;
         }
         let mut destination = edge.destination.clone();
+        let mut bypassed_component = false;
         let mut visited = BTreeSet::new();
         while !enabled
             .get(destination.component_id.as_str())
             .copied()
             .unwrap_or(false)
         {
+            if !matches!(edge.connection, StreamCircuitConnection::Forward) {
+                return Err(CircuitPlacementError(format!(
+                    "runtime graph cannot bypass disabled component {} across specialized instantaneous edge {}",
+                    destination.component_id, edge.id
+                )));
+            }
+            bypassed_component = true;
             if !visited.insert(destination.component_id.clone()) {
                 return Err(CircuitPlacementError(format!(
                     "runtime graph bypass path contains a cycle at {}",
@@ -61,6 +69,12 @@ fn effective_runtime_graph_edges(
             let Some(next) = next else {
                 break;
             };
+            if !matches!(next.connection, StreamCircuitConnection::Forward) {
+                return Err(CircuitPlacementError(format!(
+                    "runtime graph cannot bypass disabled component {} into specialized instantaneous edge {}",
+                    destination.component_id, next.id
+                )));
+            }
             destination = next.destination.clone();
         }
         if enabled
@@ -72,7 +86,11 @@ fn effective_runtime_graph_edges(
                 id: edge.id.clone(),
                 source: edge.source.clone(),
                 destination,
-                connection: StreamCircuitConnection::Forward,
+                connection: if bypassed_component {
+                    StreamCircuitConnection::Forward
+                } else {
+                    edge.connection.clone()
+                },
             });
         }
     }
@@ -93,7 +111,7 @@ fn topological_runtime_graph_order(
         .map(|id| (*id, 0usize))
         .collect::<BTreeMap<_, _>>();
     let mut outgoing = BTreeMap::<&str, Vec<&str>>::new();
-    for edge in edges.iter().filter(|edge| edge.connection.is_forward()) {
+    for edge in edges.iter().filter(|edge| edge.connection.is_instantaneous()) {
         *indegree
             .get_mut(edge.destination.component_id.as_str())
             .ok_or_else(|| {

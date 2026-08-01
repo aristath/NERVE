@@ -37,7 +37,7 @@ fn validate_explicit_edges(
         .map(|instance| (instance.instance_id.as_str(), instance))
         .collect::<BTreeMap<_, _>>();
     let mut ids = BTreeSet::new();
-    let mut forward_destination_ports = BTreeSet::new();
+    let mut instantaneous_destination_ports = BTreeSet::new();
     let mut feedback_destination_ports = BTreeSet::new();
     let mut incoming_count = BTreeMap::<&str, usize>::new();
     let mut outgoing_count = BTreeMap::<&str, usize>::new();
@@ -66,15 +66,15 @@ fn validate_explicit_edges(
             })?;
         edge.connection.validate(&edge.id)?;
         if source_instance.instance_id == destination_instance.instance_id
-            && edge.connection.is_forward()
+            && edge.connection.is_instantaneous()
         {
             return Err(CircuitPlacementError(format!(
                 "runtime graph edge {} creates an un-delayed self-loop on {}",
                 edge.id, source_instance.instance_id
             )));
         }
-        let destination_ports = if edge.connection.is_forward() {
-            &mut forward_destination_ports
+        let destination_ports = if edge.connection.is_instantaneous() {
+            &mut instantaneous_destination_ports
         } else {
             &mut feedback_destination_ports
         };
@@ -86,8 +86,8 @@ fn validate_explicit_edges(
                 "runtime graph input {}.{} has more than one {} edge",
                 destination_instance.instance_id,
                 edge.destination.port_id,
-                if edge.connection.is_forward() {
-                    "forward"
+                if edge.connection.is_instantaneous() {
+                    "instantaneous"
                 } else {
                     "temporal feedback"
                 }

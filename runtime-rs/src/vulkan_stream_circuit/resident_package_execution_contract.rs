@@ -236,12 +236,12 @@ fn validate_generation_execution_contract(
         .iter()
         .map(|component| component.component_id.as_str())
         .collect::<BTreeSet<_>>();
-    let forward = circuit_graph
+    let instantaneous = circuit_graph
         .edges
         .iter()
-        .filter(|edge| edge.connection.is_forward())
+        .filter(|edge| edge.connection.is_instantaneous())
         .collect::<Vec<_>>();
-    let input_edges = forward
+    let input_edges = instantaneous
         .iter()
         .copied()
         .filter(|edge| {
@@ -249,7 +249,7 @@ fn validate_generation_execution_contract(
                 && processor_ids.contains(edge.destination.component_id.as_str())
         })
         .collect::<Vec<_>>();
-    let output_edges = forward
+    let output_edges = instantaneous
         .iter()
         .copied()
         .filter(|edge| {
@@ -257,7 +257,7 @@ fn validate_generation_execution_contract(
                 && edge.destination.component_id == output.component_id
         })
         .collect::<Vec<_>>();
-    let sampler_edges = forward
+    let sampler_edges = instantaneous
         .iter()
         .copied()
         .filter(|edge| {
@@ -269,7 +269,7 @@ fn validate_generation_execution_contract(
         .edges
         .iter()
         .filter(|edge| {
-            !edge.connection.is_forward()
+            !edge.connection.is_instantaneous()
                 && edge.source.component_id == sampler.component_id
                 && edge.destination.component_id == input.component_id
         })

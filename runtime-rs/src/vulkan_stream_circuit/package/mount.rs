@@ -363,7 +363,7 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
         .edges
         .iter()
         .filter(|edge| {
-            edge.connection.is_forward()
+            edge.connection.is_instantaneous()
                 && edge.source.component_id == input_transducer_id
                 && processor_ids.contains(edge.destination.component_id.as_str())
         })
@@ -372,7 +372,7 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
         .edges
         .iter()
         .filter(|edge| {
-            edge.connection.is_forward()
+            edge.connection.is_instantaneous()
                 && processor_ids.contains(edge.source.component_id.as_str())
                 && edge.destination.component_id == output_transducer_id
         })

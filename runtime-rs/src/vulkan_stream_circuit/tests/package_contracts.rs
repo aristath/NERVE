@@ -736,7 +736,7 @@ fn runtime_chain_control_preserves_generation_components_and_feedback() {
     assert!(runtime_graph.edges.iter().any(|edge| {
         edge.source.component_id == "sampler"
             && edge.destination.component_id == "input_transducer"
-            && !edge.connection.is_forward()
+            && !edge.connection.is_instantaneous()
     }));
 }
 
@@ -767,7 +767,7 @@ fn generation_contract_rejects_execution_and_graph_drift() {
     topology_drift
         .circuit_graph
         .edges
-        .retain(|edge| edge.connection.is_forward());
+        .retain(|edge| edge.connection.is_instantaneous());
     let topology_error =
         validate_generation_execution_contract(&topology_drift, &topology_drift.circuit_graph)
             .unwrap_err()

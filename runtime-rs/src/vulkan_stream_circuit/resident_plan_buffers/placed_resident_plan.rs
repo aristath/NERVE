@@ -41,7 +41,7 @@ impl VulkanPlacedStreamCircuitResidentPlan {
             .edges
             .iter()
             .filter(|edge| {
-                edge.connection.is_forward()
+                edge.connection.is_instantaneous()
                     && edge.source_device_id == device_id
                     && edge.destination_device_id == device_id
             })
@@ -51,7 +51,7 @@ impl VulkanPlacedStreamCircuitResidentPlan {
             .edges
             .iter()
             .filter(|edge| {
-                edge.connection.is_forward()
+                edge.connection.is_instantaneous()
                     && edge.source_device_id != device_id
                     && edge.destination_device_id == device_id
             })
@@ -61,7 +61,7 @@ impl VulkanPlacedStreamCircuitResidentPlan {
             .edges
             .iter()
             .filter(|edge| {
-                edge.connection.is_forward()
+                edge.connection.is_instantaneous()
                     && edge.source_device_id == device_id
                     && edge.destination_device_id != device_id
             })

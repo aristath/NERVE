@@ -818,7 +818,7 @@ fn fixture_model_execution_graph() -> ResolvedLoweredExecutionGraph {
         .edges
         .iter()
         .filter(|edge| {
-            edge.connection.is_forward()
+            edge.connection.is_instantaneous()
                 && processor_ids.contains(edge.source.component_id.as_str())
                 && processor_ids.contains(edge.destination.component_id.as_str())
         })

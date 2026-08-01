@@ -897,8 +897,8 @@ pub enum StreamCircuitConnection {
 }
 
 impl StreamCircuitConnection {
-    pub fn is_forward(&self) -> bool {
-        matches!(self, Self::Forward)
+    pub fn is_instantaneous(&self) -> bool {
+        !matches!(self, Self::TemporalFeedback { .. })
     }
 
     pub fn validate(&self, edge_id: &str) -> Result<(), CircuitPlacementError> {

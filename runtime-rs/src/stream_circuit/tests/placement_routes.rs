@@ -243,6 +243,7 @@
     #[test]
     fn parallel_block_connections_require_exact_scatter_and_gather_geometry() {
         let scatter = StreamCircuitConnection::ParallelBlockScatter { width: 7 };
+        assert!(scatter.is_instantaneous());
         assert!(scatter.connects_port_geometry(
             "stream_frame_block",
             &[7, 4, 4096],
@@ -257,6 +258,7 @@
         ));
 
         let gather = StreamCircuitConnection::ParallelBlockGather { width: 7 };
+        assert!(gather.is_instantaneous());
         assert!(gather.connects_port_geometry(
             "frame",
             &[4, 4096],
@@ -269,4 +271,13 @@
             "stream_frame_block",
             &[7, 4096],
         ));
+        assert!(StreamCircuitConnection::Forward.is_instantaneous());
+        assert!(StreamCircuitConnection::SharedContext {
+            state_update: "committed_target_only".to_string(),
+        }
+        .is_instantaneous());
+        assert!(!StreamCircuitConnection::TemporalFeedback {
+            delay_activations: 1,
+        }
+        .is_instantaneous());
     }

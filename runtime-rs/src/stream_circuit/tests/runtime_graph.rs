@@ -482,7 +482,7 @@
         let feedback_index = runtime_graph
             .edges
             .iter()
-            .position(|edge| !edge.connection.is_forward())
+            .position(|edge| !edge.connection.is_instantaneous())
             .unwrap();
         runtime_graph.validate_against_graph(&resolved).unwrap();
         assert_eq!(
@@ -511,4 +511,32 @@
                 .0
                 .contains("must delay at least one activation")
         );
+    }
+
+    #[test]
+    fn effective_graph_preserves_specialized_instantaneous_connections() {
+        let resolved =
+            ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+        let mut runtime_graph = resolved.default_runtime_graph("gpu0").unwrap();
+        let edge_index = runtime_graph
+            .edges
+            .iter()
+            .position(|edge| edge.connection.is_instantaneous())
+            .unwrap();
+        let edge_id = runtime_graph.edges[edge_index].id.clone();
+        runtime_graph.edges[edge_index].connection = StreamCircuitConnection::SharedContext {
+            state_update: "committed_target_only".to_string(),
+        };
+
+        let effective = runtime_graph.effective_edges().unwrap();
+        let connection = &effective
+            .iter()
+            .find(|edge| edge.id == edge_id)
+            .unwrap()
+            .connection;
+        assert!(matches!(
+            connection,
+            StreamCircuitConnection::SharedContext { state_update }
+                if state_update == "committed_target_only"
+        ));
     }
