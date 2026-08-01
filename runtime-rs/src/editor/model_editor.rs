@@ -191,8 +191,11 @@ impl RuntimeModelEditor {
         &self.available_devices
     }
 
-    pub fn refresh_devices(&mut self) {
-        self.available_devices = discover_runtime_devices(&self.draft.default_device_id, None);
+    pub fn replace_available_devices(
+        &mut self,
+        available_devices: Vec<RuntimeAvailableDevice>,
+    ) {
+        self.available_devices = available_devices;
     }
 
     pub fn draft(&self) -> &StreamCircuitRuntimeGraph {
@@ -735,4 +738,79 @@ pub(crate) fn load_runtime_model_editor_without_hardware(
             error: None,
         }],
     )
+}
+
+#[cfg(test)]
+mod model_editor_invariant_tests {
+    use super::*;
+
+    fn editor() -> RuntimeModelEditor {
+        load_runtime_model_editor_without_hardware(crate::test_support::tiny_model_dir()).unwrap()
+    }
+
+    #[test]
+    fn layer_identity_operations_reject_incomplete_or_unknown_requests_transactionally() {
+        let mut editor = editor();
+        let original = editor.draft().clone();
+        assert!(editor.remove_layer_instance("missing").is_err());
+        assert_eq!(editor.draft(), &original);
+        assert!(editor.remove_layer_instance("layer_00").is_err());
+        assert_eq!(editor.draft(), &original);
+
+        let duplicate = editor.duplicate_layer_instance_after("layer_00").unwrap();
+        let duplicated = editor.draft().clone();
+        for invalid in [
+            vec!["layer_00".to_string()],
+            vec!["layer_00".to_string(), "layer_00".to_string()],
+            vec!["layer_00".to_string(), "missing".to_string()],
+        ] {
+            assert!(editor.reorder_layer_instances(&invalid).is_err());
+            assert_eq!(editor.draft(), &duplicated);
+        }
+        assert_eq!(duplicate, "layer_00@2");
+    }
+
+    #[test]
+    fn duplicate_reorder_and_remove_preserve_exact_instance_identity() {
+        let mut editor = editor();
+        let second = editor.duplicate_layer_instance_after("layer_00").unwrap();
+        let third = editor.duplicate_layer_instance_after(&second).unwrap();
+        editor
+            .set_instance_enabled(&second, false)
+            .expect("another enabled layer keeps the graph valid");
+        editor
+            .reorder_layer_instances(&[third.clone(), "layer_00".to_string(), second.clone()])
+            .unwrap();
+        assert_eq!(
+            editor
+                .layer_instances()
+                .iter()
+                .map(|instance| instance.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            [third.as_str(), "layer_00", second.as_str()]
+        );
+        assert!(!editor.layer_instances()[2].enabled);
+
+        editor.remove_layer_instance("layer_00").unwrap();
+        assert_eq!(
+            editor
+                .layer_instances()
+                .iter()
+                .map(|instance| instance.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            [third.as_str(), second.as_str()]
+        );
+    }
+
+    #[test]
+    fn replacing_device_inventory_never_rewrites_the_graph_draft() {
+        let mut editor = editor();
+        let draft = editor.draft().clone();
+        let mut unavailable = editor.available_devices()[0].clone();
+        unavailable.available = false;
+        unavailable.error = Some("disconnected".to_string());
+        editor.replace_available_devices(vec![unavailable]);
+        assert_eq!(editor.draft(), &draft);
+        assert!(!editor.validation().valid);
+    }
 }

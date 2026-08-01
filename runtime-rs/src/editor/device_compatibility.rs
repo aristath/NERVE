@@ -374,6 +374,9 @@ fn json_shape_set(value: Option<&Value>) -> BTreeSet<[u32; 3]> {
         .flatten()
         .filter_map(|shape| {
             let values = shape.as_array()?;
+            if values.len() != 3 {
+                return None;
+            }
             Some([
                 u32::try_from(values.first()?.as_u64()?).ok()?,
                 u32::try_from(values.get(1)?.as_u64()?).ok()?,
@@ -381,4 +384,90 @@ fn json_shape_set(value: Option<&Value>) -> BTreeSet<[u32; 3]> {
             ])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod device_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn capability_shape_parser_accepts_only_exact_unsigned_triplets() {
+        let value = serde_json::json!([
+            [16, 16, 32],
+            [8, 8],
+            [1, 2, 3, 4],
+            [-1, 2, 3],
+            ["16", 16, 16]
+        ]);
+        assert_eq!(json_shape_set(Some(&value)), BTreeSet::from([[16, 16, 32]]));
+    }
+
+    fn capability_view() -> DeviceCapabilityView {
+        DeviceCapabilityView {
+            shader_features: BTreeSet::from([
+                crate::VulkanShaderFeature::ShaderFloat16.label().to_string(),
+            ]),
+            subgroup_operations: BTreeSet::from([
+                crate::VulkanSubgroupOperation::Basic.label().to_string(),
+            ]),
+            extensions: BTreeSet::from(["VK_EXT_fixture".to_string()]),
+            subgroup_compute_supported: true,
+            subgroup_size: Some(32),
+            max_workgroup_invocations: Some(256),
+            max_workgroup_size_x: Some(128),
+            cooperative_bfloat16_shapes: BTreeSet::from([[16, 16, 32]]),
+            cooperative_float8_e4m3_shapes: BTreeSet::from([[16, 16, 64]]),
+        }
+    }
+
+    #[test]
+    fn device_capability_view_enforces_workgroup_limits_at_the_boundary() {
+        let capabilities = capability_view();
+        assert!(capabilities.validate_local_size(128).is_ok());
+        assert!(
+            capabilities
+                .validate_local_size(129)
+                .unwrap_err()
+                .contains("workgroup limit")
+        );
+    }
+
+    #[test]
+    fn batch_requirements_require_every_declared_device_capability() {
+        let capabilities = capability_view();
+        let requirements = crate::VulkanResidentVulkanDeviceRequirements {
+            vulkan_device_extensions: vec!["VK_EXT_fixture".to_string()],
+            vulkan_features: vec![crate::VulkanShaderFeature::ShaderFloat16],
+            subgroup_operations: vec![crate::VulkanSubgroupOperation::Basic],
+            cooperative_bfloat16_shape: Some([16, 16, 32]),
+            cooperative_float8_e4m3_shape: Some([16, 16, 64]),
+            subgroup_size: Some(32),
+        };
+        assert!(capabilities.validate_batch_requirements(&requirements).is_ok());
+
+        let mut missing_extension = requirements.clone();
+        missing_extension.vulkan_device_extensions = vec!["VK_EXT_missing".to_string()];
+        assert!(
+            capabilities
+                .validate_batch_requirements(&missing_extension)
+                .unwrap_err()
+                .contains("VK_EXT_missing")
+        );
+        let mut wrong_subgroup_size = requirements.clone();
+        wrong_subgroup_size.subgroup_size = Some(64);
+        assert!(
+            capabilities
+                .validate_batch_requirements(&wrong_subgroup_size)
+                .unwrap_err()
+                .contains("subgroup size 64")
+        );
+        let mut unsupported_shape = requirements;
+        unsupported_shape.cooperative_float8_e4m3_shape = Some([8, 8, 16]);
+        assert!(
+            capabilities
+                .validate_batch_requirements(&unsupported_shape)
+                .unwrap_err()
+                .contains("FP8")
+        );
+    }
 }

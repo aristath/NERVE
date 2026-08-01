@@ -163,3 +163,70 @@ fn unavailable_device(
         error,
     }
 }
+
+#[cfg(test)]
+mod device_mapping_tests {
+    use super::*;
+
+    fn device(
+        index: usize,
+        kind: &str,
+        selected_by_default: bool,
+    ) -> VulkanComputeDeviceInfo {
+        VulkanComputeDeviceInfo {
+            physical_device_index: index,
+            physical_device_id: format!("physical:{index}"),
+            device_uuid: [index as u8; 16],
+            device_name: format!("device {index}"),
+            pci_address: None,
+            device_type: kind.to_string(),
+            vendor_id: 0x1002,
+            device_id: index as u32,
+            api_version: 1,
+            driver_version: 2,
+            compute_queue_family_indices: vec![3],
+            memory_heaps: vec![crate::VulkanMemoryHeapInfo {
+                heap_index: 0,
+                size_bytes: 8 * 1024 * 1024 * 1024,
+                device_local: true,
+            }],
+            selected_by_default,
+        }
+    }
+
+    #[test]
+    fn runtime_device_mapping_preserves_physical_identity_and_allocates_cpu_targets() {
+        let devices = vec![
+            device(2, "discrete_gpu", true),
+            device(3, "integrated_gpu", false),
+            device(4, "cpu", false),
+        ];
+        let mapped = runtime_devices_from_compute_devices("runtime_default", None, &devices);
+        assert_eq!(
+            mapped
+                .iter()
+                .map(|device| device.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["runtime_default", "physical:3", "cpu0"]
+        );
+        assert_eq!(mapped[0].physical_device_id.as_deref(), Some("physical:2"));
+        assert_eq!(mapped[0].runtime_binding.as_deref(), Some("default_local_vulkan_target"));
+        assert_eq!(mapped[1].runtime_binding.as_deref(), Some("inventory_only"));
+        assert_eq!(mapped[2].runtime_device_id.as_deref(), Some("cpu0"));
+        assert_eq!(mapped[2].memory_heaps.as_ref().unwrap()[0].size_bytes, 8 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn explicit_physical_selection_overrides_catalog_default_without_losing_inventory() {
+        let devices = vec![
+            device(2, "discrete_gpu", true),
+            device(3, "discrete_gpu", false),
+        ];
+        let mapped = runtime_devices_from_compute_devices("runtime_default", Some(3), &devices);
+        assert_eq!(mapped[0].device_id, "physical:2");
+        assert_eq!(mapped[0].selected_by_runtime, Some(false));
+        assert_eq!(mapped[1].device_id, "runtime_default");
+        assert_eq!(mapped[1].selected_by_runtime, Some(true));
+        assert!(mapped.iter().all(|device| device.available));
+    }
+}

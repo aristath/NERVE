@@ -215,12 +215,211 @@ fn allocate_instance_id(
 }
 
 fn available_layer_range(source_by_layer: &BTreeMap<usize, Vec<String>>) -> String {
-    match (
-        source_by_layer.keys().next().copied(),
-        source_by_layer.keys().next_back().copied(),
-    ) {
-        (Some(first), Some(last)) if first != last => format!("{first}-{last}"),
-        (Some(only), Some(_)) => only.to_string(),
-        _ => "none".to_string(),
+    let mut layers = source_by_layer.keys().copied();
+    let Some(mut start) = layers.next() else {
+        return "none".to_string();
+    };
+    let mut end = start;
+    let mut ranges = Vec::new();
+    for layer in layers {
+        if end.checked_add(1) == Some(layer) {
+            end = layer;
+        } else {
+            ranges.push(if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            });
+            start = layer;
+            end = layer;
+        }
+    }
+    ranges.push(if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
+    });
+    ranges.join(", ")
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn available_layer_description_does_not_invent_layers_in_sparse_catalogs() {
+        let layers = BTreeMap::from([
+            (0, vec!["zero".to_string()]),
+            (2, vec!["two".to_string()]),
+            (3, vec!["three".to_string()]),
+            (7, vec!["seven".to_string()]),
+        ]);
+        assert_eq!(available_layer_range(&layers), "0, 2-3, 7");
+    }
+
+    #[test]
+    fn control_schema_normalizes_aliases_choices_and_lifecycle_metadata() {
+        let schema = runtime_editor_control_schema(
+            3,
+            &serde_json::json!({
+                "property_id": "precision",
+                "label": "Precision",
+                "help": "Execution representation",
+                "value_type": "SELECT",
+                "values": [
+                    {"value": "fp8", "label": "FP8 native"},
+                    "bf16"
+                ],
+                "value": "fp8",
+                "default": "bf16",
+                "runtime_editable": true,
+                "requires_state_reset": true,
+                "requires_remount": true,
+                "requires_recompile": false,
+                "scope": "INSTANCE"
+            }),
+        );
+        assert_eq!(schema.id, "precision");
+        assert_eq!(schema.name, "Precision");
+        assert_eq!(schema.description.as_deref(), Some("Execution representation"));
+        assert_eq!(schema.scope, "instance");
+        assert_eq!(schema.current_value, Some(serde_json::json!("fp8")));
+        assert_eq!(schema.default_value, Some(serde_json::json!("bf16")));
+        assert!(schema.editable_at_runtime);
+        assert!(schema.requires_state_reset);
+        assert!(schema.requires_remount);
+        assert!(!schema.requires_recompile);
+        let RuntimeEditorControlKind::Enumeration { choices } = schema.kind else {
+            panic!("select control was not represented as an enumeration");
+        };
+        assert_eq!(choices[0].label, "FP8 native");
+        assert_eq!(choices[1].label, "bf16");
+    }
+
+    #[test]
+    fn control_validation_rejects_noneditable_scope_type_and_enum_violations() {
+        let editable_boolean = runtime_editor_control_schema(
+            0,
+            &serde_json::json!({
+                "id":"enabled", "type":"boolean", "editable_at_runtime":true,
+                "scope":"instance"
+            }),
+        );
+        assert!(
+            validate_runtime_editor_control_value(&editable_boolean, &Value::Bool(true)).is_ok()
+        );
+        assert!(
+            validate_runtime_editor_control_value(&editable_boolean, &serde_json::json!(1))
+                .unwrap_err()
+                .to_string()
+                .contains("declared type")
+        );
+
+        let mut noneditable = editable_boolean.clone();
+        noneditable.editable_at_runtime = false;
+        assert!(
+            validate_runtime_editor_control_value(&noneditable, &Value::Bool(true))
+                .unwrap_err()
+                .to_string()
+                .contains("not editable")
+        );
+        let mut shared = editable_boolean.clone();
+        shared.scope = "source".to_string();
+        assert!(
+            validate_runtime_editor_control_value(&shared, &Value::Bool(true))
+                .unwrap_err()
+                .to_string()
+                .contains("source")
+        );
+
+        for (declared_type, expected) in [
+            ("readonly", "read-only"),
+            ("unrecognized", "unsupported value type"),
+        ] {
+            let schema = runtime_editor_control_schema(
+                0,
+                &serde_json::json!({
+                    "id":"contract", "type":declared_type,
+                    "editable_at_runtime":true, "scope":"instance"
+                }),
+            );
+            assert!(
+                validate_runtime_editor_control_value(&schema, &Value::Null)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+
+        let enumeration = runtime_editor_control_schema(
+            0,
+            &serde_json::json!({
+                "id":"mode", "type":"enum", "choices":["a", "b"],
+                "editable_at_runtime":true, "scope":"instance"
+            }),
+        );
+        assert!(
+            validate_runtime_editor_control_value(&enumeration, &serde_json::json!("c"))
+                .unwrap_err()
+                .to_string()
+                .contains("declared type")
+        );
+    }
+
+    #[test]
+    fn numeric_control_validation_enforces_bounds_step_and_step_contract() {
+        let integer = runtime_editor_control_schema(
+            0,
+            &serde_json::json!({
+                "id":"window", "type":"integer", "min":2, "max":10, "step":2,
+                "editable_at_runtime":true, "scope":"instance"
+            }),
+        );
+        assert!(validate_runtime_editor_control_value(&integer, &serde_json::json!(4)).is_ok());
+        for (value, expected) in [(1, "below minimum"), (11, "above maximum"), (5, "align")]
+        {
+            assert!(
+                validate_runtime_editor_control_value(&integer, &serde_json::json!(value))
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+
+        let mut bad_step = integer.clone();
+        bad_step.step = Some(0.0);
+        assert!(
+            validate_runtime_editor_control_value(&bad_step, &serde_json::json!(4))
+                .unwrap_err()
+                .to_string()
+                .contains("non-positive")
+        );
+        bad_step.step = Some(0.5);
+        assert!(
+            validate_runtime_editor_control_value(&bad_step, &serde_json::json!(4))
+                .unwrap_err()
+                .to_string()
+                .contains("non-whole")
+        );
+
+        let number = runtime_editor_control_schema(
+            0,
+            &serde_json::json!({
+                "id":"ratio", "type":"number", "min":0.0, "max":1.0, "step":0.1,
+                "editable_at_runtime":true, "scope":"instance"
+            }),
+        );
+        assert!(validate_runtime_editor_control_value(&number, &serde_json::json!(0.3)).is_ok());
+    }
+
+    #[test]
+    fn instance_id_allocator_never_reuses_an_existing_identity() {
+        let used = BTreeSet::from([
+            "layer_00".to_string(),
+            "layer_00@2".to_string(),
+            "layer_00@3".to_string(),
+        ]);
+        assert_eq!(allocate_instance_id("layer_00", 1, &used), "layer_00@4");
+        assert_eq!(allocate_instance_id("layer_01", 1, &used), "layer_01");
     }
 }
