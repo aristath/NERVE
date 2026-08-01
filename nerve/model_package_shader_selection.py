@@ -134,6 +134,27 @@ def shader_file_for_node(
             )
         return f"repeat_stream_lanes_bf16_m{multiplicity}_h{hidden_size}.comp"
 
+    if op == "mean_stream_lanes":
+        attrs = node.get("attrs", {})
+        multiplicity = int(attrs.get("multiplicity", 0))
+        node_hidden_size = int(attrs.get("hidden_size", 0))
+        if (
+            len(node.get("inputs", [])) != 1
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or multiplicity <= 0
+            or node_hidden_size != hidden_size
+            or hidden_size <= 0
+            or hidden_size % 2
+            or attrs.get("input_shape") != [multiplicity, hidden_size]
+            or attrs.get("output_shape") != [hidden_size]
+            or attrs.get("output_element_bytes") != [2]
+        ):
+            raise ModelCompileError(
+                f"stream-mean node {node['id']!r} has an invalid contract"
+            )
+        return f"mean_stream_lanes_bf16_m{multiplicity}_h{hidden_size}.comp"
+
     if op == "sinkhorn_hyper_connection_head":
         attrs = node.get("attrs", {})
         block_width = int(attrs.get("block_width", 0))
@@ -1653,6 +1674,9 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
     if node["op"] == "repeat_stream_lanes":
         attrs = node["attrs"]
         output_words = int(attrs["multiplicity"]) * int(attrs["hidden_size"]) // 2
+        return (output_words + 63) // 64
+    if node["op"] == "mean_stream_lanes":
+        output_words = int(node["attrs"]["hidden_size"]) // 2
         return (output_words + 63) // 64
     if (
         node["op"]

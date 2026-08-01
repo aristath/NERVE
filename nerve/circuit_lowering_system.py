@@ -484,6 +484,35 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
     if not target_inputs:
         raise ValueError("parallel Markov draft must consume target features")
     target_signal_ids = [str(item["id"]) for item in target_inputs]
+    lane_reduction = draft["target_features"]["lane_reduction"]
+    if lane_reduction != "mean":
+        raise ValueError(
+            f"unsupported parallel Markov target-feature reduction {lane_reduction!r}"
+        )
+    reduced_target_signal_ids = [
+        f"{signal_id}_reduced" for signal_id in target_signal_ids
+    ]
+    reduction_nodes = [
+        {
+            "id": f"{signal_id}_lane_mean",
+            "op": "mean_stream_lanes",
+            "inputs": [signal_id],
+            "outputs": [reduced_signal_id],
+            "params": [],
+            "state_reads": [],
+            "state_writes": [],
+            "attrs": {
+                "multiplicity": stream_multiplicity,
+                "hidden_size": hidden_size,
+                "input_shape": [stream_multiplicity, hidden_size],
+                "output_shape": [hidden_size],
+                "output_element_bytes": [2],
+            },
+        }
+        for signal_id, reduced_signal_id in zip(
+            target_signal_ids, reduced_target_signal_ids
+        )
+    ]
     minimum_block_size = int(draft["proposal_contract"]["minimum_draft_tokens"])
     block_size = int(draft["proposal_contract"]["default_draft_tokens"])
     noise_token_id = int(draft["proposal_contract"]["noise_token_id"])
@@ -492,9 +521,9 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         "weight_offset": float(adapter["attrs"]["weight_offset"]),
     }
     concatenation_nodes = []
-    combined_target_signal = target_signal_ids[0]
+    combined_target_signal = reduced_target_signal_ids[0]
     combined_target_width = hidden_size
-    for index, target_signal_id in enumerate(target_signal_ids[1:], start=1):
+    for index, target_signal_id in enumerate(reduced_target_signal_ids[1:], start=1):
         output_signal = (
             "combined_target_features"
             if index == len(target_signal_ids) - 1
@@ -527,8 +556,8 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
             *[
                 _system_port(
                     signal_id,
-                    "frame",
-                    [hidden_size],
+                    "stream_frame",
+                    [stream_multiplicity, hidden_size],
                     signal_id,
                 )
                 for signal_id in target_signal_ids
@@ -559,6 +588,7 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         ],
         parameters=adapter_params,
         nodes=[
+            *reduction_nodes,
             *concatenation_nodes,
             {
                 "id": "target_projection",

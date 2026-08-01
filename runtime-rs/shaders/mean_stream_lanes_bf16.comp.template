@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrames { uint words[]; } input_frames;
+layout(set = 0, binding = 1) buffer OutputFrame { uint words[]; } output_frame;
+
+const uint MULTIPLICITY = {{MULTIPLICITY}}u;
+const uint HIDDEN_WORDS = {{HIDDEN_SIZE}}u / 2u;
+const float INVERSE_MULTIPLICITY = 1.0 / float(MULTIPLICITY);
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    if (word >= HIDDEN_WORDS) return;
+
+    float low = 0.0;
+    float high = 0.0;
+    for (uint lane = 0u; lane < MULTIPLICITY; lane++) {
+        uint packed = input_frames.words[lane * HIDDEN_WORDS + word];
+        low += bf16_to_f32(packed);
+        high += bf16_to_f32(packed >> 16u);
+    }
+    output_frame.words[word] =
+        (f32_to_bf16(high * INVERSE_MULTIPLICITY) << 16u) |
+        f32_to_bf16(low * INVERSE_MULTIPLICITY);
+}

@@ -171,6 +171,11 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
         "target_hidden_1",
         "target_hidden_2",
     ]
+    assert [port["shape"] for port in input_circuit["boundary"]["inputs"][1:]] == [
+        [4, 8],
+        [4, 8],
+        [4, 8],
+    ]
     assert [port["id"] for port in input_circuit["boundary"]["outputs"]] == [
         "query_frames",
         "main_context",
@@ -278,6 +283,9 @@ def test_compiles_anchor_noise_embedding_block_as_one_copy_kernel(
         for item in input_circuit["nodes"]
         if item["op"] == "anchor_noise_embedding_block"
     )
+    mean_node = next(
+        item for item in input_circuit["nodes"] if item["op"] == "mean_stream_lanes"
+    )
     tensor_index = {
         "tensors": {
             name: {**tensor, "layout": ROW_MAJOR_LAYOUT}
@@ -291,17 +299,26 @@ def test_compiles_anchor_noise_embedding_block_as_one_copy_kernel(
         tensor_index,
         model["dimensions"],
     )
+    mean_shader_file = shader_file_for_node(
+        input_circuit,
+        mean_node,
+        tensor_index,
+        model["dimensions"],
+    )
 
     assert shader_file == "anchor_noise_embedding_block_b5_m4_h8_noise31.comp"
+    assert mean_shader_file == "mean_stream_lanes_bf16_m4_h8.comp"
     assert workgroup_count_x_for_node(input_circuit, node, tensor_index) == 2
+    assert workgroup_count_x_for_node(input_circuit, mean_node, tensor_index) == 1
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
-    copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
+    copy_shader_templates(shader_source_dir, tmp_path, {shader_file, mean_shader_file})
     shader = (tmp_path / shader_file).read_text()
     assert "token_id * HIDDEN_WORDS" in shader
     assert "frame_index == 0u" in shader
     assert "stream_index" in shader
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / mean_shader_file.replace(".comp", ".spv")).is_file()
 
     node["attrs"]["noise_token_id"] = 32
     with pytest.raises(ModelCompileError, match="invalid contract"):

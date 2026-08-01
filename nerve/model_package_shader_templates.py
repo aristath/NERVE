@@ -229,6 +229,23 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    mean_stream_lanes = re.fullmatch(
+        r"mean_stream_lanes_bf16_m(\d+)_h(\d+)\.comp",
+        shader_file,
+    )
+    if mean_stream_lanes is not None:
+        multiplicity, hidden_size = map(int, mean_stream_lanes.groups())
+        if multiplicity <= 0 or hidden_size <= 0 or hidden_size % 2:
+            raise ModelCompileError(f"invalid stream-mean shader shape {shader_file!r}")
+        return render_shader_template(
+            source_dir,
+            "mean_stream_lanes_bf16.comp.template",
+            {
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+            },
+        )
+
     hyper_head_block = re.fullmatch(
         r"hyper_head_block_b(\d+)_m(\d+)_h(\d+)_eps([0-9eE+.-]+)\.comp",
         shader_file,
