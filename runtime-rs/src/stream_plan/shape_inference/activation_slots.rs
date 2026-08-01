@@ -248,6 +248,64 @@ mod tests {
     }
 
     #[test]
+    fn infers_typed_learned_indexer_intermediate_shapes() {
+        let node = |op: &str, attrs: serde_json::Value| crate::stream_circuit::CircuitNode {
+            id: op.to_string(),
+            op: op.to_string(),
+            inputs: vec!["input".to_string()],
+            outputs: vec!["output".to_string()],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs,
+        };
+        let signals = BTreeMap::new();
+        let params = BTreeMap::new();
+        let cases = [
+            (
+                node(
+                    "index_vector_transform",
+                    serde_json::json!({"head_count": 64, "head_width": 128}),
+                ),
+                vec![8192],
+            ),
+            (
+                node(
+                    "compressed_index_kv_finalize",
+                    serde_json::json!({"head_width": 128}),
+                ),
+                vec![128],
+            ),
+            (
+                node(
+                    "learned_index_scores",
+                    serde_json::json!({"max_compressed_positions": 262144}),
+                ),
+                vec![262144],
+            ),
+            (
+                node("radix_topk_index", serde_json::json!({"top_k": 512})),
+                vec![512],
+            ),
+            (
+                node(
+                    "chronological_compressed_index",
+                    serde_json::json!({"max_indices": 8192}),
+                ),
+                vec![8192],
+            ),
+        ];
+
+        for (node, expected) in cases {
+            assert_eq!(
+                infer_node_output_shapes("layer", &node, &signals, &params, None)
+                    .unwrap(),
+                vec![Some(expected)]
+            );
+        }
+    }
+
+    #[test]
     fn infers_fused_linear_scalar_gate_residual_chain_shape() {
         let node = crate::stream_circuit::CircuitNode {
             id: "shared_gate_residual".to_string(),

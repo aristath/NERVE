@@ -282,7 +282,16 @@ def _token_mixer_modules(component: Json) -> list[Json]:
                 "selection",
                 "Select causal compressed positions for sparse attention",
                 parent="layer.token_mixer",
-                nodes=["compressed_memory_indexer"],
+                nodes=[
+                    "indexer_query_projection",
+                    "indexer_query_transform",
+                    "indexer_compressor_pool",
+                    "indexer_compressor_finalize",
+                    "indexer_memory_update",
+                    "indexer_head_weight_projection",
+                    "indexer_scores",
+                    "compressed_memory_indexer",
+                ],
                 state=[
                     state
                     for state in (

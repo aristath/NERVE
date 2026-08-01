@@ -253,6 +253,29 @@ fn infer_node_output_shapes(
             let output_shape = attr_usize(node, "head_width").map(|width| vec![width]);
             Ok(repeat_shape(output_shape, outputs))
         }
+        "index_vector_transform" => {
+            let output_shape = attr_usize(node, "head_count")
+                .zip(attr_usize(node, "head_width"))
+                .map(|(heads, width)| vec![heads * width]);
+            Ok(repeat_shape(output_shape, outputs))
+        }
+        "compressed_index_kv_finalize" => {
+            let output_shape = attr_usize(node, "head_width").map(|width| vec![width]);
+            Ok(repeat_shape(output_shape, outputs))
+        }
+        "learned_index_scores" => {
+            let output_shape = attr_usize(node, "max_compressed_positions")
+                .map(|positions| vec![positions]);
+            Ok(repeat_shape(output_shape, outputs))
+        }
+        "radix_topk_index" => {
+            let output_shape = attr_usize(node, "top_k").map(|top_k| vec![top_k]);
+            Ok(repeat_shape(output_shape, outputs))
+        }
+        "chronological_compressed_index" => {
+            let output_shape = attr_usize(node, "max_indices").map(|count| vec![count]);
+            Ok(repeat_shape(output_shape, outputs))
+        }
         "moe_topk" | "moe_route" => {
             let output_shape = attr_usize(node, "experts_per_token").map(|routes| vec![routes, 2]);
             Ok(repeat_shape(output_shape, outputs))

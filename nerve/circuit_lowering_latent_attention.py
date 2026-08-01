@@ -260,38 +260,143 @@ def latent_sparse_attention_nodes(
 
     indexer = attributes["indexer"]
     if indexer["selection"] == "learned_topk":
-        nodes.append(
-            {
-                "id": "compressed_memory_indexer",
-                "op": "learned_topk_index",
-                "inputs": [
-                    "operator_norm_out",
-                    "query_rank_normed",
-                    "compressed_kv_values",
-                    "indexer_compressor_accumulator",
-                    "indexer_kv_memory",
-                ],
-                "outputs": ["compressed_indices"],
-                "params": [
-                    "indexer_q_projection",
-                    "indexer_head_weight_projection",
-                    "indexer_compressor_position_bias",
-                    "indexer_compressor_kv_projection",
-                    "indexer_compressor_gate_projection",
-                    "indexer_compressor_norm",
-                ],
-                "state_reads": [
-                    "indexer_compressor_accumulator",
-                    "indexer_kv_memory",
-                ],
-                "state_writes": [
-                    "indexer_compressor_accumulator",
-                    "indexer_kv_memory",
-                ],
-                "attrs": indexer,
-            }
+        ratio = int(compression["ratio"])
+        index_heads = int(indexer["heads"])
+        index_head_width = int(indexer["head_width"])
+        index_rope_heads = {
+            "query_heads": index_heads,
+            "key_value_heads": 1,
+            "head_width": index_head_width,
+        }
+        index_rope = _rope_attrs(numerics, index_rope_heads, head_count=index_heads)
+        compressor_rope = _rope_attrs(
+            numerics, index_rope_heads, head_count=1
+        )
+        max_positions = int(numerics["max_position_embeddings"])
+        max_compressed_positions = (max_positions + ratio - 1) // ratio
+        common_transform = {
+            "rotary_scope": "tail",
+            "rotation": "hadamard",
+            "activation_quantization": {
+                "format": "fp4_e2m1",
+                "scale_format": "e8m0_power_of_two",
+                "block_columns": 32,
+                "mode": "quantize_dequantize",
+            },
+            "output_element_bytes": [2],
+        }
+        nodes.extend(
+            [
+                {
+                    "id": "indexer_query_projection",
+                    "op": "linear",
+                    "inputs": ["query_rank_normed"],
+                    "outputs": ["indexer_query_heads"],
+                    "params": _linear_params("indexer_q_projection", parameters),
+                },
+                {
+                    "id": "indexer_query_transform",
+                    "op": "index_vector_transform",
+                    "inputs": ["indexer_query_heads"],
+                    "outputs": ["indexer_query_transformed"],
+                    "attrs": {**index_rope, **common_transform},
+                },
+                {
+                    "id": "indexer_compressor_pool",
+                    "op": "learned_gated_kv_pool",
+                    "inputs": [
+                        "operator_norm_out",
+                        "indexer_compressor_accumulator",
+                    ],
+                    "outputs": ["indexer_pooled_f32"],
+                    "params": [
+                        "indexer_compressor_position_bias",
+                        "indexer_compressor_kv_projection",
+                        "indexer_compressor_gate_projection",
+                    ],
+                    "state_reads": ["indexer_compressor_accumulator"],
+                    "state_writes": ["indexer_compressor_accumulator"],
+                    "attrs": {
+                        "ratio": ratio,
+                        "overlap": True,
+                        "lane_coefficient": int(
+                            indexer["compressor_lane_coefficient"]
+                        ),
+                        "pooling": "learned_position_biased_softmax",
+                        "hidden_size": int(component["feed_forward"]["hidden_size"]),
+                        "head_width": index_head_width,
+                        "output_element_bytes": [4],
+                    },
+                },
+                {
+                    "id": "indexer_compressor_finalize",
+                    "op": "compressed_index_kv_finalize",
+                    "inputs": ["indexer_pooled_f32"],
+                    "outputs": ["indexer_candidate"],
+                    "params": ["indexer_compressor_norm"],
+                    "attrs": {
+                        **compressor_rope,
+                        **common_transform,
+                        "normalization_epsilon": float(numerics["rms_norm_eps"]),
+                        "position_offset": 1 - ratio,
+                    },
+                },
+                {
+                    "id": "indexer_memory_update",
+                    "op": "conditional_append_state_update",
+                    "inputs": ["indexer_candidate", "indexer_kv_memory"],
+                    "outputs": ["indexer_kv_values"],
+                    "state_reads": ["indexer_kv_memory"],
+                    "state_writes": ["indexer_kv_memory"],
+                    "attrs": {"period": ratio},
+                },
+                {
+                    "id": "indexer_head_weight_projection",
+                    "op": "linear",
+                    "inputs": ["operator_norm_out"],
+                    "outputs": ["indexer_head_weights"],
+                    "params": _linear_params(
+                        "indexer_head_weight_projection", parameters
+                    ),
+                },
+                {
+                    "id": "indexer_scores",
+                    "op": "learned_index_scores",
+                    "inputs": [
+                        "indexer_query_transformed",
+                        "indexer_head_weights",
+                        "indexer_kv_values",
+                    ],
+                    "outputs": ["indexer_scores_f32"],
+                    "attrs": {
+                        "heads": index_heads,
+                        "head_width": index_head_width,
+                        "ratio": ratio,
+                        "max_compressed_positions": max_compressed_positions,
+                        "score_scale": (index_heads * index_head_width) ** -0.5,
+                        "score_activation": "relu_then_head_weighted_sum",
+                        "output_element_bytes": [4],
+                    },
+                },
+                {
+                    "id": "compressed_memory_indexer",
+                    "op": "radix_topk_index",
+                    "inputs": ["indexer_scores_f32"],
+                    "outputs": ["compressed_indices"],
+                    "attrs": {
+                        "top_k": int(indexer["top_k"]),
+                        "ratio": ratio,
+                        "index_offset": int(attributes["window_size"]),
+                        "max_scores": max_compressed_positions,
+                        "ordering": "descending_float_score",
+                        "output_element_bytes": [4],
+                    },
+                },
+            ]
         )
     elif compression is not None:
+        ratio = int(compression["ratio"])
+        max_positions = int(numerics["max_position_embeddings"])
         nodes.append(
             {
                 "id": "compressed_memory_indexer",
@@ -299,8 +404,11 @@ def latent_sparse_attention_nodes(
                 "inputs": ["compressed_kv_values"],
                 "outputs": ["compressed_indices"],
                 "attrs": {
-                    "ratio": int(compression["ratio"]),
+                    "ratio": ratio,
                     "causal": True,
+                    "index_offset": int(attributes["window_size"]),
+                    "max_indices": (max_positions + ratio - 1) // ratio,
+                    "output_element_bytes": [4],
                 },
             }
         )

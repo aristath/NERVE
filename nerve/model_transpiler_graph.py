@@ -51,6 +51,7 @@ def make_layer(
             "residual_scale": structure.residual_scale,
             "attention_scale": layer.attention_scale,
             "attention_window_size": layer.attention_window_size,
+            "max_position_embeddings": structure.max_position_embeddings,
             "value_head_norm": layer.value_head_norm,
             "per_layer_input_width": layer.per_layer_input_width,
             "per_layer_input_layer_index": layer.index,

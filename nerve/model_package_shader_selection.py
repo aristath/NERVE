@@ -34,6 +34,11 @@ def shader_file_for_node(
         "learned_gated_kv_pool",
         "compressed_kv_finalize",
         "conditional_append_state_update",
+        "index_vector_transform",
+        "compressed_index_kv_finalize",
+        "learned_index_scores",
+        "radix_topk_index",
+        "chronological_compressed_index",
     }:
         return latent_compression_shader_file(circuit, node, tensor_index)
 
@@ -1195,7 +1200,7 @@ def shader_file_for_node(
                 raise ModelCompileError(
                     f"indexed sparse-attention node {node['id']!r} has no index producer"
                 )
-            if index_producer.get("op") == "learned_topk_index":
+            if index_producer.get("op") == "radix_topk_index":
                 max_compressed_indices = int(
                     index_producer.get("attrs", {}).get("top_k", 0)
                 )
@@ -1644,6 +1649,17 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         return 1
     if node["op"] == "conditional_append_state_update":
         return 1
+    if node["op"] == "index_vector_transform":
+        return int(node["attrs"]["head_count"])
+    if node["op"] == "compressed_index_kv_finalize":
+        return 1
+    if node["op"] == "learned_index_scores":
+        maximum = int(node["attrs"]["max_compressed_positions"])
+        return (maximum + 255) // 256
+    if node["op"] == "radix_topk_index":
+        return 1
+    if node["op"] == "chronological_compressed_index":
+        return 1
     if node["op"] == "independent_sparse_moe_gate_up":
         attrs = node["attrs"]
         return int(attrs["experts_per_token"]) * (
@@ -1740,6 +1756,12 @@ def local_size_x_for_node(node: Json) -> int:
         return int(node["attrs"]["head_width"])
     if node["op"] == "conditional_append_state_update":
         return 64
+    if node["op"] in {"index_vector_transform", "compressed_index_kv_finalize"}:
+        return int(node["attrs"]["head_width"])
+    if node["op"] in {"learned_index_scores", "radix_topk_index"}:
+        return 1024
+    if node["op"] == "chronological_compressed_index":
+        return 1024
     if node["op"] == "moe_reduce":
         return MOE_REDUCE_LOCAL_SIZE
     if (

@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer CompressedMemory { uint words[]; } compressed_memory;
+layout(set = 0, binding = 1) buffer Indices { uint values[]; } indices;
+layout(set = 0, binding = 2) readonly buffer CompressedMemoryView { uint words[]; } compressed_memory_view;
+layout(set = 0, binding = 3) readonly buffer StreamControl { uint words[]; } stream_control;
+
+const uint MAX_INDICES = {{MAX_INDICES}}u;
+const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
+const uint INDEX_OFFSET = {{INDEX_OFFSET}}u;
+
+void main() {
+    uint count = min(
+        (stream_control.words[1] + 1u) / COMPRESSION_RATIO,
+        MAX_INDICES
+    );
+    for (uint position = gl_LocalInvocationID.x; position < count; position += 1024u) {
+        indices.values[position] = INDEX_OFFSET + position;
+    }
+}

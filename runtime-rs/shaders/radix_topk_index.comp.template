@@ -1,0 +1,82 @@
+#version 450
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Scores { float values[]; } scores;
+layout(set = 0, binding = 1) buffer Indices { uint values[]; } indices;
+layout(set = 0, binding = 2) readonly buffer StreamControl { uint words[]; } stream_control;
+
+const uint MAX_SCORES = {{MAX_SCORES}}u;
+const uint TOP_K = {{TOP_K}}u;
+const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
+const uint INDEX_OFFSET = {{INDEX_OFFSET}}u;
+
+shared uint reductions[1024];
+shared uint selected_prefix;
+shared uint selected_mask;
+shared uint selected_rank;
+shared uint output_count;
+
+uint ordered_float_key(float value) {
+    uint bits = floatBitsToUint(value);
+    return (bits & 0x80000000u) != 0u ? ~bits : bits ^ 0x80000000u;
+}
+
+void reduce_counts(uint lane) {
+    for (uint stride = 512u; stride > 0u; stride >>= 1u) {
+        barrier();
+        if (lane < stride) reductions[lane] += reductions[lane + stride];
+    }
+    barrier();
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint score_count = min((stream_control.words[1] + 1u) / COMPRESSION_RATIO, MAX_SCORES);
+    uint result_count = min(score_count, TOP_K);
+    for (uint output_slot = lane; output_slot < TOP_K; output_slot += 1024u) {
+        indices.values[output_slot] = 0xffffffffu;
+    }
+    if (lane == 0u) {
+        selected_prefix = 0u;
+        selected_mask = 0u;
+        selected_rank = result_count;
+    }
+    barrier();
+    if (result_count == 0u) return;
+
+    for (int bit_index = 31; bit_index >= 0; --bit_index) {
+        uint bit = 1u << uint(bit_index);
+        uint count = 0u;
+        for (uint position = lane; position < score_count; position += 1024u) {
+            uint key = ordered_float_key(scores.values[position]);
+            if ((key & selected_mask) == selected_prefix && (key & bit) != 0u) ++count;
+        }
+        reductions[lane] = count;
+        reduce_counts(lane);
+        if (lane == 0u) {
+            if (reductions[0] >= selected_rank) selected_prefix |= bit;
+            else selected_rank -= reductions[0];
+            selected_mask |= bit;
+        }
+        barrier();
+    }
+
+    if (lane == 0u) output_count = 0u;
+    barrier();
+    for (uint position = lane; position < score_count; position += 1024u) {
+        uint key = ordered_float_key(scores.values[position]);
+        if (key > selected_prefix) {
+            uint slot = atomicAdd(output_count, 1u);
+            if (slot < result_count) indices.values[slot] = INDEX_OFFSET + position;
+        }
+    }
+    barrier();
+    for (uint position = lane; position < score_count; position += 1024u) {
+        uint key = ordered_float_key(scores.values[position]);
+        if (key == selected_prefix) {
+            uint slot = atomicAdd(output_count, 1u);
+            if (slot < result_count) indices.values[slot] = INDEX_OFFSET + position;
+        }
+    }
+}

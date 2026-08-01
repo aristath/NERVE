@@ -25,6 +25,27 @@ FINALIZE_SHADER_PATTERN = re.compile(
 CONDITIONAL_APPEND_SHADER_PATTERN = re.compile(
     r"conditional_append_state_bf16_d(\d+)_p(\d+)\.comp"
 )
+INDEX_TRANSFORM_SHADER_PATTERN = re.compile(
+    r"index_vector_transform_bf16_h(\d+)_d(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+    r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
+    r"_(half|interleaved)_qfp4e2m1b(\d+)\.comp"
+)
+INDEX_FINALIZE_SHADER_PATTERN = re.compile(
+    r"compressed_index_kv_finalize_f32_bf16_d(\d+)_r(\d+)_eps([0-9eE+.-]+)_"
+    r"theta([0-9eE+.-]+)"
+    r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
+    r"_(half|interleaved)_po(-?\d+)_qfp4e2m1b(\d+)\.comp"
+)
+INDEX_SCORES_SHADER_PATTERN = re.compile(
+    r"learned_index_scores_bf16_f32_h(\d+)_d(\d+)_r(\d+)_m(\d+)_c(\d+)_"
+    r"scale([0-9eE+.-]+)\.comp"
+)
+RADIX_TOPK_SHADER_PATTERN = re.compile(
+    r"radix_topk_index_f32_u32_m(\d+)_k(\d+)_r(\d+)_o(\d+)\.comp"
+)
+CHRONOLOGICAL_INDEX_SHADER_PATTERN = re.compile(
+    r"chronological_compressed_index_u32_m(\d+)_r(\d+)_o(\d+)\.comp"
+)
 
 
 def latent_compression_shader_file(
@@ -39,6 +60,14 @@ def latent_compression_shader_file(
         return _finalize_shader_file(circuit, node, tensor_index)
     if operation == "conditional_append_state_update":
         return _conditional_append_shader_file(circuit, node)
+    if operation in {"index_vector_transform", "compressed_index_kv_finalize"}:
+        return _index_transform_shader_file(circuit, node, tensor_index)
+    if operation == "learned_index_scores":
+        return _index_scores_shader_file(circuit, node)
+    if operation == "radix_topk_index":
+        return _radix_topk_shader_file(node)
+    if operation == "chronological_compressed_index":
+        return _chronological_index_shader_file(circuit, node)
     raise ModelCompileError(
         f"node {node.get('id')!r} is not a latent-memory compression component"
     )
@@ -233,15 +262,184 @@ def _conditional_append_shader_file(circuit: Json, node: Json) -> str:
         or len(states) != 1
         or state_writes != states
         or not isinstance(state_port, dict)
-        or state_port.get("type") != "append_only_attention_memory"
+        or state_port.get("type")
+        not in {"append_only_attention_memory", "append_only_index_memory"}
         or state_port.get("dtype") != "BF16"
-        or state_port.get("growth") != f"one_per_{period}_activations"
+        or state_port.get("growth")
+        not in {f"one_per_{period}_activations", "with_compressed_kv_memory"}
     ):
         raise ModelCompileError(
             f"conditional state append node {node['id']!r} has an invalid contract"
         )
     binding = stream_control_binding_for_node(circuit, node)
     return f"conditional_append_state_bf16_d{width}_p{period}__sc{binding}.comp"
+
+
+def _index_transform_shader_file(
+    circuit: Json,
+    node: Json,
+    tensor_index: Json,
+) -> str:
+    attrs = node.get("attrs", {})
+    operation = str(node["op"])
+    head_count = int(attrs.get("head_count", 0))
+    head_width = int(attrs.get("head_width", 0))
+    rotary_width = int(attrs.get("rotary_width", 0))
+    theta = float(attrs.get("theta", 0.0))
+    quantization = attrs.get("activation_quantization")
+    params = node.get("params", [])
+    epsilon = float(attrs.get("normalization_epsilon", 0.0))
+    if (
+        head_count <= 0
+        or (operation == "compressed_index_kv_finalize" and head_count != 1)
+        or head_width <= 0
+        or head_width > 1024
+        or head_width & (head_width - 1)
+        or rotary_width <= 0
+        or rotary_width > head_width
+        or rotary_width % 2
+        or not math.isfinite(theta)
+        or theta <= 0.0
+        or attrs.get("position_source") != "stream_tick"
+        or attrs.get("rotary_scope") != "tail"
+        or attrs.get("rotation") != "hadamard"
+        or quantization
+        != {
+            "format": "fp4_e2m1",
+            "scale_format": "e8m0_power_of_two",
+            "block_columns": 32,
+            "mode": "quantize_dequantize",
+        }
+        or head_width % 32
+        or attrs.get("output_element_bytes") != [2]
+        or len(node.get("inputs", [])) != 1
+        or len(node.get("outputs", [])) != 1
+        or node.get("state_reads")
+        or node.get("state_writes")
+    ):
+        raise ModelCompileError(
+            f"index vector transform node {node['id']!r} has an invalid contract"
+        )
+    rope_suffix = _rope_suffix(attrs)
+    binding = stream_control_binding_for_node(circuit, node)
+    if operation == "index_vector_transform":
+        if params:
+            raise ModelCompileError(
+                f"index query transform node {node['id']!r} unexpectedly has parameters"
+            )
+        return (
+            f"index_vector_transform_bf16_h{head_count}_d{head_width}_r{rotary_width}_"
+            f"{rope_suffix}_qfp4e2m1b32__sc{binding}.comp"
+        )
+    if (
+        len(params) != 1
+        or not math.isfinite(epsilon)
+        or epsilon <= 0.0
+        or parameter_dtype_for_id(circuit, params[0], tensor_index) != "BF16"
+        or parameter_shape_for_id(circuit, params[0], tensor_index) != [head_width]
+        or parameter_layout_for_id(circuit, params[0], tensor_index)
+        != ROW_MAJOR_LAYOUT
+    ):
+        raise ModelCompileError(
+            f"compressed index finalizer node {node['id']!r} has an invalid norm"
+        )
+    position_offset = int(attrs.get("position_offset", 0))
+    return (
+        f"compressed_index_kv_finalize_f32_bf16_d{head_width}_r{rotary_width}_"
+        f"eps{shader_float_token(epsilon)}_{rope_suffix}_po{position_offset}_"
+        f"qfp4e2m1b32__sc{binding}.comp"
+    )
+
+
+def _index_scores_shader_file(circuit: Json, node: Json) -> str:
+    attrs = node.get("attrs", {})
+    heads = int(attrs.get("heads", 0))
+    head_width = int(attrs.get("head_width", 0))
+    ratio = int(attrs.get("ratio", 0))
+    maximum = int(attrs.get("max_compressed_positions", 0))
+    scale = float(attrs.get("score_scale", 0.0))
+    chunk = 256
+    if (
+        heads <= 0
+        or heads % 16
+        or head_width <= 0
+        or head_width % 16
+        or heads * head_width > 16_384
+        or ratio <= 0
+        or maximum <= 0
+        or not math.isfinite(scale)
+        or scale <= 0.0
+        or attrs.get("score_activation") != "relu_then_head_weighted_sum"
+        or attrs.get("output_element_bytes") != [4]
+        or len(node.get("inputs", [])) != 3
+        or len(node.get("outputs", [])) != 1
+        or node.get("params")
+        or node.get("state_reads")
+        or node.get("state_writes")
+    ):
+        raise ModelCompileError(
+            f"learned index score node {node['id']!r} has an invalid contract"
+        )
+    binding = stream_control_binding_for_node(circuit, node)
+    return (
+        f"learned_index_scores_bf16_f32_h{heads}_d{head_width}_r{ratio}_"
+        f"m{maximum}_c{chunk}_scale{shader_float_token(scale)}__sc{binding}.comp"
+    )
+
+
+def _radix_topk_shader_file(node: Json) -> str:
+    attrs = node.get("attrs", {})
+    maximum = int(attrs.get("max_scores", 0))
+    top_k = int(attrs.get("top_k", 0))
+    ratio = int(attrs.get("ratio", 0))
+    offset = int(attrs.get("index_offset", -1))
+    if (
+        maximum <= 0
+        or top_k <= 0
+        or top_k > maximum
+        or ratio <= 0
+        or offset < 0
+        or attrs.get("ordering") != "descending_float_score"
+        or attrs.get("output_element_bytes") != [4]
+        or len(node.get("inputs", [])) != 1
+        or len(node.get("outputs", [])) != 1
+        or node.get("params")
+        or node.get("state_reads")
+        or node.get("state_writes")
+    ):
+        raise ModelCompileError(
+            f"radix top-k node {node['id']!r} has an invalid contract"
+        )
+    return (
+        f"radix_topk_index_f32_u32_m{maximum}_k{top_k}_r{ratio}_o{offset}__sc2.comp"
+    )
+
+
+def _chronological_index_shader_file(circuit: Json, node: Json) -> str:
+    attrs = node.get("attrs", {})
+    maximum = int(attrs.get("max_indices", 0))
+    ratio = int(attrs.get("ratio", 0))
+    offset = int(attrs.get("index_offset", -1))
+    if (
+        maximum <= 0
+        or ratio <= 0
+        or offset < 0
+        or attrs.get("causal") is not True
+        or attrs.get("output_element_bytes") != [4]
+        or len(node.get("inputs", [])) != 1
+        or len(node.get("outputs", [])) != 1
+        or node.get("params")
+        or node.get("state_reads")
+        or node.get("state_writes")
+    ):
+        raise ModelCompileError(
+            f"chronological compressed-index node {node['id']!r} has an invalid contract"
+        )
+    binding = stream_control_binding_for_node(circuit, node)
+    return (
+        f"chronological_compressed_index_u32_m{maximum}_r{ratio}_o{offset}"
+        f"__sc{binding}.comp"
+    )
 
 
 def render_latent_compression_shader(
@@ -279,6 +477,68 @@ def render_latent_compression_shader(
         return _render_template(
             source_dir / "conditional_append_state_bf16.comp.template",
             {"ELEMENT_COUNT": str(width), "PERIOD": str(period)},
+        )
+    index_transform = INDEX_TRANSFORM_SHADER_PATTERN.fullmatch(shader_file)
+    if index_transform is not None:
+        return _render_index_transform(source_dir, index_transform, finalizer=False)
+    index_finalize = INDEX_FINALIZE_SHADER_PATTERN.fullmatch(shader_file)
+    if index_finalize is not None:
+        return _render_index_transform(source_dir, index_finalize, finalizer=True)
+    index_scores = INDEX_SCORES_SHADER_PATTERN.fullmatch(shader_file)
+    if index_scores is not None:
+        heads, width, ratio, maximum, chunk = map(
+            int, index_scores.groups()[:5]
+        )
+        scale = index_scores.group(6)
+        if (
+            heads <= 0
+            or heads % 16
+            or width <= 0
+            or width % 16
+            or ratio <= 0
+            or maximum <= 0
+            or chunk != 256
+        ):
+            raise ModelCompileError(f"invalid learned index score shape {shader_file!r}")
+        return _render_template(
+            source_dir / "learned_index_scores.comp.template",
+            {
+                "HEAD_COUNT": str(heads),
+                "HEAD_WIDTH": str(width),
+                "COMPRESSION_RATIO": str(ratio),
+                "MAX_COMPRESSED_POSITIONS": str(maximum),
+                "CHUNK_POSITIONS": str(chunk),
+                "SCORE_SCALE": scale,
+            },
+        )
+    radix_topk = RADIX_TOPK_SHADER_PATTERN.fullmatch(shader_file)
+    if radix_topk is not None:
+        maximum, top_k, ratio, offset = map(int, radix_topk.groups())
+        if maximum <= 0 or top_k <= 0 or top_k > maximum or ratio <= 0:
+            raise ModelCompileError(f"invalid radix top-k shape {shader_file!r}")
+        return _render_template(
+            source_dir / "radix_topk_index.comp.template",
+            {
+                "MAX_SCORES": str(maximum),
+                "TOP_K": str(top_k),
+                "COMPRESSION_RATIO": str(ratio),
+                "INDEX_OFFSET": str(offset),
+            },
+        )
+    chronological = CHRONOLOGICAL_INDEX_SHADER_PATTERN.fullmatch(shader_file)
+    if chronological is not None:
+        maximum, ratio, offset = map(int, chronological.groups())
+        if maximum <= 0 or ratio <= 0:
+            raise ModelCompileError(
+                f"invalid chronological compressed-index shape {shader_file!r}"
+            )
+        return _render_template(
+            source_dir / "chronological_compressed_index.comp.template",
+            {
+                "MAX_INDICES": str(maximum),
+                "COMPRESSION_RATIO": str(ratio),
+                "INDEX_OFFSET": str(offset),
+            },
         )
     finalize = FINALIZE_SHADER_PATTERN.fullmatch(shader_file)
     if finalize is None:
@@ -340,3 +600,84 @@ def _render_template(path: Path, replacements: dict[str, str]) -> str:
             f"shader template {path.name!r} has unresolved values {unresolved}"
         )
     return rendered
+
+
+def _render_index_transform(
+    source_dir: Path,
+    match: re.Match[str],
+    *,
+    finalizer: bool,
+) -> str:
+    groups = match.groups()
+    if finalizer:
+        (
+            head_width_token,
+            rotary_width_token,
+            epsilon,
+            theta,
+            yarn_factor,
+            correction_low,
+            correction_high,
+            attention_factor,
+            layout,
+            position_offset,
+            block_columns_token,
+        ) = groups
+        head_count = 1
+    else:
+        (
+            head_count_token,
+            head_width_token,
+            rotary_width_token,
+            theta,
+            yarn_factor,
+            correction_low,
+            correction_high,
+            attention_factor,
+            layout,
+            block_columns_token,
+        ) = groups
+        head_count = int(head_count_token)
+        epsilon = "0.0"
+        position_offset = "0"
+    head_width = int(head_width_token)
+    rotary_width = int(rotary_width_token)
+    block_columns = int(block_columns_token)
+    if (
+        head_count <= 0
+        or head_width <= 0
+        or head_width > 1024
+        or head_width & (head_width - 1)
+        or rotary_width <= 0
+        or rotary_width > head_width
+        or rotary_width % 2
+        or block_columns != 32
+        or head_width % block_columns
+    ):
+        raise ModelCompileError(
+            f"invalid index vector transform shape {match.group(0)!r}"
+        )
+    return _render_template(
+        source_dir
+        / (
+            "compressed_index_kv_finalize.comp.template"
+            if finalizer
+            else "index_vector_transform.comp.template"
+        ),
+        {
+            "HEAD_COUNT": str(head_count),
+            "HEAD_WIDTH": str(head_width),
+            "ROTARY_WIDTH": str(rotary_width),
+            "NON_ROTARY_WIDTH": str(head_width - rotary_width),
+            "NORM_EPS": epsilon,
+            "ROPE_THETA": theta,
+            "ROPE_YARN": "true" if yarn_factor is not None else "false",
+            "ROPE_FACTOR": yarn_factor or "1.0",
+            "ROPE_CORRECTION_LOW": correction_low or "0.0",
+            "ROPE_CORRECTION_HIGH": correction_high or "1.0",
+            "ROPE_ATTENTION_FACTOR": attention_factor or "1.0",
+            "ROPE_INTERLEAVED": "true" if layout == "interleaved" else "false",
+            "POSITION_OFFSET": position_offset,
+            "QUANT_BLOCK_COLUMNS": str(block_columns),
+        },
+    )

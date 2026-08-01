@@ -407,7 +407,20 @@ def test_compiles_stateful_learned_compressor_as_typed_pool_and_finalize_stages(
         "state_writes": ["compressed_kv_memory"],
         "attrs": {"period": 4},
     }
-    circuit["nodes"].extend([pool, finalize, append])
+    chronological = {
+        "id": "compressed_memory_indexer",
+        "op": "chronological_compressed_index",
+        "inputs": ["compressed_kv_values"],
+        "outputs": ["compressed_indices"],
+        "attrs": {
+            "ratio": 4,
+            "causal": True,
+            "index_offset": 128,
+            "max_indices": 1024,
+            "output_element_bytes": [4],
+        },
+    }
+    circuit["nodes"].extend([pool, finalize, append, chronological])
 
     pool_file = shader_file_for_node(
         circuit, pool, tensor_index, {"hidden_size": 128}
@@ -418,6 +431,9 @@ def test_compiles_stateful_learned_compressor_as_typed_pool_and_finalize_stages(
     append_file = shader_file_for_node(
         circuit, append, tensor_index, {"hidden_size": 128}
     )
+    chronological_file = shader_file_for_node(
+        circuit, chronological, tensor_index, {"hidden_size": 128}
+    )
 
     assert pool_file == (
         "learned_gated_kv_pool_bf16_f32_h128_d128_r4_c2__sc8.comp"
@@ -427,20 +443,28 @@ def test_compiles_stateful_learned_compressor_as_typed_pool_and_finalize_stages(
         "theta10000_half_po-3_qfp8e4m3b64__sc3.comp"
     )
     assert append_file == "conditional_append_state_bf16_d128_p4__sc6.comp"
+    assert chronological_file == (
+        "chronological_compressed_index_u32_m1024_r4_o128__sc3.comp"
+    )
     assert workgroup_count_x_for_node(circuit, pool, tensor_index) == 128
     assert workgroup_count_x_for_node(circuit, finalize, tensor_index) == 1
     assert workgroup_count_x_for_node(circuit, append, tensor_index) == 1
+    assert workgroup_count_x_for_node(circuit, chronological, tensor_index) == 1
     assert local_size_x_for_shader_file(pool_file, pool) == 64
     assert local_size_x_for_shader_file(finalize_file, finalize) == 128
     assert local_size_x_for_shader_file(append_file, append) == 64
+    assert local_size_x_for_shader_file(chronological_file, chronological) == 1024
 
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     copy_shader_templates(
-        shader_source_dir, tmp_path, {pool_file, finalize_file, append_file}
+        shader_source_dir,
+        tmp_path,
+        {pool_file, finalize_file, append_file, chronological_file},
     )
     pool_source = (tmp_path / pool_file).read_text()
     finalize_source = (tmp_path / finalize_file).read_text()
     append_source = (tmp_path / append_file).read_text()
+    chronological_source = (tmp_path / chronological_file).read_text()
     assert "const uint LANE_COEFFICIENT = 2u;" in pool_source
     assert "state_score_index" in pool_source
     assert "if ((position + 1u) % COMPRESSION_RATIO != 0u)" in pool_source
@@ -448,13 +472,163 @@ def test_compiles_stateful_learned_compressor_as_typed_pool_and_finalize_stages(
     assert "const int POSITION_OFFSET = -3;" in finalize_source
     assert "dim < NON_ROTARY_WIDTH" in finalize_source
     assert "uint compressed_slot = position / PERIOD;" in append_source
+    assert "indices.values[position] = INDEX_OFFSET + position;" in (
+        chronological_source
+    )
     assert "{{" not in pool_source
     assert "{{" not in finalize_source
     assert "{{" not in append_source
+    assert "{{" not in chronological_source
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / pool_file.replace(".comp", ".spv")).is_file()
     assert (tmp_path / finalize_file.replace(".comp", ".spv")).is_file()
     assert (tmp_path / append_file.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / chronological_file.replace(".comp", ".spv")).is_file()
+
+
+def test_compiles_learned_index_transform_scores_and_exact_radix_topk(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _fixture()
+    circuit["state_ports"].append(
+        {
+            "id": "indexer_kv_memory",
+            "type": "append_only_index_memory",
+            "shape_per_token": [128],
+            "dtype": "BF16",
+            "growth": "with_compressed_kv_memory",
+        }
+    )
+    circuit["parameters"]["refs"]["indexer_norm"] = {
+        "tensor": "indexer.norm"
+    }
+    tensor_index["tensors"]["indexer.norm"] = {
+        "dtype": "BF16",
+        "shape": [128],
+        "layout": ROW_MAJOR_LAYOUT,
+    }
+    transform_attrs = {
+        "position_source": "stream_tick",
+        "theta": 160_000.0,
+        "rope_type": "default",
+        "scaling": None,
+        "interleaved": False,
+        "rotary_width": 64,
+        "rotary_scope": "tail",
+        "head_count": 64,
+        "head_width": 128,
+        "query_heads": 64,
+        "key_value_heads": 1,
+        "rotation": "hadamard",
+        "activation_quantization": {
+            "format": "fp4_e2m1",
+            "scale_format": "e8m0_power_of_two",
+            "block_columns": 32,
+            "mode": "quantize_dequantize",
+        },
+        "output_element_bytes": [2],
+    }
+    query_transform = {
+        "id": "indexer_query_transform",
+        "op": "index_vector_transform",
+        "inputs": ["indexer_query_heads"],
+        "outputs": ["indexer_query_transformed"],
+        "attrs": transform_attrs,
+    }
+    finalizer = {
+        "id": "indexer_compressor_finalize",
+        "op": "compressed_index_kv_finalize",
+        "inputs": ["indexer_pooled_f32"],
+        "outputs": ["indexer_candidate"],
+        "params": ["indexer_norm"],
+        "attrs": {
+            **transform_attrs,
+            "head_count": 1,
+            "normalization_epsilon": 1e-6,
+            "position_offset": -3,
+        },
+    }
+    append = {
+        "id": "indexer_memory_update",
+        "op": "conditional_append_state_update",
+        "inputs": ["indexer_candidate", "indexer_kv_memory"],
+        "outputs": ["indexer_kv_values"],
+        "state_reads": ["indexer_kv_memory"],
+        "state_writes": ["indexer_kv_memory"],
+        "attrs": {"period": 4},
+    }
+    scores = {
+        "id": "indexer_scores",
+        "op": "learned_index_scores",
+        "inputs": [
+            "indexer_query_transformed",
+            "indexer_head_weights",
+            "indexer_kv_values",
+        ],
+        "outputs": ["indexer_scores_f32"],
+        "attrs": {
+            "heads": 64,
+            "head_width": 128,
+            "ratio": 4,
+            "max_compressed_positions": 1024,
+            "score_scale": (64 * 128) ** -0.5,
+            "score_activation": "relu_then_head_weighted_sum",
+            "output_element_bytes": [4],
+        },
+    }
+    topk = {
+        "id": "compressed_memory_indexer",
+        "op": "radix_topk_index",
+        "inputs": ["indexer_scores_f32"],
+        "outputs": ["compressed_indices"],
+        "attrs": {
+            "top_k": 512,
+            "ratio": 4,
+            "index_offset": 128,
+            "max_scores": 1024,
+            "ordering": "descending_float_score",
+            "output_element_bytes": [4],
+        },
+    }
+    circuit["nodes"].extend([query_transform, finalizer, append, scores, topk])
+    dimensions = {"hidden_size": 128}
+    files = {
+        node["id"]: shader_file_for_node(circuit, node, tensor_index, dimensions)
+        for node in (query_transform, finalizer, append, scores, topk)
+    }
+
+    assert files == {
+        "indexer_query_transform": (
+            "index_vector_transform_bf16_h64_d128_r64_theta160000_half_"
+            "qfp4e2m1b32__sc2.comp"
+        ),
+        "indexer_compressor_finalize": (
+            "compressed_index_kv_finalize_f32_bf16_d128_r64_eps1e-06_"
+            "theta160000_half_po-3_qfp4e2m1b32__sc3.comp"
+        ),
+        "indexer_memory_update": "conditional_append_state_bf16_d128_p4__sc6.comp",
+        "indexer_scores": (
+            "learned_index_scores_bf16_f32_h64_d128_r4_m1024_c256_"
+            "scale0.0110485435__sc5.comp"
+        ),
+        "compressed_memory_indexer": (
+            "radix_topk_index_f32_u32_m1024_k512_r4_o128__sc2.comp"
+        ),
+    }
+    assert workgroup_count_x_for_node(circuit, query_transform, tensor_index) == 64
+    assert workgroup_count_x_for_node(circuit, scores, tensor_index) == 4
+    assert workgroup_count_x_for_node(circuit, topk, tensor_index) == 1
+    assert local_size_x_for_shader_file(files["indexer_scores"], scores) == 1024
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, set(files.values()))
+    score_source = (tmp_path / files["indexer_scores"]).read_text()
+    topk_source = (tmp_path / files["compressed_memory_indexer"]).read_text()
+    assert "shared uint query_cache[QUERY_WORDS];" in score_source
+    assert "uint selected_prefix;" in topk_source
+    assert "for (int bit_index = 31; bit_index >= 0; --bit_index)" in topk_source
+    assert all("{{" not in (tmp_path / name).read_text() for name in files.values())
+    compile_shader_artifacts(tmp_path)
+    assert len(list(tmp_path.glob("*.spv"))) == len(files)
 
 
 def test_compiles_causal_indexed_attention_with_compressed_memory(

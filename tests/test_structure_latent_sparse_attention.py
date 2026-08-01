@@ -89,6 +89,7 @@ def _source() -> tuple[dict[str, object], dict[str, dict[str, object]]]:
         "index_head_dim": 2,
         "index_topk": 16,
         "vocab_size": 32,
+        "max_position_embeddings": 1024,
         "rms_norm_eps": 1e-6,
         "rope_theta": 10_000.0,
         "rope_scaling": {
@@ -190,7 +191,29 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
         "scope": "non_rotary_dimensions",
         "mode": "quantize_dequantize",
     }
-    assert nodes["compressed_memory_indexer"]["op"] == "learned_topk_index"
+    assert nodes["indexer_query_projection"]["op"] == "linear"
+    assert nodes["indexer_query_projection"]["params"] == ["indexer_q_projection"]
+    assert nodes["indexer_query_transform"]["op"] == "index_vector_transform"
+    assert nodes["indexer_query_transform"]["attrs"]["rotary_scope"] == "tail"
+    assert nodes["indexer_query_transform"]["attrs"]["activation_quantization"] == {
+        "format": "fp4_e2m1",
+        "scale_format": "e8m0_power_of_two",
+        "block_columns": 32,
+        "mode": "quantize_dequantize",
+    }
+    assert nodes["indexer_compressor_pool"]["op"] == "learned_gated_kv_pool"
+    assert nodes["indexer_compressor_finalize"]["op"] == (
+        "compressed_index_kv_finalize"
+    )
+    assert nodes["indexer_memory_update"]["op"] == (
+        "conditional_append_state_update"
+    )
+    assert nodes["indexer_scores"]["op"] == "learned_index_scores"
+    assert nodes["indexer_scores"]["attrs"]["score_scale"] == pytest.approx(
+        (2 * 4) ** -0.5
+    )
+    assert nodes["compressed_memory_indexer"]["op"] == "radix_topk_index"
+    assert nodes["compressed_memory_indexer"]["attrs"]["index_offset"] == 8
     assert nodes["sparse_attention_read"]["op"] == "indexed_sparse_attention"
     assert nodes["grouped_output_projection"]["op"] == "grouped_linear"
     deterministic_component = make_layer(structure, deterministic)
@@ -201,6 +224,16 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
     deterministic_circuit = build_component_circuit(
         deterministic_component, Path("layer_02.json")
     )
+    deterministic_nodes = {
+        node["id"]: node for node in deterministic_circuit["nodes"]
+    }
+    assert deterministic_nodes["compressed_memory_indexer"]["attrs"] == {
+        "ratio": 8,
+        "causal": True,
+        "index_offset": 8,
+        "max_indices": 128,
+        "output_element_bytes": [4],
+    }
     deterministic_modules = {
         module["id"]: module
         for module in deterministic_circuit["semantic_module_tree"]["modules"]
