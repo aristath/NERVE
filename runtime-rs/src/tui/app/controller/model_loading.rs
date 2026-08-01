@@ -114,7 +114,8 @@ impl App {
             }
             AppAction::ModalNext => {
                 if let Some(Overlay::Compiler(progress)) = &mut self.overlay {
-                    progress.diagnostic_scroll = progress.diagnostic_scroll.saturating_add(1);
+                    progress.diagnostic_scroll = (progress.diagnostic_scroll + 1)
+                        .min(progress.diagnostics.len().saturating_sub(1));
                 }
             }
             _ => {}
@@ -318,6 +319,8 @@ impl App {
                     total: None,
                     current_item: None,
                     events: Vec::new(),
+                    terminal_event: None,
+                    protocol_error: None,
                     diagnostics: Vec::new(),
                     diagnostic_scroll: 0,
                     cancelling: false,
@@ -335,9 +338,14 @@ impl App {
     fn handle_compiler_message(&mut self, message: CompilerMessage) {
         match message {
             CompilerMessage::Event(event) => self.handle_compiler_event(event),
-            CompilerMessage::Diagnostic(diagnostic)
-            | CompilerMessage::ProtocolError(diagnostic) => {
+            CompilerMessage::Diagnostic(diagnostic) => {
                 if let Some(Overlay::Compiler(progress)) = &mut self.overlay {
+                    progress.diagnostics.push(diagnostic);
+                }
+            }
+            CompilerMessage::ProtocolError(diagnostic) => {
+                if let Some(Overlay::Compiler(progress)) = &mut self.overlay {
+                    progress.protocol_error.get_or_insert(diagnostic.clone());
                     progress.diagnostics.push(diagnostic);
                 }
             }
@@ -345,63 +353,36 @@ impl App {
     }
 
     fn handle_compiler_event(&mut self, event: CompilerEvent) {
-        let kind = match &self.overlay {
-            Some(Overlay::Compiler(progress)) => progress.kind,
-            _ => return,
-        };
-        if event.kind == "Completed" {
-            match kind {
-                CompilerJobKind::Discovery => {
-                    let mut selector = match self.overlay.take() {
-                        Some(Overlay::Compiler(progress)) => progress.selector,
-                        _ => return,
-                    };
-                    selector.discovery = selector.discovery.or_else(|| {
-                        event
-                            .value("discovery")
-                            .cloned()
-                            .and_then(source_discovery_from_value)
-                    });
-                    selector.focus = ModelSelectorFocus::Action;
-                    self.status = "Source discovery complete".to_string();
-                    self.overlay = Some(Overlay::ModelSelector(selector));
-                }
-                CompilerJobKind::Compilation => {
-                    let package = event
-                        .nested_string("package", "package_manifest")
-                        .map(PathBuf::from);
-                    if let Some(package) = package {
-                        self.load_model(package);
-                    } else {
-                        self.fail_compiler_job(
-                            "Compiler completed without a package_manifest".to_string(),
-                        );
-                    }
-                }
-            }
-            return;
-        }
-        if event.kind == "Cancelled" {
-            let selector = match self.overlay.take() {
-                Some(Overlay::Compiler(progress)) => progress.selector,
-                _ => return,
-            };
-            self.status = "Model compiler cancelled; no package was published".to_string();
-            self.overlay = Some(Overlay::ModelSelector(selector));
-            return;
-        }
-        if event.kind == "Failed" {
-            let diagnostics = event.diagnostics();
-            let mut selector = match self.overlay.take() {
-                Some(Overlay::Compiler(progress)) => progress.selector,
-                _ => return,
-            };
-            selector.diagnostics.extend(diagnostics);
-            self.status = "Model compiler failed".to_string();
-            self.overlay = Some(Overlay::ModelSelector(selector));
-            return;
-        }
         if let Some(Overlay::Compiler(progress)) = &mut self.overlay {
+            if progress.terminal_event.is_some() {
+                let error = format!(
+                    "compiler emitted event {:?} after a terminal event",
+                    event.kind
+                );
+                progress.protocol_error.get_or_insert(error.clone());
+                progress.diagnostics.push(error);
+                return;
+            }
+            if progress.events.is_empty() && event.sequence != 0 {
+                let error = format!(
+                    "compiler event stream started at sequence {}, expected 0",
+                    event.sequence
+                );
+                progress.protocol_error.get_or_insert(error.clone());
+                progress.diagnostics.push(error);
+            }
+            if progress
+                .events
+                .last()
+                .is_some_and(|previous| event.sequence <= previous.sequence)
+            {
+                let error = format!(
+                    "compiler event sequence {} is not greater than the previous sequence",
+                    event.sequence
+                );
+                progress.protocol_error.get_or_insert(error.clone());
+                progress.diagnostics.push(error);
+            }
             progress.stage = compiler_stage_label(&event.kind).to_string();
             if let Some((current, total)) = event.progress() {
                 progress.current = Some(current);
@@ -411,15 +392,133 @@ impl App {
             if event.kind == "SourceDiscovered" {
                 progress.selector.discovery = SourceDiscovery::from_event(&event);
             }
+            if matches!(event.kind.as_str(), "Completed" | "Failed" | "Cancelled") {
+                progress.stage = match event.kind.as_str() {
+                    "Completed" => "Finalizing completed compiler process",
+                    "Failed" => "Finalizing failed compiler process",
+                    _ => "Finalizing compiler cancellation",
+                }
+                .to_string();
+                progress.terminal_event = Some(event.clone());
+            }
             progress.events.push(event);
         }
     }
 
-    fn handle_compiler_exit(&mut self, status: ExitStatus, terminal_event_received: bool) {
-        if !terminal_event_received {
+    fn handle_compiler_exit(
+        &mut self,
+        status: ExitStatus,
+        cancel_requested: bool,
+        forced_termination: bool,
+    ) {
+        let (terminal_event, protocol_error) = match &mut self.overlay {
+            Some(Overlay::Compiler(progress)) => {
+                (progress.terminal_event.take(), progress.protocol_error.take())
+            }
+            _ => return,
+        };
+        if let Some(error) = protocol_error {
+            self.fail_compiler_job(format!("Compiler protocol failed: {error}"));
+            return;
+        }
+        if terminal_event.is_none() && cancel_requested {
+            let mut selector = match self.overlay.take() {
+                Some(Overlay::Compiler(progress)) => {
+                    let mut selector = progress.selector;
+                    selector.diagnostics.extend(progress.diagnostics);
+                    selector
+                }
+                _ => return,
+            };
+            if forced_termination {
+                selector.diagnostics.push(
+                    "Compiler ignored graceful cancellation and was force-stopped; staged output was not published"
+                        .to_string(),
+                );
+            }
+            self.status = "Model compiler cancelled; no package was published".to_string();
+            self.overlay = Some(Overlay::ModelSelector(selector));
+            return;
+        }
+        let Some(event) = terminal_event else {
             self.fail_compiler_job(format!(
                 "Compiler exited with {status} without a terminal structured event"
             ));
+            return;
+        };
+        match event.kind.as_str() {
+            "Completed" if !status.success() => self.fail_compiler_job(format!(
+                "Compiler reported completion but exited with {status}"
+            )),
+            "Completed" => self.complete_compiler_job(event),
+            "Cancelled" => {
+                let selector = match self.overlay.take() {
+                    Some(Overlay::Compiler(progress)) => progress.selector,
+                    _ => return,
+                };
+                self.status = "Model compiler cancelled; no package was published".to_string();
+                self.overlay = Some(Overlay::ModelSelector(selector));
+            }
+            "Failed" => {
+                let diagnostics = event.diagnostics();
+                let mut selector = match self.overlay.take() {
+                    Some(Overlay::Compiler(progress)) => {
+                        let mut selector = progress.selector;
+                        selector.diagnostics.extend(progress.diagnostics);
+                        selector
+                    }
+                    _ => return,
+                };
+                selector.diagnostics.extend(diagnostics);
+                self.status = "Model compiler failed".to_string();
+                self.overlay = Some(Overlay::ModelSelector(selector));
+            }
+            kind => self.fail_compiler_job(format!(
+                "Compiler exited after unsupported terminal event {kind:?}"
+            )),
+        }
+    }
+
+    fn complete_compiler_job(&mut self, event: CompilerEvent) {
+        let kind = match &self.overlay {
+            Some(Overlay::Compiler(progress)) => progress.kind,
+            _ => return,
+        };
+        match kind {
+            CompilerJobKind::Discovery => {
+                let mut selector = match self.overlay.take() {
+                    Some(Overlay::Compiler(progress)) => progress.selector,
+                    _ => return,
+                };
+                selector.discovery = selector.discovery.or_else(|| {
+                    event
+                        .value("discovery")
+                        .cloned()
+                        .and_then(source_discovery_from_value)
+                });
+                if selector.discovery.is_none() {
+                    selector.diagnostics.push(
+                        "Compiler completed discovery without source metadata".to_string(),
+                    );
+                    self.status = "Model compiler failed".to_string();
+                } else {
+                    selector.focus = ModelSelectorFocus::Action;
+                    self.status = "Source discovery complete".to_string();
+                }
+                self.overlay = Some(Overlay::ModelSelector(selector));
+            }
+            CompilerJobKind::Compilation => {
+                let package = event
+                    .nested_string("package", "package_manifest")
+                    .map(PathBuf::from);
+                if let Some(package) = package {
+                    self.load_model(package);
+                } else {
+                    self.fail_compiler_job(
+                        "Compiler completed without a package_manifest".to_string(),
+                    );
+                }
+            }
         }
     }
 
@@ -442,7 +541,7 @@ impl App {
     }
 
     fn load_model(&mut self, path: PathBuf) {
-        let loaded = RuntimeModelEditor::load(&path);
+        let loaded = (self.editor_loader)(&path);
         self.terminal_reset_requested = true;
         match loaded {
             Ok(editor) => self.install_editor(editor),
@@ -453,7 +552,8 @@ impl App {
                     _ => ModelSelectorState::new(path.clone()),
                 };
                 selector.set_path(path);
-                selector.diagnostics.push(error.to_string());
+                selector.detected = Some(Err(error.to_string()));
+                selector.diagnostics.clear();
                 self.status = "Compiled package could not be loaded".to_string();
                 self.overlay = Some(Overlay::ModelSelector(selector));
             }
@@ -473,7 +573,7 @@ impl App {
         }
         let sequence = editor.layer_sequence();
         let selected_instance_id = editor
-            .instances()
+            .layer_instances()
             .first()
             .map(|instance| instance.instance_id.clone());
         self.sequence.set(format_layer_sequence(&sequence));

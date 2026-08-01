@@ -231,11 +231,12 @@ fn render_model_actions(
     );
     let width = label.width() as u16;
     let x = area.x + area.width.saturating_sub(width + cancel.width() as u16 + 3) / 2;
-    app.hit_map
-        .insert(Rect::new(x, area.y, width, 1), HitTarget::ModelAction);
+    if active {
+        app.hit_map
+            .insert(Rect::new(x, area.y, width, 1), HitTarget::ModelAction);
+    }
     app.hit_map.insert(
         Rect::new(x + width + 3, area.y, cancel.width() as u16, 1),
         HitTarget::ModalCancel,
     );
 }
-

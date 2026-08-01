@@ -210,6 +210,8 @@ mod tests {
             occurrence: 1,
             device_ids: vec!["gpu0".to_string()],
             device_labels: vec!["gpu0 · fixture".to_string()],
+            device_selectable: vec![true],
+            device_diagnostics: Vec::new(),
             device_index: 0,
             original_device_id: "gpu0".to_string(),
             selected_implementation_id: None,

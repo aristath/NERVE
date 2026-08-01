@@ -1,26 +1,43 @@
 impl App {
     fn duplicate_selected(&mut self) {
-        let Some(index) = self.selected_index() else {
+        let Some(selected_id) = self.selected_instance_id.clone() else {
             return;
         };
-        let mut sequence = self.last_valid_sequence.clone();
-        if let Some(layer) = sequence.get(index).copied() {
-            sequence.insert(index + 1, layer);
-            self.replace_graph_from_visual(sequence, Some(index + 1));
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match editor.duplicate_layer_instance_after(&selected_id) {
+            Ok(duplicate_id) => {
+                self.sync_graph_from_editor(Some(duplicate_id));
+                self.status = "Graph draft updated · not mounted".to_string();
+            }
+            Err(error) => self.status = error.to_string(),
         }
     }
 
     fn remove_selected(&mut self) {
-        let Some(index) = self.selected_index() else {
+        let Some(selected_id) = self.selected_instance_id.clone() else {
             return;
         };
         if self.last_valid_sequence.len() <= 1 {
             self.status = "An execution graph must contain at least one node".to_string();
             return;
         }
-        let mut sequence = self.last_valid_sequence.clone();
-        sequence.remove(index);
-        self.replace_graph_from_visual(sequence, Some(index.saturating_sub(1)));
+        let selected_index = self.selected_index().unwrap_or(0);
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match editor.remove_layer_instance(&selected_id) {
+            Ok(()) => {
+                let replacement = editor
+                    .layer_instances()
+                    .get(selected_index.saturating_sub(1))
+                    .map(|instance| instance.instance_id.clone());
+                self.sync_graph_from_editor(replacement);
+                self.status = "Graph draft updated · not mounted".to_string();
+            }
+            Err(error) => self.status = error.to_string(),
+        }
     }
 
     fn move_selected(&mut self, delta: i32) {
@@ -31,29 +48,19 @@ impl App {
         if target >= self.last_valid_sequence.len() || target == index {
             return;
         }
-        let selected_id = self.selected_instance_id.clone();
-        let mut sequence = self.last_valid_sequence.clone();
-        sequence.swap(index, target);
-        self.replace_graph_from_visual(sequence, None);
-        if let Some(selected_id) = selected_id {
-            self.select_instance(&selected_id);
-        }
-    }
-
-    fn replace_graph_from_visual(&mut self, sequence: Vec<usize>, select_index: Option<usize>) {
+        let mut ordered_ids = self
+            .instances()
+            .into_iter()
+            .map(|instance| instance.instance_id)
+            .collect::<Vec<_>>();
+        ordered_ids.swap(index, target);
         let Some(editor) = &mut self.editor else {
             return;
         };
-        match editor.replace_layer_sequence(&sequence) {
+        match editor.reorder_layer_instances(&ordered_ids) {
             Ok(()) => {
-                self.sequence.set(format_layer_sequence(&sequence));
-                self.last_valid_sequence = sequence;
-                self.sequence_error = None;
-                if let Some(index) = select_index {
-                    self.select_index(index);
-                } else {
-                    self.ensure_selection_exists();
-                }
+                let selected_id = self.selected_instance_id.clone();
+                self.sync_graph_from_editor(selected_id);
                 self.status = "Graph draft updated · not mounted".to_string();
             }
             Err(error) => self.status = error.to_string(),
@@ -81,16 +88,25 @@ impl App {
     }
 
     fn instance_count(&self) -> usize {
-        self.editor
-            .as_ref()
-            .map(|editor| editor.instances().len())
-            .unwrap_or(0)
+        self.instances().len()
     }
 
     pub(crate) fn instances(&self) -> Vec<RuntimeEditorInstance> {
         self.editor
             .as_ref()
-            .map(RuntimeModelEditor::instances)
+            .map(RuntimeModelEditor::layer_instances)
             .unwrap_or_default()
+    }
+
+    fn sync_graph_from_editor(&mut self, selected_instance_id: Option<String>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        self.last_valid_sequence = editor.layer_sequence();
+        self.sequence
+            .set(format_layer_sequence(&self.last_valid_sequence));
+        self.sequence_error = None;
+        self.selected_instance_id = selected_instance_id;
+        self.ensure_selection_exists();
     }
 }

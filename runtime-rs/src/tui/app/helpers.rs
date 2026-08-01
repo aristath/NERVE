@@ -16,7 +16,11 @@ fn move_text_cursor(buffer: &mut TextBuffer, motion: CursorMotion, selecting: bo
 fn change_node_modal(modal: &mut NodeModalState, delta: i32) {
     match modal.focus_row {
         0 if !modal.device_ids.is_empty() => {
-            modal.device_index = cycle_index(modal.device_index, modal.device_ids.len(), delta)
+            modal.device_index = cycle_selectable_index(
+                modal.device_index,
+                &modal.device_selectable,
+                delta,
+            )
         }
         1 => modal.enabled = !modal.enabled,
         2 => {
@@ -58,6 +62,23 @@ fn cycle_index(current: usize, len: usize, delta: i32) -> usize {
         return 0;
     }
     (current as i32 + delta).rem_euclid(len as i32) as usize
+}
+
+fn cycle_selectable_index(current: usize, selectable: &[bool], delta: i32) -> usize {
+    if selectable.is_empty() || delta == 0 {
+        return current;
+    }
+    for distance in 1..=selectable.len() {
+        let candidate = cycle_index(
+            current,
+            selectable.len(),
+            delta.signum() * distance as i32,
+        );
+        if selectable[candidate] {
+            return candidate;
+        }
+    }
+    current
 }
 
 fn control_value_text(value: &Value) -> String {
@@ -136,8 +157,11 @@ fn compiler_stage_label(kind: &str) -> &str {
         "DiscoveryStarted" => "Discovering source structure",
         "SourceDiscovered" => "Source structure discovered",
         "ValidationStarted" => "Validating source artifacts",
+        "TargetDevicesDiscovered" => "Discovering compilation targets",
         "ComponentTranspiled" => "Transpiling source components",
         "ComponentLoweringStarted" => "Lowering component circuits",
+        "RepresentationOptimizationStarted" => "Initializing representation optimizer",
+        "RepresentationOptimizationCompleted" => "Representation optimizer initialized",
         "ArtifactWritingStarted" => "Writing package artifacts",
         "TensorPackagingStarted" => "Packaging tensors",
         "ShaderCompilationStarted" => "Compiling GPU circuits",

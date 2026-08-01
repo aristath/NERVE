@@ -55,7 +55,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn action_from_event(app: &App, event: Event) -> Option<AppAction> {
+pub(crate) fn action_from_event(app: &App, event: Event) -> Option<AppAction> {
     match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             action_from_key(app, key)

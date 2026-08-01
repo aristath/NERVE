@@ -21,6 +21,7 @@ impl App {
             hit_map: HitMap::default(),
             compiler_job: None,
             compiler_launch: CompilerLaunch::from_environment(),
+            editor_loader: Arc::new(|path: &Path| RuntimeModelEditor::load(path)),
             terminal_reset_requested: false,
         }
     }
@@ -43,6 +44,22 @@ impl App {
 
     pub fn selected_instance(&self) -> Option<&str> {
         self.selected_instance_id.as_deref()
+    }
+
+    pub(crate) fn help_context(&self) -> HelpContext {
+        let active_overlay = if matches!(self.overlay, Some(Overlay::Help)) {
+            self.help_return_overlay.as_ref()
+        } else {
+            self.overlay.as_ref()
+        };
+        match active_overlay {
+            Some(Overlay::ModelSelector(_)) => HelpContext::ModelSelector,
+            Some(Overlay::Compiler(_)) => HelpContext::Compiler,
+            Some(Overlay::Node(_)) => HelpContext::Node,
+            Some(Overlay::Help) => HelpContext::Graph,
+            None if self.focus == FocusRegion::Sequence => HelpContext::Sequence,
+            None => HelpContext::Graph,
+        }
     }
 
     pub fn resource_residency_policy(
@@ -211,24 +228,43 @@ impl App {
         let Some(mut job) = self.compiler_job.take() else {
             return false;
         };
+        let compiler_hidden_by_help = matches!(self.overlay, Some(Overlay::Help))
+            && matches!(self.help_return_overlay, Some(Overlay::Compiler(_)));
+        if compiler_hidden_by_help {
+            self.overlay = self.help_return_overlay.take();
+        }
         let messages = job.drain_messages();
         let mut changed = !messages.is_empty();
         for message in messages {
             self.handle_compiler_message(message);
         }
-        let process_status = job.try_status();
-        let keep_job = matches!(self.overlay, Some(Overlay::Compiler(_)));
-        match process_status {
-            Ok(Some(status)) if keep_job => {
-                self.handle_compiler_exit(status, job.terminal_event_received());
-                changed = true;
+        match job.try_status() {
+            Ok(Some(status)) => {
+                let final_messages = job.finish_messages();
+                changed |= !final_messages.is_empty();
+                for message in final_messages {
+                    self.handle_compiler_message(message);
+                }
+                if matches!(self.overlay, Some(Overlay::Compiler(_))) {
+                    self.handle_compiler_exit(
+                        status,
+                        job.cancel_requested(),
+                        job.forced_termination(),
+                    );
+                    changed = true;
+                }
             }
-            Err(error) if keep_job => {
-                self.fail_compiler_job(error);
-                changed = true;
+            Ok(None) => self.compiler_job = Some(job),
+            Err(error) => {
+                if matches!(self.overlay, Some(Overlay::Compiler(_))) {
+                    self.fail_compiler_job(error);
+                    changed = true;
+                }
             }
-            _ if keep_job => self.compiler_job = Some(job),
-            _ => {}
+        }
+        if compiler_hidden_by_help {
+            self.help_return_overlay = self.overlay.take();
+            self.overlay = Some(Overlay::Help);
         }
         changed
     }

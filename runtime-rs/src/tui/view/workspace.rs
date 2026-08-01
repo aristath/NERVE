@@ -10,8 +10,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{RuntimeAvailableDevice, RuntimeEditorControlKind, RuntimeEditorInstance};
 
 use super::app::{
-    App, BrowserEntry, CompilerProgressState, FocusRegion, HitTarget, ModelSelectorFocus,
-    ModelSelectorState, Overlay, NodeModalState, NodePolicyKind,
+    App, BrowserEntry, CompilerProgressState, FocusRegion, HelpContext, HitTarget,
+    ModelSelectorFocus, ModelSelectorState, NodeModalState, NodePolicyKind, Overlay,
 };
 use super::sequence::TextBuffer;
 
@@ -32,7 +32,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
             Overlay::ModelSelector(selector) => render_model_selector(frame, app, &selector),
             Overlay::Compiler(progress) => render_compiler(frame, app, &progress),
             Overlay::Node(modal) => render_node_modal(frame, app, &modal),
-            Overlay::Help => render_help(frame),
+            Overlay::Help => render_help(frame, app),
         }
     }
 }
@@ -360,7 +360,7 @@ fn render_node(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let state = if !device_available {
-        "! UNAVAILABLE"
+        "! UNAVAIL"
     } else if instance.enabled {
         "● ACTIVE"
     } else {

@@ -3,17 +3,22 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+use std::sync::Arc;
 
 use ratatui::layout::Rect;
 use serde_json::Value;
 
 use crate::{
     RuntimeEditorControlKind, RuntimeEditorControlSchema, RuntimeEditorInstance,
-    RuntimeEditorSourceComponent, RuntimeModelEditor, RuntimeModelPathKind,
+    RuntimeEditorSourceComponent, RuntimeEditorError, RuntimeModelEditor, RuntimeModelPathKind,
     ResourceResidencyPolicy,
     StreamCircuitNodeInstanceStatePolicy, classify_runtime_model_path,
     validate_runtime_editor_control_value,
 };
+
+pub(crate) type EditorLoader = Arc<
+    dyn Fn(&Path) -> Result<RuntimeModelEditor, RuntimeEditorError> + Send + Sync,
+>;
 
 use super::compiler::{
     CompilerEvent, CompilerJob, CompilerJobKind, CompilerLaunch, CompilerMessage,
@@ -158,7 +163,7 @@ impl SourceDiscovery {
                 .unwrap_or("unknown")
                 .to_string(),
             architecture: source
-                .get("architecture")
+                .get("architectures")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
@@ -220,7 +225,7 @@ impl ModelSelectorState {
         state
     }
 
-    fn selected_path(&self) -> PathBuf {
+    pub(crate) fn selected_path(&self) -> PathBuf {
         expand_home(self.path.text())
     }
 
@@ -273,6 +278,8 @@ pub(crate) struct CompilerProgressState {
     pub total: Option<u64>,
     pub current_item: Option<String>,
     pub events: Vec<CompilerEvent>,
+    pub terminal_event: Option<CompilerEvent>,
+    pub protocol_error: Option<String>,
     pub diagnostics: Vec<String>,
     pub diagnostic_scroll: usize,
     pub cancelling: bool,
@@ -292,6 +299,8 @@ pub(crate) struct NodeModalState {
     pub occurrence: usize,
     pub device_ids: Vec<String>,
     pub device_labels: Vec<String>,
+    pub device_selectable: Vec<bool>,
+    pub device_diagnostics: Vec<String>,
     pub device_index: usize,
     pub original_device_id: String,
     pub selected_implementation_id: Option<String>,
@@ -504,6 +513,15 @@ pub(crate) enum Overlay {
     Help,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HelpContext {
+    ModelSelector,
+    Compiler,
+    Node,
+    Sequence,
+    Graph,
+}
+
 pub struct App {
     pub(crate) editor: Option<RuntimeModelEditor>,
     pub(crate) sequence: TextBuffer,
@@ -521,6 +539,7 @@ pub struct App {
     pub(crate) mouse_capture: bool,
     pub(crate) hit_map: HitMap,
     pub(crate) compiler_job: Option<CompilerJob>,
-    compiler_launch: Result<CompilerLaunch, String>,
+    pub(crate) compiler_launch: Result<CompilerLaunch, String>,
+    pub(crate) editor_loader: EditorLoader,
     terminal_reset_requested: bool,
 }

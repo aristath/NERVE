@@ -58,7 +58,7 @@ fn render_compiler(frame: &mut Frame<'_>, app: &mut App, progress: &CompilerProg
     let current = progress
         .current_item
         .as_deref()
-        .map(|item| format!("Current circuit: {item}"))
+        .map(|item| format!("Current item: {item}"))
         .unwrap_or_else(|| format!("Structured events: {}", progress.events.len()));
     frame.render_widget(
         Paragraph::new(current).style(Style::default().fg(META)),
@@ -101,4 +101,3 @@ fn render_compiler(frame: &mut Frame<'_>, app: &mut App, progress: &CompilerProg
     );
     app.hit_map.insert(rows[4], HitTarget::CompilerCancel);
 }
-

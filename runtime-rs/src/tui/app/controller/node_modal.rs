@@ -34,16 +34,21 @@ impl App {
                     })
                     .map(|bytes| format!(" · {:.1} GiB", bytes as f64 / 1_073_741_824.0))
                     .unwrap_or_default();
+                let compatibility = editor
+                    .validate_instance_device_compatibility(instance_id, &device.device_id);
                 let status = if !device.available {
-                    " · UNAVAILABLE"
-                } else if device.can_host_runtime_components_on_physical_device == Some(false) {
-                    " · INCOMPATIBLE"
+                    "UNAVAILABLE · "
+                } else if compatibility.is_err() {
+                    "INCOMPATIBLE · "
                 } else {
                     ""
                 };
+                let selectable = compatibility.is_ok();
                 (
                     device.device_id.clone(),
-                    format!("{} · {}{memory}{status}", device.device_id, name),
+                    format!("{status}{} · {name}{memory}", device.device_id),
+                    selectable,
+                    compatibility.err().map(|error| error.to_string()),
                 )
             })
             .chain(
@@ -54,25 +59,41 @@ impl App {
                 .then(|| {
                     (
                         instance.device_id.clone(),
-                        format!("{} · UNAVAILABLE", instance.device_id),
+                        format!("UNAVAILABLE · {}", instance.device_id),
+                        false,
+                        Some(format!(
+                            "runtime device {:?} is no longer present",
+                            instance.device_id
+                        )),
                     )
                 }),
             )
             .collect::<Vec<_>>();
-        let device_ids = devices.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let device_ids = devices
+            .iter()
+            .map(|(id, _, _, _)| id.clone())
+            .collect::<Vec<_>>();
         let device_labels = devices
             .iter()
-            .map(|(_, label)| label.clone())
+            .map(|(_, label, _, _)| label.clone())
+            .collect::<Vec<_>>();
+        let device_selectable = devices
+            .iter()
+            .map(|(_, _, selectable, _)| *selectable)
+            .collect::<Vec<_>>();
+        let device_diagnostics = devices
+            .iter()
+            .filter_map(|(id, _, _, error)| {
+                error.as_ref().map(|error| format!("{id}: {error}"))
+            })
             .collect::<Vec<_>>();
         let device_index = device_ids
             .iter()
             .position(|device| device == &instance.device_id)
             .unwrap_or(0);
-        let policy_targets = instances
-            .iter()
-            .filter(|candidate| candidate.instance_id != instance.instance_id)
-            .map(|candidate| candidate.instance_id.clone())
-            .collect::<Vec<_>>();
+        let policy_targets = editor
+            .state_policy_target_ids(instance_id)
+            .unwrap_or_default();
         let (policy, target) = match &instance.state_policy {
             StreamCircuitNodeInstanceStatePolicy::Fresh => (NodePolicyKind::Independent, None),
             StreamCircuitNodeInstanceStatePolicy::CloneFrom { instance_id } => {
@@ -124,6 +145,8 @@ impl App {
             occurrence: instance.occurrence,
             device_ids,
             device_labels,
+            device_selectable,
+            device_diagnostics,
             device_index,
             original_device_id: instance.device_id,
             selected_implementation_id,
@@ -154,6 +177,19 @@ impl App {
             }
             return;
         };
+        if !modal
+            .device_selectable
+            .get(modal.device_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            if let Some(Overlay::Node(modal)) = &mut self.overlay {
+                modal.error = Some(format!(
+                    "Runtime device {device_id:?} is unavailable or incompatible"
+                ));
+            }
+            return;
+        }
         if modal.policy != NodePolicyKind::Independent && modal.policy_targets.is_empty() {
             if let Some(Overlay::Node(modal)) = &mut self.overlay {
                 modal.error = Some("This state policy needs another node instance".to_string());
@@ -175,15 +211,24 @@ impl App {
             return;
         }
         let mut candidate = editor.clone();
-        let mut result = if device_id == &modal.original_device_id {
-            Ok(())
-        } else {
-            candidate.set_instance_device(&modal.instance_id, device_id)
-        }
-        .and_then(|_| candidate.set_instance_enabled(&modal.instance_id, modal.enabled))
-        .and_then(|_| {
-            candidate.set_instance_state_policy(&modal.instance_id, modal.state_policy())
-        });
+        // Remove the instance's old state dependency first so a coordinated
+        // enabled/device/policy edit is validated as one modal transaction.
+        let mut result = candidate
+            .set_instance_state_policy(
+                &modal.instance_id,
+                StreamCircuitNodeInstanceStatePolicy::Fresh,
+            )
+            .and_then(|_| candidate.set_instance_enabled(&modal.instance_id, modal.enabled))
+            .and_then(|_| {
+                if device_id == &modal.original_device_id {
+                    Ok(())
+                } else {
+                    candidate.set_instance_device(&modal.instance_id, device_id)
+                }
+            })
+            .and_then(|_| {
+                candidate.set_instance_state_policy(&modal.instance_id, modal.state_policy())
+            });
         if result.is_ok() {
             for property in modal
                 .properties
@@ -198,6 +243,12 @@ impl App {
                     result = Err(error);
                     break;
                 }
+            }
+        }
+        if result.is_ok() {
+            let validation = candidate.validation();
+            if !validation.valid {
+                result = Err(RuntimeEditorError(validation.errors.join("; ")));
             }
         }
         match result {

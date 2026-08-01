@@ -30,9 +30,15 @@ fn render_node_modal(frame: &mut Frame<'_>, app: &mut App, modal: &NodeModalStat
             Constraint::Length(if modal.anatomy_expanded { 16 } else { 2 }),
             Constraint::Length(
                 if modal.source.implementation_options.is_empty() {
-                    2
-                } else {
+                    if modal.device_diagnostics.is_empty() {
+                        2
+                    } else {
+                        5
+                    }
+                } else if modal.device_diagnostics.is_empty() {
                     7
+                } else {
+                    9
                 },
             ),
             Constraint::Min(4),
@@ -149,18 +155,23 @@ fn render_implementation_options(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if modal.source.implementation_options.is_empty() {
+        let selected = if let Some(error) = &modal.implementation_selection_error {
+            format!(
+                "Selection unavailable: {}",
+                truncate(error, inner.width as usize)
+            )
+        } else {
+            "Selected: exact baseline".to_string()
+        };
+        let mut lines = vec![Line::styled(selected, Style::default().fg(META))];
+        lines.extend(modal.device_diagnostics.iter().take(1).map(|diagnostic| {
+            Line::styled(
+                format!("INCOMPATIBLE target: {diagnostic}"),
+                Style::default().fg(FAULT),
+            )
+        }));
         frame.render_widget(
-            Paragraph::new(if let Some(error) =
-                &modal.implementation_selection_error
-            {
-                format!(
-                    "Selection unavailable: {}",
-                    truncate(error, inner.width as usize)
-                )
-            } else {
-                "Selected: exact baseline".to_string()
-            })
-                .style(Style::default().fg(META)),
+            Paragraph::new(lines).wrap(Wrap { trim: true }),
             inner,
         );
         return;
@@ -219,6 +230,12 @@ fn render_implementation_options(
             Style::default().fg(META),
         ));
     }
+    lines.extend(modal.device_diagnostics.iter().take(1).map(|diagnostic| {
+        Line::styled(
+            format!("INCOMPATIBLE target: {diagnostic}"),
+            Style::default().fg(FAULT),
+        )
+    }));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

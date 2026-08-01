@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const COMPILER_EVENT_SCHEMA: &str = "nerve.compiler_event.v1";
+const COMPILER_CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompilerJobKind {
@@ -45,7 +47,7 @@ impl CompilerEvent {
     }
 
     pub fn current_item(&self) -> Option<&str> {
-        ["component_id", "component_id", "tensor_name", "shader_name"]
+        ["component_id", "tensor_name", "shader_name", "package"]
             .into_iter()
             .find_map(|key| self.value(key).and_then(Value::as_str))
     }
@@ -70,6 +72,7 @@ pub struct CompilerLaunch {
     program: OsString,
     prefix_args: Vec<OsString>,
     working_directory: PathBuf,
+    cancel_grace_period: Duration,
 }
 
 impl CompilerLaunch {
@@ -80,6 +83,7 @@ impl CompilerLaunch {
                 program,
                 prefix_args: Vec::new(),
                 working_directory,
+                cancel_grace_period: COMPILER_CANCEL_GRACE_PERIOD,
             });
         }
         let python = env::var_os("NERVE_PYTHON").unwrap_or_else(|| {
@@ -94,6 +98,7 @@ impl CompilerLaunch {
             program: python,
             prefix_args: vec![OsString::from("-m"), OsString::from("nerve")],
             working_directory,
+            cancel_grace_period: COMPILER_CANCEL_GRACE_PERIOD,
         })
     }
 
@@ -106,7 +111,14 @@ impl CompilerLaunch {
             program: program.into(),
             prefix_args: prefix_args.into_iter().collect(),
             working_directory: working_directory.into(),
+            cancel_grace_period: COMPILER_CANCEL_GRACE_PERIOD,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_cancel_grace_period(mut self, grace_period: Duration) -> Self {
+        self.cancel_grace_period = grace_period;
+        self
     }
 
     pub fn working_directory(&self) -> &Path {
@@ -163,7 +175,7 @@ impl CompilerLaunch {
             .ok_or_else(|| "compiler stderr pipe was not created".to_string())?;
         let (sender, receiver) = mpsc::channel();
         let stdout_sender = sender.clone();
-        thread::spawn(move || {
+        let stdout_reader = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let message = match line {
                     Ok(line) => match serde_json::from_str::<CompilerEvent>(&line) {
@@ -187,7 +199,7 @@ impl CompilerLaunch {
                 }
             }
         });
-        thread::spawn(move || {
+        let stderr_reader = thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 match line {
                     Ok(line) if !line.trim().is_empty() => {
@@ -209,8 +221,10 @@ impl CompilerLaunch {
             kind,
             child,
             receiver,
-            cancel_requested: false,
-            terminal_event_received: false,
+            readers: vec![stdout_reader, stderr_reader],
+            cancel_requested_at: None,
+            cancel_grace_period: self.cancel_grace_period,
+            forced_termination: false,
         })
     }
 }
@@ -226,8 +240,10 @@ pub struct CompilerJob {
     kind: CompilerJobKind,
     child: Child,
     receiver: Receiver<CompilerMessage>,
-    cancel_requested: bool,
-    terminal_event_received: bool,
+    readers: Vec<thread::JoinHandle<()>>,
+    cancel_requested_at: Option<Instant>,
+    cancel_grace_period: Duration,
+    forced_termination: bool,
 }
 
 impl CompilerJob {
@@ -236,42 +252,61 @@ impl CompilerJob {
     }
 
     pub fn cancel_requested(&self) -> bool {
-        self.cancel_requested
+        self.cancel_requested_at.is_some()
+    }
+
+    pub fn forced_termination(&self) -> bool {
+        self.forced_termination
     }
 
     pub fn drain_messages(&mut self) -> Vec<CompilerMessage> {
         let mut messages = Vec::new();
         while let Ok(message) = self.receiver.try_recv() {
-            if let CompilerMessage::Event(event) = &message
-                && matches!(event.kind.as_str(), "Completed" | "Failed" | "Cancelled")
-            {
-                self.terminal_event_received = true;
-            }
             messages.push(message);
         }
         messages
     }
 
-    pub fn try_status(&mut self) -> Result<Option<ExitStatus>, String> {
-        self.child
-            .try_wait()
-            .map_err(|error| format!("could not inspect compiler process: {error}"))
+    pub fn finish_messages(&mut self) -> Vec<CompilerMessage> {
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        self.drain_messages()
     }
 
-    pub fn terminal_event_received(&self) -> bool {
-        self.terminal_event_received
+    pub fn try_status(&mut self) -> Result<Option<ExitStatus>, String> {
+        let status = self
+            .child
+            .try_wait()
+            .map_err(|error| format!("could not inspect compiler process: {error}"))?;
+        if status.is_none()
+            && self
+                .cancel_requested_at
+                .is_some_and(|requested_at| requested_at.elapsed() >= self.cancel_grace_period)
+        {
+            self.child
+                .kill()
+                .map_err(|error| format!("could not force-stop compiler process: {error}"))?;
+            self.forced_termination = true;
+            return self
+                .child
+                .try_wait()
+                .map_err(|error| format!("could not inspect force-stopped compiler: {error}"));
+        }
+        Ok(status)
     }
 
     pub fn cancel(&mut self) -> Result<(), String> {
-        if self.cancel_requested {
+        if self.cancel_requested_at.is_some() {
             return Ok(());
         }
-        self.cancel_requested = true;
         send_terminate(self.child.id()).or_else(|_| {
             self.child
                 .kill()
                 .map_err(|error| format!("could not stop compiler process: {error}"))
-        })
+        })?;
+        self.cancel_requested_at = Some(Instant::now());
+        Ok(())
     }
 }
 
@@ -279,7 +314,20 @@ impl Drop for CompilerJob {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = send_terminate(self.child.id());
+            let deadline = Instant::now() + self.cancel_grace_period;
+            while Instant::now() < deadline {
+                if self.child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
         }
     }
 }
@@ -407,7 +455,7 @@ mod tests {
             assert!(Instant::now() < deadline, "compiler discovery timed out");
             thread::sleep(Duration::from_millis(10));
         };
-        for message in job.drain_messages() {
+        for message in job.finish_messages() {
             if let CompilerMessage::Event(event) = message {
                 events.push(event);
             }
@@ -424,6 +472,15 @@ mod tests {
         assert_eq!(
             events[1].nested_string("source", "model_type"),
             Some("protocol_fixture")
+        );
+        assert_eq!(
+            events[1]
+                .value("source")
+                .and_then(|source| source.get("architectures"))
+                .and_then(Value::as_array)
+                .and_then(|architectures| architectures.first())
+                .and_then(Value::as_str),
+            Some("FixtureCircuit")
         );
         fs::remove_dir_all(source).unwrap();
     }
