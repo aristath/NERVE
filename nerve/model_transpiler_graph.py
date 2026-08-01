@@ -2,6 +2,7 @@ from nerve.model_transpiler_types import *
 from nerve.model_transpiler_tensor_index import *
 from nerve.model_transpiler_quantization import *
 
+
 def make_layer(
     structure: ModelStructure,
     layer: LayerStructure,
@@ -17,6 +18,8 @@ def make_layer(
         if layer.operator_type == "conv"
         else make_attention_operator(structure, layer)
         if layer.operator_type == "full_attention"
+        else make_latent_sparse_attention_operator(structure, layer)
+        if layer.operator_type == "latent_sparse_attention"
         else make_gated_delta_operator(structure, layer)
         if layer.operator_type == "gated_delta"
         else make_rg_lru_operator(structure, layer)
@@ -30,6 +33,7 @@ def make_layer(
         "runtime_role": runtime_role,
         "component_class": make_component_class(structure, layer),
         "operator_type": layer.operator_type,
+        "operator": deepcopy(operator),
         "feed_forward": make_feed_forward_descriptor(structure, layer),
         "numerics": {
             "rms_norm_eps": structure.norm_eps,
@@ -80,7 +84,12 @@ def make_layer(
             "outputs": [
                 {"id": "output", "signal": "frame", "shape": list(layer.boundary_shape)}
             ],
-            "controls": [],
+            "controls": (
+                [{"id": "token_id", "signal": "token_id", "shape": []}]
+                if layer.feed_forward_attributes.get("routing", {}).get("selection")
+                == "token_id_table"
+                else []
+            ),
         },
         "residual_mixer": deepcopy(layer.residual_mixer),
         "state_ports": make_state_ports(structure, layer),
@@ -222,9 +231,7 @@ def make_model_graph(
                     "stream_expansion": (
                         {
                             "type": "repeat",
-                            "multiplicity": int(
-                                structure.stream_mixer["multiplicity"]
-                            ),
+                            "multiplicity": int(structure.stream_mixer["multiplicity"]),
                         }
                         if structure.stream_mixer is not None
                         else None
@@ -365,6 +372,7 @@ def make_feed_forward_descriptor(
                 "shared_intermediate_size": layer.shared_intermediate_size,
             }
         )
+        descriptor.update(deepcopy(layer.feed_forward_attributes))
     return descriptor
 
 
@@ -373,6 +381,10 @@ def make_reference_decomposition(
     layer: LayerStructure,
     operator: Json,
 ) -> Json:
+    if layer.residual_mixer is not None:
+        return make_hyper_connected_reference_decomposition(
+            structure, layer, operator
+        )
     hidden_size = structure.hidden_size
     return {
         "source": "source_transformers_layer",
@@ -413,8 +425,137 @@ def make_reference_decomposition(
     }
 
 
+def make_hyper_connected_reference_decomposition(
+    structure: ModelStructure,
+    layer: LayerStructure,
+    operator: Json,
+) -> Json:
+    mixer = layer.residual_mixer
+    if mixer is None or mixer.get("type") != "sinkhorn_hyper_connection":
+        raise ModelTranspileError("hyper-connected decomposition has no supported mixer")
+    hidden_size = structure.hidden_size
+    mixer_attrs = {
+        "multiplicity": int(mixer["multiplicity"]),
+        "sinkhorn_iterations": int(mixer["sinkhorn_iterations"]),
+        "epsilon": float(mixer["epsilon"]),
+    }
+
+    def stage_prefix(stage: str, input_signal: str, output_signal: str) -> list[Json]:
+        return [
+            {
+                "id": f"hyper_{stage}_function",
+                "type": "normalized_linear",
+                "input": input_signal,
+                "output": f"hyper_{stage}.mixes",
+                "attrs": {
+                    "normalization": "root_mean_square",
+                    **mixer_attrs,
+                },
+                "params": {
+                    "weight": tensor_ref(layer.tensors[f"hyper_{stage}_function"])
+                },
+            },
+            {
+                "id": f"hyper_{stage}_sinkhorn",
+                "type": "sinkhorn_hyper_connection",
+                "input": f"hyper_{stage}.mixes",
+                "outputs": [
+                    f"hyper_{stage}.pre",
+                    f"hyper_{stage}.post",
+                    f"hyper_{stage}.combination",
+                ],
+                "attrs": mixer_attrs,
+                "params": {
+                    "base": tensor_ref(layer.tensors[f"hyper_{stage}_base"]),
+                    "scale": tensor_ref(layer.tensors[f"hyper_{stage}_scale"]),
+                },
+            },
+            {
+                "id": f"hyper_{stage}_reduce",
+                "type": "sinkhorn_hyper_connection_reduce",
+                "inputs": [input_signal, f"hyper_{stage}.pre"],
+                "output": output_signal,
+                "attrs": mixer_attrs,
+            },
+        ]
+
+    return {
+        "source": "source_transformers_layer",
+        "topology": [
+            *stage_prefix("attention", "input", "hyper_attention.input"),
+            {
+                "id": "operator_norm",
+                "type": "rms_norm",
+                "circuit_template": f"rms_norm_h{hidden_size}_v1",
+                "input": "hyper_attention.input",
+                "output": "operator_norm.output",
+                "params": {"weight": tensor_ref(layer.tensors["operator_norm"])},
+            },
+            operator,
+            {
+                "id": "operator_residual",
+                "type": "sinkhorn_hyper_connection_post",
+                "inputs": [
+                    "operator.output",
+                    "input",
+                    "hyper_attention.post",
+                    "hyper_attention.combination",
+                ],
+                "output": "operator_residual.output",
+                "attrs": mixer_attrs,
+            },
+            *stage_prefix(
+                "feed_forward",
+                "operator_residual.output",
+                "hyper_feed_forward.input",
+            ),
+            {
+                "id": "ffn_norm",
+                "type": "rms_norm",
+                "circuit_template": f"rms_norm_h{hidden_size}_v1",
+                "input": "hyper_feed_forward.input",
+                "output": "ffn_norm.output",
+                "params": {"weight": tensor_ref(layer.tensors["ffn_norm"])},
+            },
+            make_ffn_component(structure, layer),
+            {
+                "id": "ffn_residual",
+                "type": "sinkhorn_hyper_connection_post",
+                "inputs": [
+                    "ffn.output",
+                    "operator_residual.output",
+                    "hyper_feed_forward.post",
+                    "hyper_feed_forward.combination",
+                ],
+                "output": "output",
+                "attrs": mixer_attrs,
+            },
+        ],
+    }
+
+
 def make_ffn_component(structure: ModelStructure, layer: LayerStructure) -> Json:
     if layer.feed_forward_type == "sparse_moe":
+        if (
+            layer.feed_forward_attributes.get("expert_storage")
+            == "independent_resources"
+        ):
+            return {
+                "id": "feed_forward",
+                "type": "independently_addressed_sparse_moe_feed_forward",
+                "input": "ffn_norm.output",
+                "output": "ffn.output",
+                "dimensions": make_feed_forward_descriptor(structure, layer),
+                "params": {
+                    name: tensor_ref(tensor)
+                    for name, tensor in layer.tensors.items()
+                    if name == "moe_router"
+                    or name == "moe_route_table"
+                    or name == "moe_router_selection_bias"
+                    or name.startswith("routed_expert_")
+                    or name.startswith("shared_expert_")
+                },
+            }
         params = {
             "router": tensor_ref(layer.tensors["moe_router"]),
             "input": tensor_ref(layer.tensors["moe_input"]),
@@ -563,7 +704,9 @@ def make_attention_operator(structure: ModelStructure, layer: LayerStructure) ->
         params["attention_gate_projection"] = tensor_ref(
             layer.tensors["attention_gate_projection"]
         )
-        internal_components.append({"id": "attention_gate_projection", "type": "linear"})
+        internal_components.append(
+            {"id": "attention_gate_projection", "type": "linear"}
+        )
     if "q_norm" in layer.tensors:
         params["q_norm"] = tensor_ref(layer.tensors["q_norm"])
         internal_components.append({"id": "q_norm", "type": "rms_norm_per_head"})
@@ -629,6 +772,73 @@ def make_attention_operator(structure: ModelStructure, layer: LayerStructure) ->
         "state_ports": make_state_ports(structure, layer),
         "params": params,
         "internal_components": internal_components,
+    }
+
+
+def make_latent_sparse_attention_operator(
+    structure: ModelStructure, layer: LayerStructure
+) -> Json:
+    attributes = deepcopy(layer.operator_attributes)
+    parameter_names = {
+        "q_input_projection",
+        "q_input_norm",
+        "q_head_projection",
+        "kv_projection",
+        "kv_norm",
+        "attention_sinks",
+        "out_group_projection",
+        "attention_out_projection",
+    }
+    return {
+        "id": "operator",
+        "type": "latent_sparse_attention_operator",
+        "circuit_template": (
+            "latent_sparse_attention_"
+            f"h{structure.hidden_size}_q{layer.num_attention_heads}_"
+            f"d{layer.head_width}_r{attributes['query_rank']}_v1"
+        ),
+        "input": "operator_norm.output",
+        "output": "operator.output",
+        "heads": {
+            "query_heads": layer.num_attention_heads,
+            "key_value_heads": layer.num_key_value_heads,
+            "head_width": layer.head_width,
+        },
+        "attributes": attributes,
+        "state_ports": make_state_ports(structure, layer),
+        "params": {
+            name: tensor_ref(tensor)
+            for name, tensor in layer.tensors.items()
+            if name in parameter_names
+            or name.startswith("compressor_")
+            or name.startswith("indexer_")
+        },
+        "internal_components": [
+            {"id": "query_low_rank_projection", "type": "linear"},
+            {"id": "query_low_rank_norm", "type": "rms_norm"},
+            {"id": "query_head_projection", "type": "linear"},
+            {"id": "key_value_projection", "type": "linear"},
+            {"id": "local_temporal_memory", "type": "rolling_attention_memory"},
+            *(
+                [
+                    {"id": "memory_compressor", "type": "learned_gated_pooling"},
+                    {
+                        "id": "compressed_temporal_memory",
+                        "type": "append_only_memory",
+                    },
+                ]
+                if attributes["compression"] is not None
+                else []
+            ),
+            *(
+                [{"id": "memory_indexer", "type": "learned_topk_indexer"}]
+                if attributes["indexer"]["selection"] == "learned_topk"
+                else []
+            ),
+            {"id": "sparse_attention_read", "type": "indexed_attention"},
+            {"id": "grouped_output_projection", "type": "grouped_linear"},
+            {"id": "output_projection", "type": "linear"},
+        ],
     }
 
 
@@ -728,6 +938,8 @@ def make_parameter_block(
         layout = "shortconv_layer_params_v1"
     elif operator_type == "full_attention":
         layout = "gqa_attention_layer_params_v1"
+    elif operator_type == "latent_sparse_attention":
+        layout = "latent_sparse_attention_layer_params_v1"
     elif operator_type == "gated_delta":
         layout = "gated_delta_layer_params_v1"
     elif operator_type == "rg_lru":
@@ -781,6 +993,75 @@ def make_state_ports(
                 "sharing": sharing,
             }
         ]
+
+    if operator_type == "latent_sparse_attention":
+        attributes = layer.operator_attributes
+        states: list[Json] = [
+            {
+                "id": "local_kv_memory",
+                "type": "rolling_attention_memory",
+                "shape_per_token": [layer.head_width],
+                "capacity": int(attributes["window_size"]),
+                "dtype": "BF16",
+                "update": "ring_append",
+                "sharing": "per_stream_per_node_instance",
+            }
+        ]
+        compression = attributes["compression"]
+        if compression is not None:
+            ratio = int(compression["ratio"])
+            coefficient = int(compression["lane_coefficient"])
+            states.extend(
+                [
+                    {
+                        "id": "compressed_kv_memory",
+                        "type": "append_only_attention_memory",
+                        "shape_per_token": [layer.head_width],
+                        "dtype": "BF16",
+                        "growth": f"one_per_{ratio}_activations",
+                        "sharing": "per_stream_per_node_instance",
+                    },
+                    {
+                        "id": "compressor_accumulator",
+                        "type": "gated_pooling_memory",
+                        "shape": [
+                            coefficient * ratio,
+                            coefficient * layer.head_width,
+                        ],
+                        "dtype": "F32",
+                        "update": "position_biased_softmax_pool",
+                        "sharing": "per_stream_per_node_instance",
+                    },
+                ]
+            )
+        if attributes["indexer"]["selection"] == "learned_topk":
+            indexer = attributes["indexer"]
+            states.extend(
+                [
+                    {
+                        "id": "indexer_compressor_accumulator",
+                        "type": "gated_pooling_memory",
+                        "shape": [
+                            int(indexer["compressor_lane_coefficient"])
+                            * int(compression["ratio"]),
+                            int(indexer["compressor_lane_coefficient"])
+                            * int(indexer["head_width"]),
+                        ],
+                        "dtype": "F32",
+                        "update": "position_biased_softmax_pool",
+                        "sharing": "per_stream_per_node_instance",
+                    },
+                    {
+                        "id": "indexer_kv_memory",
+                        "type": "append_only_index_memory",
+                        "shape_per_token": [int(indexer["head_width"])],
+                        "dtype": "BF16",
+                        "growth": "with_compressed_kv_memory",
+                        "sharing": "per_stream_per_node_instance",
+                    },
+                ]
+            )
+        return states
 
     if operator_type == "gated_delta":
         mixer = structure.recurrent_mixer
@@ -875,6 +1156,23 @@ def make_component_class(structure: ModelStructure, layer: LayerStructure) -> st
             f"{feed_forward}_v1"
         )
 
+    if operator_type == "latent_sparse_attention":
+        attributes = layer.operator_attributes
+        compression = attributes["compression"]
+        compression_class = (
+            f"c{compression['ratio']}" if compression is not None else "window_only"
+        )
+        index_class = (
+            "indexed"
+            if attributes["indexer"]["selection"] == "learned_topk"
+            else "chronological"
+        )
+        return (
+            "latent_sparse_attention_layer_"
+            f"h{structure.hidden_size}_q{layer.num_attention_heads}_"
+            f"d{layer.head_width}_{compression_class}_{index_class}_{feed_forward}_v1"
+        )
+
     if operator_type == "gated_delta":
         mixer = structure.recurrent_mixer
         if mixer is None:
@@ -888,4 +1186,6 @@ def make_component_class(structure: ModelStructure, layer: LayerStructure) -> st
             f"{feed_forward}_v1"
         )
 
-    raise ModelTranspileError(f"unsupported component class for operator {operator_type!r}")
+    raise ModelTranspileError(
+        f"unsupported component class for operator {operator_type!r}"
+    )

@@ -26,9 +26,42 @@ def build_layer_semantic_module_tree(component: Json, nodes: list[Json]) -> Json
             parent="layer",
         ),
     ]
-    definitions.extend(_token_mixer_modules(operator_type))
+    definitions.extend(_token_mixer_modules(component))
     definitions.extend(_feature_transform_modules(component))
+    definitions.extend(_residual_mixer_modules(component))
     return _materialize_tree(component, nodes, definitions)
+
+
+def _residual_mixer_modules(component: Json) -> list[Json]:
+    mixer = component.get("residual_mixer")
+    if mixer is None:
+        return []
+    if mixer.get("type") != "sinkhorn_hyper_connection":
+        raise ValueError(f"unsupported residual mixer {mixer.get('type')!r}")
+    return [
+        _module(
+            "layer.token_mixer.hyper_connection",
+            "stream_mixer",
+            "Select, normalize, and reduce the input lanes for token mixing",
+            parent="layer.token_mixer",
+            nodes=[
+                "hyper_attention_function",
+                "hyper_attention_sinkhorn",
+                "hyper_attention_reduce",
+            ],
+        ),
+        _module(
+            "layer.feature_transform.hyper_connection",
+            "stream_mixer",
+            "Select, normalize, and reduce the token-mixer lanes for feature transformation",
+            parent="layer.feature_transform",
+            nodes=[
+                "hyper_feed_forward_function",
+                "hyper_feed_forward_sinkhorn",
+                "hyper_feed_forward_reduce",
+            ],
+        ),
+    ]
 
 
 def semantic_module_ids_for_source_nodes(
@@ -48,16 +81,15 @@ def semantic_module_ids_for_source_nodes(
 def normalized_source_node_ids(node: Json) -> list[str]:
     semantic_source_node_ids = node.get("attrs", {}).get("semantic_source_node_ids")
     if isinstance(semantic_source_node_ids, list) and semantic_source_node_ids:
-        return list(
-            dict.fromkeys(str(node_id) for node_id in semantic_source_node_ids)
-        )
+        return list(dict.fromkeys(str(node_id) for node_id in semantic_source_node_ids))
     compiled_from = node.get("attrs", {}).get("compiled_from")
     if isinstance(compiled_from, list) and compiled_from:
         return list(dict.fromkeys(str(node_id) for node_id in compiled_from))
     return [str(node["id"])]
 
 
-def _token_mixer_modules(operator_type: str) -> list[Json]:
+def _token_mixer_modules(component: Json) -> list[Json]:
+    operator_type = str(component["operator_type"])
     common = [
         _module(
             "layer.token_mixer.normalization",
@@ -74,6 +106,10 @@ def _token_mixer_modules(operator_type: str) -> list[Json]:
             nodes={
                 "conv": ["conv_out_projection"],
                 "full_attention": ["attention_out_projection"],
+                "latent_sparse_attention": [
+                    "grouped_output_projection",
+                    "attention_out_projection",
+                ],
                 "gated_delta": ["delta_out_projection"],
                 "rg_lru": ["rg_lru_out_projection"],
             }[operator_type],
@@ -179,6 +215,74 @@ def _token_mixer_modules(operator_type: str) -> list[Json]:
                     "attention_output_gate",
                 ],
                 optional=True,
+            ),
+        ]
+    if operator_type == "latent_sparse_attention":
+        state_ports = {str(port["id"]) for port in component.get("state_ports", [])}
+        return [
+            *common,
+            _module(
+                "layer.token_mixer.query_path",
+                "projection",
+                "Build normalized low-rank query heads",
+                parent="layer.token_mixer",
+                nodes=[
+                    "query_input_projection",
+                    "query_input_norm",
+                    "query_head_projection",
+                    "query_head_norm",
+                ],
+            ),
+            _module(
+                "layer.token_mixer.position",
+                "position_operation",
+                "Apply and reverse the partial rotary position transform",
+                parent="layer.token_mixer",
+                nodes=[
+                    "query_rope",
+                    "key_value_rope",
+                    "attention_inverse_rope",
+                ],
+            ),
+            _module(
+                "layer.token_mixer.local_memory",
+                "state_attachment",
+                "Own the bounded local attention window",
+                parent="layer.token_mixer",
+                nodes=["key_value_projection", "key_value_norm", "local_memory_update"],
+                state=["local_kv_memory"],
+            ),
+            _module(
+                "layer.token_mixer.compressed_memory",
+                "state_attachment",
+                "Learn and retain the compressed long-range attention memory",
+                parent="layer.token_mixer",
+                nodes=["memory_compressor", "compressed_memory_update"],
+                state=["compressor_accumulator", "compressed_kv_memory"],
+                optional=True,
+            ),
+            _module(
+                "layer.token_mixer.memory_index",
+                "selection",
+                "Select causal compressed positions for sparse attention",
+                parent="layer.token_mixer",
+                nodes=["compressed_memory_indexer"],
+                state=[
+                    state
+                    for state in (
+                        "indexer_compressor_accumulator",
+                        "indexer_kv_memory",
+                    )
+                    if state in state_ports
+                ],
+                optional=True,
+            ),
+            _module(
+                "layer.token_mixer.sparse_read",
+                "temporal_mixer",
+                "Read the local window and selected compressed positions",
+                parent="layer.token_mixer",
+                nodes=["sparse_attention_read"],
             ),
         ]
     if operator_type == "gated_delta":
@@ -345,6 +449,8 @@ def _feature_transform_modules(component: Json) -> list[Json]:
                 nodes=[
                     "shared_mlp_input_projection",
                     "shared_mlp_split",
+                    "shared_mlp_gate_projection",
+                    "shared_mlp_up_projection",
                     "shared_mlp_activation",
                     "shared_mlp_output_projection",
                     "shared_expert_gate_projection",
@@ -355,20 +461,45 @@ def _feature_transform_modules(component: Json) -> list[Json]:
         ]
     )
     for expert_index in range(int(feed_forward["num_experts"])):
+        independent = feed_forward.get("expert_storage") == "independent_resources"
+        expert_params = (
+            [
+                f"routed_expert_{expert_index:03d}_w1",
+                f"routed_expert_{expert_index:03d}_w2",
+                f"routed_expert_{expert_index:03d}_w3",
+            ]
+            if independent
+            else ["moe_input", "moe_output"]
+        )
         modules.append(
             _module(
                 f"layer.feature_transform.expert_bank.expert_{expert_index:03d}",
                 "expert",
                 f"Packed sparse expert {expert_index}",
                 parent="layer.feature_transform.expert_bank",
-                params=["moe_input", "moe_output"],
+                params=expert_params,
                 virtual=True,
                 attrs={
                     "expert_index": expert_index,
-                    "parameter_slices": [
-                        {"parameter_ref_id": "moe_input", "axis": 0, "index": expert_index},
-                        {"parameter_ref_id": "moe_output", "axis": 0, "index": expert_index},
-                    ],
+                    "parameter_slices": (
+                        []
+                        if independent
+                        else [
+                            {
+                                "parameter_ref_id": "moe_input",
+                                "axis": 0,
+                                "index": expert_index,
+                            },
+                            {
+                                "parameter_ref_id": "moe_output",
+                                "axis": 0,
+                                "index": expert_index,
+                            },
+                        ]
+                    ),
+                    "resource_granularity": (
+                        "expert" if independent else "expert_axis_partition"
+                    ),
                 },
             )
         )
@@ -402,7 +533,9 @@ def _module(
     }
 
 
-def _materialize_tree(component: Json, nodes: list[Json], definitions: list[Json]) -> Json:
+def _materialize_tree(
+    component: Json, nodes: list[Json], definitions: list[Json]
+) -> Json:
     node_by_id = {str(node["id"]): node for node in nodes}
     node_order = {node_id: index for index, node_id in enumerate(node_by_id)}
     parameters = set(component["parameter_block"]["params"])
@@ -425,7 +558,9 @@ def _materialize_tree(component: Json, nodes: list[Json], definitions: list[Json
             for parameter in node_by_id[node_id].get("params", []):
                 if parameter not in direct_params:
                     direct_params.append(parameter)
-        unknown_params = [parameter for parameter in direct_params if parameter not in parameters]
+        unknown_params = [
+            parameter for parameter in direct_params if parameter not in parameters
+        ]
         if unknown_params:
             raise ValueError(
                 f"semantic module {definition['id']!r} references unknown parameters "
@@ -526,9 +661,8 @@ def _module_boundary_signals(
                 inputs.append(signal)
         for signal in node.get("outputs", []):
             if (
-                (signal in consumed_outside or signal == "output_frame")
-                and signal not in outputs
-            ):
+                signal in consumed_outside or signal == "output_frame"
+            ) and signal not in outputs:
                 outputs.append(signal)
     return inputs, outputs
 
@@ -562,7 +696,9 @@ def _validate_materialized_tree(
 
     visit(root_id, set())
     if visited != set(by_id):
-        raise ValueError("semantic module tree contains modules unreachable from the root")
+        raise ValueError(
+            "semantic module tree contains modules unreachable from the root"
+        )
 
     owners: dict[str, str] = {}
     for module in modules:
@@ -586,9 +722,7 @@ def _validate_materialized_tree(
         )
 
     state_owners = [
-        state
-        for module in modules
-        for state in module["owned_state_port_ids"]
+        state for module in modules for state in module["owned_state_port_ids"]
     ]
     if len(state_owners) != len(set(state_owners)) or set(state_owners) != state_ports:
         raise ValueError("every layer state port must have exactly one semantic owner")

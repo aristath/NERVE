@@ -24,6 +24,7 @@ def find_bias_for_weight(tensors: dict[str, Json], weight: str) -> str | None:
     bias = f"{weight[: -len(suffix)]}.bias"
     return bias if bias in tensors else None
 
+
 def synthesize_packed_expert_tensors(
     tensors: dict[str, Json], layer_prefix: str
 ) -> None:
@@ -372,9 +373,7 @@ def annotate_quantized_linear_tensors(
             "symmetric": symmetric,
             "packing_layout": AUTO_GPTQ_INPUT_MAJOR_PACKING,
             "zero_point_encoding": (
-                AUTO_GPTQ_FIXED_ZERO_8
-                if symmetric
-                else AUTO_GPTQ_PER_GROUP_ZERO
+                AUTO_GPTQ_FIXED_ZERO_8 if symmetric else AUTO_GPTQ_PER_GROUP_ZERO
             ),
             "execution_zero_point_encoding": AUTO_GPTQ_FIXED_ZERO_8,
             "scales": scales_name,
@@ -409,8 +408,7 @@ def annotate_compressed_tensors_channel_fp8_linears(
     for group in config_groups.values():
         if (
             isinstance(group, dict)
-            and (group.get("format") or quantization.get("format"))
-            == "float-quantized"
+            and (group.get("format") or quantization.get("format")) == "float-quantized"
             and isinstance(group.get("weights"), dict)
             and isinstance(group.get("input_activations"), dict)
         ):
@@ -453,10 +451,7 @@ def annotate_compressed_tensors_channel_fp8_linears(
                 f"compressed-tensors FP8 weight {tensor_name!r} requires a "
                 f"matrix with {block_columns}-aligned input columns; got {shape}"
             )
-        if (
-            source_scale.get("dtype") != "BF16"
-            or scale_shape != [shape[0], 1]
-        ):
+        if source_scale.get("dtype") != "BF16" or scale_shape != [shape[0], 1]:
             raise ModelTranspileError(
                 f"compressed-tensors FP8 weight {tensor_name!r} has incompatible "
                 f"channel scale dtype {source_scale.get('dtype')!r} and shape "
@@ -572,11 +567,10 @@ def attach_packed_linear_quantization(
     additions: dict[str, str] = {}
     for parameter_id, tensor_name in tuple(layer_tensors.items()):
         quantization = tensors[tensor_name].get("quantization")
-        if (
-            not isinstance(quantization, dict)
-            or quantization.get("format")
-            not in {"auto_gptq", "compressed_tensors_pack_quantized"}
-        ):
+        if not isinstance(quantization, dict) or quantization.get("format") not in {
+            "auto_gptq",
+            "compressed_tensors_pack_quantized",
+        }:
             continue
         execution_zero_encoding = str(
             quantization.get(
@@ -644,6 +638,27 @@ def attach_block_quantization_scales(
                 f"FP8 parameter {tensor_name!r} has unsupported shape {shape}; "
                 "only block-scaled matrices and expert stacks are executable"
             )
+        native_scale_name = (
+            tensor_name.removesuffix(".weight") + ".scale"
+            if tensor_name.endswith(".weight")
+            else ""
+        )
+        native_scale = tensors.get(native_scale_name)
+        if native_scale is not None:
+            expected_shape = (
+                [shape[0], math.ceil(shape[1] / 128), math.ceil(shape[2] / 128)]
+                if len(shape) == 3
+                else [math.ceil(shape[0] / 128), math.ceil(shape[1] / 128)]
+            )
+            native_shape = [int(value) for value in native_scale.get("shape", [])]
+            if native_scale.get("dtype") != "F8_E8M0" or native_shape != expected_shape:
+                raise ModelTranspileError(
+                    f"FP8 parameter {tensor_name!r} has incompatible native E8M0 "
+                    f"scale dtype {native_scale.get('dtype')!r} and shape {native_shape}; "
+                    f"expected F8_E8M0 {expected_shape}"
+                )
+            additions[f"{parameter_id}_scale"] = native_scale_name
+            continue
         scale_name = f"{tensor_name}_scale_inv"
         scale = tensors.get(scale_name)
         if scale is None:

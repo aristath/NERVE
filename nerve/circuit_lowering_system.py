@@ -1,6 +1,7 @@
 from nerve.circuit_lowering_common import *
 from nerve.circuit_lowering_helpers import *
 
+
 def build_system_circuits(model: Json) -> list[Json]:
     dimensions = model["dimensions"]
     hidden_size = dimensions["hidden_size"]
@@ -14,6 +15,51 @@ def build_system_circuits(model: Json) -> list[Json]:
         name: _system_param_ref(ref, f"input_transducer.{name}")
         for name, ref in input_component.get("params", {}).items()
     }
+    input_attrs = dict(input_component.get("attrs", {}))
+    input_shape = [
+        int(value) for value in input_attrs.get("output_shape", [hidden_size])
+    ]
+    stream_expansion = input_attrs.get("stream_expansion")
+    embedding_output = (
+        "embedded_frame" if stream_expansion is not None else "output_frame"
+    )
+    input_nodes: list[Json] = [
+        {
+            "id": input_component.get("id", "token_embedding"),
+            "op": input_component["type"],
+            "inputs": ["input_token"],
+            "outputs": [embedding_output],
+            "params": list(input_params),
+            "state_reads": [],
+            "state_writes": [],
+            "attrs": {
+                **input_attrs,
+                "output_shape": [hidden_size],
+                "stream_expansion": None,
+            },
+        }
+    ]
+    if stream_expansion is not None:
+        if stream_expansion.get("type") != "repeat":
+            raise ValueError(
+                f"unsupported input stream expansion {stream_expansion.get('type')!r}"
+            )
+        input_nodes.append(
+            {
+                "id": "stream_expansion",
+                "op": "repeat_stream_lanes",
+                "inputs": [embedding_output],
+                "outputs": ["output_frame"],
+                "params": [],
+                "state_reads": [],
+                "state_writes": [],
+                "attrs": {
+                    "multiplicity": int(stream_expansion["multiplicity"]),
+                    "input_shape": [hidden_size],
+                    "output_shape": input_shape,
+                },
+            }
+        )
     input_circuit = _system_circuit(
         component_id="input_transducer",
         operator_type="input_transducer",
@@ -24,24 +70,13 @@ def build_system_circuits(model: Json) -> list[Json]:
             _system_port(
                 "output_frame",
                 "frame",
-                [hidden_size],
+                input_shape,
                 "frame",
                 source="output_frame",
             )
         ],
         parameters=input_params,
-        nodes=[
-            {
-                "id": input_component.get("id", "token_embedding"),
-                "op": input_component["type"],
-                "inputs": ["input_token"],
-                "outputs": ["output_frame"],
-                "params": list(input_params),
-                "state_reads": [],
-                "state_writes": [],
-                "attrs": dict(input_component.get("attrs", {})),
-            }
-        ],
+        nodes=input_nodes,
     )
 
     output_params: Json = {}
@@ -79,7 +114,19 @@ def build_system_circuits(model: Json) -> list[Json]:
         operator_type="output_transducer",
         runtime_role="output_transducer",
         implementation="compiled_output_transducer_v1",
-        inputs=[_system_port("input_frame", "frame", [hidden_size], "frame")],
+        inputs=[
+            _system_port(
+                "input_frame",
+                "frame",
+                [
+                    int(value)
+                    for value in output_components[0]
+                    .get("attrs", {})
+                    .get("input_shape", [hidden_size])
+                ],
+                "frame",
+            )
+        ],
         outputs=[
             _system_port(
                 "output_logits",
@@ -104,7 +151,7 @@ def build_system_circuits(model: Json) -> list[Json]:
         sampler_min_p = 0.0
     else:
         sampler_temperature = sampling["temperature"]
-        sampler_top_k = sampling["top_k"]
+        sampler_top_k = sampling.get("top_k")
         sampler_top_p = sampling["top_p"]
         sampler_min_p = sampling["min_p"]
     sampler_circuit = _system_circuit(
@@ -353,5 +400,6 @@ def _system_circuit(
             "Its optimized Vulkan implementation is a backend lowering, not a host-side exception.",
         ],
     }
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

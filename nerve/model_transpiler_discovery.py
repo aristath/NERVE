@@ -10,6 +10,15 @@ from nerve.model_transpiler_hyper_connections import (
     discover_layer_residual_mixer,
     discover_stream_mixer,
 )
+from nerve.model_transpiler_latent_attention import (
+    discover_latent_sparse_attention,
+    has_latent_sparse_attention,
+)
+from nerve.model_transpiler_sparse_experts import (
+    discover_independent_sparse_experts,
+    has_independent_sparse_experts,
+)
+
 
 def discover_model_structure(
     model_dir: Path,
@@ -127,7 +136,12 @@ def discover_model_structure(
     )
 
     first_attention = next(
-        (layer for layer in layers if layer.operator_type == "full_attention"), None
+        (
+            layer
+            for layer in layers
+            if layer.operator_type in {"full_attention", "latent_sparse_attention"}
+        ),
+        None,
     )
     num_key_value_heads = (
         first_attention.num_key_value_heads
@@ -162,11 +176,16 @@ def discover_model_structure(
     )
     if has_sparse_experts:
         num_experts = discover_int_config(
-            decoder_config, "num_local_experts", "num_experts", role="number of experts"
+            decoder_config,
+            "n_routed_experts",
+            "num_local_experts",
+            "num_experts",
+            role="number of experts",
         )
         experts_per_token = discover_int_config(
             decoder_config,
             "num_experts_per_tok",
+            "n_activated_experts",
             "experts_per_token",
             role="experts per token",
         )
@@ -365,12 +384,28 @@ def discover_layer_structure(
         if optional_layer_scalar is not None:
             layer_tensors["layer_scalar"] = optional_layer_scalar
     synthesize_packed_expert_tensors(tensors, prefix)
+    feed_forward_attributes: Json = {}
+    independent_intermediate_size: int | None = None
     dense_gate = find_optional_layer_tensor(tensors, prefix, FFN_GATE_SUFFIXES)
     fused_gate_up = find_optional_layer_tensor(
         tensors, prefix, FFN_FUSED_GATE_UP_SUFFIXES
     )
     moe_input = find_optional_layer_tensor(tensors, prefix, MOE_INPUT_SUFFIXES)
-    if dense_gate is not None:
+    if has_independent_sparse_experts(tensors, prefix):
+        feed_forward_type = "sparse_moe"
+        (
+            independent_parameters,
+            feed_forward_attributes,
+            independent_intermediate_size,
+        ) = discover_independent_sparse_experts(
+            tensors,
+            decoder_config,
+            prefix=prefix,
+            hidden_size=hidden_size,
+            vocab_size=int(decoder_config.get("vocab_size") or 0),
+        )
+        layer_tensors.update(independent_parameters)
+    elif dense_gate is not None:
         feed_forward_type = "dense_swiglu"
         layer_tensors.update(
             {
@@ -477,6 +512,7 @@ def discover_layer_structure(
         layer_attention_window_size = None
 
     attention_key_equals_value = False
+    operator_attributes: Json = {}
     if operator_type == "conv":
         layer_tensors.update(
             {
@@ -590,6 +626,18 @@ def discover_layer_structure(
                 "attention_gate_projection",
             )
         add_optional_linear_biases(tensors, layer_tensors, attention_linear_ids)
+    elif operator_type == "latent_sparse_attention":
+        latent_parameters, operator_attributes = discover_latent_sparse_attention(
+            tensors,
+            decoder_config,
+            prefix=prefix,
+            layer_index=layer_index,
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            head_width=configured_head_width,
+            window_size=configured_attention_window_size,
+        )
+        layer_tensors.update(latent_parameters)
     elif operator_type == "gated_delta":
         layer_tensors.update(
             {
@@ -768,6 +816,19 @@ def discover_layer_structure(
         )
         attention_gate_activation = None
         attention_gate_per_head = False
+    elif operator_type == "latent_sparse_attention":
+        head_width = configured_head_width
+        num_key_value_heads = configured_num_key_value_heads
+        rotary_width = int(operator_attributes["rotary_width"])
+        rope_parameters = operator_attributes["rope_parameters"]
+        rope_theta = float(rope_parameters["rope_theta"])
+        rope_type = str(rope_parameters.get("rope_type", "default"))
+        rope_scaling = compile_rope_scaling(rope_parameters, rotary_width)
+        attention_scale = head_width**-0.5
+        layer_attention_window_size = int(operator_attributes["window_size"])
+        value_head_norm = False
+        attention_gate_activation = None
+        attention_gate_per_head = False
         if "attention_gate_projection" in layer_tensors:
             if configured_attention_gate_activation is None:
                 raise ModelTranspileError(
@@ -804,6 +865,7 @@ def discover_layer_structure(
         index=layer_index,
         prefix=prefix,
         operator_type=operator_type,
+        operator_attributes=operator_attributes,
         attention_window_size=layer_attention_window_size,
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
@@ -820,10 +882,17 @@ def discover_layer_structure(
         shared_kv_source_layer=shared_kv_source_layer,
         per_layer_input_width=per_layer_input_width,
         feed_forward_type=feed_forward_type,
-        intermediate_size=discover_layer_intermediate_size(tensors, layer_tensors),
+        feed_forward_attributes=feed_forward_attributes,
+        intermediate_size=(
+            independent_intermediate_size
+            if independent_intermediate_size is not None
+            else discover_layer_intermediate_size(tensors, layer_tensors)
+        ),
         shared_intermediate_size=(
             tensor_matrix_shape(tensors, layer_tensors["shared_mlp_input"])[0] // 2
             if "shared_mlp_input" in layer_tensors
+            else independent_intermediate_size
+            if independent_intermediate_size is not None
             else None
         ),
         boundary_shape=(
@@ -841,6 +910,8 @@ def infer_operator_type(tensors: dict[str, Json], prefix: str) -> str:
         tensors, (f"{prefix}.{suffix}" for suffix in CONV_IN_PROJECTION_SUFFIXES)
     ):
         return "conv"
+    if has_latent_sparse_attention(tensors, prefix):
+        return "latent_sparse_attention"
     if find_first_existing_tensor(
         tensors, (f"{prefix}.{suffix}" for suffix in ATTENTION_Q_PROJECTION_SUFFIXES)
     ) or find_first_existing_tensor(
@@ -1268,7 +1339,7 @@ def discover_moe_routing(model_dir: Path, config: Json) -> Json:
                 f"model source contains ambiguous MoE router activations {sorted(discovered)}"
             )
         activation = next(iter(discovered), "softmax")
-    if activation not in {"sigmoid", "softmax"}:
+    if activation not in {"sigmoid", "softmax", "sqrtsoftplus"}:
         raise ModelTranspileError(f"unsupported MoE router activation {activation!r}")
 
     logit_softcap = float(config.get("moe_router_logit_softcapping") or 0.0)
@@ -1351,7 +1422,9 @@ def compile_rope_scaling(parameters: Json, rotary_width: int) -> Json | None:
     attention_factor = (
         float(attention_factor_value)
         if attention_factor_value is not None
-        else 1.0 if factor <= 1.0 else 0.1 * math.log(factor) + 1.0
+        else 1.0
+        if factor <= 1.0
+        else 0.1 * math.log(factor) + 1.0
     )
     if not math.isfinite(attention_factor) or attention_factor <= 0.0:
         raise ModelTranspileError(
@@ -1655,27 +1728,30 @@ def discover_sampling_policy(generation_config: Json) -> Json:
         }
 
     temperature = float(generation_config.get("temperature", 1.0))
-    top_k = int(generation_config.get("top_k", 0))
+    source_top_k = generation_config.get("top_k")
+    top_k = int(source_top_k) if source_top_k is not None else None
     top_p = float(generation_config.get("top_p", 1.0))
     if not math.isfinite(temperature) or temperature <= 0.0:
         raise ModelTranspileError(
             f"sampling temperature must be finite and positive, got {temperature}"
         )
-    if top_k <= 0:
-        raise ModelTranspileError(
-            "sampled generation requires a positive top_k for the resident Vulkan sampler"
-        )
+    if top_k is not None and top_k <= 0:
+        raise ModelTranspileError(f"sampling top_k must be positive, got {top_k}")
     if not math.isfinite(top_p) or not 0.0 < top_p <= 1.0:
         raise ModelTranspileError(f"sampling top_p must be in (0, 1], got {top_p}")
-    return {
-        "method": "temperature_top_k_top_p",
+    policy = {
+        "method": (
+            "temperature_top_k_top_p" if top_k is not None else "temperature_top_p"
+        ),
         "temperature": temperature,
-        "top_k": top_k,
         "top_p": top_p,
         "min_p": min_p,
         "presence_penalty": presence_penalty,
         "repetition_penalty": repetition_penalty,
     }
+    if top_k is not None:
+        policy["top_k"] = top_k
+    return policy
 
 
 def discover_attention_window_size(config: Json) -> int | None:

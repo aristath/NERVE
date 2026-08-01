@@ -32,9 +32,26 @@ def test_compiles_exact_yarn_frequency_and_attention_scaling() -> None:
     }
 
 
-def test_discovers_model_owned_sampling_policy() -> None:
+def test_discovers_model_owned_greedy_sampling_policy() -> None:
     assert discover_sampling_policy({}) == {
         "method": "greedy",
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
+    }
+
+
+def test_preserves_model_owned_sampled_generation_filters() -> None:
+    assert discover_sampling_policy(
+        {
+            "do_sample": True,
+            "temperature": 1.0,
+            "top_p": 1.0,
+        }
+    ) == {
+        "method": "temperature_top_p",
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "min_p": 0.0,
         "presence_penalty": 0.0,
         "repetition_penalty": 1.0,
     }
@@ -168,6 +185,21 @@ def test_attaches_block_scale_to_fp8_parameter_by_tensor_structure() -> None:
     assert parameters == {
         "projection": "projection.weight",
         "projection_scale_inv": "projection.weight_scale_inv",
+    }
+
+
+def test_preserves_native_e8m0_block_scale_without_conversion() -> None:
+    tensors = {
+        "projection.weight": _tensor([256, 512], "F8_E4M3"),
+        "projection.scale": _tensor([2, 4], "F8_E8M0"),
+    }
+    parameters = {"projection": "projection.weight"}
+
+    attach_block_quantization_scales(tensors, parameters)
+
+    assert parameters == {
+        "projection": "projection.weight",
+        "projection_scale": "projection.scale",
     }
 
 

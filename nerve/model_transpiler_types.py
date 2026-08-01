@@ -36,6 +36,7 @@ class LayerStructure:
     index: int
     prefix: str
     operator_type: str
+    operator_attributes: Json
     attention_window_size: int | None
     num_attention_heads: int
     num_key_value_heads: int
@@ -52,6 +53,7 @@ class LayerStructure:
     shared_kv_source_layer: int | None
     per_layer_input_width: int | None
     feed_forward_type: str
+    feed_forward_attributes: Json
     intermediate_size: int
     shared_intermediate_size: int | None
     boundary_shape: tuple[int, ...]
@@ -133,6 +135,7 @@ OUTPUT_PROJECTION_CANDIDATES = (
 )
 
 OPERATOR_NORM_SUFFIXES = (
+    "attn_norm.weight",
     "operator_norm.weight",
     "input_layernorm.weight",
     "self_attn_layer_norm.weight",

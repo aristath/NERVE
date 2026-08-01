@@ -1,4 +1,7 @@
+import re
+
 from nerve.circuit_lowering_common import *
+
 
 def _residual_node(
     *, node_id: str, residual: str, update: str, output: str, scale: float
@@ -16,6 +19,9 @@ def _residual_node(
 
 def _linear_params(weight_id: str, parameters: Json) -> list[str]:
     result = [weight_id]
+    source_scale_id = f"{weight_id}_scale"
+    if source_scale_id in parameters:
+        result.append(source_scale_id)
     scale_id = f"{weight_id}_scale_inv"
     if scale_id in parameters:
         result.append(scale_id)
@@ -57,6 +63,9 @@ def _state_port_for_circuit(port: Json, operator_type: str) -> Json:
     elif operator_type == "full_attention":
         state.setdefault("layout", "append_only_kv")
         state.setdefault("source_layout", "batch_kvheads_seq_headdim")
+    elif operator_type == "latent_sparse_attention":
+        state.setdefault("layout", state["type"])
+        state.setdefault("source_layout", state["layout"])
     elif operator_type == "gated_delta":
         state.setdefault(
             "layout",
@@ -116,6 +125,28 @@ def _param_role(name: str) -> str:
         "attention_sinks": "attention_sink_logits",
         "q_norm": "attention_query_head_normalization",
         "k_norm": "attention_key_head_normalization",
+        "q_input_projection": "attention_query_low_rank_input_projection",
+        "q_input_norm": "attention_query_low_rank_normalization",
+        "q_head_projection": "attention_query_head_projection",
+        "kv_projection": "attention_latent_key_value_projection",
+        "kv_norm": "attention_latent_key_value_normalization",
+        "out_group_projection": "attention_grouped_output_projection",
+        "compressor_position_bias": "attention_compressor_position_bias",
+        "compressor_kv_projection": "attention_compressor_key_value_projection",
+        "compressor_gate_projection": "attention_compressor_gate_projection",
+        "compressor_norm": "attention_compressor_normalization",
+        "indexer_q_projection": "attention_indexer_query_projection",
+        "indexer_head_weight_projection": "attention_indexer_head_weight_projection",
+        "indexer_compressor_position_bias": "attention_indexer_compressor_position_bias",
+        "indexer_compressor_kv_projection": "attention_indexer_compressor_key_value_projection",
+        "indexer_compressor_gate_projection": "attention_indexer_compressor_gate_projection",
+        "indexer_compressor_norm": "attention_indexer_compressor_normalization",
+        "hyper_attention_function": "attention_hyper_connection_function",
+        "hyper_attention_base": "attention_hyper_connection_base",
+        "hyper_attention_scale": "attention_hyper_connection_scale",
+        "hyper_feed_forward_function": "feed_forward_hyper_connection_function",
+        "hyper_feed_forward_base": "feed_forward_hyper_connection_base",
+        "hyper_feed_forward_scale": "feed_forward_hyper_connection_scale",
         "token_embedding": "token_embedding_for_per_layer_input",
         "per_layer_model_projection": "packed_per_layer_context_projection",
         "per_layer_projection_norm": "per_layer_context_projection_normalization",
@@ -146,18 +177,42 @@ def _param_role(name: str) -> str:
         "rg_lru_recurrent_gate_bias": "real_gated_recurrence_recurrent_gate_bias",
         "rg_lru_recurrent_param": "real_gated_recurrence_parameter",
     }
+    if name in roles:
+        return roles[name]
     if name.endswith("_scale_inv"):
         weight_id = name.removesuffix("_scale_inv")
-        return f"{roles[weight_id]}_block_scale_inverse"
+        return f"{_base_param_role(weight_id, roles)}_block_scale_inverse"
+    if name.endswith("_scale"):
+        weight_id = name.removesuffix("_scale")
+        return f"{_base_param_role(weight_id, roles)}_native_block_scale"
     if name.endswith("_qzeros"):
         weight_id = name.removesuffix("_qzeros")
-        return f"{roles[weight_id]}_packed_zero_points"
+        return f"{_base_param_role(weight_id, roles)}_packed_zero_points"
     if name.endswith("_scales"):
         weight_id = name.removesuffix("_scales")
-        return f"{roles[weight_id]}_group_scales"
+        return f"{_base_param_role(weight_id, roles)}_group_scales"
     if name.startswith("per_layer_embedding_chunk_"):
         return "packed_per_layer_token_embedding_chunk"
-    return roles[name]
+    return _base_param_role(name, roles)
+
+
+def _base_param_role(name: str, roles: dict[str, str]) -> str:
+    if name in roles:
+        return roles[name]
+    expert = re.fullmatch(r"routed_expert_(\d{3})_(w[123])", name)
+    if expert is not None:
+        return (
+            f"routed_expert_{expert.group(1)}_"
+            f"{ {'w1': 'gate', 'w2': 'down', 'w3': 'up'}[expert.group(2)] }_projection"
+        )
+    shared = re.fullmatch(r"shared_expert_(w[123])", name)
+    if shared is not None:
+        return f"shared_expert_{ {'w1': 'gate', 'w2': 'down', 'w3': 'up'}[shared.group(1)] }_projection"
+    if name == "moe_route_table":
+        return "mixture_of_experts_token_route_table"
+    if name == "moe_router_selection_bias":
+        return "mixture_of_experts_router_selection_bias"
+    raise KeyError(name)
 
 
 def _norm_attrs(numerics: Json) -> Json:
@@ -165,5 +220,6 @@ def _norm_attrs(numerics: Json) -> Json:
         "eps": float(numerics["rms_norm_eps"]),
         "weight_offset": float(numerics["rms_norm_weight_offset"]),
     }
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

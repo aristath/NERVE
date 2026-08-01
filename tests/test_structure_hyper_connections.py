@@ -7,6 +7,7 @@ import pytest
 from nerve.model_transpiler_discovery import discover_model_structure
 from nerve.model_transpiler_graph import make_layer, make_model_graph
 from nerve.model_transpiler_types import ModelTranspileError
+from nerve.circuit_lowering_system import build_system_circuits
 
 
 def _tensor(shape: list[int], dtype: str = "BF16") -> dict[str, object]:
@@ -78,6 +79,9 @@ def test_discovers_sinkhorn_hyper_connection_from_tensor_contract() -> None:
     assert layer.boundary_shape == (4, 8)
     assert layer.residual_mixer == {
         "type": "sinkhorn_hyper_connection",
+        "multiplicity": 4,
+        "sinkhorn_iterations": 20,
+        "epsilon": 1e-6,
         "attention": {
             "function": "layers.0.hc_attn_fn",
             "base": "layers.0.hc_attn_base",
@@ -105,6 +109,14 @@ def test_discovers_sinkhorn_hyper_connection_from_tensor_contract() -> None:
         "base": {"tensor": "hc_head_base"},
         "scale": {"tensor": "hc_head_scale"},
     }
+    input_circuit, output_circuit, _ = build_system_circuits(graph)
+    assert input_circuit["boundary"]["outputs"][0]["shape"] == [4, 8]
+    assert [node["op"] for node in input_circuit["nodes"]] == [
+        "embedding_lookup",
+        "repeat_stream_lanes",
+    ]
+    assert output_circuit["boundary"]["inputs"][0]["shape"] == [4, 8]
+    assert output_circuit["nodes"][0]["op"] == "sinkhorn_hyper_connection_head"
 
 
 def test_rejects_incomplete_hyper_connection_tensor_set() -> None:

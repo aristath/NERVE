@@ -4,6 +4,8 @@ from nerve.circuit_lowering_common import *
 from nerve.circuit_lowering_helpers import *
 from nerve.circuit_lowering_nodes import *
 from nerve.semantic_modules import build_layer_semantic_module_tree
+from nerve.circuit_lowering_latent_attention import latent_sparse_attention_nodes
+
 
 def build_conv_circuit(component: Json, component_path: Path) -> Json:
     hidden_size = component["ports"]["inputs"][0]["shape"][0]
@@ -47,6 +49,24 @@ def build_attention_circuit(component: Json, component_path: Path) -> Json:
         behavioral_notes=(
             "This circuit preserves the source grouped-query attention layer decomposition.",
             "KV is represented as stream-owned append-only transient state, not as a disposable host cache.",
+        ),
+    )
+
+
+def build_latent_sparse_attention_circuit(
+    component: Json, component_path: Path
+) -> Json:
+    parameters = component["parameter_block"]["params"]
+    return _base_circuit(
+        component=component,
+        component_path=component_path,
+        behavioral_role="source_reference_circuit",
+        implementation="reference_latent_sparse_attention_layer_circuit_v1",
+        circuit_id=f"{component['id']}_latent_sparse_attention_circuit_v1",
+        nodes=latent_sparse_attention_nodes(component, parameters=parameters),
+        behavioral_notes=(
+            "This circuit preserves low-rank query projection, local temporal memory, and optional learned compressed-memory selection.",
+            "Local, compressed, and index memories are transient component-owned stream state.",
         ),
     )
 
@@ -191,5 +211,6 @@ def _base_circuit(
             "The graph is ordered topologically so a backend can fuse or replace regions without changing the boundary contract.",
         ],
     }
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

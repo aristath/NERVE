@@ -1,5 +1,7 @@
 from nerve.circuit_lowering_common import *
 from nerve.circuit_lowering_helpers import *
+from nerve.circuit_lowering_sparse_experts import independent_sparse_moe_body
+
 
 def _conv_nodes(
     hidden_size: int, numerics: Json, feed_forward: Json, parameters: Json
@@ -554,6 +556,47 @@ def _ffn_tail(
             "attrs": _norm_attrs(numerics),
         },
     ]
+    if (
+        feed_forward["type"] == "sparse_moe"
+        and feed_forward.get("expert_storage") == "independent_resources"
+    ):
+        if (
+            numerics.get("per_layer_input_width") is not None
+            or "layer_scalar" in parameters
+        ):
+            raise ValueError(
+                "independent sparse experts do not support a per-layer auxiliary tail"
+            )
+        body = independent_sparse_moe_body(
+            feed_forward=feed_forward,
+            parameters=parameters,
+        )
+        ffn_update = "ffn_out"
+        ffn_post_norm: list[Json] = []
+        if "ffn_post_norm" in parameters:
+            ffn_post_norm = [
+                {
+                    "id": "ffn_post_norm",
+                    "op": "rms_norm",
+                    "inputs": ["ffn_out"],
+                    "outputs": ["ffn_post_norm_out"],
+                    "params": ["ffn_post_norm"],
+                    "attrs": _norm_attrs(numerics),
+                }
+            ]
+            ffn_update = "ffn_post_norm_out"
+        return [
+            *prefix,
+            *body,
+            *ffn_post_norm,
+            _residual_node(
+                node_id="ffn_residual",
+                residual="operator_residual_out",
+                update=ffn_update,
+                output="output_frame",
+                scale=residual_scale,
+            ),
+        ]
     if feed_forward["type"] == "sparse_moe":
         shared_intermediate_size = feed_forward.get("shared_intermediate_size")
         has_shared_expert = shared_intermediate_size is not None
@@ -593,7 +636,7 @@ def _ffn_tail(
                                 feed_forward["experts_per_token"]
                             ),
                             "index_shift": 0,
-                            "index_mask": 0xffff,
+                            "index_mask": 0xFFFF,
                         },
                     },
                 },
@@ -974,5 +1017,6 @@ def _ffn_tail(
             }
         )
     return tail
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

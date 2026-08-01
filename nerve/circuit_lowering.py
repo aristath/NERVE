@@ -6,6 +6,7 @@ from nerve.circuit_lowering_nodes import *
 from nerve.circuit_lowering_operators import *
 from nerve.circuit_lowering_system import *
 
+
 def lower_component(component_path: Path, out_dir: Path) -> Json:
     component = read_json(component_path)
     circuit = build_component_circuit(component, component_path)
@@ -36,6 +37,8 @@ def build_component_circuit(component: Json, component_path: Path) -> Json:
         return build_conv_circuit(component, component_path)
     if operator_type == "full_attention":
         return build_attention_circuit(component, component_path)
+    if operator_type == "latent_sparse_attention":
+        return build_latent_sparse_attention_circuit(component, component_path)
     if operator_type == "gated_delta":
         return build_gated_delta_circuit(component, component_path)
     if operator_type == "rg_lru":
@@ -54,7 +57,9 @@ def lower_execution_graph(
     source_components = model["graph"]["execution_graph"]["components"]
     source_drafts = model["graph"].get("draft_execution_graphs", [])
     draft_source_components = [
-        component for draft in source_drafts for component in draft["execution_graph"]["components"]
+        component
+        for draft in source_drafts
+        for component in draft["execution_graph"]["components"]
     ]
 
     lowered: list[Json] = []
@@ -94,7 +99,9 @@ def lower_execution_graph(
             if progress is not None:
                 progress(lowered_count, total, source_component["id"])
             component_path = execution_graph_dir / source_component["file"]
-            component_out_dir = out_dir / "drafts" / draft["id"] / source_component["id"]
+            component_out_dir = (
+                out_dir / "drafts" / draft["id"] / source_component["id"]
+            )
             result = lower_component(component_path, component_out_dir)
             operator_counts[source_component["operator_type"]] += 1
             draft_refs.append(
@@ -277,7 +284,9 @@ def lower_draft_execution_graph(
     out_dir: Path,
 ) -> Json:
     if not layer_refs:
-        raise ValueError(f"draft execution graph {draft['id']!r} contains no layer components")
+        raise ValueError(
+            f"draft execution graph {draft['id']!r} contains no layer components"
+        )
     system_circuits = build_draft_system_circuits(model, draft)
     system_refs = []
     for circuit in system_circuits:

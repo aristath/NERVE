@@ -43,7 +43,10 @@ class CircuitValidationReport:
     def raise_for_errors(self) -> None:
         if not self.errors:
             return
-        messages = "\n".join(f"- {issue.path + ': ' if issue.path else ''}{issue.message}" for issue in self.errors)
+        messages = "\n".join(
+            f"- {issue.path + ': ' if issue.path else ''}{issue.message}"
+            for issue in self.errors
+        )
         raise ValueError(f"circuit validation failed:\n{messages}")
 
     def to_json(self) -> Json:
@@ -71,7 +74,14 @@ def validate_circuit(circuit: Json) -> CircuitValidationReport:
         f"unsupported circuit schema {circuit.get('schema')!r}",
         "schema",
     )
-    _check(isinstance(circuit.get("id"), str) and bool(circuit["id"]), checks, issues, "circuit id exists", "missing circuit id", "id")
+    _check(
+        isinstance(circuit.get("id"), str) and bool(circuit["id"]),
+        checks,
+        issues,
+        "circuit id exists",
+        "missing circuit id",
+        "id",
+    )
     _check(
         circuit.get("runtime_role")
         in {
@@ -91,14 +101,44 @@ def validate_circuit(circuit: Json) -> CircuitValidationReport:
     )
 
     boundary = circuit.get("boundary")
-    _check(isinstance(boundary, dict), checks, issues, "boundary exists", "boundary must be an object", "boundary")
+    _check(
+        isinstance(boundary, dict),
+        checks,
+        issues,
+        "boundary exists",
+        "boundary must be an object",
+        "boundary",
+    )
     if not isinstance(boundary, dict):
         return CircuitValidationReport(checks=tuple(checks), issues=tuple(issues))
 
     inputs = boundary.get("inputs", [])
     outputs = boundary.get("outputs", [])
-    _check(isinstance(inputs, list) and bool(inputs), checks, issues, "boundary has inputs", "boundary.inputs must be a non-empty list", "boundary.inputs")
-    _check(isinstance(outputs, list) and bool(outputs), checks, issues, "boundary has outputs", "boundary.outputs must be a non-empty list", "boundary.outputs")
+    controls = boundary.get("controls", [])
+    _check(
+        isinstance(inputs, list) and bool(inputs),
+        checks,
+        issues,
+        "boundary has inputs",
+        "boundary.inputs must be a non-empty list",
+        "boundary.inputs",
+    )
+    _check(
+        isinstance(outputs, list) and bool(outputs),
+        checks,
+        issues,
+        "boundary has outputs",
+        "boundary.outputs must be a non-empty list",
+        "boundary.outputs",
+    )
+    _check(
+        isinstance(controls, list),
+        checks,
+        issues,
+        "boundary controls are declared",
+        "boundary.controls must be a list",
+        "boundary.controls",
+    )
 
     produced: set[str] = set()
     input_port_ids: set[str] = set()
@@ -106,22 +146,59 @@ def validate_circuit(circuit: Json) -> CircuitValidationReport:
         path = f"boundary.inputs[{index}]"
         if _port_has_id_signal_shape(port, checks, issues, path):
             if port["id"] in input_port_ids:
-                issues.append(CircuitIssue("error", f"duplicate boundary input port id {port['id']!r}", f"{path}.id"))
+                issues.append(
+                    CircuitIssue(
+                        "error",
+                        f"duplicate boundary input port id {port['id']!r}",
+                        f"{path}.id",
+                    )
+                )
                 continue
             input_port_ids.add(port["id"])
             produced.add(port["id"])
 
-    declared_state = _ids_by_path(circuit.get("state_ports", []), checks, issues, "state_ports")
+    control_port_ids: set[str] = set()
+    for index, port in enumerate(controls if isinstance(controls, list) else []):
+        path = f"boundary.controls[{index}]"
+        if not _control_has_id_signal_shape(port, checks, issues, path):
+            continue
+        port_id = port["id"]
+        if port_id in input_port_ids or port_id in control_port_ids:
+            issues.append(
+                CircuitIssue(
+                    "error",
+                    f"duplicate boundary input/control port id {port_id!r}",
+                    f"{path}.id",
+                )
+            )
+            continue
+        control_port_ids.add(port_id)
+        produced.add(port_id)
+
+    declared_state = _ids_by_path(
+        circuit.get("state_ports", []), checks, issues, "state_ports"
+    )
     declared_params = set()
     parameters = circuit.get("parameters", {})
     if isinstance(parameters, dict) and isinstance(parameters.get("refs"), dict):
         declared_params = set(parameters["refs"])
         checks.append("parameter refs are declared")
     else:
-        issues.append(CircuitIssue("error", "parameters.refs must be an object", "parameters.refs"))
+        issues.append(
+            CircuitIssue(
+                "error", "parameters.refs must be an object", "parameters.refs"
+            )
+        )
 
     nodes = circuit.get("nodes", [])
-    _check(isinstance(nodes, list) and bool(nodes), checks, issues, "circuit has nodes", "nodes must be a non-empty list", "nodes")
+    _check(
+        isinstance(nodes, list) and bool(nodes),
+        checks,
+        issues,
+        "circuit has nodes",
+        "nodes must be a non-empty list",
+        "nodes",
+    )
     if not isinstance(nodes, list):
         return CircuitValidationReport(checks=tuple(checks), issues=tuple(issues))
 
@@ -135,46 +212,99 @@ def validate_circuit(circuit: Json) -> CircuitValidationReport:
 
         node_id = node.get("id")
         if not isinstance(node_id, str) or not node_id:
-            issues.append(CircuitIssue("error", "node id must be a non-empty string", f"{path}.id"))
+            issues.append(
+                CircuitIssue(
+                    "error", "node id must be a non-empty string", f"{path}.id"
+                )
+            )
             node_id = f"<node:{index}>"
         elif node_id in node_ids:
-            issues.append(CircuitIssue("error", f"duplicate node id {node_id!r}", f"{path}.id"))
+            issues.append(
+                CircuitIssue("error", f"duplicate node id {node_id!r}", f"{path}.id")
+            )
         else:
             checks.append(f"{node_id} node id is unique")
             node_ids.add(node_id)
 
-        _check(isinstance(node.get("op"), str) and bool(node["op"]), checks, issues, f"{node_id} op exists", "node op must be a non-empty string", f"{path}.op")
+        _check(
+            isinstance(node.get("op"), str) and bool(node["op"]),
+            checks,
+            issues,
+            f"{node_id} op exists",
+            "node op must be a non-empty string",
+            f"{path}.op",
+        )
 
         for signal in _string_list(node.get("inputs", []), issues, f"{path}.inputs"):
             if signal not in produced and signal not in declared_state:
-                issues.append(CircuitIssue("error", f"input signal {signal!r} has not been produced or declared as state", f"{path}.inputs"))
+                issues.append(
+                    CircuitIssue(
+                        "error",
+                        f"input signal {signal!r} has not been produced or declared as state",
+                        f"{path}.inputs",
+                    )
+                )
             else:
                 checks.append(f"{node_id} input {signal} resolves")
 
         for param in _string_list(node.get("params", []), issues, f"{path}.params"):
             if param not in declared_params:
-                issues.append(CircuitIssue("error", f"parameter ref {param!r} is not declared", f"{path}.params"))
+                issues.append(
+                    CircuitIssue(
+                        "error",
+                        f"parameter ref {param!r} is not declared",
+                        f"{path}.params",
+                    )
+                )
             else:
                 checks.append(f"{node_id} parameter {param} resolves")
 
-        for state in _string_list(node.get("state_reads", []), issues, f"{path}.state_reads"):
+        for state in _string_list(
+            node.get("state_reads", []), issues, f"{path}.state_reads"
+        ):
             if state not in declared_state:
-                issues.append(CircuitIssue("error", f"state read {state!r} is not declared", f"{path}.state_reads"))
+                issues.append(
+                    CircuitIssue(
+                        "error",
+                        f"state read {state!r} is not declared",
+                        f"{path}.state_reads",
+                    )
+                )
             else:
                 checks.append(f"{node_id} state read {state} resolves")
 
-        for state in _string_list(node.get("state_writes", []), issues, f"{path}.state_writes"):
+        for state in _string_list(
+            node.get("state_writes", []), issues, f"{path}.state_writes"
+        ):
             if state not in declared_state:
-                issues.append(CircuitIssue("error", f"state write {state!r} is not declared", f"{path}.state_writes"))
+                issues.append(
+                    CircuitIssue(
+                        "error",
+                        f"state write {state!r} is not declared",
+                        f"{path}.state_writes",
+                    )
+                )
             else:
                 checks.append(f"{node_id} state write {state} resolves")
 
         node_outputs = _string_list(node.get("outputs", []), issues, f"{path}.outputs")
         if not node_outputs:
-            issues.append(CircuitIssue("error", "node must declare at least one output signal", f"{path}.outputs"))
+            issues.append(
+                CircuitIssue(
+                    "error",
+                    "node must declare at least one output signal",
+                    f"{path}.outputs",
+                )
+            )
         for signal in node_outputs:
             if signal in produced_by:
-                issues.append(CircuitIssue("error", f"output signal {signal!r} already produced by {produced_by[signal]}", f"{path}.outputs"))
+                issues.append(
+                    CircuitIssue(
+                        "error",
+                        f"output signal {signal!r} already produced by {produced_by[signal]}",
+                        f"{path}.outputs",
+                    )
+                )
                 continue
             produced.add(signal)
             produced_by[signal] = str(node_id)
@@ -186,14 +316,30 @@ def validate_circuit(circuit: Json) -> CircuitValidationReport:
         if not _port_has_id_signal_shape(port, checks, issues, path):
             continue
         if port["id"] in output_port_ids:
-            issues.append(CircuitIssue("error", f"duplicate boundary output port id {port['id']!r}", f"{path}.id"))
+            issues.append(
+                CircuitIssue(
+                    "error",
+                    f"duplicate boundary output port id {port['id']!r}",
+                    f"{path}.id",
+                )
+            )
             continue
         output_port_ids.add(port["id"])
         source = port.get("source", port["id"])
         if not isinstance(source, str):
-            issues.append(CircuitIssue("error", "boundary output source must be a string", f"{path}.source"))
+            issues.append(
+                CircuitIssue(
+                    "error", "boundary output source must be a string", f"{path}.source"
+                )
+            )
         elif source not in produced:
-            issues.append(CircuitIssue("error", f"boundary output source {source!r} is not produced", f"{path}.source"))
+            issues.append(
+                CircuitIssue(
+                    "error",
+                    f"boundary output source {source!r} is not produced",
+                    f"{path}.source",
+                )
+            )
         else:
             checks.append(f"boundary output {port['id']} source resolves")
 
@@ -221,7 +367,11 @@ def _validate_semantic_module_tree(
         return
     if not isinstance(tree, dict):
         issues.append(
-            CircuitIssue("error", "semantic module tree must be an object", "semantic_module_tree")
+            CircuitIssue(
+                "error",
+                "semantic module tree must be an object",
+                "semantic_module_tree",
+            )
         )
         return
     if tree.get("schema") != "nerve.semantic_module_tree.v1":
@@ -250,12 +400,16 @@ def _validate_semantic_module_tree(
     for index, module in enumerate(modules):
         path = f"semantic_module_tree.modules[{index}]"
         if not isinstance(module, dict):
-            issues.append(CircuitIssue("error", "semantic module must be an object", path))
+            issues.append(
+                CircuitIssue("error", "semantic module must be an object", path)
+            )
             continue
         module_id = module.get("id")
         if not isinstance(module_id, str) or not module_id:
             issues.append(
-                CircuitIssue("error", "semantic module id must be non-empty", f"{path}.id")
+                CircuitIssue(
+                    "error", "semantic module id must be non-empty", f"{path}.id"
+                )
             )
             continue
         if module_id in module_by_id:
@@ -268,9 +422,14 @@ def _validate_semantic_module_tree(
         module_by_id[module_id] = module
         if not isinstance(module.get("role"), str) or not module["role"]:
             issues.append(
-                CircuitIssue("error", "semantic module role must be non-empty", f"{path}.role")
+                CircuitIssue(
+                    "error", "semantic module role must be non-empty", f"{path}.role"
+                )
             )
-        if not isinstance(module.get("responsibility"), str) or not module["responsibility"]:
+        if (
+            not isinstance(module.get("responsibility"), str)
+            or not module["responsibility"]
+        ):
             issues.append(
                 CircuitIssue(
                     "error",
@@ -307,7 +466,9 @@ def _validate_semantic_module_tree(
     if root.get("parent_id") is not None:
         issues.append(
             CircuitIssue(
-                "error", "semantic module root must not have a parent", "semantic_module_tree.root_module_id"
+                "error",
+                "semantic module root must not have a parent",
+                "semantic_module_tree.root_module_id",
             )
         )
 
@@ -441,11 +602,15 @@ def _validate_semantic_module_tree(
                 "semantic_module_tree.modules",
             )
         )
-    if not any(issue.path and issue.path.startswith("semantic_module_tree") for issue in issues):
+    if not any(
+        issue.path and issue.path.startswith("semantic_module_tree") for issue in issues
+    ):
         checks.append("semantic module tree has exact node and state ownership")
 
 
-def validate_circuit_against_component(circuit: Json, component: Json) -> CircuitValidationReport:
+def validate_circuit_against_component(
+    circuit: Json, component: Json
+) -> CircuitValidationReport:
     base = validate_circuit(circuit)
     checks = list(base.checks)
     issues = list(base.issues)
@@ -453,14 +618,34 @@ def validate_circuit_against_component(circuit: Json, component: Json) -> Circui
     boundary = circuit.get("boundary", {})
     circuit_inputs = boundary.get("inputs", []) if isinstance(boundary, dict) else []
     circuit_outputs = boundary.get("outputs", []) if isinstance(boundary, dict) else []
+    circuit_controls = (
+        boundary.get("controls", []) if isinstance(boundary, dict) else []
+    )
     component_inputs = component.get("ports", {}).get("inputs", [])
     component_outputs = component.get("ports", {}).get("outputs", [])
+    component_controls = component.get("ports", {}).get("controls", [])
 
     _compare_ports(circuit_inputs, component_inputs, checks, issues, "inputs")
     _compare_ports(circuit_outputs, component_outputs, checks, issues, "outputs")
+    _check(
+        circuit_controls == component_controls,
+        checks,
+        issues,
+        "boundary controls match component contract",
+        f"expected controls {component_controls!r}, found {circuit_controls!r}",
+        "boundary.controls",
+    )
 
-    circuit_state = {port.get("id"): port for port in circuit.get("state_ports", []) if isinstance(port, dict)}
-    component_state = {port.get("id"): port for port in component.get("state_ports", []) if isinstance(port, dict)}
+    circuit_state = {
+        port.get("id"): port
+        for port in circuit.get("state_ports", [])
+        if isinstance(port, dict)
+    }
+    component_state = {
+        port.get("id"): port
+        for port in component.get("state_ports", [])
+        if isinstance(port, dict)
+    }
     _check(
         set(circuit_state) == set(component_state),
         checks,
@@ -472,11 +657,36 @@ def validate_circuit_against_component(circuit: Json, component: Json) -> Circui
     for state_id in sorted(set(circuit_state) & set(component_state)):
         c_state = circuit_state[state_id]
         p_state = component_state[state_id]
-        _check(c_state.get("type") == p_state.get("type"), checks, issues, f"{state_id} state type matches component", f"expected {p_state.get('type')!r}, found {c_state.get('type')!r}", f"state_ports.{state_id}.type")
-        _check(c_state.get("shape") == p_state.get("shape"), checks, issues, f"{state_id} state shape matches component", f"expected {p_state.get('shape')!r}, found {c_state.get('shape')!r}", f"state_ports.{state_id}.shape")
-        _check(c_state.get("update") == p_state.get("update"), checks, issues, f"{state_id} state update matches component", f"expected {p_state.get('update')!r}, found {c_state.get('update')!r}", f"state_ports.{state_id}.update")
+        _check(
+            c_state.get("type") == p_state.get("type"),
+            checks,
+            issues,
+            f"{state_id} state type matches component",
+            f"expected {p_state.get('type')!r}, found {c_state.get('type')!r}",
+            f"state_ports.{state_id}.type",
+        )
+        _check(
+            c_state.get("shape") == p_state.get("shape"),
+            checks,
+            issues,
+            f"{state_id} state shape matches component",
+            f"expected {p_state.get('shape')!r}, found {c_state.get('shape')!r}",
+            f"state_ports.{state_id}.shape",
+        )
+        _check(
+            c_state.get("update") == p_state.get("update"),
+            checks,
+            issues,
+            f"{state_id} state update matches component",
+            f"expected {p_state.get('update')!r}, found {c_state.get('update')!r}",
+            f"state_ports.{state_id}.update",
+        )
 
-    circuit_params = circuit.get("parameters", {}).get("refs", {}) if isinstance(circuit.get("parameters"), dict) else {}
+    circuit_params = (
+        circuit.get("parameters", {}).get("refs", {})
+        if isinstance(circuit.get("parameters"), dict)
+        else {}
+    )
     component_params = component.get("parameter_block", {}).get("params", {})
     _check(
         set(circuit_params) == set(component_params),
@@ -487,9 +697,24 @@ def validate_circuit_against_component(circuit: Json, component: Json) -> Circui
         "parameters.refs",
     )
     for param_id in sorted(set(circuit_params) & set(component_params)):
-        c_tensor = circuit_params[param_id].get("tensor") if isinstance(circuit_params[param_id], dict) else None
-        p_tensor = component_params[param_id].get("tensor") if isinstance(component_params[param_id], dict) else None
-        _check(c_tensor == p_tensor, checks, issues, f"{param_id} tensor ref matches component", f"expected tensor {p_tensor!r}, found {c_tensor!r}", f"parameters.refs.{param_id}.tensor")
+        c_tensor = (
+            circuit_params[param_id].get("tensor")
+            if isinstance(circuit_params[param_id], dict)
+            else None
+        )
+        p_tensor = (
+            component_params[param_id].get("tensor")
+            if isinstance(component_params[param_id], dict)
+            else None
+        )
+        _check(
+            c_tensor == p_tensor,
+            checks,
+            issues,
+            f"{param_id} tensor ref matches component",
+            f"expected tensor {p_tensor!r}, found {c_tensor!r}",
+            f"parameters.refs.{param_id}.tensor",
+        )
 
     return CircuitValidationReport(checks=tuple(checks), issues=tuple(issues))
 
@@ -508,19 +733,76 @@ def _check(
     issues.append(CircuitIssue(severity="error", message=error_message, path=path))
 
 
-def _port_has_id_signal_shape(port: Any, checks: list[str], issues: list[CircuitIssue], path: str) -> bool:
+def _port_has_id_signal_shape(
+    port: Any, checks: list[str], issues: list[CircuitIssue], path: str
+) -> bool:
     if not isinstance(port, dict):
         issues.append(CircuitIssue("error", "port must be an object", path))
         return False
     ok = True
     if not isinstance(port.get("id"), str) or not port["id"]:
-        issues.append(CircuitIssue("error", "port id must be a non-empty string", f"{path}.id"))
+        issues.append(
+            CircuitIssue("error", "port id must be a non-empty string", f"{path}.id")
+        )
         ok = False
     if not isinstance(port.get("signal"), str) or not port["signal"]:
-        issues.append(CircuitIssue("error", "port signal must be a non-empty string", f"{path}.signal"))
+        issues.append(
+            CircuitIssue(
+                "error", "port signal must be a non-empty string", f"{path}.signal"
+            )
+        )
         ok = False
     if not _is_shape(port.get("shape")):
-        issues.append(CircuitIssue("error", "port shape must be a non-empty list of positive integers", f"{path}.shape"))
+        issues.append(
+            CircuitIssue(
+                "error",
+                "port shape must be a non-empty list of positive integers",
+                f"{path}.shape",
+            )
+        )
+        ok = False
+    if ok:
+        checks.append(f"{path} has id/signal/shape")
+    return ok
+
+
+def _control_has_id_signal_shape(
+    port: Any,
+    checks: list[str],
+    issues: list[CircuitIssue],
+    path: str,
+) -> bool:
+    if not isinstance(port, dict):
+        issues.append(CircuitIssue("error", "control port must be an object", path))
+        return False
+    ok = True
+    if not isinstance(port.get("id"), str) or not port["id"]:
+        issues.append(
+            CircuitIssue(
+                "error", "control port id must be a non-empty string", f"{path}.id"
+            )
+        )
+        ok = False
+    if not isinstance(port.get("signal"), str) or not port["signal"]:
+        issues.append(
+            CircuitIssue(
+                "error",
+                "control port signal must be a non-empty string",
+                f"{path}.signal",
+            )
+        )
+        ok = False
+    shape = port.get("shape")
+    if not isinstance(shape, list) or any(
+        not isinstance(value, int) or value <= 0 for value in shape
+    ):
+        issues.append(
+            CircuitIssue(
+                "error",
+                "control port shape must be a scalar or positive-integer shape",
+                f"{path}.shape",
+            )
+        )
         ok = False
     if ok:
         checks.append(f"{path} has id/signal/shape")
@@ -535,9 +817,30 @@ def _compare_port(
     circuit_path: str,
     component_path: str,
 ) -> None:
-    _check(circuit_port.get("component_port") == component_port.get("id"), checks, issues, f"{circuit_path} maps to {component_path}", f"expected component port {component_port.get('id')!r}, found {circuit_port.get('component_port')!r}", f"{circuit_path}.component_port")
-    _check(circuit_port.get("signal") == component_port.get("signal"), checks, issues, f"{circuit_path} signal matches {component_path}", f"expected signal {component_port.get('signal')!r}, found {circuit_port.get('signal')!r}", f"{circuit_path}.signal")
-    _check(circuit_port.get("shape") == component_port.get("shape"), checks, issues, f"{circuit_path} shape matches {component_path}", f"expected shape {component_port.get('shape')!r}, found {circuit_port.get('shape')!r}", f"{circuit_path}.shape")
+    _check(
+        circuit_port.get("component_port") == component_port.get("id"),
+        checks,
+        issues,
+        f"{circuit_path} maps to {component_path}",
+        f"expected component port {component_port.get('id')!r}, found {circuit_port.get('component_port')!r}",
+        f"{circuit_path}.component_port",
+    )
+    _check(
+        circuit_port.get("signal") == component_port.get("signal"),
+        checks,
+        issues,
+        f"{circuit_path} signal matches {component_path}",
+        f"expected signal {component_port.get('signal')!r}, found {circuit_port.get('signal')!r}",
+        f"{circuit_path}.signal",
+    )
+    _check(
+        circuit_port.get("shape") == component_port.get("shape"),
+        checks,
+        issues,
+        f"{circuit_path} shape matches {component_path}",
+        f"expected shape {component_port.get('shape')!r}, found {circuit_port.get('shape')!r}",
+        f"{circuit_path}.shape",
+    )
 
 
 def _compare_ports(
@@ -548,7 +851,13 @@ def _compare_ports(
     direction: str,
 ) -> None:
     if not isinstance(circuit_ports, list) or not isinstance(component_ports, list):
-        issues.append(CircuitIssue("error", f"circuit and component {direction} must be lists", f"boundary.{direction}"))
+        issues.append(
+            CircuitIssue(
+                "error",
+                f"circuit and component {direction} must be lists",
+                f"boundary.{direction}",
+            )
+        )
         return
     _check(
         len(circuit_ports) == len(component_ports),
@@ -558,7 +867,9 @@ def _compare_ports(
         f"expected {len(component_ports)} {direction}, found {len(circuit_ports)}",
         f"boundary.{direction}",
     )
-    for index, (circuit_port, component_port) in enumerate(zip(circuit_ports, component_ports)):
+    for index, (circuit_port, component_port) in enumerate(
+        zip(circuit_ports, component_ports)
+    ):
         if not isinstance(circuit_port, dict) or not isinstance(component_port, dict):
             continue
         _compare_port(
@@ -571,7 +882,9 @@ def _compare_ports(
         )
 
 
-def _ids_by_path(values: Any, checks: list[str], issues: list[CircuitIssue], path: str) -> set[str]:
+def _ids_by_path(
+    values: Any, checks: list[str], issues: list[CircuitIssue], path: str
+) -> set[str]:
     ids: set[str] = set()
     if values is None:
         checks.append(f"{path} absent")
@@ -582,14 +895,26 @@ def _ids_by_path(values: Any, checks: list[str], issues: list[CircuitIssue], pat
     for index, value in enumerate(values):
         item_path = f"{path}[{index}]"
         if not isinstance(value, dict):
-            issues.append(CircuitIssue("error", "state port must be an object", item_path))
+            issues.append(
+                CircuitIssue("error", "state port must be an object", item_path)
+            )
             continue
         state_id = value.get("id")
         if not isinstance(state_id, str) or not state_id:
-            issues.append(CircuitIssue("error", "state port id must be a non-empty string", f"{item_path}.id"))
+            issues.append(
+                CircuitIssue(
+                    "error",
+                    "state port id must be a non-empty string",
+                    f"{item_path}.id",
+                )
+            )
             continue
         if state_id in ids:
-            issues.append(CircuitIssue("error", f"duplicate state port {state_id!r}", f"{item_path}.id"))
+            issues.append(
+                CircuitIssue(
+                    "error", f"duplicate state port {state_id!r}", f"{item_path}.id"
+                )
+            )
             continue
         ids.add(state_id)
         checks.append(f"{state_id} state port is declared")
@@ -605,7 +930,9 @@ def _string_list(value: Any, issues: list[CircuitIssue], path: str) -> list[str]
     strings: list[str] = []
     for index, item in enumerate(value):
         if not isinstance(item, str) or not item:
-            issues.append(CircuitIssue("error", "must be a non-empty string", f"{path}[{index}]"))
+            issues.append(
+                CircuitIssue("error", "must be a non-empty string", f"{path}[{index}]")
+            )
             continue
         strings.append(item)
     return strings
@@ -615,5 +942,8 @@ def _is_shape(value: Any) -> bool:
     return (
         isinstance(value, list)
         and bool(value)
-        and all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value)
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and item > 0
+            for item in value
+        )
     )

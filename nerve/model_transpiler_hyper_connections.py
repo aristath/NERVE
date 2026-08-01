@@ -50,7 +50,10 @@ def discover_stream_mixer(
             "hyper-connection head function must map N hidden lanes to N mixing weights"
         )
     configured_multiplicity = config.get("hc_mult")
-    if configured_multiplicity is not None and int(configured_multiplicity) != multiplicity:
+    if (
+        configured_multiplicity is not None
+        and int(configured_multiplicity) != multiplicity
+    ):
         raise ModelTranspileError(
             "hyper-connection multiplicity disagrees with the head function shape"
         )
@@ -106,7 +109,9 @@ def discover_layer_residual_mixer(
         for stage, roles in LAYER_TENSOR_SUFFIXES.items()
     }
     if discovered != expected:
-        expected_names = sorted(name for stage in expected.values() for name in stage.values())
+        expected_names = sorted(
+            name for stage in expected.values() for name in stage.values()
+        )
         raise ModelTranspileError(
             f"incomplete hyper-connection tensor set for layer prefix {prefix!r}: "
             f"expected {expected_names}, found {sorted(present_names)}"
@@ -128,6 +133,9 @@ def discover_layer_residual_mixer(
     }
     return {
         "type": "sinkhorn_hyper_connection",
+        "multiplicity": multiplicity,
+        "sinkhorn_iterations": int(stream_mixer["sinkhorn_iterations"]),
+        "epsilon": float(stream_mixer["epsilon"]),
         "attention": expected["attention"],
         "feed_forward": expected["feed_forward"],
     }, parameters
