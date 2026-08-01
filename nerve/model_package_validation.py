@@ -331,7 +331,10 @@ def _port_by_id(ports: list[Json], port_id: Any) -> Json | None:
     return next((port for port in ports if port.get("id") == port_id), None)
 
 
-def validate_compiled_speculative_decoders(manifest: Json) -> dict[str, Json]:
+def validate_compiled_speculative_decoders(
+    manifest: Json,
+    target_circuits: dict[str, Json],
+) -> dict[str, Json]:
     raw_decoders = manifest.get("speculative_decoders", [])
     if not isinstance(raw_decoders, list):
         raise ModelCompileError("compiled package speculative decoders must be a list")
@@ -383,6 +386,12 @@ def validate_compiled_speculative_decoders(manifest: Json) -> dict[str, Json]:
             )
         graph = decoder.get("circuit_graph")
         graph_candidates = validate_compiled_circuit_graph({"circuit_graph": graph})
+        _validate_speculative_source_taps(
+            decoder_id,
+            graph,
+            graph_candidates,
+            target_circuits,
+        )
         duplicate = set(candidates).intersection(graph_candidates)
         if duplicate:
             raise ModelCompileError(
@@ -479,6 +488,49 @@ def validate_compiled_speculative_decoders(manifest: Json) -> dict[str, Json]:
             )
         candidates.update(graph_candidates)
     return candidates
+
+
+def _validate_speculative_source_taps(
+    decoder_id: str,
+    graph: Json,
+    decoder_circuits: dict[str, Json],
+    target_circuits: dict[str, Json],
+) -> None:
+    for boundary_port in graph["boundary"]["external_inputs"]:
+        source_tap = boundary_port.get("source_tap")
+        if source_tap is None:
+            continue
+        if not isinstance(source_tap, dict):
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} source tap must be an object"
+            )
+        component_id = source_tap.get("component_id")
+        port_id = source_tap.get("port_id")
+        if source_tap.get("instance_selection") != "last_in_execution_order":
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} source tap has an unsupported instance selection"
+            )
+        target_circuit = target_circuits.get(component_id)
+        source_port = (
+            _port_by_id(target_circuit["boundary"]["outputs"], port_id)
+            if target_circuit is not None
+            else None
+        )
+        endpoint = boundary_port["endpoint"]
+        decoder_port = _port_by_id(
+            decoder_circuits[endpoint["component_id"]]["boundary"]["inputs"],
+            endpoint["port_id"],
+        )
+        if source_port is None:
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} source tap references an unknown target output"
+            )
+        if source_port.get("signal") != decoder_port.get("signal") or source_port.get(
+            "shape"
+        ) != decoder_port.get("shape"):
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} source tap has incompatible geometry"
+            )
 
 
 def validate_compiled_component_executions(
@@ -1093,7 +1145,9 @@ def validate_compiled_package(package_dir: Path, manifest: Json) -> None:
         )
     load_optimizer_stage(optimizer_path, package_dir=package_dir)
     candidate_circuits = validate_compiled_circuit_graph(manifest)
-    auxiliary_circuits = validate_compiled_speculative_decoders(manifest)
+    auxiliary_circuits = validate_compiled_speculative_decoders(
+        manifest, candidate_circuits
+    )
     duplicate_circuits = set(candidate_circuits).intersection(auxiliary_circuits)
     if duplicate_circuits:
         raise ModelCompileError(

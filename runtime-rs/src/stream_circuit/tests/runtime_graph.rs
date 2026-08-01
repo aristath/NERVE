@@ -459,6 +459,7 @@
                     component_id: "branch".to_string(),
                     port_id: "output_frame".to_string(),
                 },
+                source_tap: None,
             });
 
         runtime_graph.validate_against_graph(&resolved).unwrap();

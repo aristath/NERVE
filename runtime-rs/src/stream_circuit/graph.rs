@@ -854,6 +854,21 @@ pub struct StreamCircuitGraphEdge {
 pub struct StreamCircuitGraphBoundaryPort {
     pub id: String,
     pub endpoint: StreamCircuitEdgeEndpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tap: Option<StreamCircuitGraphSourceTap>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamCircuitGraphSourceTap {
+    pub component_id: String,
+    pub port_id: String,
+    pub instance_selection: StreamCircuitGraphSourceTapInstanceSelection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCircuitGraphSourceTapInstanceSelection {
+    LastInExecutionOrder,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1089,6 +1104,14 @@ fn validate_index_boundary_ports(
                 "{kind} {} has an empty or duplicate endpoint {}.{}",
                 port.id, port.endpoint.component_id, port.endpoint.port_id
             ));
+        }
+        if let Some(source_tap) = &port.source_tap {
+            if source_tap.component_id.is_empty() || source_tap.port_id.is_empty() {
+                issues.push(format!(
+                    "{kind} {} has an empty source-tap endpoint",
+                    port.id
+                ));
+            }
         }
     }
 }

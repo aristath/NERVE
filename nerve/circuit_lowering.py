@@ -501,8 +501,11 @@ def lower_parallel_markov_draft_graph(
                 *[
                     {
                         "id": target_input["id"],
-                        "source_layer_index": target_input["source_layer_index"],
-                        "lane_reduction": draft["target_features"]["lane_reduction"],
+                        "source_tap": {
+                            "component_id": target_input["source_component_id"],
+                            "port_id": "output_frame",
+                            "instance_selection": "last_in_execution_order",
+                        },
                         "endpoint": {
                             "component_id": input_ref["id"],
                             "port_id": target_input["id"],

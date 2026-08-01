@@ -18,6 +18,7 @@ from nerve.model_package import (
     shader_file_for_node,
     workgroup_count_x_for_node,
 )
+from nerve.model_package_validation import _validate_speculative_source_taps
 
 
 def _tensor(shape: list[int], dtype: str = "BF16") -> dict[str, object]:
@@ -450,7 +451,92 @@ def test_lowers_explicit_query_context_and_target_feature_wiring() -> None:
         for edge in context_edges
     )
     assert [
-        item["source_layer_index"]
+        item["source_tap"]
         for item in lowered["boundary"]["external_inputs"]
-        if "source_layer_index" in item
-    ] == [0, 1, 2]
+        if "source_tap" in item
+    ] == [
+        {
+            "component_id": f"layer_{index:02d}",
+            "port_id": "output_frame",
+            "instance_selection": "last_in_execution_order",
+        }
+        for index in range(3)
+    ]
+
+
+def _source_tap_validation_fixture() -> tuple[dict, dict, dict]:
+    graph = {
+        "boundary": {
+            "external_inputs": [
+                {
+                    "id": "target_hidden_0",
+                    "source_tap": {
+                        "component_id": "target_processor",
+                        "port_id": "output_frame",
+                        "instance_selection": "last_in_execution_order",
+                    },
+                    "endpoint": {
+                        "component_id": "draft_input",
+                        "port_id": "target_hidden_0",
+                    },
+                }
+            ]
+        }
+    }
+    decoder_circuits = {
+        "draft_input": {
+            "boundary": {
+                "inputs": [
+                    {
+                        "id": "target_hidden_0",
+                        "signal": "frame",
+                        "shape": [4, 16],
+                    }
+                ]
+            }
+        }
+    }
+    target_circuits = {
+        "target_processor": {
+            "boundary": {
+                "outputs": [
+                    {
+                        "id": "output_frame",
+                        "signal": "frame",
+                        "shape": [4, 16],
+                    }
+                ]
+            }
+        }
+    }
+    return graph, decoder_circuits, target_circuits
+
+
+def test_validates_typed_speculative_source_tap_geometry() -> None:
+    graph, decoder_circuits, target_circuits = _source_tap_validation_fixture()
+
+    _validate_speculative_source_taps("draft", graph, decoder_circuits, target_circuits)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("unknown_component", "unknown target output"),
+        ("wrong_shape", "incompatible geometry"),
+        ("wrong_selection", "unsupported instance selection"),
+    ],
+)
+def test_rejects_invalid_speculative_source_taps(mutation: str, expected: str) -> None:
+    graph, decoder_circuits, target_circuits = _source_tap_validation_fixture()
+    source_tap = graph["boundary"]["external_inputs"][0]["source_tap"]
+    if mutation == "unknown_component":
+        source_tap["component_id"] = "missing"
+    elif mutation == "wrong_shape":
+        target_circuits["target_processor"]["boundary"]["outputs"][0]["shape"] = [16]
+    else:
+        source_tap["instance_selection"] = "first"
+
+    with pytest.raises(ModelCompileError, match=expected):
+        _validate_speculative_source_taps(
+            "draft", graph, decoder_circuits, target_circuits
+        )

@@ -329,6 +329,7 @@ pub(crate) fn execution_boundary_inputs(
                 |edge| crate::stream_circuit::StreamCircuitGraphBoundaryPort {
                     id: format!("{}_input", edge.id),
                     endpoint: edge.destination.clone(),
+                    source_tap: None,
                 },
             ),
     );
@@ -363,6 +364,7 @@ pub(crate) fn execution_boundary_outputs(
                 |edge| crate::stream_circuit::StreamCircuitGraphBoundaryPort {
                     id: format!("{}_output", edge.id),
                     endpoint: edge.source.clone(),
+                    source_tap: None,
                 },
             ),
     );

@@ -268,3 +268,38 @@
                 .contains("does not own every state port exactly once")
         );
     }
+    #[test]
+    fn graph_boundary_deserializes_typed_source_tap() {
+        let boundary: StreamCircuitGraphBoundary =
+            serde_json::from_value(serde_json::json!({
+                "external_inputs": [{
+                    "id": "target_hidden",
+                    "endpoint": {
+                        "component_id": "draft_input",
+                        "port_id": "target_hidden"
+                    },
+                    "source_tap": {
+                        "component_id": "target_processor",
+                        "port_id": "output_frame",
+                        "instance_selection": "last_in_execution_order"
+                    }
+                }],
+                "public_outputs": [{
+                    "id": "draft_tokens",
+                    "endpoint": {
+                        "component_id": "draft_output",
+                        "port_id": "draft_tokens"
+                    }
+                }]
+            }))
+            .unwrap();
+
+        let source_tap = boundary.external_inputs[0].source_tap.as_ref().unwrap();
+        assert_eq!(source_tap.component_id, "target_processor");
+        assert_eq!(source_tap.port_id, "output_frame");
+        assert_eq!(
+            source_tap.instance_selection,
+            StreamCircuitGraphSourceTapInstanceSelection::LastInExecutionOrder
+        );
+        assert!(boundary.public_outputs[0].source_tap.is_none());
+    }

@@ -135,6 +135,7 @@ fn series_boundary_for_instances(
                 component_id: first.instance_id.clone(),
                 port_id: input.id.clone(),
             },
+            source_tap: None,
         }],
         public_outputs: vec![StreamCircuitGraphBoundaryPort {
             id: "model_output".to_string(),
@@ -142,6 +143,7 @@ fn series_boundary_for_instances(
                 component_id: last.instance_id.clone(),
                 port_id: output.id.clone(),
             },
+            source_tap: None,
         }],
     })
 }

@@ -323,7 +323,7 @@ def make_parallel_markov_draft_descriptor(
             "id": f"target_hidden_{index}",
             "signal": "frame",
             "shape": [hidden_size],
-            "source_layer_index": layer_index,
+            "source_component_id": f"layer_{layer_index:02d}",
         }
         for index, layer_index in enumerate(target_features["layer_indices"])
     ]

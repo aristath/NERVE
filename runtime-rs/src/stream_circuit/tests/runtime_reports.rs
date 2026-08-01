@@ -288,6 +288,7 @@
                             component_id: "layer_00".to_string(),
                             port_id: "input_frame".to_string(),
                         },
+                        source_tap: None,
                     }],
                     public_outputs: vec![StreamCircuitGraphBoundaryPort {
                         id: "model_output".to_string(),
@@ -295,6 +296,7 @@
                             component_id: "layer_00".to_string(),
                             port_id: "output_frame".to_string(),
                         },
+                        source_tap: None,
                     }],
                 },
             },
@@ -460,6 +462,7 @@
                             component_id: "layer_05_repeat".to_string(),
                             port_id: "input_frame".to_string(),
                         },
+                        source_tap: None,
                     }],
                     public_outputs: vec![StreamCircuitGraphBoundaryPort {
                         id: "model_output".to_string(),
@@ -467,6 +470,7 @@
                             component_id: "layer_05_repeat".to_string(),
                             port_id: "output_frame".to_string(),
                         },
+                        source_tap: None,
                     }],
                 },
             },
