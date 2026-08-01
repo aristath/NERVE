@@ -27,18 +27,22 @@ LAYER_TENSOR_SUFFIXES = {
 
 
 def discover_stream_mixer(
-    tensors: dict[str, Json], config: Json, *, hidden_size: int
+    tensors: dict[str, Json], config: Json, *, hidden_size: int, prefix: str = ""
 ) -> Json | None:
-    present = {role: name for role, name in HEAD_TENSORS.items() if name in tensors}
+    names = {
+        role: f"{prefix}.{name}" if prefix else name
+        for role, name in HEAD_TENSORS.items()
+    }
+    present = {role: name for role, name in names.items() if name in tensors}
     if not present:
         return None
     if present.keys() != HEAD_TENSORS.keys():
         raise ModelTranspileError(
             "incomplete hyper-connection head tensor set: expected "
-            f"{sorted(HEAD_TENSORS.values())}, found {sorted(present.values())}"
+            f"{sorted(names.values())}, found {sorted(present.values())}"
         )
 
-    function_shape = _shape(tensors, HEAD_TENSORS["function"])
+    function_shape = _shape(tensors, names["function"])
     if len(function_shape) != 2 or function_shape[1] % hidden_size:
         raise ModelTranspileError(
             "hyper-connection head function must be a matrix whose input width is "
@@ -57,9 +61,9 @@ def discover_stream_mixer(
         raise ModelTranspileError(
             "hyper-connection multiplicity disagrees with the head function shape"
         )
-    _require_shape(tensors, HEAD_TENSORS["base"], [multiplicity])
-    _require_shape(tensors, HEAD_TENSORS["scale"], [1])
-    _require_f32(tensors, HEAD_TENSORS.values())
+    _require_shape(tensors, names["base"], [multiplicity])
+    _require_shape(tensors, names["scale"], [1])
+    _require_f32(tensors, names.values())
 
     sinkhorn_iterations = int(config.get("hc_sinkhorn_iters", 20))
     epsilon = float(config.get("hc_eps", 1e-6))
@@ -76,7 +80,7 @@ def discover_stream_mixer(
         "multiplicity": multiplicity,
         "sinkhorn_iterations": sinkhorn_iterations,
         "epsilon": epsilon,
-        "head": dict(HEAD_TENSORS),
+        "head": names,
     }
 
 

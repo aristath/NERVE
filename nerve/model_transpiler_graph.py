@@ -281,12 +281,144 @@ def make_draft_execution_graph_descriptor(
     structure: ModelStructure,
     draft: DraftExecutionGraphStructure,
 ) -> Json:
+    if draft.draft_type == "parallel_backbone_markov":
+        return make_parallel_markov_draft_descriptor(structure, draft)
+    if draft.draft_type != "multi_token_prediction":
+        raise ModelTranspileError(
+            f"unsupported draft execution type {draft.draft_type!r}"
+        )
     hidden_size = structure.hidden_size
     adapter_params = {
         name: tensor_ref(tensor)
         for name, tensor in draft.tensors.items()
         if name not in {"output_norm", "output_projection"}
     }
+    return make_standard_mtp_draft_descriptor(structure, draft, adapter_params)
+
+
+def make_parallel_markov_draft_descriptor(
+    structure: ModelStructure,
+    draft: DraftExecutionGraphStructure,
+) -> Json:
+    hidden_size = structure.hidden_size
+    target_features = deepcopy(draft.attributes["target_features"])
+    target_inputs = [
+        {
+            "id": f"target_hidden_{index}",
+            "signal": "frame",
+            "shape": [hidden_size],
+            "source_layer_index": layer_index,
+        }
+        for index, layer_index in enumerate(target_features["layer_indices"])
+    ]
+    adapter_param_ids = {
+        "target_projection",
+        "target_projection_scale",
+        "target_projection_scale_inv",
+        "target_norm",
+    }
+    output_param_ids = set(draft.tensors) - adapter_param_ids
+    return {
+        "id": draft.id,
+        "type": draft.draft_type,
+        "source_prefix": draft.prefix,
+        "target_features": target_features,
+        "proposal_contract": deepcopy(draft.attributes["proposal_contract"]),
+        "input_adapter": {
+            "type": "target_feature_projection",
+            "inputs": target_inputs,
+            "output": {
+                "id": "main_context",
+                "signal": "frame",
+                "shape": [hidden_size],
+            },
+            "attrs": {
+                "eps": structure.norm_eps,
+                "weight_offset": structure.rms_norm_weight_offset,
+                "concatenation_order": [item["id"] for item in target_inputs],
+            },
+            "params": {
+                name: tensor_ref(tensor)
+                for name, tensor in draft.tensors.items()
+                if name in adapter_param_ids
+            },
+        },
+        "query_block": {
+            "type": "anchor_then_noise_embeddings",
+            "token_embedding": tensor_ref(structure.tensors["token_embedding"]),
+            "block_size": draft.attributes["proposal_contract"][
+                "configured_block_size"
+            ],
+            "noise_token_id": draft.attributes["proposal_contract"][
+                "noise_token_id"
+            ],
+        },
+        "execution_graph": {
+            "topology": "series_with_shared_context",
+            "shared_input": "main_context",
+            "components": [
+                {
+                    "id": f"{draft.id}_layer_{layer.index:02d}",
+                    "type": "node_instance",
+                    "component_class": make_component_class(structure, layer),
+                    "operator_type": layer.operator_type,
+                    "file": (
+                        f"drafts/{draft.id}/layers/"
+                        f"{draft.id}_layer_{layer.index:02d}.json"
+                    ),
+                }
+                for layer in draft.layers
+            ],
+        },
+        "output_transducer": {
+            "type": "hyper_reduced_markov_confidence_projection",
+            "inputs": [
+                {
+                    "id": "input_frames",
+                    "signal": "frame_block",
+                    "shape": [-1, hidden_size],
+                }
+            ],
+            "outputs": [
+                {
+                    "id": "draft_logits",
+                    "signal": "logits_block",
+                    "shape": [-1, structure.vocab_size],
+                },
+                {
+                    "id": "confidence_logits",
+                    "signal": "scalar_block",
+                    "shape": [-1],
+                },
+            ],
+            "attrs": {
+                "eps": structure.norm_eps,
+                "weight_offset": structure.rms_norm_weight_offset,
+                "markov_rank": draft.attributes["markov_rank"],
+                "stream_mixer": deepcopy(draft.attributes["stream_mixer"]),
+            },
+            "params": {
+                name: tensor_ref(tensor)
+                for name, tensor in draft.tensors.items()
+                if name in output_param_ids
+            },
+        },
+        "state_contract": {
+            "ownership": "per_stream_per_node_instance",
+            "draft_updates": "tentative",
+            "acceptance": "commit_accepted_prefix",
+            "rejection": "restore_last_committed_state",
+            "context_updates": "target_feature_projection_per_committed_token",
+        },
+    }
+
+
+def make_standard_mtp_draft_descriptor(
+    structure: ModelStructure,
+    draft: DraftExecutionGraphStructure,
+    adapter_params: Json,
+) -> Json:
+    hidden_size = structure.hidden_size
     return {
         "id": draft.id,
         "type": "multi_token_prediction",

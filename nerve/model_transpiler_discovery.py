@@ -18,6 +18,7 @@ from nerve.model_transpiler_sparse_experts import (
     discover_independent_sparse_experts,
     has_independent_sparse_experts,
 )
+from nerve.model_transpiler_parallel_markov import discover_parallel_markov_drafts
 
 
 def discover_model_structure(
@@ -134,6 +135,38 @@ def discover_model_structure(
         configured_head_width=configured_head_width,
         configured_attention_window_size=attention_window_size,
     )
+    parallel_markov_drafts = discover_parallel_markov_drafts(
+        tensors=tensors,
+        decoder_config=decoder_config,
+        primary_layer_root=layer_root,
+        main_layer_count=layer_count,
+        hidden_size=hidden_size,
+        vocabulary_size=vocab_size,
+        output_projection=output_projection,
+        discover_layer=lambda root, index, draft_stream_mixer: discover_layer_structure(
+            tensors=tensors,
+            decoder_config=decoder_config,
+            configured_layer_types=None,
+            configured_attention_window_size=attention_window_size,
+            num_attention_heads=num_attention_heads,
+            configured_num_key_value_heads=configured_num_key_value_heads,
+            configured_head_width=configured_head_width,
+            configured_attention_gate_activation=None,
+            shared_kv_source_layer=None,
+            per_layer_input=None,
+            token_embedding=token_embedding,
+            hidden_size=hidden_size,
+            stream_mixer=draft_stream_mixer,
+            layer_root=root,
+            layer_index=index,
+            configured_layer_index=layer_count + index,
+        ),
+    )
+    if draft_execution_graphs and parallel_markov_drafts:
+        raise ModelTranspileError(
+            "checkpoint exposes overlapping auxiliary draft structures"
+        )
+    draft_execution_graphs += parallel_markov_drafts
 
     first_attention = next(
         (
@@ -303,9 +336,13 @@ def discover_layer_structure(
     stream_mixer: Json | None,
     layer_root: str,
     layer_index: int,
+    configured_layer_index: int | None = None,
 ) -> LayerStructure:
     prefix = f"{layer_root}.{layer_index}"
-    configured = configured_layer_types[layer_index] if configured_layer_types else None
+    config_index = (
+        layer_index if configured_layer_index is None else configured_layer_index
+    )
+    configured = configured_layer_types[config_index] if configured_layer_types else None
     has_explicit_feed_forward_pre_norm = (
         find_optional_layer_tensor(tensors, prefix, FFN_PRE_NORM_SUFFIXES) is not None
     )
@@ -631,7 +668,7 @@ def discover_layer_structure(
             tensors,
             decoder_config,
             prefix=prefix,
-            layer_index=layer_index,
+            layer_index=config_index,
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
             head_width=configured_head_width,
@@ -1082,6 +1119,8 @@ def discover_draft_execution_graphs(
                 shared_kv_source_layer=None,
                 per_layer_input=None,
                 token_embedding=token_embedding,
+                hidden_size=hidden_size,
+                stream_mixer=None,
                 layer_root=root,
                 layer_index=index,
             )
@@ -1102,6 +1141,7 @@ def discover_draft_execution_graphs(
                 prefix=prefix,
                 tensors=adapter_tensors,
                 layers=layers,
+                draft_type="multi_token_prediction",
             )
         )
     return tuple(discovered)

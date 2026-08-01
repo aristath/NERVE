@@ -7,7 +7,7 @@ import shutil
 import struct
 from collections import Counter
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -67,6 +67,8 @@ class DraftExecutionGraphStructure:
     prefix: str
     tensors: dict[str, str]
     layers: tuple[LayerStructure, ...]
+    draft_type: str = "multi_token_prediction"
+    attributes: Json = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
