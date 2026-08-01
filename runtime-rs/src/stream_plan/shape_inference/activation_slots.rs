@@ -531,6 +531,11 @@ mod tests {
             vec![Some(vec![8, 2])]
         );
         assert_eq!(
+            infer_node_output_shapes("layer_00", &node("moe_route"), &signals, &params, None)
+                .unwrap(),
+            vec![Some(vec![8, 2])]
+        );
+        assert_eq!(
             infer_node_output_shapes(
                 "layer_00",
                 &node("sparse_moe_gate_up"),

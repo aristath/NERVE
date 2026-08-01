@@ -55,6 +55,14 @@ def persistent_batch_control_stage(
 
 
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
+    if re.fullmatch(
+        r"moe_router_(?:score_topk|token_table)_"
+        r"(?:sigmoid|softmax|sqrtsoftplus)_bf16_e\d+_k\d+_"
+        r"(?:v\d+_)?norm[01]_scale[0-9eE+.-]+_"
+        r"(?:bias(?:f32|bf16)|tablei(?:32|64))\.comp",
+        shader_file,
+    ):
+        return shader_file.replace("moe_router_", "moe_router_batch1_", 1)
     if re.fullmatch(r"moe_topk_bf16_e\d+_k\d+\.comp", shader_file):
         return shader_file.replace("moe_topk_", "moe_topk_batch1_", 1)
     if re.fullmatch(

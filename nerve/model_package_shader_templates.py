@@ -3615,6 +3615,101 @@ if (
             },
         )
 
+    independent_score_router_shape = re.fullmatch(
+        r"moe_router(?:_(batch1))?_score_topk_"
+        r"(sigmoid|softmax|sqrtsoftplus)_bf16_e(\d+)_k(\d+)_"
+        r"norm([01])_scale([0-9eE+.-]+)_bias(f32|bf16)\.comp",
+        shader_file,
+    )
+    if independent_score_router_shape is not None:
+        (
+            batch_mode,
+            activation,
+            num_experts,
+            experts_per_token,
+            normalize_selected,
+            routed_scale,
+            bias_dtype,
+        ) = independent_score_router_shape.groups()
+        num_experts, experts_per_token = map(int, (num_experts, experts_per_token))
+        if not 0 < experts_per_token <= num_experts <= 4096:
+            raise ModelCompileError(
+                f"invalid independent sparse expert routing e{num_experts} "
+                f"k{experts_per_token}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "moe_router_score_topk_bf16.comp.template"
+                if batch_mode is None
+                else "moe_router_score_topk_batch1_bf16.comp.template"
+            ),
+            {
+                "NUM_EXPERTS": str(num_experts),
+                "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "ROUTER_ACTIVATION": str(
+                    {"sigmoid": 0, "softmax": 1, "sqrtsoftplus": 2}[activation]
+                ),
+                "NORMALIZE_SELECTED": normalize_selected,
+                "ROUTED_SCALE": routed_scale,
+                "BIAS_DECLARATION": (
+                    "layout(set = 0, binding = 2) readonly buffer "
+                    "RouterSelectionBias { uint words[]; } router_selection_bias;"
+                ),
+                "READ_SELECTION_BIAS": (
+                    "uintBitsToFloat(router_selection_bias.words[expert])"
+                    if bias_dtype == "f32"
+                    else "unpack_bf16(router_selection_bias.words[expert >> 1u], expert)"
+                ),
+            },
+        )
+
+    token_table_router_shape = re.fullmatch(
+        r"moe_router(?:_(batch1))?_token_table_"
+        r"(sigmoid|sqrtsoftplus)_bf16_e(\d+)_k(\d+)_v(\d+)_"
+        r"norm([01])_scale([0-9eE+.-]+)_tablei(32|64)\.comp",
+        shader_file,
+    )
+    if token_table_router_shape is not None:
+        (
+            batch_mode,
+            activation,
+            num_experts,
+            experts_per_token,
+            vocab_size,
+            normalize_selected,
+            routed_scale,
+            table_width,
+        ) = token_table_router_shape.groups()
+        num_experts, experts_per_token, vocab_size = map(
+            int, (num_experts, experts_per_token, vocab_size)
+        )
+        if (
+            not 0 < experts_per_token <= num_experts <= 4096
+            or vocab_size <= 0
+        ):
+            raise ModelCompileError(
+                f"invalid token-table sparse expert routing e{num_experts} "
+                f"k{experts_per_token} v{vocab_size}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "moe_router_token_table_bf16.comp.template"
+                if batch_mode is None
+                else "moe_router_token_table_batch1_bf16.comp.template"
+            ),
+            {
+                "NUM_EXPERTS": str(num_experts),
+                "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "VOCAB_SIZE": str(vocab_size),
+                "TABLE_WORD_STRIDE": "1" if table_width == "32" else "2",
+                "ROUTER_ACTIVATION": "0" if activation == "sigmoid" else "2",
+                "NORMALIZE_SELECTED": normalize_selected,
+                "ROUTED_SCALE": routed_scale,
+            },
+        )
+
     custom_moe_topk_shape = re.fullmatch(
         r"moe_topk(?:_batch(\d+))?_(sigmoid|softmax)_bf16_e(\d+)_k(\d+)_"
         r"norm([01])_cap([0-9eE+.-]+)_"

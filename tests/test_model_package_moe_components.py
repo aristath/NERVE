@@ -413,6 +413,159 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "{{" not in batch_source
 
 
+def test_compiler_renders_score_selected_sqrtsoftplus_router(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    circuit = {
+        "parameters": {
+            "refs": {
+                "selection_bias": {"tensor": "router.selection_bias"},
+            }
+        }
+    }
+    node = {
+        "id": "route",
+        "op": "moe_route",
+        "inputs": ["router_logits"],
+        "outputs": ["routes"],
+        "params": ["selection_bias"],
+        "attrs": {
+            "num_experts": 256,
+            "experts_per_token": 6,
+            "selection": "score_topk",
+            "activation": "sqrtsoftplus",
+            "normalize_selected": True,
+            "routed_scaling_factor": 1.5,
+            "selection_bias": "router.selection_bias",
+        },
+    }
+    tensor_index = {
+        "tensors": {
+            "router.selection_bias": {
+                "dtype": "F32",
+                "shape": [256],
+                "layout": "row_major",
+            }
+        }
+    }
+    primary = (
+        "moe_router_score_topk_sqrtsoftplus_bf16_e256_k6_"
+        "norm1_scale1.5_biasf32.comp"
+    )
+    batch = (
+        "moe_router_batch1_score_topk_sqrtsoftplus_bf16_e256_k6_"
+        "norm1_scale1.5_biasf32.comp"
+    )
+
+    assert (
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2176},
+        )
+        == primary
+    )
+    assert frame_parallel_batch_shader_file(primary) == batch
+    copy_shader_templates(shader_source_dir, tmp_path, {primary, batch})
+
+    primary_source = (tmp_path / primary).read_text()
+    batch_source = (tmp_path / batch).read_text()
+    assert "sqrt(softplus(value))" in primary_source
+    assert "return activated + uintBitsToFloat" in primary_source
+    assert "float weight = router_values[expert];" in primary_source
+    assert "weight = weight / denominator * ROUTED_SCALE;" in primary_source
+    assert "const float ROUTED_SCALE = 1.5;" in primary_source
+    assert "binding = 1) buffer ExpertRoutes" in primary_source
+    assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
+    assert "binding = 3) buffer SelectionTelemetry" in primary_source
+    assert "gl_WorkGroupID.y" in batch_source
+    assert "batch_index * ROUTER_WORDS" in batch_source
+    assert "batch_index * EXPERTS_PER_TOKEN" in batch_source
+    assert "{{" not in primary_source
+    assert "{{" not in batch_source
+    compile_shader_artifacts(tmp_path)
+
+
+def test_compiler_renders_token_table_sqrtsoftplus_router(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    circuit = {
+        "parameters": {
+            "refs": {
+                "route_table": {"tensor": "router.token_routes"},
+            }
+        }
+    }
+    node = {
+        "id": "route",
+        "op": "moe_route",
+        "inputs": ["router_logits", "token_id"],
+        "outputs": ["routes"],
+        "params": ["route_table"],
+        "attrs": {
+            "num_experts": 256,
+            "experts_per_token": 6,
+            "selection": "token_id_table",
+            "activation": "sqrtsoftplus",
+            "normalize_selected": True,
+            "routed_scaling_factor": 1.5,
+            "route_table": "router.token_routes",
+        },
+    }
+    tensor_index = {
+        "tensors": {
+            "router.token_routes": {
+                "dtype": "I64",
+                "shape": [129280, 6],
+                "layout": "row_major",
+            }
+        }
+    }
+    primary = (
+        "moe_router_token_table_sqrtsoftplus_bf16_e256_k6_v129280_"
+        "norm1_scale1.5_tablei64.comp"
+    )
+    batch = (
+        "moe_router_batch1_token_table_sqrtsoftplus_bf16_e256_k6_v129280_"
+        "norm1_scale1.5_tablei64.comp"
+    )
+
+    assert (
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2176},
+        )
+        == primary
+    )
+    assert frame_parallel_batch_shader_file(primary) == batch
+    copy_shader_templates(shader_source_dir, tmp_path, {primary, batch})
+
+    primary_source = (tmp_path / primary).read_text()
+    batch_source = (tmp_path / batch).read_text()
+    assert "const uint VOCAB_SIZE = 129280u;" in primary_source
+    assert "const uint TABLE_WORD_STRIDE = 2u;" in primary_source
+    assert "route_table.words[table_element * TABLE_WORD_STRIDE]" in primary_source
+    assert "sqrt(softplus(value))" in primary_source
+    assert "weight = weight / denominator * ROUTED_SCALE;" in primary_source
+    assert "binding = 0) readonly buffer RouterLogits" in primary_source
+    assert "binding = 1) readonly buffer TokenId" in primary_source
+    assert "binding = 2) buffer ExpertRoutes" in primary_source
+    assert "binding = 3) readonly buffer RouteTable" in primary_source
+    assert "binding = 4) buffer SelectionTelemetry" in primary_source
+    assert "gl_WorkGroupID.y" in batch_source
+    assert "token_ids.values[batch_index]" in batch_source
+    assert "batch_index * ROUTER_WORDS" in batch_source
+    assert "batch_index * EXPERTS_PER_TOKEN" in batch_source
+    assert "{{" not in primary_source
+    assert "{{" not in batch_source
+    compile_shader_artifacts(tmp_path)
+
+
 def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     tmp_path: Path,
 ) -> None:

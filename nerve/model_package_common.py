@@ -139,6 +139,10 @@ TOKENIZER_PACKAGE_FILES = (
 )
 
 
+def shader_float_token(value: float) -> str:
+    return format(value, ".9g")
+
+
 def gated_delta_lanes_per_value(
     key_head_width: int,
     value_head_width: int,

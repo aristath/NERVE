@@ -1,5 +1,6 @@
 from nerve.model_package_common import *
 from nerve.model_package_assets import stream_control_binding_for_node
+from nerve.model_package_moe_routing import independent_moe_route_shader_file
 from nerve.model_package_tensors import *
 
 
@@ -1362,6 +1363,8 @@ def shader_file_for_node(
             f"cap{shader_float_token(logit_softcap)}_"
             f"{'bias' + bias_dtype.lower() if bias_dtype else 'nobias'}.comp"
         )
+    if op == "moe_route":
+        return independent_moe_route_shader_file(circuit, node, tensor_index)
     if op in {"sparse_moe_gate_up", "sparse_moe_down"}:
         attrs = node["attrs"]
         parameter_dtype = parameter_dtype_for_node(circuit, node, tensor_index)
@@ -1911,10 +1914,6 @@ def rms_norm_shader_file(hidden_size: int, eps: float, weight_offset: float) -> 
         f"rms_norm_bf16_h{hidden_size}_eps{shader_float_token(eps)}"
         f"_offset{shader_float_token(weight_offset)}.comp"
     )
-
-
-def shader_float_token(value: float) -> str:
-    return format(value, ".9g")
 
 
 def rope_shader_suffix(attrs: Json) -> str:

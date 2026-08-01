@@ -1,0 +1,180 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer RouterLogits {
+    uint words[];
+} router_logits;
+
+layout(set = 0, binding = 1) buffer ExpertRoutes {
+    uint words[];
+} expert_routes;
+
+{{BIAS_DECLARATION}}
+
+layout(set = 0, binding = 3) buffer SelectionTelemetry {
+    uint counts[];
+} selection_telemetry;
+
+const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
+const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
+const uint ROUTER_ACTIVATION = {{ROUTER_ACTIVATION}}u;
+const bool NORMALIZE_SELECTED = {{NORMALIZE_SELECTED}} != 0;
+const float ROUTED_SCALE = {{ROUTED_SCALE}};
+
+shared uint top_indices[EXPERTS_PER_TOKEN];
+shared uint selected_experts[NUM_EXPERTS];
+shared float raw_values[NUM_EXPERTS];
+shared float router_values[NUM_EXPERTS];
+shared float subgroup_values[64];
+shared uint subgroup_experts[64];
+shared float softmax_maximum;
+shared float softmax_denominator;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16;
+}
+
+float unpack_bf16(uint packed, uint index) {
+    return bf16_to_f32((index & 1u) == 0u ? packed : packed >> 16);
+}
+
+float softplus(float value) {
+    return max(value, 0.0) + log(1.0 + exp(-abs(value)));
+}
+
+float activate_router_value(float value) {
+    if (ROUTER_ACTIVATION == 0u) return 1.0 / (1.0 + exp(-value));
+    if (ROUTER_ACTIVATION == 1u) {
+        return exp(value - softmax_maximum) / softmax_denominator;
+    }
+    return sqrt(softplus(value));
+}
+
+float selection_score(uint expert) {
+    float activated = router_values[expert];
+    return activated + {{READ_SELECTION_BIAS}};
+}
+
+void initialize_softmax(uint lane) {
+    if (ROUTER_ACTIVATION != 1u) return;
+    float lane_maximum = -uintBitsToFloat(0x7f800000u);
+    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+        lane_maximum = max(lane_maximum, raw_values[expert]);
+    }
+    float subgroup_maximum = subgroupMax(lane_maximum);
+    if (subgroupElect()) subgroup_values[gl_SubgroupID] = subgroup_maximum;
+    barrier();
+    if (lane == 0u) {
+        softmax_maximum = -uintBitsToFloat(0x7f800000u);
+        for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+            softmax_maximum = max(softmax_maximum, subgroup_values[subgroup]);
+        }
+    }
+    barrier();
+    float lane_sum = 0.0;
+    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+        lane_sum += exp(raw_values[expert] - softmax_maximum);
+    }
+    float subgroup_sum = subgroupAdd(lane_sum);
+    if (subgroupElect()) subgroup_values[gl_SubgroupID] = subgroup_sum;
+    barrier();
+    if (lane == 0u) {
+        softmax_denominator = 0.0;
+        for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+            softmax_denominator += subgroup_values[subgroup];
+        }
+    }
+    barrier();
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+        raw_values[expert] = unpack_bf16(router_logits.words[expert >> 1u], expert);
+        selected_experts[expert] = 0u;
+    }
+    barrier();
+    initialize_softmax(lane);
+    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+        router_values[expert] = activate_router_value(raw_values[expert]);
+    }
+    barrier();
+
+    for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+        float best_score = -uintBitsToFloat(0x7f800000u);
+        uint best_expert = 0xffffffffu;
+        for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+            float score = selection_score(expert);
+            if (
+                selected_experts[expert] == 0u
+                && (score > best_score || (score == best_score && expert < best_expert))
+            ) {
+                best_score = score;
+                best_expert = expert;
+            }
+        }
+        float subgroup_score = subgroupMax(best_score);
+        uint subgroup_expert = subgroupMin(
+            best_score == subgroup_score ? best_expert : 0xffffffffu
+        );
+        if (subgroupElect()) {
+            subgroup_values[gl_SubgroupID] = subgroup_score;
+            subgroup_experts[gl_SubgroupID] = subgroup_expert;
+        }
+        barrier();
+        if (lane == 0u) {
+            float route_score = -uintBitsToFloat(0x7f800000u);
+            uint route_expert = 0xffffffffu;
+            for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                float score = subgroup_values[subgroup];
+                uint expert = subgroup_experts[subgroup];
+                if (score > route_score || (score == route_score && expert < route_expert)) {
+                    route_score = score;
+                    route_expert = expert;
+                }
+            }
+            top_indices[route] = route_expert;
+            selected_experts[route_expert] = 1u;
+        }
+        barrier();
+    }
+
+    if (lane == 0u) {
+        float denominator = 0.0;
+        if (NORMALIZE_SELECTED) {
+            for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+                denominator += router_values[top_indices[route]];
+            }
+        }
+        for (uint route = 1u; route < EXPERTS_PER_TOKEN; route++) {
+            uint expert = top_indices[route];
+            uint insertion = route;
+            while (insertion > 0u && top_indices[insertion - 1u] > expert) {
+                top_indices[insertion] = top_indices[insertion - 1u];
+                insertion--;
+            }
+            top_indices[insertion] = expert;
+        }
+        for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+            uint expert = top_indices[route];
+            float weight = router_values[expert];
+            if (NORMALIZE_SELECTED) {
+                weight = weight / denominator * ROUTED_SCALE;
+            } else {
+                weight *= ROUTED_SCALE;
+            }
+            expert_routes.words[route] = (f32_to_bf16(weight) << 16u) | expert;
+            atomicAdd(selection_telemetry.counts[expert], 1u);
+        }
+    }
+}

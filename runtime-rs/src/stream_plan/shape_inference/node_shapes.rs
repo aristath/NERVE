@@ -249,7 +249,7 @@ fn infer_node_output_shapes(
             let output_shape = attr_usize(node, "width").map(|width| vec![width]);
             Ok(repeat_shape(output_shape, outputs))
         }
-        "moe_topk" => {
+        "moe_topk" | "moe_route" => {
             let output_shape = attr_usize(node, "experts_per_token").map(|routes| vec![routes, 2]);
             Ok(repeat_shape(output_shape, outputs))
         }
