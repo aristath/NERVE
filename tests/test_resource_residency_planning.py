@@ -670,10 +670,14 @@ def test_builds_concrete_group_table_for_independent_resources(
     }
 
     resource_builds: Counter[str] = Counter()
+    source_header_catalogs: set[int] = set()
+    artifact_size_catalogs: set[int] = set()
     original_resource_builder = residency_planning.compiled_immutable_resource
 
     def count_resource_builds(**kwargs: object) -> dict[str, object]:
         resource_builds[str(kwargs["tensor_name"])] += 1
+        source_header_catalogs.add(id(kwargs["source_headers"]))
+        artifact_size_catalogs.add(id(kwargs["artifact_byte_counts"]))
         return original_resource_builder(**kwargs)
 
     monkeypatch.setattr(
@@ -707,6 +711,8 @@ def test_builds_concrete_group_table_for_independent_resources(
         binding["mapping"]["kind"] == "atomic_group" for binding in dynamic_bindings
     )
     assert resource_builds == Counter({tensor_name: 1 for tensor_name in packaged["tensors"]})
+    assert len(source_header_catalogs) == 1
+    assert len(artifact_size_catalogs) == 1
     validate_resource_residency_contract(package_dir, contract, manifest)
 
 

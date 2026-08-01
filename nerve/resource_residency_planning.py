@@ -20,6 +20,7 @@ from nerve.resource_residency import (
     residency_content_id,
     selector_identity,
     validate_resource_residency_contract,
+    compiled_resource_artifact_metadata,
 )
 
 
@@ -682,6 +683,9 @@ def build_planned_resource_residency_contract(
     )
     tensors = tensor_index["tensors"]
     parameter_bindings = compiled_parameter_bindings(manifest)
+    source_headers, artifact_byte_counts = compiled_resource_artifact_metadata(
+        package_dir, tensor_index
+    )
     dynamic_tensors = set(analysis["dynamic_tensors"])
     referenced_tensors = set(parameter_bindings)
     if dynamic_tensors | set(analysis["spine_tensors"]) != referenced_tensors:
@@ -695,6 +699,8 @@ def build_planned_resource_residency_contract(
             tensor_index=tensor_index,
             tensor_name=tensor_name,
             lifetime="always_resident",
+            source_headers=source_headers,
+            artifact_byte_counts=artifact_byte_counts,
         )
         for tensor_name in sorted(referenced_tensors - dynamic_tensors)
     }
@@ -731,6 +737,8 @@ def build_planned_resource_residency_contract(
                 tensor_index=tensor_index,
                 tensor_name=tensor_name,
                 lifetime="dynamic",
+                source_headers=source_headers,
+                artifact_byte_counts=artifact_byte_counts,
             )
             dynamic_resource_by_tensor[tensor_name] = resource
         return resource

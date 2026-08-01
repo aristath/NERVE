@@ -532,6 +532,9 @@ def build_eager_resource_residency_contract(
     if not isinstance(tensors, dict):
         raise ModelCompileError("tensor index has no tensor mapping")
 
+    source_headers, artifact_byte_counts = compiled_resource_artifact_metadata(
+        package_dir, tensor_index
+    )
     resources_by_id: dict[str, Json] = {}
     resource_id_by_tensor: dict[str, str] = {}
     for tensor_name in sorted(tensor_bindings):
@@ -540,6 +543,8 @@ def build_eager_resource_residency_contract(
             tensor_index=tensor_index,
             tensor_name=tensor_name,
             lifetime="always_resident",
+            source_headers=source_headers,
+            artifact_byte_counts=artifact_byte_counts,
         )
         resource_id = resource["id"]
         resource_id_by_tensor[tensor_name] = resource_id
@@ -595,6 +600,8 @@ def compiled_immutable_resource(
     tensor_index: Json,
     tensor_name: str,
     lifetime: str,
+    source_headers: dict[str, int],
+    artifact_byte_counts: dict[str, int],
 ) -> Json:
     tensors = tensor_index.get("tensors")
     metadata = tensors.get(tensor_name) if isinstance(tensors, dict) else None
@@ -605,14 +612,6 @@ def compiled_immutable_resource(
     source_file = _require_safe_relative_path(
         metadata.get("source_file"), f"tensor {tensor_name!r} source"
     )
-    source_headers = {
-        record["path"]: record["safetensors_header_bytes"]
-        for record in tensor_index.get("source", {}).get("weights_files", [])
-        if isinstance(record, dict)
-        and isinstance(record.get("path"), str)
-        and isinstance(record.get("safetensors_header_bytes"), int)
-        and not isinstance(record.get("safetensors_header_bytes"), bool)
-    }
     offsets = metadata.get("data_offsets")
     header_bytes = metadata.get(
         "safetensors_header_bytes",
@@ -642,13 +641,11 @@ def compiled_immutable_resource(
             f"compiled tensor {tensor_name!r} cannot form a bounded residency range"
         )
     absolute_offset = 8 + header_bytes + offsets[0]
-    source_path = package_dir / source_file
-    try:
-        artifact_bytes = source_path.stat().st_size
-    except OSError as error:
+    artifact_bytes = artifact_byte_counts.get(source_file)
+    if artifact_bytes is None:
         raise ModelCompileError(
-            f"compiled tensor {tensor_name!r} source cannot be inspected: {error}"
-        ) from error
+            f"compiled tensor {tensor_name!r} source has no inspected artifact size"
+        )
     if absolute_offset + byte_count > artifact_bytes:
         raise ModelCompileError(
             f"compiled tensor {tensor_name!r} range exceeds {source_file!r}"
@@ -678,6 +675,38 @@ def compiled_immutable_resource(
     }
     resource["id"] = resource_identity(resource)
     return resource
+
+
+def compiled_resource_artifact_metadata(
+    package_dir: Path,
+    tensor_index: Json,
+) -> tuple[dict[str, int], dict[str, int]]:
+    source_headers = {
+        record["path"]: record["safetensors_header_bytes"]
+        for record in tensor_index.get("source", {}).get("weights_files", [])
+        if isinstance(record, dict)
+        and isinstance(record.get("path"), str)
+        and isinstance(record.get("safetensors_header_bytes"), int)
+        and not isinstance(record.get("safetensors_header_bytes"), bool)
+    }
+    tensors = tensor_index.get("tensors")
+    if not isinstance(tensors, dict):
+        raise ModelCompileError("tensor index has no tensor mapping")
+    source_files = {
+        metadata.get("source_file")
+        for metadata in tensors.values()
+        if isinstance(metadata, dict)
+        and isinstance(metadata.get("source_file"), str)
+    }
+    artifact_byte_counts: dict[str, int] = {}
+    for source_file in source_files:
+        try:
+            artifact_byte_counts[source_file] = (package_dir / source_file).stat().st_size
+        except OSError as error:
+            raise ModelCompileError(
+                f"compiled resource source {source_file!r} cannot be inspected: {error}"
+            ) from error
+    return source_headers, artifact_byte_counts
 
 
 def validate_resource_residency_contract(
@@ -1087,6 +1116,17 @@ def _validate_bindings(
     template_by_id: dict[str, Json],
     parameter_semantics: set[tuple[str, str, str, str]],
 ) -> None:
+    resource_ids_by_group = {
+        group_id: set(group["resource_ids"])
+        for group_id, group in group_by_id.items()
+    }
+    member_seeds_by_template = {
+        template_id: {
+            member["resource_identity_seed"]
+            for member in template["member_templates"]
+        }
+        for template_id, template in template_by_id.items()
+    }
     keys = []
     bound_semantics = []
     bound_concrete_resources: set[str] = set()
@@ -1112,7 +1152,7 @@ def _validate_bindings(
             resource_id = _require_content_id(
                 mapping["resource_id"], "resource binding resource id"
             )
-            if resource_id not in group_by_id[group_id]["resource_ids"]:
+            if resource_id not in resource_ids_by_group[group_id]:
                 raise ModelCompileError(
                     "resource binding maps a resource outside its atomic group"
                 )
@@ -1132,10 +1172,7 @@ def _validate_bindings(
                 "resource binding partition resource seed",
             )
             template = template_by_id.get(template_id)
-            if template is None or resource_seed not in {
-                member["resource_identity_seed"]
-                for member in template["member_templates"]
-            }:
+            if template is None or resource_seed not in member_seeds_by_template[template_id]:
                 raise ModelCompileError(
                     "resource binding references an unknown partition template member"
                 )
