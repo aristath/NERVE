@@ -413,6 +413,7 @@ fn component_batches_select_only_mode_compatible_kernels() {
             lane_tile_width,
             independent_candidate_compatible,
             causal_sequence_compatible,
+            parallel_block_compatible: false,
             device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
             stages: Vec::new(),
         };
@@ -467,6 +468,29 @@ fn component_batches_select_only_mode_compatible_kernels() {
     .unwrap();
     assert_eq!(heterogeneous.lane_tile_width, 8);
 
+    let parallel_only = VulkanResidentComponentBatchKernelArtifact {
+        component_id: "processor".to_string(),
+        node_id: "attend".to_string(),
+        execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
+        batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+        lane_tile_width: 64,
+        independent_candidate_compatible: false,
+        causal_sequence_compatible: false,
+        parallel_block_compatible: true,
+        device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+        stages: Vec::new(),
+    };
+    assert!(
+        select_component_batch_kernel_artifact(
+            &[parallel_only],
+            "processor",
+            "attend",
+            VulkanComponentBatchExecutionMode::ParallelBlock,
+            7,
+        )
+        .is_some()
+    );
+
 }
 
 #[test]
@@ -496,6 +520,7 @@ fn component_batches_select_only_artifacts_for_the_requested_execution_domain() 
         lane_tile_width,
         independent_candidate_compatible: true,
         causal_sequence_compatible: true,
+        parallel_block_compatible: false,
         device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
         stages: Vec::new(),
     };
@@ -547,6 +572,7 @@ fn component_batches_use_causal_compatibility_for_temporal_prefill_kernels() {
         lane_tile_width: 64,
         independent_candidate_compatible: false,
         causal_sequence_compatible: true,
+        parallel_block_compatible: false,
         device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
         stages: Vec::new(),
     }];
@@ -583,6 +609,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                 lane_tile_width: 16,
                 independent_candidate_compatible: true,
                 causal_sequence_compatible: true,
+                parallel_block_compatible: false,
                 device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
                 stages: vec![VulkanResidentComponentBatchStageSpec {
                     shader_path,

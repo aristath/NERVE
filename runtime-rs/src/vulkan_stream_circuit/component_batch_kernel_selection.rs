@@ -119,6 +119,7 @@ fn component_batch_stage_bindings<'a>(
 enum VulkanComponentBatchExecutionMode {
     IndependentStreams,
     CausalSequence,
+    ParallelBlock,
 }
 
 fn select_component_batch_kernel_artifact<'a>(

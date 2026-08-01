@@ -1084,7 +1084,16 @@ def component_kernel_spec(
                 )
             ),
         }
-    causal_scan_stages = causal_scan_batch_stages(shader_file, local_size_x)
+    parallel_block_stages = parallel_block_attention_stages(
+        shader_file,
+        local_size_x,
+        workgroup_count_x,
+    )
+    causal_scan_stages = (
+        None
+        if parallel_block_stages is not None
+        else causal_scan_batch_stages(shader_file, local_size_x)
+    )
     direct_frame_parallel_shader_file = (
         None
         if causal_scan_stages is not None
@@ -1131,12 +1140,32 @@ def component_kernel_spec(
             "causal_scan"
             if causal_scan_stages
             else "weight_shared"
-            if scalar_batch_shader_file or frame_parallel_shader_file
+            if (
+                parallel_block_stages
+                or scalar_batch_shader_file
+                or frame_parallel_shader_file
+            )
             else "serial_lanes"
         ),
         "batch_implementations": [],
     }
-    if causal_scan_stages is not None:
+    if parallel_block_stages is not None:
+        spec["batch_implementations"].append(
+            {
+                "execution_domain": "decode_and_prefill",
+                "lane_tile_width": 64,
+                "independent_candidate_compatible": False,
+                "causal_sequence_compatible": False,
+                "parallel_block_compatible": True,
+                "device_requirements": {
+                    "vulkan_device_extensions": [],
+                    "vulkan_features": [],
+                    "subgroup_operations": [],
+                },
+                "stages": parallel_block_stages,
+            }
+        )
+    elif causal_scan_stages is not None:
         spec["batch_implementations"].append(
             {
                 "execution_domain": "prefill",

@@ -98,6 +98,38 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     return None
 
 
+def parallel_block_attention_stages(
+    shader_file: str,
+    local_size_x: int,
+    workgroup_count_x: int,
+) -> list[Json] | None:
+    match = re.fullmatch(
+        r"indexed_sparse_attention_bf16_q\d+_kv\d+_d\d+_w\d+_"
+        r"scale[0-9eE+.-]+__sc(\d+)\.comp",
+        shader_file,
+    )
+    if match is None:
+        return None
+    control_binding = int(match.group(1))
+    parallel_shader = re.sub(
+        r"^indexed_sparse_attention_",
+        "indexed_sparse_attention_parallel_",
+        shader_file,
+        count=1,
+    )
+    parallel_shader = re.sub(r"__sc\d+\.comp$", ".comp", parallel_shader)
+    return [
+        persistent_batch_control_stage(
+            parallel_shader,
+            local_size_x,
+            workgroup_count_x,
+            payload="temporal",
+            binding=control_binding,
+            dispatch_y_from_batch_width=True,
+        )
+    ]
+
+
 def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     match = re.fullmatch(
         r"sparse_moe_(gate_up|down)_(?:bf16|"

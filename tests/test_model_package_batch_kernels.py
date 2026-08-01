@@ -366,6 +366,45 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
     )
 
 
+def test_compiler_marks_all_visible_indexed_attention_as_parallel_block_only() -> None:
+    spec = component_kernel_spec(
+        execution_index=0,
+        node={"id": "attend", "op": "indexed_sparse_attention"},
+        circuit={},
+        shader_file=(
+            "indexed_sparse_attention_bf16_q64_kv1_d512_w128_"
+            "scale0.0441941738__sc6.comp"
+        ),
+        local_size_x=512,
+        workgroup_count_x=64,
+    )
+
+    assert spec["batch_mode"] == "weight_shared"
+    assert len(spec["batch_implementations"]) == 1
+    [implementation] = spec["batch_implementations"]
+    assert implementation["lane_tile_width"] == 64
+    assert implementation["independent_candidate_compatible"] is False
+    assert implementation["causal_sequence_compatible"] is False
+    assert implementation["parallel_block_compatible"] is True
+    assert implementation["stages"] == [
+        {
+            "shader_path": (
+                "shaders/indexed_sparse_attention_parallel_bf16_q64_kv1_d512_"
+                "w128_scale0.0441941738__pbc6.comp"
+            ),
+            "local_size_x": 512,
+            "workgroup_count_x": 64,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 16,
+                "binding": 6,
+                "payload": "temporal",
+            },
+            "dispatch_y_from_batch_width": True,
+        }
+    ]
+
+
 def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     assert CAUSAL_SCAN_LANE_TILE_WIDTH == 64
     assert (

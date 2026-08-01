@@ -6,6 +6,7 @@ struct VulkanResidentComponentBatchKernelArtifact {
     lane_tile_width: usize,
     independent_candidate_compatible: bool,
     causal_sequence_compatible: bool,
+    parallel_block_compatible: bool,
     device_requirements: VulkanResidentVulkanDeviceRequirements,
     stages: Vec<VulkanResidentComponentBatchStageArtifact>,
 }
@@ -18,6 +19,9 @@ impl VulkanResidentComponentBatchKernelArtifact {
             }
             VulkanComponentBatchExecutionMode::CausalSequence => {
                 self.causal_sequence_compatible
+            }
+            VulkanComponentBatchExecutionMode::ParallelBlock => {
+                self.parallel_block_compatible || self.independent_candidate_compatible
             }
         }
     }

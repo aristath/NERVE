@@ -208,6 +208,7 @@ fn load_resident_component_batch_kernels(
                     independent_candidate_compatible: implementation
                         .independent_candidate_compatible,
                     causal_sequence_compatible: implementation.causal_sequence_compatible,
+                    parallel_block_compatible: implementation.parallel_block_compatible,
                     device_requirements: implementation.device_requirements.clone(),
                     stages: implementation
                         .stages

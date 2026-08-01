@@ -512,6 +512,7 @@ def valid_batch_implementation(implementation: Any) -> bool:
         and implementation["lane_tile_width"] > 0
         and isinstance(implementation.get("independent_candidate_compatible"), bool)
         and isinstance(implementation.get("causal_sequence_compatible"), bool)
+        and isinstance(implementation.get("parallel_block_compatible", False), bool)
         and isinstance(stages, list)
         and bool(stages)
         and all(valid_batch_stage(stage) for stage in stages)

@@ -743,6 +743,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         let execution_mode = match self.execution_mode {
             VulkanComponentBatchExecutionMode::IndependentStreams => "independent_streams",
             VulkanComponentBatchExecutionMode::CausalSequence => "causal_sequence",
+            VulkanComponentBatchExecutionMode::ParallelBlock => "parallel_block",
         };
         format!(
             "{}:{execution_mode}:capacity={}:width={batch_width}",

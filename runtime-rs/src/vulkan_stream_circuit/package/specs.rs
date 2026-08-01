@@ -139,6 +139,8 @@ pub struct VulkanResidentComponentBatchImplementationSpec {
     pub lane_tile_width: u32,
     pub independent_candidate_compatible: bool,
     pub causal_sequence_compatible: bool,
+    #[serde(default)]
+    pub parallel_block_compatible: bool,
     pub device_requirements: VulkanResidentVulkanDeviceRequirements,
     pub stages: Vec<VulkanResidentComponentBatchStageSpec>,
 }
@@ -282,6 +284,7 @@ impl VulkanResidentComponentKernelExecutionDomain {
         match mode {
             VulkanComponentBatchExecutionMode::IndependentStreams => self.supports_decode(),
             VulkanComponentBatchExecutionMode::CausalSequence => self.supports_prefill(),
+            VulkanComponentBatchExecutionMode::ParallelBlock => self.supports_decode(),
         }
     }
 }
