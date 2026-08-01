@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import struct
+from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import nerve.resource_residency_planning as residency_planning
 
 from nerve.compilation import ModelCompileError
 from nerve.model_package_assets import copy_tensor_package
@@ -612,6 +614,7 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
 
 def test_builds_concrete_group_table_for_independent_resources(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -666,6 +669,19 @@ def test_builds_concrete_group_table_for_independent_resources(
         "speculative_decoders": [],
     }
 
+    resource_builds: Counter[str] = Counter()
+    original_resource_builder = residency_planning.compiled_immutable_resource
+
+    def count_resource_builds(**kwargs: object) -> dict[str, object]:
+        resource_builds[str(kwargs["tensor_name"])] += 1
+        return original_resource_builder(**kwargs)
+
+    monkeypatch.setattr(
+        residency_planning,
+        "compiled_immutable_resource",
+        count_resource_builds,
+    )
+
     contract = build_planned_resource_residency_contract(
         package_dir=package_dir,
         tensor_index=packaged,
@@ -690,6 +706,7 @@ def test_builds_concrete_group_table_for_independent_resources(
     assert all(
         binding["mapping"]["kind"] == "atomic_group" for binding in dynamic_bindings
     )
+    assert resource_builds == Counter({tensor_name: 1 for tensor_name in packaged["tensors"]})
     validate_resource_residency_contract(package_dir, contract, manifest)
 
 

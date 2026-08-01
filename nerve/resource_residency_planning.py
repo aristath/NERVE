@@ -720,16 +720,30 @@ def build_planned_resource_residency_contract(
     selectors: list[Json] = []
     checkpoints: list[Json] = []
     dynamic_binding_mapping: dict[tuple[str, str, str, str], Json] = {}
+    dynamic_resource_by_tensor: dict[str, Json] = {}
     seen_dynamic_tensors: set[str] = set()
+
+    def dynamic_resource(tensor_name: str) -> Json:
+        resource = dynamic_resource_by_tensor.get(tensor_name)
+        if resource is None:
+            resource = compiled_immutable_resource(
+                package_dir=package_dir,
+                tensor_index=tensor_index,
+                tensor_name=tensor_name,
+                lifetime="dynamic",
+            )
+            dynamic_resource_by_tensor[tensor_name] = resource
+        return resource
+
     for group in analysis["groups"]:
         if group["storage"] == "independent_resources":
+            accesses_by_selector: list[list[Json]] = [
+                [] for _ in range(group["partition_count"])
+            ]
+            for access in group["accesses"]:
+                accesses_by_selector[access["selector"]].append(access)
             atomic_group_ids: list[str] = []
-            for selector_index in range(group["partition_count"]):
-                selected_accesses = [
-                    access
-                    for access in group["accesses"]
-                    if access["selector"] == selector_index
-                ]
+            for selected_accesses in accesses_by_selector:
                 if not selected_accesses:
                     raise ModelCompileError(
                         "independent residency group has an empty selector resource"
@@ -738,12 +752,7 @@ def build_planned_resource_residency_contract(
                 for access in selected_accesses:
                     tensor_name = access["tensor"]
                     seen_dynamic_tensors.add(tensor_name)
-                    resource = compiled_immutable_resource(
-                        package_dir=package_dir,
-                        tensor_index=tensor_index,
-                        tensor_name=tensor_name,
-                        lifetime="dynamic",
-                    )
+                    resource = dynamic_resource(tensor_name)
                     resource_id = resource["id"]
                     resources_by_id.setdefault(resource_id, resource)
                     group_resource_ids.add(resource_id)
@@ -764,12 +773,7 @@ def build_planned_resource_residency_contract(
                         access["parameter_id"],
                     )
                     tensor_name = access["tensor"]
-                    resource = compiled_immutable_resource(
-                        package_dir=package_dir,
-                        tensor_index=tensor_index,
-                        tensor_name=tensor_name,
-                        lifetime="dynamic",
-                    )
+                    resource = dynamic_resource(tensor_name)
                     dynamic_binding_mapping[semantic_key] = {
                         "kind": "atomic_group",
                         "atomic_group_id": atomic_group["id"],
