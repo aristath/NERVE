@@ -317,6 +317,12 @@ def test_lowers_explicit_query_context_and_target_feature_wiring() -> None:
 
     assert lowered["topology"] == "explicit_parallel_query_graph"
     assert len(lowered["edges"]) == 8
+    assert [edge["connection"] for edge in lowered["edges"][:4]] == [
+        {"kind": "parallel_block_scatter", "width": 5},
+        {"kind": "forward"},
+        {"kind": "forward"},
+        {"kind": "parallel_block_gather", "width": 5},
+    ]
     context_edges = [
         edge
         for edge in lowered["edges"]

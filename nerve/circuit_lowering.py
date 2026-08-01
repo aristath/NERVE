@@ -394,14 +394,22 @@ def lower_parallel_markov_draft_graph(
     input_ref: Json,
     output_ref: Json,
 ) -> Json:
+    block_width = int(draft["proposal_contract"]["default_draft_tokens"])
     query_chain = [*layer_refs, output_ref]
     query_edges = []
     for index, destination in enumerate(query_chain):
         source = input_ref if index == 0 else layer_refs[index - 1]
+        connection = (
+            {"kind": "parallel_block_scatter", "width": block_width}
+            if source is input_ref
+            else {"kind": "parallel_block_gather", "width": block_width}
+            if destination is output_ref
+            else {"kind": "forward"}
+        )
         query_edges.append(
             {
                 "id": f"{draft['id']}_query_edge_{index:04d}",
-                "connection": {"kind": "forward"},
+                "connection": connection,
                 "source": {
                     "component_id": source["id"],
                     "port_id": "query_frames" if index == 0 else "output_frame",

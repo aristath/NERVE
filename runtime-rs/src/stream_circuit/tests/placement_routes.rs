@@ -240,3 +240,33 @@
         );
         assert_eq!(payload["unsupported_targets"][0], "remote0=lan:worker-a");
     }
+    #[test]
+    fn parallel_block_connections_require_exact_scatter_and_gather_geometry() {
+        let scatter = StreamCircuitConnection::ParallelBlockScatter { width: 7 };
+        assert!(scatter.connects_port_geometry(
+            "stream_frame_block",
+            &[7, 4, 4096],
+            "frame",
+            &[4, 4096],
+        ));
+        assert!(!scatter.connects_port_geometry(
+            "stream_frame_block",
+            &[5, 4, 4096],
+            "frame",
+            &[4, 4096],
+        ));
+
+        let gather = StreamCircuitConnection::ParallelBlockGather { width: 7 };
+        assert!(gather.connects_port_geometry(
+            "frame",
+            &[4, 4096],
+            "stream_frame_block",
+            &[7, 4, 4096],
+        ));
+        assert!(!gather.connects_port_geometry(
+            "frame",
+            &[4, 4096],
+            "stream_frame_block",
+            &[7, 4096],
+        ));
+    }

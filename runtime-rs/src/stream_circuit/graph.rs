@@ -870,6 +870,15 @@ pub enum StreamCircuitConnection {
     TemporalFeedback {
         delay_activations: usize,
     },
+    SharedContext {
+        state_update: String,
+    },
+    ParallelBlockScatter {
+        width: usize,
+    },
+    ParallelBlockGather {
+        width: usize,
+    },
 }
 
 impl StreamCircuitConnection {
@@ -878,14 +887,45 @@ impl StreamCircuitConnection {
     }
 
     pub fn validate(&self, edge_id: &str) -> Result<(), CircuitPlacementError> {
-        if let Self::TemporalFeedback { delay_activations } = self
-            && *delay_activations == 0
-        {
-            return Err(CircuitPlacementError(format!(
-                "runtime graph temporal feedback edge {edge_id} must delay at least one activation"
-            )));
+        match self {
+            Self::TemporalFeedback { delay_activations } if *delay_activations == 0 => {
+                return Err(CircuitPlacementError(format!(
+                    "runtime graph temporal feedback edge {edge_id} must delay at least one activation"
+                )));
+            }
+            Self::SharedContext { state_update } if state_update.trim().is_empty() => {
+                return Err(CircuitPlacementError(format!(
+                    "runtime graph shared-context edge {edge_id} has no state-update contract"
+                )));
+            }
+            Self::ParallelBlockScatter { width } | Self::ParallelBlockGather { width }
+                if *width == 0 =>
+            {
+                return Err(CircuitPlacementError(format!(
+                    "runtime graph parallel-block edge {edge_id} has zero width"
+                )));
+            }
+            _ => {}
         }
         Ok(())
+    }
+
+    pub(crate) fn connects_port_geometry(
+        &self,
+        output_signal: &str,
+        output_shape: &[usize],
+        input_signal: &str,
+        input_shape: &[usize],
+    ) -> bool {
+        match self {
+            Self::ParallelBlockScatter { width } => {
+                output_shape.first() == Some(width) && output_shape[1..] == *input_shape
+            }
+            Self::ParallelBlockGather { width } => {
+                input_shape.first() == Some(width) && input_shape[1..] == *output_shape
+            }
+            _ => output_signal == input_signal && output_shape == input_shape,
+        }
     }
 }
 

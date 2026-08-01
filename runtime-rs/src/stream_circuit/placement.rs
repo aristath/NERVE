@@ -125,7 +125,13 @@ impl StreamCircuitPlacementPlan {
                         destination.component.id, edge.destination.port_id, edge.id
                     ))
                 })?;
-            if output.signal != input.signal || output.shape != input.shape {
+            let compatible = edge.connection.connects_port_geometry(
+                &output.signal,
+                &output.shape,
+                &input.signal,
+                &input.shape,
+            );
+            if !compatible {
                 return Err(CircuitPlacementError(format!(
                     "cannot place edge {} -> {} without an adapter: output {:?}/{:?}, input {:?}/{:?}",
                     source.component.id,
