@@ -4,6 +4,9 @@ mod sequence;
 mod terminal;
 mod view;
 
+#[cfg(test)]
+mod e2e_tests;
+
 pub use app::{App, AppAction, FocusRegion};
 pub use compiler::{CompilerEvent, CompilerJob, CompilerJobKind, CompilerLaunch};
 pub use sequence::{SequenceParseError, TextBuffer, parse_layer_sequence};
