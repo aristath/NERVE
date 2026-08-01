@@ -744,6 +744,12 @@ def shader_file_for_node(
             raise ModelCompileError(
                 f"rolling-state node {node['id']!r} has incompatible state geometry"
             )
+        if attrs["update"] == "ring_append":
+            binding = stream_control_binding_for_node(circuit, node)
+            return (
+                f"rolling_state_ring_append_bf16_{frames}x{state_hidden}"
+                f"__sc{binding}.comp"
+            )
         return f"rolling_state_update_bf16_{frames}x{state_hidden}.comp"
     if op == "depthwise_conv1d":
         temporal_memory = state_port(circuit, "temporal_memory")

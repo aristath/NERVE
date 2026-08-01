@@ -2821,6 +2821,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("FRAME_COUNT", "HIDDEN_SIZE"),
         ),
         (
+            r"rolling_state_ring_append_bf16_(\d+)x(\d+)\.comp",
+            "rolling_state_ring_append_bf16.comp.template",
+            ("FRAME_COUNT", "HIDDEN_SIZE"),
+        ),
+        (
             r"depthwise_conv1d_bf16_(\d+)x(\d+)\.comp",
             "depthwise_conv1d_bf16.comp.template",
             ("FRAME_COUNT", "HIDDEN_SIZE"),

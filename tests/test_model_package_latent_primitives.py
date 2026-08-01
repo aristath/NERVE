@@ -107,7 +107,7 @@ def test_compiles_latent_attention_primitives(tmp_path: Path) -> None:
     }
 
     assert shaders == {
-        "remember": "rolling_state_update_bf16_4x128.comp",
+        "remember": "rolling_state_ring_append_bf16_4x128__sc6.comp",
         "derotate": (
             "inverse_rotary_bf16_2x64_r32_theta10000_half_po1__sc2.comp"
         ),
@@ -125,6 +125,10 @@ def test_compiles_latent_attention_primitives(tmp_path: Path) -> None:
     rendered = {
         name: (tmp_path / shader).read_text() for name, shader in shaders.items()
     }
+    assert "uint slot = stream_control.words[1] % FRAME_COUNT;" in rendered[
+        "remember"
+    ]
+    assert "for (uint frame" not in rendered["remember"]
     assert "const float ROPE_DIRECTION = -1.0;" in rendered["derotate"]
     assert "const int POSITION_OFFSET = 1;" in rendered["derotate"]
     assert "uint offset = (group * INPUT_SIZE + column) >> 1u;" in rendered[
