@@ -2858,6 +2858,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("VOCAB_SIZE", "TOP_K_CAPACITY", "PARTITION_COUNT", "LOCAL_SIZE_X"),
         ),
         (
+            r"temperature_distribution_partitions_f32_(\d+)_t([0-9eE+.-]+)_g(\d+)_l(\d+)\.comp",
+            "temperature_distribution_partitions_f32.comp.template",
+            ("VOCAB_SIZE", "TEMPERATURE", "PARTITION_COUNT", "LOCAL_SIZE_X"),
+        ),
+        (
+            r"temperature_distribution_sampler_f32_(\d+)_t([0-9eE+.-]+)_g(\d+)_l(\d+)\.comp",
+            "temperature_distribution_sampler_f32.comp.template",
+            ("VOCAB_SIZE", "TEMPERATURE", "PARTITION_COUNT", "LOCAL_SIZE_X"),
+        ),
+        (
             r"record_seen_token_(\d+)\.comp",
             "record_seen_token.comp.template",
             ("VOCAB_SIZE",),

@@ -227,6 +227,43 @@ def build_vulkan_resident_package_manifest(
                 "workgroup_count_x": 1,
             },
         ]
+    elif sampler_method == "temperature_top_p":
+        sampler_temperature = float(sampling["temperature"])
+        sampler_top_k = 0
+        sampler_top_p = float(sampling["top_p"])
+        sampler_min_p = float(sampling["min_p"])
+        if sampler_top_p != 1.0 or sampler_min_p != 0.0:
+            raise ModelCompileError(
+                "exact sampling without a top-k bound currently requires top_p=1 "
+                "and min_p=0"
+            )
+        if sampler_uses_token_state:
+            raise ModelCompileError(
+                "exact full-distribution sampling with token penalties is not yet supported"
+            )
+        sampler_id = "temperature_distribution_sampler"
+        distribution_shape = (
+            f"f32_{vocab_size}_t{shader_float_token(sampler_temperature)}"
+            f"_g{sampler_partition_count}_l{sampler_candidate_local_size_x}.comp"
+        )
+        sampler_kernels = [
+            {
+                "role": "partition_distribution",
+                "shader_path": compiled_shader_path(
+                    f"shaders/temperature_distribution_partitions_{distribution_shape}"
+                ),
+                "local_size_x": sampler_candidate_local_size_x,
+                "workgroup_count_x": sampler_partition_count,
+            },
+            {
+                "role": "sample_distribution",
+                "shader_path": compiled_shader_path(
+                    f"shaders/temperature_distribution_sampler_{distribution_shape}"
+                ),
+                "local_size_x": sampler_merge_local_size_x,
+                "workgroup_count_x": 1,
+            },
+        ]
     else:
         raise ModelCompileError(f"unsupported sampling method {sampler_method!r}")
 

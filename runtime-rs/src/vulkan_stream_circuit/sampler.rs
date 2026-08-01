@@ -85,6 +85,10 @@ impl VulkanResidentSamplerRuntimeConfig {
             effective.top_p = 1.0;
             effective.min_p = 0.0;
         }
+        if default.method == "temperature_top_p" && self.top_k.is_some() {
+            effective.sampler_id = "runtime_temperature_top_k_top_p_sampler".to_string();
+            effective.method = "temperature_top_k_top_p".to_string();
+        }
         if let Some(value) = self.temperature {
             effective.temperature = value;
         }
@@ -103,6 +107,16 @@ impl VulkanResidentSamplerRuntimeConfig {
         if let Some(value) = self.repetition_penalty {
             effective.repetition_penalty = value;
         }
+        if effective == *default {
+            return Ok(default.clone());
+        }
+        if effective.method == "temperature_top_p" {
+            return Err(
+                VulkanResidentSamplerRunnerError::UnsupportedRuntimeSamplingOverride(
+                    "changing full-distribution sampling requires an explicit top_k so the runtime-parameterized sampler has a bounded candidate set".to_string(),
+                ),
+            );
+        }
         let valid_common = effective.presence_penalty.is_finite()
             && effective.repetition_penalty.is_finite()
             && effective.repetition_penalty > 0.0;
@@ -119,6 +133,14 @@ impl VulkanResidentSamplerRuntimeConfig {
                     && effective.min_p.is_finite()
                     && effective.min_p >= 0.0
                     && effective.min_p <= 1.0
+                    && valid_common
+            }
+            "temperature_top_p" => {
+                effective.temperature.is_finite()
+                    && effective.temperature > 0.0
+                    && effective.top_k == 0
+                    && effective.top_p == 1.0
+                    && effective.min_p == 0.0
                     && valid_common
             }
             _ => false,
@@ -158,7 +180,16 @@ fn sampler_kernel_role_matches(role: &str, runtime_parameterized: bool, method: 
                 "temperature_top_k_top_p",
                 "runtime_partition_top_k" | "runtime_sample_candidates",
             )
+            | (
+                false,
+                "temperature_top_p",
+                "partition_distribution" | "sample_distribution"
+            )
     )
+}
+
+fn sampler_method_uses_randomness(method: &str) -> bool {
+    matches!(method, "temperature_top_k_top_p" | "temperature_top_p")
 }
 
 pub struct VulkanResidentSamplerKernelArtifact {
@@ -335,6 +366,19 @@ impl VulkanResidentSamplerRunner {
                 })
                 .and_then(|candidates| candidates.checked_mul(2 * std::mem::size_of::<u32>()))
                 .is_some_and(|required| required <= spec.scratch_byte_capacity);
+        let distribution_kernel_plan_is_valid = sampling_kernels.len() == 2
+            && sampling_kernels[0].role == "partition_distribution"
+            && sampling_kernels[0].local_size_x > 0
+            && sampling_kernels[0].workgroup_count_x > 0
+            && sampling_kernels[1].role == "sample_distribution"
+            && sampling_kernels[1].local_size_x >= sampling_kernels[0].workgroup_count_x
+            && sampling_kernels[1].workgroup_count_x == 1
+            && usize::try_from(sampling_kernels[0].workgroup_count_x)
+                .ok()
+                .and_then(|partitions| {
+                    partitions.checked_mul(2 * std::mem::size_of::<f32>())
+                })
+                .is_some_and(|required| required <= spec.scratch_byte_capacity);
         let feedback_control_kernel_is_valid = feedback_control_kernel
             .is_some_and(|kernel| kernel.local_size_x == 1 && kernel.workgroup_count_x == 1);
         match spec.method.as_str() {
@@ -370,6 +414,16 @@ impl VulkanResidentSamplerRunner {
                     && tracking_kernel_plan_is_valid
                     && sampled_kernel_plan_is_valid
                     && feedback_control_kernel_is_valid => {}
+            "temperature_top_p"
+                if spec.temperature.is_finite()
+                    && spec.temperature > 0.0
+                    && spec.top_k == 0
+                    && spec.top_p == 1.0
+                    && spec.min_p == 0.0
+                    && spec.presence_penalty == 0.0
+                    && spec.repetition_penalty == 1.0
+                    && distribution_kernel_plan_is_valid
+                    && feedback_control_kernel_is_valid => {}
             _ => {
                 return Err(VulkanResidentSamplerRunnerError::InvalidSamplingSpec {
                     method: spec.method.clone(),
@@ -389,14 +443,14 @@ impl VulkanResidentSamplerRunner {
         let mut output_buffer =
             device.create_host_visible_resident_buffer(history_byte_capacity)?;
         output_buffer.persistently_map()?;
-        let sampler_seed_buffer = if spec.method == "temperature_top_k_top_p" {
+        let sampler_seed_buffer = if sampler_method_uses_randomness(&spec.method) {
             let buffer = device.create_host_visible_resident_buffer(4)?;
             buffer.write_bytes(&random_seed.to_le_bytes())?;
             Some(buffer)
         } else {
             None
         };
-        let scratch_buffer = (spec.method == "temperature_top_k_top_p")
+        let scratch_buffer = sampler_method_uses_randomness(&spec.method)
             .then(|| device.create_resident_buffer(spec.scratch_byte_capacity))
             .transpose()?;
         let seen_token_byte_capacity = vocabulary_size
@@ -558,6 +612,16 @@ impl VulkanResidentSamplerRunner {
                     )
                     .with_access(VulkanResidentKernelBufferAccess::Write),
                 ],
+                "partition_distribution" => vec![
+                    VulkanResidentKernelBufferBinding::new(0, logits_buffer, logits_byte_capacity)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(
+                        1,
+                        scratch_buffer.as_ref().expect("sampling plan has scratch"),
+                        spec.scratch_byte_capacity,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+                ],
                 "sample_candidates" | "runtime_sample_candidates" => vec![
                     VulkanResidentKernelBufferBinding::new(
                         0,
@@ -579,6 +643,36 @@ impl VulkanResidentSamplerRunner {
                     .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
                     VulkanResidentKernelBufferBinding::new(
                         3,
+                        sampler_seed_buffer
+                            .as_ref()
+                            .expect("sampled plan has a seed buffer"),
+                        4,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                ],
+                "sample_distribution" => vec![
+                    VulkanResidentKernelBufferBinding::new(0, logits_buffer, logits_byte_capacity)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(
+                        1,
+                        scratch_buffer.as_ref().expect("sampling plan has scratch"),
+                        spec.scratch_byte_capacity,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(
+                        2,
+                        &output_buffer,
+                        history_byte_capacity,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(
+                        3,
+                        &stream_control_buffer,
+                        VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
+                    VulkanResidentKernelBufferBinding::new(
+                        4,
                         sampler_seed_buffer
                             .as_ref()
                             .expect("sampled plan has a seed buffer"),
@@ -625,6 +719,7 @@ impl VulkanResidentSamplerRunner {
                     | "runtime_sample_logits"
                     | "sample_candidates"
                     | "runtime_sample_candidates"
+                    | "sample_distribution"
             ) {
                 bindings.push(
                     VulkanResidentKernelBufferBinding::new(
@@ -947,7 +1042,7 @@ impl VulkanResidentSamplerRunner {
         kernels: &[VulkanResidentSamplerKernelArtifact],
         spec: &VulkanResidentSamplerSpec,
     ) -> Result<VulkanResidentSamplerLogitsView, VulkanResidentSamplerRunnerError> {
-        let scratch_buffer = (spec.method == "temperature_top_k_top_p")
+        let scratch_buffer = sampler_method_uses_randomness(&spec.method)
             .then(|| device.create_resident_buffer(spec.scratch_byte_capacity))
             .transpose()?;
         let mut stream_control_buffer =
@@ -1071,6 +1166,17 @@ impl VulkanResidentSamplerRunner {
                     )
                     .with_access(VulkanResidentKernelBufferAccess::Write),
                 ],
+                "partition_distribution" => vec![
+                    logits_binding(),
+                    VulkanResidentKernelBufferBinding::new(
+                        1,
+                        scratch_buffer
+                            .as_ref()
+                            .expect("validated sampling plan has scratch"),
+                        spec.scratch_byte_capacity,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+                ],
                 "sample_candidates" | "runtime_sample_candidates" => vec![
                     VulkanResidentKernelBufferBinding::new(
                         0,
@@ -1094,6 +1200,37 @@ impl VulkanResidentSamplerRunner {
                     .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
                     VulkanResidentKernelBufferBinding::new(
                         3,
+                        self._sampler_seed_buffer
+                            .as_ref()
+                            .expect("validated sampled plan has a seed buffer"),
+                        4,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                ],
+                "sample_distribution" => vec![
+                    logits_binding(),
+                    VulkanResidentKernelBufferBinding::new(
+                        1,
+                        scratch_buffer
+                            .as_ref()
+                            .expect("validated sampling plan has scratch"),
+                        spec.scratch_byte_capacity,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(
+                        2,
+                        &self.output_buffer,
+                        self.output_buffer.byte_capacity(),
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+                    VulkanResidentKernelBufferBinding::new(
+                        3,
+                        &stream_control_buffer,
+                        VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
+                    VulkanResidentKernelBufferBinding::new(
+                        4,
                         self._sampler_seed_buffer
                             .as_ref()
                             .expect("validated sampled plan has a seed buffer"),
@@ -1144,6 +1281,7 @@ impl VulkanResidentSamplerRunner {
                     | "runtime_sample_logits"
                     | "sample_candidates"
                     | "runtime_sample_candidates"
+                    | "sample_distribution"
             ) {
                 bindings.push(
                     VulkanResidentKernelBufferBinding::new(
@@ -1388,5 +1526,68 @@ impl Error for VulkanResidentSamplerRunnerError {}
 impl From<VulkanError> for VulkanResidentSamplerRunnerError {
     fn from(error: VulkanError) -> Self {
         Self::Vulkan(error)
+    }
+}
+
+#[cfg(test)]
+mod sampler_runtime_tests {
+    use super::{VulkanResidentSamplerRuntimeConfig, VulkanResidentSamplerSpec};
+
+    fn full_distribution_spec() -> VulkanResidentSamplerSpec {
+        VulkanResidentSamplerSpec {
+            sampler_id: "temperature_distribution_sampler".to_string(),
+            method: "temperature_top_p".to_string(),
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            top_k_capacity: 256,
+            runtime_parameterized: false,
+            logits_byte_capacity: 129_280 * 4,
+            output_byte_capacity: 16,
+            scratch_byte_capacity: 128 * 256 * 8,
+        }
+    }
+
+    #[test]
+    fn full_distribution_sampler_preserves_identical_runtime_defaults() {
+        let default = full_distribution_spec();
+        let effective = VulkanResidentSamplerRuntimeConfig {
+            temperature: Some(1.0),
+            top_p: Some(1.0),
+            min_p: Some(0.0),
+            ..Default::default()
+        }
+        .apply_to(&default)
+        .expect("identical runtime values must preserve the compiled sampler");
+
+        assert_eq!(effective, default);
+        assert!(!effective.runtime_parameterized);
+    }
+
+    #[test]
+    fn full_distribution_sampler_requires_top_k_for_changed_runtime_policy() {
+        let default = full_distribution_spec();
+        let error = VulkanResidentSamplerRuntimeConfig {
+            temperature: Some(0.8),
+            ..Default::default()
+        }
+        .apply_to(&default)
+        .expect_err("the bounded runtime sampler cannot silently approximate full sampling");
+        assert!(error.to_string().contains("requires an explicit top_k"));
+
+        let effective = VulkanResidentSamplerRuntimeConfig {
+            temperature: Some(0.8),
+            top_k: Some(64),
+            top_p: Some(0.95),
+            ..Default::default()
+        }
+        .apply_to(&default)
+        .expect("an explicit bound selects the runtime top-k sampler");
+        assert_eq!(effective.method, "temperature_top_k_top_p");
+        assert_eq!(effective.top_k, 64);
+        assert!(effective.runtime_parameterized);
     }
 }

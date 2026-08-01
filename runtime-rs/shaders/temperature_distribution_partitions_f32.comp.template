@@ -1,0 +1,77 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = {{LOCAL_SIZE_X}}, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits {
+    float values[];
+} logits;
+
+layout(set = 0, binding = 1) buffer PartitionStatistics {
+    vec2 values[];
+} partition_statistics;
+
+const uint VOCAB_SIZE = {{VOCAB_SIZE}}u;
+const float TEMPERATURE = {{TEMPERATURE}};
+const uint PARTITION_COUNT = {{PARTITION_COUNT}}u;
+const uint PARTITION_SIZE = (VOCAB_SIZE + PARTITION_COUNT - 1u) / PARTITION_COUNT;
+const uint LOCAL_SIZE_X = {{LOCAL_SIZE_X}}u;
+const float LOWEST_FLOAT = -3.4028234663852886e38;
+
+shared float subgroup_values[{{LOCAL_SIZE_X}}];
+shared float partition_maximum;
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint partition_id = gl_WorkGroupID.x;
+    uint begin = partition_id * PARTITION_SIZE;
+    uint end = min(begin + PARTITION_SIZE, VOCAB_SIZE);
+
+    float local_maximum = LOWEST_FLOAT;
+    for (uint token = begin + lane; token < end; token += LOCAL_SIZE_X) {
+        float value = logits.values[token] / TEMPERATURE;
+        if (!isnan(value)) {
+            local_maximum = max(local_maximum, value);
+        }
+    }
+    float subgroup_maximum = subgroupMax(local_maximum);
+    if (subgroupElect()) {
+        subgroup_values[gl_SubgroupID] = subgroup_maximum;
+    }
+    barrier();
+    if (lane == 0u) {
+        float value = subgroup_values[0];
+        for (uint subgroup = 1u; subgroup < gl_NumSubgroups; ++subgroup) {
+            value = max(value, subgroup_values[subgroup]);
+        }
+        partition_maximum = value;
+    }
+    barrier();
+
+    float local_weight = 0.0;
+    if (partition_maximum > LOWEST_FLOAT) {
+        for (uint token = begin + lane; token < end; token += LOCAL_SIZE_X) {
+            float value = logits.values[token] / TEMPERATURE;
+            if (!isnan(value) && value > LOWEST_FLOAT) {
+                local_weight += exp(value - partition_maximum);
+            }
+        }
+    }
+    float subgroup_weight = subgroupAdd(local_weight);
+    if (subgroupElect()) {
+        subgroup_values[gl_SubgroupID] = subgroup_weight;
+    }
+    barrier();
+    if (lane == 0u) {
+        float total_weight = subgroup_values[0];
+        for (uint subgroup = 1u; subgroup < gl_NumSubgroups; ++subgroup) {
+            total_weight += subgroup_values[subgroup];
+        }
+        partition_statistics.values[partition_id] = vec2(
+            partition_maximum,
+            total_weight
+        );
+    }
+}
