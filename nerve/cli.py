@@ -150,10 +150,7 @@ def main() -> None:
         default=[],
         type=Path,
         metavar="RADEON_ICD_JSON",
-        help=(
-            "explicit AMD Vulkan ICD manifest for optimization; may be "
-            "repeated"
-        ),
+        help=("explicit AMD Vulkan ICD manifest for optimization; may be repeated"),
     )
     parser.add_argument(
         "--device",
@@ -239,15 +236,21 @@ def main() -> None:
         type=int,
         help="explicit sampler randomness seed (default: 0)",
     )
-    parser.add_argument("--temperature", type=float, help="runtime sampler temperature override")
+    parser.add_argument(
+        "--temperature", type=float, help="runtime sampler temperature override"
+    )
     parser.add_argument("--top-k", type=int, help="runtime sampler top-k override")
     parser.add_argument("--top-p", type=float, help="runtime sampler top-p override")
     parser.add_argument("--min-p", type=float, help="runtime sampler min-p override")
     parser.add_argument(
-        "--presence-penalty", type=float, help="runtime sampler presence-penalty override"
+        "--presence-penalty",
+        type=float,
+        help="runtime sampler presence-penalty override",
     )
     parser.add_argument(
-        "--repetition-penalty", type=float, help="runtime sampler repetition-penalty override"
+        "--repetition-penalty",
+        type=float,
+        help="runtime sampler repetition-penalty override",
     )
     parser.add_argument(
         "--no-special-tokens",
@@ -306,8 +309,14 @@ def main() -> None:
         parser.error("--context-size must be at least 1")
     if args.speculative_draft_tokens < 0:
         parser.error("--speculative-draft-tokens must not be negative")
-    if args.compiler_events_jsonl and args.compile_model is None and args.discover_model is None:
-        parser.error("--compiler-events-jsonl requires --compile-model or --discover-model")
+    if (
+        args.compiler_events_jsonl
+        and args.compile_model is None
+        and args.discover_model is None
+    ):
+        parser.error(
+            "--compiler-events-jsonl requires --compile-model or --discover-model"
+        )
     if args.compiler_events_jsonl and args.json:
         parser.error("--compiler-events-jsonl and --json are mutually exclusive")
     if args.calibrate_hardware is not None:
@@ -379,20 +388,18 @@ def main() -> None:
             report = outcome.optimization.report
             print(f"optimizer status: {report['status']}")
             print(f"  report:  {outcome.optimization.report_path}")
-            print(
-                f"  package: {outcome.optimization.output_package_dir}"
-            )
+            print(f"  package: {outcome.optimization.output_package_dir}")
             print(
                 "  targets: "
-                + ", ".join(
-                    target.target_id for target in outcome.targets.targets
-                )
+                + ", ".join(target.target_id for target in outcome.targets.targets)
             )
         return
     if args.discover_model is not None:
         reporter = JsonLineCompileReporter() if args.compiler_events_jsonl else None
         if reporter is not None:
-            reporter({"type": "DiscoveryStarted", "model_dir": str(args.discover_model)})
+            reporter(
+                {"type": "DiscoveryStarted", "model_dir": str(args.discover_model)}
+            )
         try:
             discovery = discover_source_model(args.discover_model)
         except ModelCompileError as error:
@@ -417,7 +424,7 @@ def main() -> None:
             print(f"  model_type: {discovery.model_type}")
             print(f"  weight_files: {len(discovery.weight_files)}")
             print(f"  tokenizer: {', '.join(discovery.tokenizer_files)}")
-            print(f"  chat_template: {discovery.has_chat_template}")
+            print(f"  chat_interface: {discovery.chat_interface or 'absent'}")
         return
     if args.run is not None:
         inspect_mode_count = sum(
@@ -464,8 +471,7 @@ def main() -> None:
         ):
             parser.error("--presence-penalty must be finite")
         if args.repetition_penalty is not None and (
-            not math.isfinite(args.repetition_penalty)
-            or args.repetition_penalty <= 0
+            not math.isfinite(args.repetition_penalty) or args.repetition_penalty <= 0
         ):
             parser.error("--repetition-penalty must be greater than zero")
         run_engine(args)
@@ -688,7 +694,9 @@ def resolve_runtime_package_manifest(path: Path) -> Path:
     raise SystemExit(f"compiled model package path does not exist: {path}")
 
 
-def build_runtime_command(args: argparse.Namespace, package_manifest: Path) -> list[str]:
+def build_runtime_command(
+    args: argparse.Namespace, package_manifest: Path
+) -> list[str]:
     runtime_args = [
         "--package",
         str(package_manifest),

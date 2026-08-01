@@ -540,8 +540,8 @@ def minimal_package(root: Path) -> dict[str, object]:
         lowered_index=lowered_index,
         lowered_index_path=lowered_index_path,
     )
-    manifest["representation_optimization_path"] = (
-        optimizer_stage.package_reference(root)
+    manifest["representation_optimization_path"] = optimizer_stage.package_reference(
+        root
     )
     manifest["artifact_integrity"] = build_package_artifact_integrity(root)
     return manifest
@@ -551,6 +551,28 @@ def test_package_integrity_accepts_a_complete_compiler_boundary(tmp_path: Path) 
     manifest = minimal_package(tmp_path)
 
     validate_compiled_package(tmp_path, manifest)
+
+
+def test_package_rejects_chat_codec_outside_declared_tokenizer_artifacts(
+    tmp_path: Path,
+) -> None:
+    manifest = minimal_package(tmp_path)
+    manifest["tokenizer"]["chat_codec"] = "chat_codec.json"
+
+    with pytest.raises(ModelCompileError, match="must be listed"):
+        validate_compiled_package(tmp_path, manifest)
+
+
+def test_package_rejects_invalid_compiled_chat_codec_schema(tmp_path: Path) -> None:
+    manifest = minimal_package(tmp_path)
+    (tmp_path / "tokenizer" / "chat_codec.json").write_text(
+        json.dumps({"schema": "invalid"})
+    )
+    manifest["tokenizer"]["files"].append("chat_codec.json")
+    manifest["tokenizer"]["chat_codec"] = "chat_codec.json"
+
+    with pytest.raises(ModelCompileError, match="chat codec schema is invalid"):
+        validate_compiled_package(tmp_path, manifest)
 
 
 @pytest.mark.parametrize(
@@ -746,8 +768,7 @@ def test_shader_templates_compile_to_vulkan_1_4_spirv(tmp_path: Path) -> None:
         "append_kv_state_bf16_4x64__sc9.comp",
         "gqa_attention_bf16_q12_kv4_d64_scale0.125__sc6.comp",
         "append_gqa_attention_bf16_q12_kv4_d64_scale0.125__sc7.comp",
-        "append_gqa_attention_temporal_read_bf16_q12_kv4_d64_"
-        "scale0.125__pbc7.comp",
+        "append_gqa_attention_temporal_read_bf16_q12_kv4_d64_scale0.125__pbc7.comp",
         "causal_conv1d_silu_bf16_c768_k4.comp",
         "causal_conv1d_silu_temporal_bf16_c768_k4.comp",
         "gated_delta_scan_k4x64_v4x64_af32_dtbf16_nf32_eps1e-06.comp",

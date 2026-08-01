@@ -570,14 +570,10 @@ def valid_batch_stage(stage: Any) -> bool:
         stage.get("descriptor_bindings") if isinstance(stage, dict) else None
     )
     indirect_offset = (
-        stage.get("indirect_dispatch_byte_offset")
-        if isinstance(stage, dict)
-        else None
+        stage.get("indirect_dispatch_byte_offset") if isinstance(stage, dict) else None
     )
     state_snapshot_binding = (
-        stage.get("state_snapshot_binding")
-        if isinstance(stage, dict)
-        else None
+        stage.get("state_snapshot_binding") if isinstance(stage, dict) else None
     )
     dispatch_y_from_batch_width = (
         stage.get("dispatch_y_from_batch_width", False)
@@ -659,13 +655,10 @@ def valid_batch_descriptor_bindings(
     ):
         return False
     stage_bindings = [mapping["binding"] for mapping in descriptor_bindings]
-    source_bindings = [
-        mapping["source_binding"] for mapping in descriptor_bindings
-    ]
-    return (
-        len(stage_bindings) == len(set(stage_bindings))
-        and len(source_bindings) == len(set(source_bindings))
-    )
+    source_bindings = [mapping["source_binding"] for mapping in descriptor_bindings]
+    return len(stage_bindings) == len(set(stage_bindings)) and len(
+        source_bindings
+    ) == len(set(source_bindings))
 
 
 def valid_batch_control(control: Any) -> bool:
@@ -1041,6 +1034,23 @@ def validate_compiled_package(package_dir: Path, manifest: Json) -> None:
         if not path.is_file():
             raise ModelCompileError(
                 f"compiled package is missing tokenizer artifact {path}"
+            )
+    chat_codec = tokenizer.get("chat_codec")
+    if chat_codec is not None:
+        if not isinstance(chat_codec, str) or not chat_codec:
+            raise ModelCompileError(
+                "compiled package tokenizer chat codec path is invalid"
+            )
+        if chat_codec not in tokenizer_files:
+            raise ModelCompileError(
+                "compiled package tokenizer chat codec must be listed among tokenizer artifacts"
+            )
+        codec = read_json(
+            package_artifact_path(tokenizer_dir, chat_codec, "tokenizer chat codec")
+        )
+        if codec.get("schema") != "nerve.chat_codec.v1":
+            raise ModelCompileError(
+                "compiled package tokenizer chat codec schema is invalid"
             )
 
     tensor_index = read_json(required_files[1])

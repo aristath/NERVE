@@ -484,6 +484,15 @@ fn validate_resident_package_paths(
     for path in &manifest.tokenizer.files {
         validate_resident_package_relative_path("tokenizer file", path)?;
     }
+    if let Some(path) = &manifest.tokenizer.chat_codec {
+        validate_resident_package_relative_path("tokenizer chat codec", path)?;
+        if !manifest.tokenizer.files.contains(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "resident model package tokenizer chat codec must be listed among tokenizer files",
+            ));
+        }
+    }
     for execution in &manifest.component_executions {
         for kernel in &execution.kernels {
             validate_resident_package_relative_path("component kernel shader", &kernel.shader_path)?;

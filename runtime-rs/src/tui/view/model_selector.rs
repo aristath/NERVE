@@ -153,7 +153,7 @@ fn render_detection(frame: &mut Frame<'_>, selector: &ModelSelectorState, area: 
             if let Some(discovery) = &selector.discovery {
                 lines.push(Line::styled(
                     format!(
-                        "{} · {} weight file(s) · tokenizer {} · chat template {}",
+                        "{} · {} weight file(s) · tokenizer {} · chat interface {}",
                         discovery.model_type,
                         discovery.weight_files.len(),
                         if discovery.tokenizer_files.is_empty() {
@@ -161,11 +161,7 @@ fn render_detection(frame: &mut Frame<'_>, selector: &ModelSelectorState, area: 
                         } else {
                             "ready"
                         },
-                        if discovery.has_chat_template {
-                            "ready"
-                        } else {
-                            "absent"
-                        }
+                        discovery.chat_interface.as_deref().unwrap_or("absent")
                     ),
                     Style::default().fg(META),
                 ));

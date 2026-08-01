@@ -232,7 +232,7 @@ source = {
     "architectures":["FixtureCircuit"],
     "weight_files":["model.safetensors"],
     "tokenizer_files":["tokenizer.json", "tokenizer_config.json"],
-    "has_chat_template":True,
+    "chat_interface":"jinja_template",
 }
 if "--discover-model" in sys.argv:
     emit("DiscoveryStarted")
@@ -351,7 +351,7 @@ fn mark_source_as_discovered(harness: &mut TuiHarness) {
         architecture: vec!["FixtureCircuit".to_string()],
         weight_files: vec!["model.safetensors".to_string()],
         tokenizer_files: vec!["tokenizer.json".to_string()],
-        has_chat_template: true,
+        chat_interface: Some("jinja_template".to_string()),
         raw: serde_json::json!({"model_type":"e2e_fixture"}),
     });
     selector.focus = ModelSelectorFocus::Action;
@@ -643,6 +643,7 @@ fn e2e_browser_discovery_transpilation_and_fast_exit_delivery() {
     let rendered = harness.render();
     assert!(rendered.contains("e2e_fixture"));
     assert!(rendered.contains("FixtureCircuit"));
+    assert!(rendered.contains("chat interface jinja_template"));
     assert!(rendered.contains("Transpile and load"));
 
     harness.key(KeyCode::Enter, KeyModifiers::NONE);

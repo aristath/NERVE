@@ -21,6 +21,8 @@ from nerve.compilation import (
 )
 from nerve.model_package import compiled_model_slug, compile_model_package
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
+from nerve.chat_codec import discover_model_chat_interface
+
 
 @dataclass(frozen=True)
 class SourceModelDiscovery:
@@ -30,7 +32,7 @@ class SourceModelDiscovery:
     config_path: Path
     weight_files: tuple[Path, ...]
     tokenizer_files: tuple[str, ...]
-    has_chat_template: bool
+    chat_interface: str | None
 
     def to_json(self) -> Json:
         return {
@@ -42,7 +44,7 @@ class SourceModelDiscovery:
             "weight_files": [str(path) for path in self.weight_files],
             "weight_file_count": len(self.weight_files),
             "tokenizer_files": list(self.tokenizer_files),
-            "has_chat_template": self.has_chat_template,
+            "chat_interface": self.chat_interface,
         }
 
 
@@ -137,7 +139,9 @@ def discover_source_model(model_dir: Path) -> SourceModelDiscovery:
     config = read_json(config_path)
     weight_files = tuple(sorted(model_dir.glob("*.safetensors")))
     if not weight_files:
-        raise ModelCompileError(f"source model contains no Safetensors weights: {model_dir}")
+        raise ModelCompileError(
+            f"source model contains no Safetensors weights: {model_dir}"
+        )
     tokenizer_path = model_dir / "tokenizer.json"
     if not tokenizer_path.is_file():
         raise ModelCompileError(
@@ -158,10 +162,6 @@ def discover_source_model(model_dir: Path) -> SourceModelDiscovery:
     tokenizer_files = tuple(
         name for name in tokenizer_candidates if (model_dir / name).is_file()
     )
-    tokenizer_config_path = model_dir / "tokenizer_config.json"
-    tokenizer_config = (
-        read_json(tokenizer_config_path) if tokenizer_config_path.is_file() else {}
-    )
     return SourceModelDiscovery(
         model_dir=model_dir,
         model_type=str(config.get("model_type") or "unknown"),
@@ -169,8 +169,7 @@ def discover_source_model(model_dir: Path) -> SourceModelDiscovery:
         config_path=config_path,
         weight_files=weight_files,
         tokenizer_files=tokenizer_files,
-        has_chat_template=(model_dir / "chat_template.jinja").is_file()
-        or isinstance(tokenizer_config.get("chat_template"), str),
+        chat_interface=discover_model_chat_interface(model_dir),
     )
 
 

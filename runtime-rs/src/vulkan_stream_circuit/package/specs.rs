@@ -73,6 +73,8 @@ pub struct VulkanResidentTokenizerPackageSpec {
     pub path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_codec: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

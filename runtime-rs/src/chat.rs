@@ -18,6 +18,9 @@ use crate::{
     vulkan_resident_execution_counters,
 };
 
+mod compiled_codec;
+pub use compiled_codec::*;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RuntimeChatMessage {
     pub role: String,
@@ -41,6 +44,7 @@ pub struct RuntimePreparedChatTurn {
 pub struct VulkanResidentChatTransactionRun {
     pub generated_token_ids: Vec<u32>,
     pub assistant_content: String,
+    pub assistant_message: serde_json::Value,
     pub canonical_committed_token_ids: Vec<u32>,
     pub assistant_commit_token_ids: Vec<u32>,
     pub generation_event_id: String,
@@ -110,10 +114,17 @@ where
         VulkanResidentChatTransactionPhase::GenerationCompleted,
         engine,
     )?;
+    let assistant_stopped = generation_run
+        .generated_token_ids
+        .last()
+        .is_some_and(|token_id| stop_token_ids.contains(token_id));
     let assistant_content = transcript_codec.decode_tokens(assistant_content_token_ids(
         &generation_run.generated_token_ids,
         stop_token_ids,
     ))?;
+    let assistant_message = chat_session
+        .formatter
+        .parse_assistant_completion(&assistant_content, assistant_stopped)?;
     let (assistant_commit_token_ids, canonical_committed_token_ids) = chat_session
         .render_assistant_commit_token_delta(
             prepared,
@@ -137,6 +148,7 @@ where
     Ok(VulkanResidentChatTransactionRun {
         generated_token_ids: generation_run.generated_token_ids.clone(),
         assistant_content,
+        assistant_message,
         canonical_committed_token_ids,
         assistant_commit_token_ids,
         generation_event_id,
@@ -313,6 +325,7 @@ pub struct RuntimeChatFormatter {
     pub template_source: String,
     pub template_variables: serde_json::Map<String, serde_json::Value>,
     pub render_time: DateTime<FixedOffset>,
+    pub compiled_codec: Option<CompiledChatCodec>,
 }
 
 impl RuntimeChatFormatter {
@@ -321,25 +334,36 @@ impl RuntimeChatFormatter {
         variable_overrides: &BTreeMap<String, serde_json::Value>,
     ) -> Result<Self, Box<dyn Error>> {
         let template_path = tokenizer_dir.join("chat_template.jinja");
-        let template = fs::read_to_string(&template_path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "chat mode requires a supported chat template; failed to read {:?}: {error}",
-                    template_path,
-                ),
-            )
-        })?;
         let mut template_variables = tokenizer_template_variables(tokenizer_dir)?;
         template_variables.extend(
             variable_overrides
                 .iter()
                 .map(|(name, value)| (name.clone(), value.clone())),
         );
+        let codec_path = tokenizer_dir.join(COMPILED_CHAT_CODEC_FILE);
+        let (template_source, compiled_codec) = if template_path.is_file() {
+            (
+                normalize_chat_template_for_runtime(&fs::read_to_string(&template_path)?),
+                None,
+            )
+        } else if codec_path.is_file() {
+            (
+                String::new(),
+                Some(CompiledChatCodec::from_path(&codec_path)?),
+            )
+        } else {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "chat mode requires a compiled chat codec or supported chat template in {tokenizer_dir:?}",
+                ),
+            )));
+        };
         let formatter = Self {
-            template_source: normalize_chat_template_for_runtime(&template),
+            template_source,
             template_variables,
             render_time: Local::now().fixed_offset(),
+            compiled_codec,
         };
         formatter.format_messages(
             &[RuntimeChatMessage {
@@ -356,6 +380,25 @@ impl RuntimeChatFormatter {
         messages: &[RuntimeChatMessage],
         add_generation_prompt: bool,
     ) -> Result<String, Box<dyn Error>> {
+        let messages = messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.format_structured_messages(&messages, add_generation_prompt)
+    }
+
+    pub fn format_structured_messages(
+        &self,
+        messages: &[serde_json::Value],
+        add_generation_prompt: bool,
+    ) -> Result<String, Box<dyn Error>> {
+        if let Some(codec) = &self.compiled_codec {
+            return Ok(codec.format_messages(
+                messages,
+                &self.template_variables,
+                add_generation_prompt,
+            )?);
+        }
         let mut environment = Environment::new();
         environment
             .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
@@ -375,12 +418,33 @@ impl RuntimeChatFormatter {
         environment.add_template("chat", &self.template_source)?;
 
         let mut context = self.template_variables.clone();
-        context.insert("messages".to_string(), serde_json::to_value(messages)?);
+        context.insert(
+            "messages".to_string(),
+            serde_json::Value::Array(messages.to_vec()),
+        );
         context.insert(
             "add_generation_prompt".to_string(),
             serde_json::Value::Bool(add_generation_prompt),
         );
         Ok(environment.get_template("chat")?.render(context)?)
+    }
+
+    pub fn parse_assistant_completion(
+        &self,
+        assistant_content: &str,
+        assistant_stopped: bool,
+    ) -> Result<serde_json::Value, Box<dyn Error>> {
+        if let Some(codec) = &self.compiled_codec {
+            return Ok(codec.parse_generated_content(
+                assistant_content,
+                assistant_stopped,
+                &self.template_variables,
+            )?);
+        }
+        Ok(serde_json::json!({
+            "role": "assistant",
+            "content": assistant_content,
+        }))
     }
 }
 

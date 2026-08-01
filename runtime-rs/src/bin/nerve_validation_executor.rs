@@ -1834,6 +1834,7 @@ mod tests {
                 .to_string(),
                 template_variables: serde_json::Map::new(),
                 render_time: chrono::Local::now().fixed_offset(),
+                compiled_codec: None,
             },
             messages: Vec::new(),
             committed_token_ids: Vec::new(),

@@ -4,6 +4,8 @@ from nerve.model_package_packed_tensors import *
 from nerve.resource_residency_planning import (
     TENSOR_PARTITION_INTEGRITY_SCHEMA,
 )
+from nerve.chat_codec import CHAT_CODEC_FILE, compile_model_chat_codec
+
 
 def stream_control_binding_for_node(circuit: Json, node: Json) -> int:
     state_view_signals = {
@@ -53,9 +55,14 @@ def copy_tokenizer_package(model_dir: Path, dest_dir: Path) -> Json:
                 (dest_dir / "chat_template.jinja").write_text(inline_template)
                 copied_files.append("chat_template.jinja")
 
+    chat_codec = compile_model_chat_codec(model_dir, dest_dir)
+    if chat_codec is not None:
+        copied_files.append(CHAT_CODEC_FILE)
+
     return {
         "path": TOKENIZER_PACKAGE_DIR,
         "files": copied_files,
+        **({"chat_codec": CHAT_CODEC_FILE} if chat_codec is not None else {}),
     }
 
 
@@ -243,7 +250,9 @@ def copy_tensor_package(
             ):
                 emitted_info = packaged["tensors"][emitted_name]
                 header_bytes, data_sha256 = group_headers_and_digests[emitted_name]
-                relative_destination = relative_json_path(package_dir, emitted_destination)
+                relative_destination = relative_json_path(
+                    package_dir, emitted_destination
+                )
                 emitted_info["source_file"] = relative_destination
                 emitted_info["data_offsets"] = [0, int(emitted_info["byte_count"])]
                 emitted_info["data_sha256"] = data_sha256
@@ -320,13 +329,11 @@ def copy_tensor_package(
             isinstance(derivation, dict)
             and derivation.get("kind") == "fp8_channel_scale_to_block_grid"
         ):
-            header_bytes, data_sha256 = (
-                write_compiled_block_grid_from_channel_scales(
-                    tensor_name=tensor_name,
-                    info=info,
-                    destination=destination,
-                    layout=layout,
-                )
+            header_bytes, data_sha256 = write_compiled_block_grid_from_channel_scales(
+                tensor_name=tensor_name,
+                info=info,
+                destination=destination,
+                layout=layout,
             )
             relative_destination = relative_json_path(package_dir, destination)
             info["source_file"] = relative_destination
@@ -367,17 +374,15 @@ def copy_tensor_package(
                 raise ModelCompileError(
                     f"AutoGPTQ zero source file does not exist: {zero_source}"
                 )
-            header_bytes, data_sha256 = (
-                write_compiled_auto_gptq_fixed_zero_8(
-                    tensor_name=tensor_name,
-                    info=info,
-                    zero_info=zero_info,
-                    source=source,
-                    zero_source=zero_source,
-                    destination=destination,
-                    layout=layout,
-                    cancel_requested=cancel_requested,
-                )
+            header_bytes, data_sha256 = write_compiled_auto_gptq_fixed_zero_8(
+                tensor_name=tensor_name,
+                info=info,
+                zero_info=zero_info,
+                source=source,
+                zero_source=zero_source,
+                destination=destination,
+                layout=layout,
+                cancel_requested=cancel_requested,
             )
             quantization["zero_point_encoding"] = AUTO_GPTQ_FIXED_ZERO_8
             quantization.pop("execution_zero_point_encoding", None)
@@ -441,10 +446,7 @@ def copy_tensor_package(
             "format": "nerve",
             "layout": layout,
         }
-        if (
-            isinstance(quantization, dict)
-            and quantization.get("format") == "auto_gptq"
-        ):
+        if isinstance(quantization, dict) and quantization.get("format") == "auto_gptq":
             source_metadata["packing_layout"] = auto_gptq_packing(info)
             source_metadata["zero_point_encoding"] = auto_gptq_zero_encoding(info)
         compiled_sources.append(

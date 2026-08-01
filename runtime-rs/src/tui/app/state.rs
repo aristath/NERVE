@@ -150,7 +150,7 @@ pub(crate) struct SourceDiscovery {
     pub architecture: Vec<String>,
     pub weight_files: Vec<String>,
     pub tokenizer_files: Vec<String>,
-    pub has_chat_template: bool,
+    pub chat_interface: Option<String>,
     pub raw: Value,
 }
 
@@ -191,10 +191,10 @@ impl SourceDiscovery {
                 .filter_map(Value::as_str)
                 .map(ToOwned::to_owned)
                 .collect(),
-            has_chat_template: source
-                .get("has_chat_template")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            chat_interface: source
+                .get("chat_interface")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
             raw: source,
         })
     }
@@ -587,7 +587,7 @@ mod app_state_contract_tests {
         assert!(discovery.architecture.is_empty());
         assert!(discovery.weight_files.is_empty());
         assert!(discovery.tokenizer_files.is_empty());
-        assert!(!discovery.has_chat_template);
+        assert_eq!(discovery.chat_interface, None);
     }
 
     #[test]

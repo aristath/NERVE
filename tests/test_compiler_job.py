@@ -46,7 +46,7 @@ def test_discovers_source_artifacts_without_model_family_checks(tmp_path: Path) 
     assert discovery.model_type == "synthetic_decoder"
     assert discovery.architecture == ("SyntheticForCausalLM",)
     assert discovery.weight_files == (tmp_path / "model.safetensors",)
-    assert discovery.has_chat_template
+    assert discovery.chat_interface == "jinja_template"
     assert discovery.to_json()["source_format"] == "safetensors"
 
 
@@ -243,7 +243,9 @@ def test_cli_reports_transpiler_failure_once_without_traceback_or_staging(
     captured = capsys.readouterr()
     events = [json.loads(line) for line in captured.out.splitlines()]
     terminal_events = [
-        event for event in events if event["type"] in {"Completed", "Cancelled", "Failed"}
+        event
+        for event in events
+        if event["type"] in {"Completed", "Cancelled", "Failed"}
     ]
     assert exit_info.value.code == 1
     assert captured.err == ""
@@ -272,9 +274,7 @@ def test_cli_compile_forwards_one_compiled_model_destination(
     write_discoverable_source(source)
     compiled_model_dir = tmp_path / "compiled_model"
     captured: dict[str, object] = {}
-    physical_device_id = (
-        "vulkan-uuid:00000000030000000000000000000000"
-    )
+    physical_device_id = "vulkan-uuid:00000000030000000000000000000000"
 
     def fake_compile_model(model_dir: Path, **kwargs: object) -> CompiledModelReport:
         captured["model_dir"] = model_dir
@@ -292,6 +292,7 @@ def test_cli_compile_forwards_one_compiled_model_destination(
         )
 
     monkeypatch.setattr("nerve.cli.compile_model", fake_compile_model)
+
     def fake_discover_compiler_target(**kwargs: object) -> CompilerTarget:
         captured["target_kwargs"] = kwargs
         return CompilerTarget.for_features({"shader_bfloat16_type"})
