@@ -45,11 +45,15 @@ without regressing supported Qwen models.
    currently workload-free AMD GPUs without using the display-resident GPU or
    any NVIDIA device.
 
-8. Add runtime per-layer/per-component representation selection. Preserve a
-   native source representation when supported; otherwise choose only verified
-   alternatives. Add packed INT4 candidates for eligible dense components, but
-   promote them only when hardware benchmarks show a real speed or capacity
-   benefit and quality validation passes. Placement remains a runtime concern.
+8. Add runtime per-layer/per-component representation selection and optimized
+   kernels for the hardware's real throughput hierarchy. Preserve a native
+   source representation when it is the best verified path; otherwise explore
+   INT4 2:4 structured (1531 TOPS), dense INT4 (766 TOPS), FP8 2:4 structured
+   (766 TFLOPs), dense FP8/INT8 (383 TFLOPs/TOPS), then FP16 matrix paths.
+   Structured candidates may be promoted only when their exact sparsity
+   contract is satisfied and behavioral/quality validation passes; never prune
+   silently for a benchmark. Benchmark the actual NERVE kernels, record the
+   chosen representation per component, and keep placement a runtime concern.
 
 9. Run real multi-turn DeepSeek conversations with the official thinking and
    sampling defaults, 64K-or-larger output allowance, and enough context for
