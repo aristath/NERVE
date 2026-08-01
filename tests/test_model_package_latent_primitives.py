@@ -197,3 +197,96 @@ def test_forward_rope_keeps_zero_offset_filename_stable() -> None:
     assert shader_file_for_node(
         circuit, node, tensor_index, {"hidden_size": 128}
     ) == "rotary_bf16_2x64_r32_theta10000_half__sc2.comp"
+
+
+def test_compiles_parallel_block_latent_attention(tmp_path: Path) -> None:
+    circuit, tensor_index = _fixture()
+    circuit["parameters"]["refs"]["attention_sinks"] = {
+        "tensor": "attention.sinks"
+    }
+    tensor_index["tensors"]["attention.sinks"] = {
+        "dtype": "F32",
+        "shape": [2],
+        "layout": ROW_MAJOR_LAYOUT,
+    }
+    node = {
+        "id": "attend",
+        "op": "indexed_sparse_attention",
+        "inputs": ["query", "local_kv_values", "query_kv"],
+        "outputs": ["attention_heads"],
+        "params": ["attention_sinks"],
+        "attrs": {
+            "causal": False,
+            "scale": 0.125,
+            "window_size": 4,
+            "intra_block_visibility": "all",
+            "query_state": "transient",
+            "query_heads": 2,
+            "key_value_heads": 1,
+            "head_width": 64,
+        },
+    }
+    circuit["nodes"].append(node)
+
+    shader_file = shader_file_for_node(
+        circuit, node, tensor_index, {"hidden_size": 128}
+    )
+
+    assert shader_file == (
+        "indexed_sparse_attention_bf16_q2_kv1_d64_w4_"
+        "scale0.125__sc6.comp"
+    )
+    assert workgroup_count_x_for_node(circuit, node, tensor_index) == 2
+    assert local_size_x_for_shader_file(shader_file, node) == 64
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    parallel_shader_file = shader_file.replace(
+        "indexed_sparse_attention_", "indexed_sparse_attention_parallel_", 1
+    ).replace("__sc6", "")
+    copy_shader_templates(
+        shader_source_dir, tmp_path, {shader_file, parallel_shader_file}
+    )
+    source = (tmp_path / shader_file).read_text()
+    assert "const uint LOCAL_WINDOW = 4u;" in source
+    assert "const uint MAX_PARALLEL_BLOCK = 64u;" in source
+    assert "uint slot = absolute_tick % capacity;" in source
+    assert "uintBitsToFloat(attention_sinks.words[query_head])" in source
+    assert all("{{" not in line for line in source.splitlines())
+    parallel_source = (tmp_path / parallel_shader_file).read_text()
+    assert "uint batch_width;" in parallel_source
+    assert "return gl_WorkGroupID.y;" in parallel_source
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / parallel_shader_file.replace(".comp", ".spv")).is_file()
+
+
+def test_rejects_indexed_attention_without_f32_per_head_sinks() -> None:
+    circuit, tensor_index = _fixture()
+    circuit["parameters"]["refs"]["attention_sinks"] = {
+        "tensor": "attention.sinks"
+    }
+    tensor_index["tensors"]["attention.sinks"] = {
+        "dtype": "BF16",
+        "shape": [1],
+        "layout": ROW_MAJOR_LAYOUT,
+    }
+    node = {
+        "id": "attend",
+        "op": "indexed_sparse_attention",
+        "inputs": ["query", "local_kv_values", "query_kv"],
+        "outputs": ["attention_heads"],
+        "params": ["attention_sinks"],
+        "attrs": {
+            "causal": False,
+            "scale": 0.125,
+            "window_size": 4,
+            "intra_block_visibility": "all",
+            "query_state": "transient",
+            "query_heads": 2,
+            "key_value_heads": 1,
+            "head_width": 64,
+        },
+    }
+    circuit["nodes"].append(node)
+
+    with pytest.raises(ModelCompileError, match="invalid contract"):
+        shader_file_for_node(circuit, node, tensor_index, {"hidden_size": 128})

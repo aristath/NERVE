@@ -1108,6 +1108,49 @@ def shader_file_for_node(
             f"append_kv_state_bf16_{node['attrs']['key_value_heads']}"
             f"x{node['attrs']['head_width']}__sc{binding}.comp"
         )
+    if op == "indexed_sparse_attention":
+        attrs = node.get("attrs", {})
+        query_heads = int(attrs.get("query_heads", 0))
+        key_value_heads = int(attrs.get("key_value_heads", 0))
+        head_width = int(attrs.get("head_width", 0))
+        window_size = int(attrs.get("window_size", 0))
+        scale = float(attrs.get("scale", 0.0))
+        if (
+            node.get("inputs")
+            != ["query_positioned", "local_kv_values", "query_key_value_positioned"]
+            and len(node.get("inputs", [])) != 3
+        ) or (
+            len(node.get("outputs", [])) != 1
+            or len(node.get("params", [])) != 1
+            or node.get("state_reads")
+            or node.get("state_writes")
+            or attrs.get("causal") is not False
+            or attrs.get("intra_block_visibility") != "all"
+            or attrs.get("query_state") != "transient"
+            or query_heads <= 0
+            or key_value_heads <= 0
+            or query_heads % key_value_heads
+            or head_width <= 0
+            or head_width % 64
+            or head_width > 1024
+            or window_size <= 0
+            or not math.isfinite(scale)
+            or scale <= 0.0
+            or parameter_dtype_for_node(circuit, node, tensor_index) != "F32"
+            or parameter_shape_for_node(circuit, node, tensor_index)
+            != [query_heads]
+            or parameter_layout_for_node(circuit, node, tensor_index)
+            != ROW_MAJOR_LAYOUT
+        ):
+            raise ModelCompileError(
+                f"indexed sparse-attention node {node['id']!r} has an invalid contract"
+            )
+        binding = stream_control_binding_for_node(circuit, node)
+        return (
+            f"indexed_sparse_attention_bf16_q{query_heads}_kv{key_value_heads}_"
+            f"d{head_width}_w{window_size}_scale{shader_float_token(scale)}"
+            f"__sc{binding}.comp"
+        )
     if op == "scaled_dot_product_attention":
         attrs = node["attrs"]
         binding = stream_control_binding_for_node(circuit, node)
@@ -1493,6 +1536,7 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
     if node["op"] in {
         "scaled_dot_product_attention",
         "append_scaled_dot_product_attention",
+        "indexed_sparse_attention",
     }:
         attrs = (
             node["attrs"]["attention"]
@@ -1573,6 +1617,8 @@ def local_size_x_for_node(node: Json) -> int:
             else node["attrs"]
         )
         return attention_workgroup_shape(int(attrs["head_width"]))[0]
+    if node["op"] == "indexed_sparse_attention":
+        return int(node["attrs"]["head_width"])
     if node["op"] == "gated_delta_step":
         attrs = node["attrs"]
         key_head_width = int(attrs["key_head_width"])

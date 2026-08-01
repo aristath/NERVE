@@ -233,6 +233,44 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
         return rendered
 
+    indexed_sparse_attention = re.fullmatch(
+        r"indexed_sparse_attention(_parallel)?_bf16_q(\d+)_kv(\d+)_d(\d+)_"
+        r"w(\d+)_scale([0-9eE+.-]+)\.comp",
+        shader_file,
+    )
+    if indexed_sparse_attention is not None:
+        parallel, query_heads, kv_heads, head_width, window, scale = (
+            indexed_sparse_attention.groups()
+        )
+        query_heads, kv_heads, head_width, window = map(
+            int, (query_heads, kv_heads, head_width, window)
+        )
+        if (
+            query_heads <= 0
+            or kv_heads <= 0
+            or query_heads % kv_heads
+            or head_width <= 0
+            or head_width % 64
+            or head_width > 1024
+            or window <= 0
+        ):
+            raise ModelCompileError(
+                f"invalid indexed sparse-attention shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "indexed_sparse_attention_bf16.comp.template",
+            {
+                "LOCAL_SIZE": str(head_width),
+                "QUERY_HEADS": str(query_heads),
+                "KV_HEADS": str(kv_heads),
+                "HEAD_WIDTH": str(head_width),
+                "LOCAL_WINDOW": str(window),
+                "ATTENTION_SCALE": scale,
+                "PARALLEL_BLOCK": "1" if parallel else "0",
+            },
+        )
+
     cooperative_parallel_linear = re.fullmatch(
         r"parallel_linear_batch64_cooperative_([23])way_"
         r"bf16_(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",
