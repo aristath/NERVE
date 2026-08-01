@@ -3,6 +3,7 @@ from nerve.model_package_shaders import *
 from nerve.model_package_sparse_projection_shaders import (
     render_sparse_moe_projection_shader,
 )
+from nerve.model_package_latent_compression import render_latent_compression_shader
 from nerve.model_package_tensors import *
 
 
@@ -61,6 +62,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     source = source_dir / shader_file
     if source.exists():
         return source.read_text()
+
+    latent_compression = render_latent_compression_shader(source_dir, shader_file)
+    if latent_compression is not None:
+        return latent_compression
 
     hyper_pre = re.fullmatch(
         r"(hyper_connection_pre|hyper_connection_post_pre)_m(\d+)_h(\d+)_i(\d+)_"

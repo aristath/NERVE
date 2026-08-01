@@ -269,7 +269,11 @@ def _token_mixer_modules(component: Json) -> list[Json]:
                 "state_attachment",
                 "Learn and retain the compressed long-range attention memory",
                 parent="layer.token_mixer",
-                nodes=["memory_compressor", "compressed_memory_update"],
+                nodes=[
+                    "memory_compressor_pool",
+                    "memory_compressor_finalize",
+                    "compressed_memory_update",
+                ],
                 state=["compressor_accumulator", "compressed_kv_memory"],
                 optional=True,
             ),

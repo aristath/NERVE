@@ -1,0 +1,42 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Candidate { uint words[]; } candidate;
+layout(set = 0, binding = 1) readonly buffer StateInput { uint words[]; } state_input;
+layout(set = 0, binding = 2) buffer StateOutput { uint words[]; } state_output;
+layout(set = 0, binding = 3) readonly buffer StateRead { uint words[]; } state_read;
+layout(set = 0, binding = 4) buffer StateWrite { uint words[]; } state_write;
+layout(set = 0, binding = 5) buffer StateView { uint words[]; } state_view;
+layout(set = 0, binding = 6) readonly buffer StreamControl { uint words[]; } stream_control;
+
+const uint ELEMENT_COUNT = {{ELEMENT_COUNT}}u;
+const uint WORD_COUNT = ELEMENT_COUNT / 2u;
+const uint PERIOD = {{PERIOD}}u;
+const uint STATE_PAGE_TABLE_WORDS = 9u;
+
+uint state_write_word(uint logical_word) {
+    uint logical_byte = logical_word * 4u;
+    if (logical_byte < state_write.words[2]) {
+        return (state_write.words[3] + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - state_write.words[2];
+    uint page_bytes = state_write.words[4];
+    uint physical_page =
+        state_write.words[STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes];
+    return (
+        state_write.words[8]
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+
+void main() {
+    uint position = stream_control.words[1];
+    if ((position + 1u) % PERIOD != 0u) return;
+    uint compressed_slot = position / PERIOD;
+    uint slot_base = compressed_slot * WORD_COUNT;
+    for (uint word = gl_LocalInvocationID.x; word < WORD_COUNT; word += 64u) {
+        state_write.words[state_write_word(slot_base + word)] = candidate.words[word];
+    }
+}

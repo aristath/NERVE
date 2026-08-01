@@ -139,6 +139,7 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
     assert learned.rotary_width == 2
     assert learned.rope_theta == 160_000.0
     assert learned.rope_type == "yarn"
+    assert learned.rope_scaling["attention_factor"] == 1.0
     assert sliding.rope_theta == 10_000.0
     assert sliding.rope_type == "default"
     component = make_layer(structure, learned)
@@ -159,7 +160,36 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
     assert state_ports["indexer_compressor_accumulator"]["shape"] == [2, 8, 4]
     nodes = {node["id"]: node for node in circuit["nodes"]}
     assert nodes["query_input_projection"]["op"] == "linear"
-    assert nodes["memory_compressor"]["op"] == "learned_gated_kv_compression"
+    assert nodes["memory_compressor_pool"]["op"] == "learned_gated_kv_pool"
+    assert nodes["memory_compressor_pool"]["outputs"] == ["compressed_pooled_f32"]
+    assert nodes["memory_compressor_pool"]["params"] == [
+        "compressor_position_bias",
+        "compressor_kv_projection",
+        "compressor_gate_projection",
+    ]
+    assert nodes["memory_compressor_pool"]["attrs"]["output_element_bytes"] == [4]
+    assert nodes["memory_compressor_finalize"]["op"] == "compressed_kv_finalize"
+    assert nodes["memory_compressor_finalize"]["inputs"] == [
+        "compressed_pooled_f32"
+    ]
+    assert nodes["memory_compressor_finalize"]["outputs"] == [
+        "compressed_candidate"
+    ]
+    assert nodes["memory_compressor_finalize"]["params"] == ["compressor_norm"]
+    assert nodes["memory_compressor_finalize"]["attrs"]["output_element_bytes"] == [
+        2
+    ]
+    assert nodes["memory_compressor_finalize"]["attrs"]["head_width"] == 4
+    assert nodes["memory_compressor_finalize"]["attrs"]["rotary_width"] == 2
+    assert nodes["memory_compressor_finalize"]["attrs"]["rotary_scope"] == "tail"
+    assert nodes["memory_compressor_finalize"]["attrs"]["position_offset"] == -3
+    assert nodes["memory_compressor_finalize"]["attrs"]["activation_quantization"] == {
+        "format": "fp8_e4m3",
+        "scale_format": "e8m0_power_of_two",
+        "block_columns": 64,
+        "scope": "non_rotary_dimensions",
+        "mode": "quantize_dequantize",
+    }
     assert nodes["compressed_memory_indexer"]["op"] == "learned_topk_index"
     assert nodes["sparse_attention_read"]["op"] == "indexed_sparse_attention"
     assert nodes["grouped_output_projection"]["op"] == "grouped_linear"

@@ -136,6 +136,12 @@ def discover_latent_sparse_attention(
         scaling = config.get("rope_scaling")
         if isinstance(scaling, dict):
             rope_parameters.update(scaling)
+            # This latent-attention family uses YaRN only to interpolate the
+            # inverse frequencies.  Its reference rotary factors remain unit
+            # magnitude unless the checkpoint explicitly declares otherwise.
+            rope_parameters["attention_factor"] = float(
+                scaling.get("attention_factor", 1.0)
+            )
             rope_parameters["rope_type"] = str(
                 scaling.get("rope_type") or scaling.get("type") or "default"
             )

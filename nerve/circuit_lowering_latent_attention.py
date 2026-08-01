@@ -201,22 +201,50 @@ def latent_sparse_attention_nodes(
 
     compression = attributes["compression"]
     if compression is not None:
+        ratio = int(compression["ratio"])
+        compressor_rope = _rope_attrs(numerics, heads, head_count=1)
         nodes.extend(
             [
                 {
-                    "id": "memory_compressor",
-                    "op": "learned_gated_kv_compression",
+                    "id": "memory_compressor_pool",
+                    "op": "learned_gated_kv_pool",
                     "inputs": ["operator_norm_out", "compressor_accumulator"],
-                    "outputs": ["compressed_candidate"],
+                    "outputs": ["compressed_pooled_f32"],
                     "params": [
                         "compressor_position_bias",
                         "compressor_kv_projection",
                         "compressor_gate_projection",
-                        "compressor_norm",
                     ],
                     "state_reads": ["compressor_accumulator"],
                     "state_writes": ["compressor_accumulator"],
-                    "attrs": compression,
+                    "attrs": {
+                        **compression,
+                        "hidden_size": int(component["feed_forward"]["hidden_size"]),
+                        "head_width": int(heads["head_width"]),
+                        "output_element_bytes": [4],
+                    },
+                },
+                {
+                    "id": "memory_compressor_finalize",
+                    "op": "compressed_kv_finalize",
+                    "inputs": ["compressed_pooled_f32"],
+                    "outputs": ["compressed_candidate"],
+                    "params": ["compressor_norm"],
+                    "attrs": {
+                        **compressor_rope,
+                        "head_width": int(heads["head_width"]),
+                        "rotary_scope": "tail",
+                        "normalization_epsilon": float(numerics["rms_norm_eps"]),
+                        "position_offset": 1 - ratio,
+                        "activation_quantization": {
+                            "format": "fp8_e4m3",
+                            "scale_format": "e8m0_power_of_two",
+                            "block_columns": 64,
+                            "scope": "non_rotary_dimensions",
+                            "mode": "quantize_dequantize",
+                        },
+                        "output_element_bytes": [2],
+                    },
                 },
                 {
                     "id": "compressed_memory_update",
@@ -225,7 +253,7 @@ def latent_sparse_attention_nodes(
                     "outputs": ["compressed_kv_values"],
                     "state_reads": ["compressed_kv_memory"],
                     "state_writes": ["compressed_kv_memory"],
-                    "attrs": {"period": int(compression["ratio"])},
+                    "attrs": {"period": ratio},
                 },
             ]
         )

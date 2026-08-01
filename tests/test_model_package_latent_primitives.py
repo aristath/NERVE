@@ -292,6 +292,171 @@ def test_rejects_indexed_attention_without_f32_per_head_sinks() -> None:
         shader_file_for_node(circuit, node, tensor_index, {"hidden_size": 128})
 
 
+def test_compiles_stateful_learned_compressor_as_typed_pool_and_finalize_stages(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _fixture()
+    circuit["state_ports"].append(
+        {
+            "id": "compressor_accumulator",
+            "type": "gated_pooling_memory",
+            "shape": [2, 8, 256],
+            "dtype": "F32",
+            "update": "position_biased_softmax_pool",
+        }
+    )
+    circuit["state_ports"].append(
+        {
+            "id": "compressed_kv_memory",
+            "type": "append_only_attention_memory",
+            "shape_per_token": [128],
+            "dtype": "BF16",
+            "growth": "one_per_4_activations",
+        }
+    )
+    circuit["parameters"]["refs"].update(
+        {
+            "compressor_position_bias": {"tensor": "compressor.ape"},
+            "compressor_kv_projection": {"tensor": "compressor.wkv"},
+            "compressor_gate_projection": {"tensor": "compressor.wgate"},
+            "compressor_norm": {"tensor": "compressor.norm"},
+        }
+    )
+    tensor_index["tensors"].update(
+        {
+            "compressor.ape": {
+                "dtype": "F32",
+                "shape": [4, 256],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "compressor.wkv": {
+                "dtype": "BF16",
+                "shape": [256, 128],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "compressor.wgate": {
+                "dtype": "BF16",
+                "shape": [256, 128],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "compressor.norm": {
+                "dtype": "BF16",
+                "shape": [128],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    )
+    pool = {
+        "id": "memory_compressor_pool",
+        "op": "learned_gated_kv_pool",
+        "inputs": ["current_kv", "compressor_accumulator"],
+        "outputs": ["compressed_pooled_f32"],
+        "params": [
+            "compressor_position_bias",
+            "compressor_kv_projection",
+            "compressor_gate_projection",
+        ],
+        "state_reads": ["compressor_accumulator"],
+        "state_writes": ["compressor_accumulator"],
+        "attrs": {
+            "ratio": 4,
+            "overlap": True,
+            "lane_coefficient": 2,
+            "pooling": "learned_position_biased_softmax",
+            "hidden_size": 128,
+            "head_width": 128,
+            "output_element_bytes": [4],
+        },
+    }
+    finalize = {
+        "id": "memory_compressor_finalize",
+        "op": "compressed_kv_finalize",
+        "inputs": ["compressed_pooled_f32"],
+        "outputs": ["compressed_candidate"],
+        "params": ["compressor_norm"],
+        "attrs": {
+            "position_source": "stream_tick",
+            "theta": 10_000.0,
+            "rope_type": "default",
+            "scaling": None,
+            "interleaved": False,
+            "rotary_width": 64,
+            "rotary_scope": "tail",
+            "head_count": 1,
+            "head_width": 128,
+            "query_heads": 1,
+            "key_value_heads": 1,
+            "normalization_epsilon": 1e-6,
+            "position_offset": -3,
+            "activation_quantization": {
+                "format": "fp8_e4m3",
+                "scale_format": "e8m0_power_of_two",
+                "block_columns": 64,
+                "scope": "non_rotary_dimensions",
+                "mode": "quantize_dequantize",
+            },
+            "output_element_bytes": [2],
+        },
+    }
+    append = {
+        "id": "compressed_memory_update",
+        "op": "conditional_append_state_update",
+        "inputs": ["compressed_candidate", "compressed_kv_memory"],
+        "outputs": ["compressed_kv_values"],
+        "state_reads": ["compressed_kv_memory"],
+        "state_writes": ["compressed_kv_memory"],
+        "attrs": {"period": 4},
+    }
+    circuit["nodes"].extend([pool, finalize, append])
+
+    pool_file = shader_file_for_node(
+        circuit, pool, tensor_index, {"hidden_size": 128}
+    )
+    finalize_file = shader_file_for_node(
+        circuit, finalize, tensor_index, {"hidden_size": 128}
+    )
+    append_file = shader_file_for_node(
+        circuit, append, tensor_index, {"hidden_size": 128}
+    )
+
+    assert pool_file == (
+        "learned_gated_kv_pool_bf16_f32_h128_d128_r4_c2__sc8.comp"
+    )
+    assert finalize_file == (
+        "compressed_kv_finalize_f32_bf16_d128_r64_eps1e-06_"
+        "theta10000_half_po-3_qfp8e4m3b64__sc3.comp"
+    )
+    assert append_file == "conditional_append_state_bf16_d128_p4__sc6.comp"
+    assert workgroup_count_x_for_node(circuit, pool, tensor_index) == 128
+    assert workgroup_count_x_for_node(circuit, finalize, tensor_index) == 1
+    assert workgroup_count_x_for_node(circuit, append, tensor_index) == 1
+    assert local_size_x_for_shader_file(pool_file, pool) == 64
+    assert local_size_x_for_shader_file(finalize_file, finalize) == 128
+    assert local_size_x_for_shader_file(append_file, append) == 64
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(
+        shader_source_dir, tmp_path, {pool_file, finalize_file, append_file}
+    )
+    pool_source = (tmp_path / pool_file).read_text()
+    finalize_source = (tmp_path / finalize_file).read_text()
+    append_source = (tmp_path / append_file).read_text()
+    assert "const uint LANE_COEFFICIENT = 2u;" in pool_source
+    assert "state_score_index" in pool_source
+    assert "if ((position + 1u) % COMPRESSION_RATIO != 0u)" in pool_source
+    assert "round_power_of_two_scale" in finalize_source
+    assert "const int POSITION_OFFSET = -3;" in finalize_source
+    assert "dim < NON_ROTARY_WIDTH" in finalize_source
+    assert "uint compressed_slot = position / PERIOD;" in append_source
+    assert "{{" not in pool_source
+    assert "{{" not in finalize_source
+    assert "{{" not in append_source
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / pool_file.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / finalize_file.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / append_file.replace(".comp", ".spv")).is_file()
+
+
 def test_compiles_causal_indexed_attention_with_compressed_memory(
     tmp_path: Path,
 ) -> None:

@@ -249,6 +249,10 @@ fn infer_node_output_shapes(
             let output_shape = attr_usize(node, "width").map(|width| vec![width]);
             Ok(repeat_shape(output_shape, outputs))
         }
+        "learned_gated_kv_pool" | "compressed_kv_finalize" => {
+            let output_shape = attr_usize(node, "head_width").map(|width| vec![width]);
+            Ok(repeat_shape(output_shape, outputs))
+        }
         "moe_topk" | "moe_route" => {
             let output_shape = attr_usize(node, "experts_per_token").map(|routes| vec![routes, 2]);
             Ok(repeat_shape(output_shape, outputs))
@@ -823,7 +827,9 @@ fn product(shape: &[usize]) -> Option<usize> {
 
 fn node_output_storage(node: &CircuitNode) -> SignalStorage {
     match node.op.as_str() {
-        "append_state_update" | "rolling_state_update" => SignalStorage::StateView,
+        "append_state_update"
+        | "conditional_append_state_update"
+        | "rolling_state_update" => SignalStorage::StateView,
         _ => SignalStorage::Activation,
     }
 }

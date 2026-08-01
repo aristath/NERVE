@@ -232,6 +232,22 @@ mod tests {
     }
 
     #[test]
+    fn conditional_append_output_is_a_state_view() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "compressed_memory_update".to_string(),
+            op: "conditional_append_state_update".to_string(),
+            inputs: vec!["candidate".to_string(), "compressed_state".to_string()],
+            outputs: vec!["compressed_values".to_string()],
+            params: Vec::new(),
+            state_reads: vec!["compressed_state".to_string()],
+            state_writes: vec!["compressed_state".to_string()],
+            attrs: serde_json::json!({"period": 4}),
+        };
+
+        assert_eq!(node_output_storage(&node), SignalStorage::StateView);
+    }
+
+    #[test]
     fn infers_fused_linear_scalar_gate_residual_chain_shape() {
         let node = crate::stream_circuit::CircuitNode {
             id: "shared_gate_residual".to_string(),

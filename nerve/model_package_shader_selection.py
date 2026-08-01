@@ -6,6 +6,7 @@ from nerve.model_package_independent_experts import (
     independent_sparse_moe_shader_file,
 )
 from nerve.model_package_moe_routing import independent_moe_route_shader_file
+from nerve.model_package_latent_compression import latent_compression_shader_file
 from nerve.model_package_tensors import *
 
 
@@ -28,6 +29,13 @@ def shader_file_for_node(
 ) -> str:
     hidden_size = int(dimensions["hidden_size"])
     op = node["op"]
+
+    if op in {
+        "learned_gated_kv_pool",
+        "compressed_kv_finalize",
+        "conditional_append_state_update",
+    }:
+        return latent_compression_shader_file(circuit, node, tensor_index)
 
     if op in {"hyper_connection_pre", "hyper_connection_post_pre"}:
         (
@@ -1195,7 +1203,7 @@ def shader_file_for_node(
                     (
                         producer
                         for producer in circuit.get("nodes", [])
-                        if producer.get("op") == "learned_gated_kv_compression"
+                        if producer.get("op") == "learned_gated_kv_pool"
                     ),
                     None,
                 )
@@ -1630,6 +1638,12 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         return int(node["attrs"]["value_heads"])
     if node["op"] == "rg_lru_step":
         return int(node["attrs"]["heads"])
+    if node["op"] == "learned_gated_kv_pool":
+        return int(node["attrs"]["head_width"])
+    if node["op"] == "compressed_kv_finalize":
+        return 1
+    if node["op"] == "conditional_append_state_update":
+        return 1
     if node["op"] == "independent_sparse_moe_gate_up":
         attrs = node["attrs"]
         return int(attrs["experts_per_token"]) * (
@@ -1720,6 +1734,12 @@ def local_size_x_for_node(node: Json) -> int:
         )
     if node["op"] == "rg_lru_step":
         return int(node["attrs"]["block_width"])
+    if node["op"] == "learned_gated_kv_pool":
+        return 64
+    if node["op"] == "compressed_kv_finalize":
+        return int(node["attrs"]["head_width"])
+    if node["op"] == "conditional_append_state_update":
+        return 64
     if node["op"] == "moe_reduce":
         return MOE_REDUCE_LOCAL_SIZE
     if (
