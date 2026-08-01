@@ -249,6 +249,7 @@ RG_LRU_RECURRENT_GATE_BIAS_SUFFIXES = ("temporal_block.rg_lru.recurrent_gate_bia
 RG_LRU_RECURRENT_PARAM_SUFFIXES = ("temporal_block.rg_lru.recurrent_param",)
 
 LAYER_ROOT_PATTERNS = (
+    re.compile(r"^(?P<root>layers)\.(?P<index>\d+)\."),
     re.compile(r"^(?P<root>.+?\.layers)\.(?P<index>\d+)\."),
     re.compile(r"^(?P<root>transformer\.h)\.(?P<index>\d+)\."),
     re.compile(r"^(?P<root>gpt_neox\.layers)\.(?P<index>\d+)\."),
@@ -272,5 +273,4 @@ DRAFT_OUTPUT_NORM_SUFFIXES = (
     "norm.weight",
     "shared_head_norm.weight",
 )
-
 

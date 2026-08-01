@@ -16,21 +16,27 @@ def discover_model_structure(
 ) -> ModelStructure:
     layer_root, layer_indices = discover_layer_root(tensors, config=config)
     decoder_config = discover_decoder_config(config, max(layer_indices) + 1)
-    model_prefix = layer_root.removesuffix(".layers")
+    model_prefix = layer_root_parent(layer_root)
     token_embedding = find_first_tensor(
         tensors,
-        (f"{model_prefix}.embed_tokens.weight", *TOKEN_EMBEDDING_CANDIDATES),
+        (
+            prefixed_tensor_name(model_prefix, "embed_tokens.weight"),
+            *TOKEN_EMBEDDING_CANDIDATES,
+        ),
         role="token embedding",
     )
     output_norm = find_first_tensor(
         tensors,
-        (f"{model_prefix}.norm.weight", *OUTPUT_NORM_CANDIDATES),
+        (prefixed_tensor_name(model_prefix, "norm.weight"), *OUTPUT_NORM_CANDIDATES),
         role="output norm",
     )
     output_projection = (
         find_first_existing_tensor(
             tensors,
-            (f"{model_prefix}.lm_head.weight", *OUTPUT_PROJECTION_CANDIDATES),
+            (
+                prefixed_tensor_name(model_prefix, "lm_head.weight"),
+                *OUTPUT_PROJECTION_CANDIDATES,
+            ),
         )
         or token_embedding
     )
@@ -840,12 +846,12 @@ def discover_layer_root(
 
     def score(root: str) -> tuple[int, int]:
         indices = root_indices[root]
-        model_prefix = root.removesuffix(".layers")
+        model_prefix = layer_root_parent(root)
         contiguous = indices == set(range(max(indices) + 1))
         boundary_score = 0
-        if f"{model_prefix}.embed_tokens.weight" in tensors:
+        if prefixed_tensor_name(model_prefix, "embed_tokens.weight") in tensors:
             boundary_score += 200
-        if f"{model_prefix}.norm.weight" in tensors:
+        if prefixed_tensor_name(model_prefix, "norm.weight") in tensors:
             boundary_score += 50
         layer_count_score = (
             100 if len(indices) in decoder_layer_counts and contiguous else 0
@@ -869,6 +875,16 @@ def discover_layer_root(
 
     root = max(roots, key=score)
     return root, tuple(sorted(root_indices[root]))
+
+
+def layer_root_parent(layer_root: str) -> str:
+    if layer_root == "layers":
+        return ""
+    return layer_root.removesuffix(".layers")
+
+
+def prefixed_tensor_name(prefix: str, suffix: str) -> str:
+    return f"{prefix}.{suffix}" if prefix else suffix
 
 
 def discover_draft_execution_graphs(
@@ -908,7 +924,7 @@ def discover_draft_execution_graphs(
         indices = sorted(roots[root])
         if indices != list(range(len(indices))):
             continue
-        prefix = root.removesuffix(".layers")
+        prefix = layer_root_parent(root)
         input_projection = find_first_existing_tensor(
             tensors,
             (f"{prefix}.{suffix}" for suffix in DRAFT_INPUT_PROJECTION_SUFFIXES),
