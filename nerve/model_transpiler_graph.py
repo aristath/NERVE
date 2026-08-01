@@ -1177,6 +1177,7 @@ def make_state_ports(
                         "id": "compressor_accumulator",
                         "type": "gated_pooling_memory",
                         "shape": [
+                            2,
                             coefficient * ratio,
                             coefficient * layer.head_width,
                         ],
@@ -1194,6 +1195,7 @@ def make_state_ports(
                         "id": "indexer_compressor_accumulator",
                         "type": "gated_pooling_memory",
                         "shape": [
+                            2,
                             int(indexer["compressor_lane_coefficient"])
                             * int(compression["ratio"]),
                             int(indexer["compressor_lane_coefficient"])

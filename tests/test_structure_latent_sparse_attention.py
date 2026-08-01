@@ -154,6 +154,9 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
         "indexer_compressor_accumulator",
         "indexer_kv_memory",
     ]
+    state_ports = {port["id"]: port for port in component["state_ports"]}
+    assert state_ports["compressor_accumulator"]["shape"] == [2, 8, 8]
+    assert state_ports["indexer_compressor_accumulator"]["shape"] == [2, 8, 4]
     nodes = {node["id"]: node for node in circuit["nodes"]}
     assert nodes["query_input_projection"]["op"] == "linear"
     assert nodes["memory_compressor"]["op"] == "learned_gated_kv_compression"
@@ -161,6 +164,10 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
     assert nodes["sparse_attention_read"]["op"] == "indexed_sparse_attention"
     assert nodes["grouped_output_projection"]["op"] == "grouped_linear"
     deterministic_component = make_layer(structure, deterministic)
+    deterministic_states = {
+        port["id"]: port for port in deterministic_component["state_ports"]
+    }
+    assert deterministic_states["compressor_accumulator"]["shape"] == [2, 8, 4]
     deterministic_circuit = build_component_circuit(
         deterministic_component, Path("layer_02.json")
     )
