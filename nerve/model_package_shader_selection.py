@@ -23,6 +23,40 @@ def shader_file_for_node(
     hidden_size = int(dimensions["hidden_size"])
     op = node["op"]
 
+    if op in {"hyper_connection_pre", "hyper_connection_post_pre"}:
+        (
+            multiplicity,
+            sinkhorn_iterations,
+            normalization_epsilon,
+            sinkhorn_epsilon,
+        ) = hyper_connection_geometry_for_node(
+            circuit,
+            node,
+            tensor_index,
+            hidden_size=hidden_size,
+        )
+        return (
+            f"{op}_m{multiplicity}_h{hidden_size}_i{sinkhorn_iterations}_"
+            f"neps{shader_float_token(normalization_epsilon)}_"
+            f"heps{shader_float_token(sinkhorn_epsilon)}.comp"
+        )
+    if op == "hyper_connection_post":
+        attrs = node.get("attrs", {})
+        multiplicity = int(attrs.get("multiplicity", 0))
+        if (
+            multiplicity <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+            or len(node.get("inputs", [])) != 4
+            or len(node.get("outputs", [])) != 1
+            or node.get("params")
+            or attrs.get("output_element_bytes") != [2]
+        ):
+            raise ModelCompileError(
+                f"hyper-connection post node {node['id']!r} has an invalid contract"
+            )
+        return f"hyper_connection_post_m{multiplicity}_h{hidden_size}.comp"
+
     if op == "anchor_noise_embedding_block":
         attrs = node.get("attrs", {})
         block_size = int(attrs.get("block_size", 0))
@@ -1156,6 +1190,12 @@ def shader_file_for_node(
 
 
 def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
+    if node["op"] in {
+        "hyper_connection_pre",
+        "hyper_connection_post_pre",
+        "hyper_connection_post",
+    }:
+        return 1
     if node["op"] == "anchor_noise_embedding_block":
         attrs = node["attrs"]
         output_words = (

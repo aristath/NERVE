@@ -25,6 +25,7 @@ def latent_sparse_attention_nodes(
                 input_signal="input_frame",
                 output_signal="operator_input",
                 mixer=residual_mixer,
+                normalization_epsilon=float(numerics["rms_norm_eps"]),
             )
         )
         operator_input = "operator_input"
@@ -347,13 +348,17 @@ def latent_sparse_attention_nodes(
                         "hyper_attention_combination",
                     ],
                     "outputs": ["operator_residual_out"],
-                    "attrs": _hyper_connection_attrs(residual_mixer),
+                    "attrs": {
+                        **_hyper_connection_attrs(residual_mixer),
+                        "output_element_bytes": [2],
+                    },
                 },
                 *_hyper_connection_pre_nodes(
                     stage="feed_forward",
                     input_signal="operator_residual_out",
                     output_signal="ffn_input",
                     mixer=residual_mixer,
+                    normalization_epsilon=float(numerics["rms_norm_eps"]),
                 ),
                 {
                     "id": "ffn_norm",
@@ -377,7 +382,10 @@ def latent_sparse_attention_nodes(
                         "hyper_feed_forward_combination",
                     ],
                     "outputs": ["output_frame"],
-                    "attrs": _hyper_connection_attrs(residual_mixer),
+                    "attrs": {
+                        **_hyper_connection_attrs(residual_mixer),
+                        "output_element_bytes": [2],
+                    },
                 },
             ]
         )
@@ -385,7 +393,12 @@ def latent_sparse_attention_nodes(
 
 
 def _hyper_connection_pre_nodes(
-    *, stage: str, input_signal: str, output_signal: str, mixer: Json
+    *,
+    stage: str,
+    input_signal: str,
+    output_signal: str,
+    mixer: Json,
+    normalization_epsilon: float,
 ) -> list[Json]:
     parameter_prefix = f"hyper_{stage}"
     signal_prefix = f"hyper_{stage}"
@@ -398,7 +411,9 @@ def _hyper_connection_pre_nodes(
             "params": [f"{parameter_prefix}_function"],
             "attrs": {
                 "normalization": "root_mean_square",
+                "normalization_epsilon": normalization_epsilon,
                 "multiplicity": int(mixer["multiplicity"]),
+                "output_element_bytes": [4],
             },
         },
         {
@@ -414,14 +429,20 @@ def _hyper_connection_pre_nodes(
                 f"{parameter_prefix}_scale",
                 f"{parameter_prefix}_base",
             ],
-            "attrs": _hyper_connection_attrs(mixer),
+            "attrs": {
+                **_hyper_connection_attrs(mixer),
+                "output_element_bytes": [4, 4, 4],
+            },
         },
         {
             "id": f"{signal_prefix}_reduce",
             "op": "hyper_connection_reduce",
             "inputs": [input_signal, f"{signal_prefix}_pre"],
             "outputs": [output_signal],
-            "attrs": {"multiplicity": int(mixer["multiplicity"])},
+            "attrs": {
+                "multiplicity": int(mixer["multiplicity"]),
+                "output_element_bytes": [2],
+            },
         },
     ]
 

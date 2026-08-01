@@ -1829,6 +1829,77 @@ def fp8_scale_shader_suffix_for_node(
     return "_se8m0" if scale_dtype == "F8_E8M0" else ""
 
 
+def hyper_connection_geometry_for_node(
+    circuit: Json,
+    node: Json,
+    tensor_index: Json,
+    *,
+    hidden_size: int,
+) -> tuple[int, int, float, float]:
+    attrs = node.get("attrs", {})
+    multiplicity = int(attrs.get("multiplicity", 0))
+    sinkhorn_iterations = int(attrs.get("sinkhorn_iterations", 0))
+    normalization_epsilon = float(attrs.get("normalization_epsilon", 0.0))
+    sinkhorn_epsilon = float(attrs.get("epsilon", 0.0))
+    mix_count = (2 + multiplicity) * multiplicity
+    operation = node.get("op")
+    if (
+        operation not in {"hyper_connection_pre", "hyper_connection_post_pre"}
+        or multiplicity <= 0
+        or hidden_size <= 0
+        or hidden_size % 2
+        or sinkhorn_iterations <= 0
+        or not math.isfinite(normalization_epsilon)
+        or normalization_epsilon <= 0.0
+        or not math.isfinite(sinkhorn_epsilon)
+        or sinkhorn_epsilon <= 0.0
+        or attrs.get("intermediate_rounding") != "BF16"
+        or attrs.get("output_element_bytes")
+        != ([2, 4, 4] if operation == "hyper_connection_pre" else [2, 2, 4, 4])
+        or len(node.get("outputs", []))
+        != (3 if operation == "hyper_connection_pre" else 4)
+        or len(node.get("params", [])) != 3
+        or len(node.get("inputs", []))
+        != (1 if operation == "hyper_connection_pre" else 4)
+    ):
+        raise ModelCompileError(
+            f"hyper-connection node {node.get('id')!r} has an invalid contract"
+        )
+    function_id, scale_id, base_id = node["params"]
+    expected_shapes = [
+        [mix_count, multiplicity * hidden_size],
+        [3],
+        [mix_count],
+    ]
+    actual_shapes = [
+        parameter_shape_for_id(circuit, parameter_id, tensor_index)
+        for parameter_id in (function_id, scale_id, base_id)
+    ]
+    if (
+        actual_shapes != expected_shapes
+        or {
+            parameter_dtype_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in (function_id, scale_id, base_id)
+        }
+        != {"F32"}
+        or {
+            parameter_layout_for_id(circuit, parameter_id, tensor_index)
+            for parameter_id in (function_id, scale_id, base_id)
+        }
+        != {ROW_MAJOR_LAYOUT}
+    ):
+        raise ModelCompileError(
+            f"hyper-connection node {node['id']!r} has incompatible parameters "
+            f"{actual_shapes}; expected {expected_shapes}"
+        )
+    return (
+        multiplicity,
+        sinkhorn_iterations,
+        normalization_epsilon,
+        sinkhorn_epsilon,
+    )
+
+
 def fp8_moe_block_shape_for_stage(
     circuit: Json,
     node: Json,

@@ -6,6 +6,16 @@ from nerve.model_package_sparse_projection_shaders import (
 from nerve.model_package_tensors import *
 
 
+def shader_float_glsl(value: float) -> str:
+    """Render a finite Python float as an unambiguously floating GLSL literal."""
+    literal = format(float(value), ".9g")
+    if not math.isfinite(value):
+        raise ModelCompileError(f"cannot render non-finite GLSL float {value!r}")
+    if "." not in literal and "e" not in literal:
+        literal += ".0"
+    return literal
+
+
 def copy_shader_templates(
     source_dir: Path, dest_dir: Path, shader_files: set[str]
 ) -> None:
@@ -51,6 +61,121 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     source = source_dir / shader_file
     if source.exists():
         return source.read_text()
+
+    hyper_pre = re.fullmatch(
+        r"(hyper_connection_pre|hyper_connection_post_pre)_m(\d+)_h(\d+)_i(\d+)_"
+        r"neps([^_]+)_heps([^_]+)\.comp",
+        shader_file,
+    )
+    if hyper_pre is not None:
+        operation = hyper_pre.group(1)
+        multiplicity, hidden_size, sinkhorn_iterations = map(
+            int, hyper_pre.groups()[1:4]
+        )
+        normalization_epsilon = float(hyper_pre.group(5))
+        sinkhorn_epsilon = float(hyper_pre.group(6))
+        if (
+            multiplicity <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+            or sinkhorn_iterations <= 0
+            or normalization_epsilon <= 0.0
+            or sinkhorn_epsilon <= 0.0
+        ):
+            raise ModelCompileError(
+                f"invalid hyper-connection shader shape {shader_file!r}"
+            )
+        if operation == "hyper_connection_pre":
+            source_buffers = (
+                "layout(set = 0, binding = 0) readonly buffer InputStreams {\n"
+                "    uint words[];\n"
+                "} input_streams;"
+            )
+            source_word = "return input_streams.words[word_index];"
+            output_binding = 1
+        else:
+            source_buffers = "\n".join(
+                (
+                    "layout(set = 0, binding = 0) readonly buffer OperatorFrame {\n"
+                    "    uint words[];\n"
+                    "} operator_frame;",
+                    "layout(set = 0, binding = 1) readonly buffer ResidualStreams {\n"
+                    "    uint words[];\n"
+                    "} residual_streams;",
+                    "layout(set = 0, binding = 2) readonly buffer PriorPost {\n"
+                    "    float values[];\n"
+                    "} prior_post;",
+                    "layout(set = 0, binding = 3) readonly buffer PriorCombination {\n"
+                    "    float values[];\n"
+                    "} prior_combination;",
+                    "layout(set = 0, binding = 4) buffer PreservedStreams {\n"
+                    "    uint words[];\n"
+                    "} preserved_streams;",
+                )
+            )
+            source_word = "\n".join(
+                (
+                    "uint stream_index = word_index / HIDDEN_WORDS;",
+                    "uint hidden_word = word_index % HIDDEN_WORDS;",
+                    "uint low_index = hidden_word * 2u;",
+                    "uint high_index = low_index + 1u;",
+                    "float low = prior_post.values[stream_index] *",
+                    "    read_bf16(operator_frame.words[hidden_word], 0u);",
+                    "float high = prior_post.values[stream_index] *",
+                    "    read_bf16(operator_frame.words[hidden_word], 1u);",
+                    "for (uint source_stream = 0u; source_stream < MULTIPLICITY; ++source_stream) {",
+                    "    float coefficient = prior_combination.values[",
+                    "        stream_index * MULTIPLICITY + source_stream",
+                    "    ];",
+                    "    uint residual_base = source_stream * HIDDEN_WORDS + hidden_word;",
+                    "    uint residual_pair = residual_streams.words[residual_base];",
+                    "    low += coefficient * read_bf16(residual_pair, 0u);",
+                    "    high += coefficient * read_bf16(residual_pair, 1u);",
+                    "}",
+                    "uint packed = pack_bf16(low, high);",
+                    "preserved_streams.words[word_index] = packed;",
+                    "return packed;",
+                )
+            )
+            output_binding = 5
+        return render_shader_template(
+            source_dir,
+            "hyper_connection_pre.comp.template",
+            {
+                "SOURCE_BUFFERS": source_buffers,
+                "SOURCE_HYPER_WORD": source_word,
+                "REDUCED_OUTPUT_BINDING": str(output_binding),
+                "POST_OUTPUT_BINDING": str(output_binding + 1),
+                "COMBINATION_OUTPUT_BINDING": str(output_binding + 2),
+                "FUNCTION_BINDING": str(output_binding + 3),
+                "SCALE_BINDING": str(output_binding + 4),
+                "BASE_BINDING": str(output_binding + 5),
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+                "SINKHORN_ITERATIONS": str(sinkhorn_iterations),
+                "NORMALIZATION_EPSILON": shader_float_glsl(normalization_epsilon),
+                "SINKHORN_EPSILON": shader_float_glsl(sinkhorn_epsilon),
+            },
+        )
+
+    hyper_post = re.fullmatch(
+        r"hyper_connection_post_m(\d+)_h(\d+)\.comp",
+        shader_file,
+    )
+    if hyper_post is not None:
+        multiplicity, hidden_size = map(int, hyper_post.groups())
+        if multiplicity <= 0 or hidden_size <= 0 or hidden_size % 2:
+            raise ModelCompileError(
+                f"invalid hyper-connection post shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "hyper_connection_post.comp.template",
+            {
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+            },
+        )
 
     anchor_noise_embedding = re.fullmatch(
         r"anchor_noise_embedding_block_b(\d+)_m(\d+)_h(\d+)_noise(\d+)\.comp",

@@ -46,8 +46,10 @@ def optimize_circuit_for_vulkan(
 ) -> Json:
     """Compile discoverable node regions without changing the component boundary."""
     optimized = deepcopy(circuit)
+    nodes = _fuse_hyper_connection_pre_regions(optimized["nodes"])
+    nodes = _fuse_hyper_connection_post_pre_regions(nodes)
     nodes = _fuse_parallel_head_norm_rope_regions(
-        optimized["nodes"], can_fuse_parallel_head_norm_rope
+        nodes, can_fuse_parallel_head_norm_rope
     )
     consumer_counts = Counter(
         signal
@@ -149,6 +151,142 @@ def optimize_circuit_for_vulkan(
         can_fuse_mixed_precision_parallel_linears,
     )
     return optimized
+
+
+def _fuse_hyper_connection_pre_regions(nodes: list[Json]) -> list[Json]:
+    fused_nodes: list[Json] = []
+    index = 0
+    while index < len(nodes):
+        function = nodes[index]
+        sinkhorn = nodes[index + 1] if index + 1 < len(nodes) else None
+        reduce = nodes[index + 2] if index + 2 < len(nodes) else None
+        function_attrs = function.get("attrs", {})
+        sinkhorn_attrs = sinkhorn.get("attrs", {}) if sinkhorn is not None else {}
+        reduce_attrs = reduce.get("attrs", {}) if reduce is not None else {}
+        function_inputs = function.get("inputs", [])
+        function_outputs = function.get("outputs", [])
+        sinkhorn_outputs = sinkhorn.get("outputs", []) if sinkhorn is not None else []
+        if (
+            sinkhorn is None
+            or reduce is None
+            or function.get("op") != "normalized_linear"
+            or sinkhorn.get("op") != "hyper_connection_sinkhorn"
+            or reduce.get("op") != "hyper_connection_reduce"
+            or len(function_inputs) != 1
+            or len(function_outputs) != 1
+            or sinkhorn.get("inputs") != function_outputs
+            or len(sinkhorn_outputs) != 3
+            or reduce.get("inputs") != [function_inputs[0], sinkhorn_outputs[0]]
+            or len(reduce.get("outputs", [])) != 1
+            or len(function.get("params", [])) != 1
+            or len(sinkhorn.get("params", [])) != 2
+            or function.get("state_reads")
+            or function.get("state_writes")
+            or sinkhorn.get("state_reads")
+            or sinkhorn.get("state_writes")
+            or reduce.get("params")
+            or reduce.get("state_reads")
+            or reduce.get("state_writes")
+            or function_attrs.get("normalization") != "root_mean_square"
+            or int(function_attrs.get("multiplicity", 0)) <= 0
+            or int(function_attrs.get("multiplicity", 0))
+            != int(sinkhorn_attrs.get("multiplicity", 0))
+            or int(function_attrs.get("multiplicity", 0))
+            != int(reduce_attrs.get("multiplicity", 0))
+            or int(sinkhorn_attrs.get("sinkhorn_iterations", 0)) <= 0
+            or float(function_attrs.get("normalization_epsilon", 0.0)) <= 0.0
+            or float(sinkhorn_attrs.get("epsilon", 0.0)) <= 0.0
+        ):
+            fused_nodes.append(deepcopy(function))
+            index += 1
+            continue
+        fused_nodes.append(
+            {
+                "id": f"{function['id']}__{sinkhorn['id']}__{reduce['id']}",
+                "op": "hyper_connection_pre",
+                "inputs": deepcopy(function_inputs),
+                "outputs": [
+                    reduce["outputs"][0],
+                    sinkhorn_outputs[1],
+                    sinkhorn_outputs[2],
+                ],
+                "params": [*function["params"], *sinkhorn["params"]],
+                "attrs": {
+                    "compiled_from": [
+                        *_source_node_ids(function),
+                        *_source_node_ids(sinkhorn),
+                        *_source_node_ids(reduce),
+                    ],
+                    "multiplicity": int(function_attrs["multiplicity"]),
+                    "normalization_epsilon": float(
+                        function_attrs["normalization_epsilon"]
+                    ),
+                    "sinkhorn_iterations": int(
+                        sinkhorn_attrs["sinkhorn_iterations"]
+                    ),
+                    "epsilon": float(sinkhorn_attrs["epsilon"]),
+                    "intermediate_rounding": "BF16",
+                    "output_element_bytes": [2, 4, 4],
+                },
+            }
+        )
+        index += 3
+    return fused_nodes
+
+
+def _fuse_hyper_connection_post_pre_regions(nodes: list[Json]) -> list[Json]:
+    fused_nodes: list[Json] = []
+    index = 0
+    while index < len(nodes):
+        post = nodes[index]
+        pre = nodes[index + 1] if index + 1 < len(nodes) else None
+        post_outputs = post.get("outputs", [])
+        post_attrs = post.get("attrs", {})
+        pre_attrs = pre.get("attrs", {}) if pre is not None else {}
+        if (
+            pre is None
+            or post.get("op") != "hyper_connection_post"
+            or pre.get("op") != "hyper_connection_pre"
+            or len(post.get("inputs", [])) != 4
+            or len(post_outputs) != 1
+            or pre.get("inputs") != post_outputs
+            or len(pre.get("outputs", [])) != 3
+            or post.get("params")
+            or post.get("state_reads")
+            or post.get("state_writes")
+            or len(pre.get("params", [])) != 3
+            or pre.get("state_reads")
+            or pre.get("state_writes")
+            or int(post_attrs.get("multiplicity", 0)) <= 0
+            or int(post_attrs.get("multiplicity", 0))
+            != int(pre_attrs.get("multiplicity", 0))
+        ):
+            fused_nodes.append(deepcopy(post))
+            index += 1
+            continue
+        fused_nodes.append(
+            {
+                "id": f"{post['id']}__{pre['id']}",
+                "op": "hyper_connection_post_pre",
+                "inputs": deepcopy(post["inputs"]),
+                # The next hyper-connection post consumes this residual stream,
+                # so the fused kernel must preserve it as well as feeding the
+                # following pre-reduction directly.
+                "outputs": [post_outputs[0], *deepcopy(pre["outputs"])],
+                "params": deepcopy(pre["params"]),
+                "attrs": {
+                    **deepcopy(pre_attrs),
+                    "compiled_from": [
+                        *_source_node_ids(post),
+                        *_source_node_ids(pre),
+                    ],
+                    "post_rounding": "BF16",
+                    "output_element_bytes": [2, 2, 4, 4],
+                },
+            }
+        )
+        index += 2
+    return fused_nodes
 
 
 def _lower_partitioned_attention(

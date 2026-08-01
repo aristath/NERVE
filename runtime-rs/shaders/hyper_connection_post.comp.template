@@ -1,0 +1,65 @@
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer OperatorFrame {
+    uint words[];
+} operator_frame;
+layout(set = 0, binding = 1) readonly buffer ResidualStreams {
+    uint words[];
+} residual_streams;
+layout(set = 0, binding = 2) readonly buffer PostMix {
+    float values[];
+} post_mix;
+layout(set = 0, binding = 3) readonly buffer CombinationMix {
+    float values[];
+} combination_mix;
+layout(set = 0, binding = 4) buffer OutputStreams {
+    uint words[];
+} output_streams;
+
+const uint MULTIPLICITY = {{MULTIPLICITY}}u;
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
+const uint OUTPUT_WORDS = MULTIPLICITY * HIDDEN_WORDS;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float read_bf16(uint packed, uint half_index) {
+    return bf16_to_f32(packed >> (half_index * 16u));
+}
+
+uint pack_bf16(float low, float high) {
+    return f32_to_bf16(low) | (f32_to_bf16(high) << 16u);
+}
+
+void main() {
+    uint output_word = gl_GlobalInvocationID.x;
+    if (output_word >= OUTPUT_WORDS) {
+        return;
+    }
+    uint output_stream = output_word / HIDDEN_WORDS;
+    uint hidden_word = output_word % HIDDEN_WORDS;
+    uint operator_pair = operator_frame.words[hidden_word];
+    float low = post_mix.values[output_stream] * read_bf16(operator_pair, 0u);
+    float high = post_mix.values[output_stream] * read_bf16(operator_pair, 1u);
+    for (uint source_stream = 0u; source_stream < MULTIPLICITY; ++source_stream) {
+        float coefficient = combination_mix.values[
+            output_stream * MULTIPLICITY + source_stream
+        ];
+        uint residual_pair = residual_streams.words[
+            source_stream * HIDDEN_WORDS + hidden_word
+        ];
+        low += coefficient * read_bf16(residual_pair, 0u);
+        high += coefficient * read_bf16(residual_pair, 1u);
+    }
+    output_streams.words[output_word] = pack_bf16(low, high);
+}

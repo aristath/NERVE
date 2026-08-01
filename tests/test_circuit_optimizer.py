@@ -1603,6 +1603,126 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             fused["attrs"]["compiled_from"],
         )
 
+    def test_fuses_hyper_connection_pre_and_post_pre_regions(self) -> None:
+        pre = [
+            {
+                "id": "attention_function",
+                "op": "normalized_linear",
+                "inputs": ["input_frame"],
+                "outputs": ["attention_mixes"],
+                "params": ["attention_function_weight"],
+                "attrs": {
+                    "normalization": "root_mean_square",
+                    "normalization_epsilon": 1e-6,
+                    "multiplicity": 4,
+                    "output_element_bytes": [4],
+                },
+            },
+            {
+                "id": "attention_sinkhorn",
+                "op": "hyper_connection_sinkhorn",
+                "inputs": ["attention_mixes"],
+                "outputs": ["attention_pre", "attention_post", "attention_comb"],
+                "params": ["attention_scale", "attention_base"],
+                "attrs": {
+                    "multiplicity": 4,
+                    "sinkhorn_iterations": 20,
+                    "epsilon": 1e-6,
+                    "output_element_bytes": [4, 4, 4],
+                },
+            },
+            {
+                "id": "attention_reduce",
+                "op": "hyper_connection_reduce",
+                "inputs": ["input_frame", "attention_pre"],
+                "outputs": ["operator_input"],
+                "attrs": {"multiplicity": 4, "output_element_bytes": [2]},
+            },
+        ]
+        post = {
+            "id": "attention_post",
+            "op": "hyper_connection_post",
+            "inputs": [
+                "operator_out",
+                "input_frame",
+                "attention_post",
+                "attention_comb",
+            ],
+            "outputs": ["attention_residual"],
+            "attrs": {
+                "multiplicity": 4,
+                "sinkhorn_iterations": 20,
+                "epsilon": 1e-6,
+                "output_element_bytes": [2],
+            },
+        }
+        feed_forward = []
+        for node in pre:
+            clone = {
+                **node,
+                "id": node["id"].replace("attention", "feed_forward"),
+                "inputs": [
+                    signal.replace("input_frame", "attention_residual").replace(
+                        "attention_", "feed_forward_"
+                    )
+                    for signal in node["inputs"]
+                ],
+                "outputs": [
+                    signal.replace("attention_", "feed_forward_").replace(
+                        "operator_input", "ffn_input"
+                    )
+                    for signal in node["outputs"]
+                ],
+                "params": [
+                    parameter.replace("attention_", "feed_forward_")
+                    for parameter in node.get("params", [])
+                ],
+                "attrs": dict(node["attrs"]),
+            }
+            feed_forward.append(clone)
+        feed_forward[0]["inputs"] = ["attention_residual"]
+        feed_forward[2]["inputs"] = ["attention_residual", "feed_forward_pre"]
+
+        optimized = optimize_circuit_for_vulkan(
+            {"nodes": [*pre, {"id": "operator", "op": "operator"}, post, *feed_forward]}
+        )
+
+        self.assertEqual(
+            ["hyper_connection_pre", "operator", "hyper_connection_post_pre"],
+            [node["op"] for node in optimized["nodes"]],
+        )
+        first = optimized["nodes"][0]
+        self.assertEqual(["input_frame"], first["inputs"])
+        self.assertEqual(
+            ["operator_input", "attention_post", "attention_comb"],
+            first["outputs"],
+        )
+        self.assertEqual(
+            ["attention_function_weight", "attention_scale", "attention_base"],
+            first["params"],
+        )
+        fused = optimized["nodes"][2]
+        self.assertEqual(post["inputs"], fused["inputs"])
+        self.assertEqual(
+            [
+                "attention_residual",
+                "ffn_input",
+                "feed_forward_post",
+                "feed_forward_comb",
+            ],
+            fused["outputs"],
+        )
+        self.assertEqual([2, 2, 4, 4], fused["attrs"]["output_element_bytes"])
+        self.assertEqual(
+            [
+                "attention_post",
+                "feed_forward_function",
+                "feed_forward_sinkhorn",
+                "feed_forward_reduce",
+            ],
+            fused["attrs"]["compiled_from"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

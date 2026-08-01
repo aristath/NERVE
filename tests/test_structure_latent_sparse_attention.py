@@ -249,6 +249,18 @@ def test_composes_latent_attention_independent_experts_and_hyper_connections() -
     assert reference_topology[5]["type"] == "sinkhorn_hyper_connection_post"
     assert reference_topology[-1]["type"] == "sinkhorn_hyper_connection_post"
     assert not any(node["type"] == "residual_add" for node in reference_topology)
+    nodes = {node["id"]: node for node in circuit["nodes"]}
+    assert nodes["hyper_attention_function"]["attrs"] == {
+        "normalization": "root_mean_square",
+        "normalization_epsilon": 1e-6,
+        "multiplicity": 4,
+        "output_element_bytes": [4],
+    }
+    assert nodes["hyper_attention_sinkhorn"]["attrs"][
+        "output_element_bytes"
+    ] == [4, 4, 4]
+    assert nodes["hyper_attention_reduce"]["attrs"]["output_element_bytes"] == [2]
+    assert nodes["operator_residual"]["attrs"]["output_element_bytes"] == [2]
     node_ids = [node["id"] for node in circuit["nodes"]]
     assert node_ids.index("hyper_attention_reduce") < node_ids.index("operator_norm")
     assert node_ids.index("operator_residual") < node_ids.index(
