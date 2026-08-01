@@ -306,6 +306,30 @@ while True:
     .with_cancel_grace_period(Duration::from_millis(50))
 }
 
+fn completion_racing_cancellation_compiler_launch(
+    package_manifest: &Path,
+    working_directory: &Path,
+) -> CompilerLaunch {
+    let package = serde_json::to_string(&package_manifest.display().to_string()).unwrap();
+    let script = r#"
+import json, signal, time
+sequence = 0
+def emit(kind, **payload):
+    global sequence
+    print(json.dumps({"schema":"nerve.compiler_event.v1","sequence":sequence,"type":kind,**payload}), flush=True)
+    sequence += 1
+def cancel(_signal, _frame):
+    emit("Completed", package={"package_manifest":__PACKAGE__})
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, cancel)
+emit("ValidationStarted")
+while True:
+    time.sleep(0.05)
+"#
+    .replace("__PACKAGE__", &package);
+    scripted_compiler_launch(&script, working_directory)
+}
+
 fn scripted_compiler_launch(script: &str, working_directory: &Path) -> CompilerLaunch {
     CompilerLaunch::new(
         "python3",
@@ -723,6 +747,98 @@ fn e2e_uncooperative_compiler_is_force_stopped_without_publishing() {
 }
 
 #[test]
+fn e2e_cancellation_wins_a_race_with_compiler_completion() {
+    let root = TempDir::new("tui-e2e-cancel-complete-race");
+    let source = root.path().join("source");
+    write_safetensors_source(&source);
+    let package = crate::test_support::tiny_model_dir();
+    let load_count = Arc::new(AtomicUsize::new(0));
+    let observed = load_count.clone();
+    let mut harness = TuiHarness::new();
+    harness.app.editor_loader = Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(deterministic_editor_with_two_devices())
+    });
+    harness.app.compiler_launch = Ok(completion_racing_cancellation_compiler_launch(
+        &package.join(crate::RUNTIME_PACKAGE_MANIFEST_FILE),
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+    ));
+
+    harness.set_path(&source);
+    mark_source_as_discovered(&mut harness);
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.wait_until(|app| {
+        matches!(app.overlay, Some(Overlay::Compiler(ref progress)) if !progress.events.is_empty())
+    });
+    harness.key(KeyCode::Esc, KeyModifiers::NONE);
+    harness.wait_for(|app| app.compiler_job.is_none());
+
+    assert_eq!(load_count.load(Ordering::SeqCst), 0);
+    assert!(harness.app.editor.is_none());
+    assert!(matches!(
+        harness.app.overlay,
+        Some(Overlay::ModelSelector(_))
+    ));
+    assert!(harness.app.status.contains("cancelled"));
+}
+
+#[test]
+fn e2e_editing_model_path_clears_diagnostics_from_the_previous_source() {
+    let package = crate::test_support::tiny_model_dir();
+    let mut harness = TuiHarness::new();
+    let Some(Overlay::ModelSelector(selector)) = &mut harness.app.overlay else {
+        panic!("model selector did not open");
+    };
+    selector.diagnostics = vec!["tokenizer.json is missing".to_string()];
+    selector.diagnostic_scroll = 1;
+
+    harness.set_path(&package);
+
+    let Some(Overlay::ModelSelector(selector)) = &harness.app.overlay else {
+        panic!("model selector closed while editing its path");
+    };
+    assert!(selector.diagnostics.is_empty());
+    assert_eq!(selector.diagnostic_scroll, 0);
+    assert_eq!(selector.current_action_label(), "Load model");
+    assert!(!harness.render().contains("tokenizer.json is missing"));
+}
+
+#[test]
+fn e2e_text_property_accepts_the_anatomy_shortcut_character() {
+    let mut harness = TuiHarness::new();
+    harness
+        .app
+        .install_editor(deterministic_editor_with_two_devices());
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    let schema = crate::runtime_editor_control_schema(
+        0,
+        &serde_json::json!({
+            "id":"label",
+            "name":"Label",
+            "type":"text",
+            "current":"",
+            "editable_at_runtime":true,
+            "scope":"instance"
+        }),
+    );
+    let Some(Overlay::Node(modal)) = &mut harness.app.overlay else {
+        panic!("node modal did not open");
+    };
+    modal
+        .properties
+        .push(NodePropertyDraft::new(schema, serde_json::json!("")));
+    modal.focus_row = 4;
+
+    harness.key(KeyCode::Char('a'), KeyModifiers::NONE);
+
+    let Some(Overlay::Node(modal)) = &harness.app.overlay else {
+        panic!("node modal closed while editing a text property");
+    };
+    assert_eq!(modal.properties[0].buffer.text(), "a");
+    assert!(!modal.anatomy_expanded);
+}
+
+#[test]
 fn e2e_incomplete_source_is_diagnosed_by_the_compiler_and_remains_retryable() {
     let root = TempDir::new("tui-e2e-incomplete-source");
     let source = root.path().join("source");
@@ -835,6 +951,88 @@ print(json.dumps({{"schema":"nerve.compiler_event.v1","sequence":4,"type":"Compl
         );
         assert!(harness.app.editor.is_none());
     }
+}
+
+#[test]
+fn e2e_compiler_event_sequence_gaps_cannot_publish() {
+    let root = TempDir::new("tui-e2e-compiler-sequence-gap");
+    let source = root.path().join("source");
+    write_safetensors_source(&source);
+    let package = crate::test_support::tiny_model_dir().join(crate::RUNTIME_PACKAGE_MANIFEST_FILE);
+    let package_json = serde_json::to_string(&package.display().to_string()).unwrap();
+    let script = format!(
+        r#"import json
+print(json.dumps({{"schema":"nerve.compiler_event.v1","sequence":0,"type":"ValidationStarted"}}), flush=True)
+print(json.dumps({{"schema":"nerve.compiler_event.v1","sequence":2,"type":"Completed","package":{{"package_manifest":{package_json}}}}}), flush=True)"#
+    );
+    let load_count = Arc::new(AtomicUsize::new(0));
+    let observed = load_count.clone();
+    let mut harness = TuiHarness::new();
+    harness.app.editor_loader = Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(deterministic_editor_with_two_devices())
+    });
+    harness.app.compiler_launch = Ok(scripted_compiler_launch(
+        &script,
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+    ));
+
+    harness.set_path(&source);
+    mark_source_as_discovered(&mut harness);
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.wait_for(|app| app.compiler_job.is_none());
+
+    assert_eq!(load_count.load(Ordering::SeqCst), 0);
+    assert!(harness.app.editor.is_none());
+    let Some(Overlay::ModelSelector(selector)) = &harness.app.overlay else {
+        panic!("compiler protocol failure did not return to model selection");
+    };
+    assert!(
+        selector
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("expected sequence 1"))
+    );
+}
+
+#[test]
+fn e2e_retrying_compiler_starts_with_clean_diagnostics() {
+    let root = TempDir::new("tui-e2e-clean-compiler-retry");
+    let source = root.path().join("source");
+    write_safetensors_source(&source);
+    let failure = r#"import json
+print(json.dumps({"schema":"nerve.compiler_event.v1","sequence":0,"type":"Failed","diagnostics":[{"message":"first attempt failed"}]}), flush=True)
+raise SystemExit(1)"#;
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let mut harness = TuiHarness::new();
+    harness.app.compiler_launch = Ok(scripted_compiler_launch(failure, workspace));
+
+    harness.set_path(&source);
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.wait_for(|app| matches!(app.overlay, Some(Overlay::ModelSelector(_))));
+    let Some(Overlay::ModelSelector(selector)) = &harness.app.overlay else {
+        panic!("failed discovery did not return to model selection");
+    };
+    assert!(
+        selector
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("first attempt failed"))
+    );
+
+    harness.app.compiler_launch = Ok(cancelling_compiler_launch(workspace));
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.wait_until(|app| {
+        matches!(app.overlay, Some(Overlay::Compiler(ref progress)) if !progress.events.is_empty())
+    });
+    let Some(Overlay::Compiler(progress)) = &harness.app.overlay else {
+        panic!("retry did not start compiler progress");
+    };
+    assert!(progress.selector.diagnostics.is_empty());
+    assert_eq!(progress.selector.diagnostic_scroll, 0);
+
+    harness.key(KeyCode::Esc, KeyModifiers::NONE);
+    harness.wait_for(|app| matches!(app.overlay, Some(Overlay::ModelSelector(_))));
 }
 
 #[test]
@@ -1094,4 +1292,190 @@ fn e2e_global_help_and_mouse_controls_preserve_the_active_workflow() {
     harness.key(KeyCode::F(1), KeyModifiers::NONE);
     assert!(harness.render().contains("EXECUTION GRAPH"));
     harness.key(KeyCode::F(1), KeyModifiers::NONE);
+}
+
+#[test]
+fn e2e_device_refresh_replaces_inventory_and_requests_one_terminal_reset() {
+    let editor = deterministic_editor_with_two_devices();
+    let mut refreshed = editor.available_devices()[0].clone();
+    refreshed.device_name = Some("Refreshed deterministic device".to_string());
+    let refresh_count = Arc::new(AtomicUsize::new(0));
+    let observed = refresh_count.clone();
+    let mut harness = TuiHarness::new();
+    harness.app.install_editor(editor);
+    harness.app.device_refresher = Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        vec![refreshed.clone()]
+    });
+
+    harness.key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    assert_eq!(refresh_count.load(Ordering::SeqCst), 1);
+    let devices = harness.app.editor.as_ref().unwrap().available_devices();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(
+        devices[0].device_name.as_deref(),
+        Some("Refreshed deterministic device")
+    );
+    assert!(harness.app.status.contains("1 runtime device target"));
+    assert!(harness.app.take_terminal_reset_request());
+    assert!(!harness.app.take_terminal_reset_request());
+}
+
+#[test]
+fn e2e_mouse_wheel_pans_without_changing_selection_or_renderer_snapback() {
+    let mut harness = TuiHarness::new();
+    harness
+        .app
+        .install_editor(deterministic_editor_with_two_devices());
+    for _ in 0..7 {
+        harness.key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    }
+    harness.key(KeyCode::Home, KeyModifiers::NONE);
+    harness.resize(40, 12);
+    harness.render();
+    assert_eq!(harness.app.graph_scroll, 0);
+
+    assert_eq!(
+        harness.event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 20,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        })),
+        Some(AppAction::PanGraph(1))
+    );
+    harness.render();
+
+    assert_eq!(harness.app.graph_scroll, 1);
+    assert_eq!(harness.app.selected_instance(), Some("layer_00"));
+
+    harness.resize(80, 24);
+    harness.render();
+    assert_eq!(harness.app.selected_instance(), Some("layer_00"));
+    assert_eq!(harness.app.graph_scroll, 0);
+}
+
+#[test]
+fn e2e_model_selector_cancel_and_successful_replacement_are_transactional() {
+    let package = crate::test_support::tiny_model_dir();
+    let mut harness = TuiHarness::new().with_editor_loader(deterministic_editor_with_two_devices());
+    harness
+        .app
+        .install_editor(deterministic_editor_with_two_devices());
+    harness.key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let duplicated_ids = harness
+        .app
+        .instances()
+        .iter()
+        .map(|instance| instance.instance_id.clone())
+        .collect::<Vec<_>>();
+
+    harness.key(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(harness.click_text("Cancel"), Some(AppAction::CloseOverlay));
+    assert!(harness.app.overlay.is_none());
+    assert_eq!(
+        harness
+            .app
+            .instances()
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect::<Vec<_>>(),
+        duplicated_ids
+    );
+
+    harness.key(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    harness.set_path(&package);
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(harness.app.overlay.is_none());
+    assert_eq!(harness.app.instances().len(), 1);
+    assert_eq!(harness.app.selected_instance(), Some("layer_00"));
+    assert_eq!(harness.app.graph_scroll, 0);
+}
+
+#[test]
+fn e2e_compiler_cancel_button_uses_the_same_safe_cancellation_path() {
+    let root = TempDir::new("tui-e2e-mouse-cancel");
+    let source = root.path().join("source");
+    write_safetensors_source(&source);
+    let mut harness = TuiHarness::new();
+    harness.app.compiler_launch = Ok(cancelling_compiler_launch(
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+    ));
+    harness.set_path(&source);
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.wait_until(|app| {
+        matches!(app.overlay, Some(Overlay::Compiler(ref progress)) if !progress.events.is_empty())
+    });
+
+    assert_eq!(
+        harness.click_text("Cancel"),
+        Some(AppAction::CancelCompiler)
+    );
+    harness.wait_for(|app| matches!(app.overlay, Some(Overlay::ModelSelector(_))));
+    assert!(harness.app.status.contains("cancelled"));
+    assert!(harness.app.editor.is_none());
+}
+
+#[test]
+fn e2e_node_anatomy_scroll_and_modal_focus_are_bounded() {
+    let mut harness = TuiHarness::new();
+    harness
+        .app
+        .install_editor(deterministic_editor_with_two_devices());
+    harness.key(KeyCode::Enter, KeyModifiers::NONE);
+    harness.key(KeyCode::Char('a'), KeyModifiers::NONE);
+    harness.key(KeyCode::PageDown, KeyModifiers::NONE);
+    let Some(Overlay::Node(modal)) = &harness.app.overlay else {
+        panic!("node modal closed while inspecting anatomy");
+    };
+    assert!(modal.anatomy_expanded);
+    assert_eq!(modal.anatomy_scroll, 8);
+
+    harness.key(KeyCode::PageUp, KeyModifiers::NONE);
+    harness.key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    let Some(Overlay::Node(modal)) = &harness.app.overlay else {
+        panic!("node modal closed while moving focus");
+    };
+    assert_eq!(modal.anatomy_scroll, 0);
+    assert_eq!(modal.focus_row, modal.cancel_row());
+}
+
+#[test]
+fn e2e_unknown_sequence_keeps_the_last_valid_graph_until_corrected() {
+    let mut harness = TuiHarness::new();
+    harness
+        .app
+        .install_editor(deterministic_editor_with_two_devices());
+    harness.key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let original_ids = harness
+        .app
+        .instances()
+        .iter()
+        .map(|instance| instance.instance_id.clone())
+        .collect::<Vec<_>>();
+    harness.key(KeyCode::Tab, KeyModifiers::NONE);
+    harness.key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    harness.paste("[999]");
+    assert!(
+        harness
+            .app
+            .sequence_error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("Unknown layer"))
+    );
+    assert_eq!(
+        harness
+            .app
+            .instances()
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect::<Vec<_>>(),
+        original_ids
+    );
+
+    harness.key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+    harness.paste("[0]");
+    assert!(harness.app.sequence_error.is_none());
+    assert_eq!(harness.app.instances().len(), 1);
 }
