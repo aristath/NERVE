@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from nerve.compilation import check_compile_cancelled, read_json, write_json
+from nerve.compilation import (
+    ModelCompileError,
+    check_compile_cancelled,
+    read_json,
+    write_json,
+)
 
 
 Json = dict[str, Any]
@@ -22,7 +27,7 @@ Json = dict[str, Any]
 MAX_SHADER_PARAMETER_CHUNK_BYTES = 1 << 30
 
 
-class ModelTranspileError(RuntimeError):
+class ModelTranspileError(ModelCompileError):
     pass
 
 
@@ -273,4 +278,3 @@ DRAFT_OUTPUT_NORM_SUFFIXES = (
     "norm.weight",
     "shared_head_norm.weight",
 )
-

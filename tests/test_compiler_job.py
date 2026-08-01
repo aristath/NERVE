@@ -19,6 +19,7 @@ from nerve.model_compiler import (
     publish_staged_directories,
 )
 from nerve.compiler_target import CompilerTarget
+from nerve.model_transpiler_types import ModelTranspileError
 
 
 def write_discoverable_source(root: Path) -> None:
@@ -195,6 +196,72 @@ def test_failed_compile_preserves_public_outputs_and_removes_staging(
             {"kind": "RuntimeError", "message": "injected compiler failure"}
         ],
     }
+
+
+def test_cli_reports_transpiler_failure_once_without_traceback_or_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    write_discoverable_source(source)
+    destination = tmp_path / "compiled_model"
+
+    def fail_from_transpiler(_model_dir: Path, **arguments: object) -> None:
+        staged = arguments["package_dir"]
+        assert isinstance(staged, Path)
+        staged.mkdir(parents=True)
+        (staged / "partial").write_text("incomplete")
+        raise ModelTranspileError("unsupported synthetic topology")
+
+    monkeypatch.setattr(
+        compiler_module,
+        "compile_model_package",
+        fail_from_transpiler,
+    )
+    monkeypatch.setattr(
+        "nerve.cli.discover_compiler_target",
+        lambda **_kwargs: CompilerTarget.for_features({"shader_bfloat16_type"}),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nerve",
+            "--compile-model",
+            str(source),
+            "--compiled-model-dir",
+            str(destination),
+            "--compiler-events-jsonl",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.out.splitlines()]
+    terminal_events = [
+        event for event in events if event["type"] in {"Completed", "Cancelled", "Failed"}
+    ]
+    assert exit_info.value.code == 1
+    assert captured.err == ""
+    assert terminal_events == [
+        {
+            "schema": "nerve.compiler_event.v1",
+            "sequence": len(events) - 1,
+            "type": "Failed",
+            "diagnostics": [
+                {
+                    "kind": "ModelTranspileError",
+                    "message": "unsupported synthetic topology",
+                }
+            ],
+        }
+    ]
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".*.nerve-stage-*"))
 
 
 def test_cli_compile_forwards_one_compiled_model_destination(
