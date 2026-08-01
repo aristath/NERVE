@@ -1151,7 +1151,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     prequant_fp8_linear = re.fullmatch(
         r"(linear|linear_bias|linear_residual)_prequant"
         r"(?:_batch(\d+))?_fp8_e4m3_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        r"(?:(se8m0)_)?b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if prequant_fp8_linear is not None:
@@ -1161,8 +1161,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             if prequant_fp8_linear.group(2) is not None
             else None
         )
+        scale_dtype = prequant_fp8_linear.group(3) or "bf16"
         block_rows, block_columns, input_size, output_size = map(
-            int, prequant_fp8_linear.groups()[2:]
+            int, prequant_fp8_linear.groups()[3:]
         )
         if (
             (batch_tile_width is not None and batch_tile_width <= 0)
@@ -1256,6 +1257,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "OUTPUT_BINDING": str(output_binding),
                 "WEIGHT_BINDING": str(weight_binding),
                 "WEIGHT_SCALE_BINDING": str(weight_binding + 1),
+                "WEIGHT_SCALE_READ": (
+                    "uint packed = weight_scale_inv.words[index >> 2u];\n"
+                    "    uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu;\n"
+                    "    return uintBitsToFloat(e8m0 << 23u);"
+                    if scale_dtype == "se8m0"
+                    else (
+                        "return read_bf16_word("
+                        "weight_scale_inv.words[index >> 1u], index);"
+                    )
+                ),
                 "FINALIZE_OUTPUT_FUNCTION": finalize_output,
             },
         )

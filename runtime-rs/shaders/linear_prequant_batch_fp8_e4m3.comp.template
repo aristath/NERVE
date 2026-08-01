@@ -55,7 +55,7 @@ float read_bf16_word(uint packed, uint index) {
 
 float read_weight_scale(uint row, uint block) {
     uint index = (row / BLOCK_ROWS) * SCALE_COLUMNS + block;
-    return read_bf16_word(weight_scale_inv.words[index >> 1u], index);
+    {{WEIGHT_SCALE_READ}}
 }
 
 fe4m3vec4 read_weightx4(uint row, uint word) {

@@ -212,6 +212,25 @@ def test_linear_shader_selector_preserves_native_e8m0_block_scales(
     assert "read_bf16_word(weight_scale" not in shader
 
 
+def test_prequantized_linear_preserves_native_e8m0_block_scales(
+    tmp_path: Path,
+) -> None:
+    scalar = "linear_prequant_fp8_e4m3_se8m0_b128x128_12288x4096.comp"
+    batch = weight_shared_batch_shader_file(scalar, tile_width=16)
+    assert batch == (
+        "linear_prequant_batch16_fp8_e4m3_se8m0_b128x128_12288x4096.comp"
+    )
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {scalar, batch})
+
+    for shader_file in (scalar, batch):
+        source = (tmp_path / shader_file).read_text()
+        assert "uint e8m0 =" in source
+        assert "uintBitsToFloat(e8m0 << 23u)" in source
+        assert "read_bf16_word(weight_scale" not in source
+    compile_shader_artifacts(tmp_path)
+
+
 def test_fp8_linear_rejects_non_scale_parameter_after_weight() -> None:
     node = {
         "id": "projection",

@@ -816,7 +816,7 @@ def weight_shared_batch_shader_file(
         return shader_file.replace("split_bf16_", f"split_batch{tile}_bf16_", 1)
     prequant_fp8 = re.fullmatch(
         r"(linear|linear_bias|linear_residual)_prequant_fp8_e4m3_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        r"(?:se8m0_)?b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
     if prequant_fp8 is not None:
