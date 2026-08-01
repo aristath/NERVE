@@ -9,16 +9,17 @@ use ratatui::layout::Rect;
 use serde_json::Value;
 
 use crate::{
-    RuntimeEditorControlKind, RuntimeEditorControlSchema, RuntimeEditorInstance,
-    RuntimeEditorSourceComponent, RuntimeEditorError, RuntimeModelEditor, RuntimeModelPathKind,
-    ResourceResidencyPolicy,
-    StreamCircuitNodeInstanceStatePolicy, classify_runtime_model_path,
-    validate_runtime_editor_control_value,
+    RuntimeAvailableDevice, RuntimeEditorControlKind, RuntimeEditorControlSchema,
+    RuntimeEditorInstance, RuntimeEditorSourceComponent, RuntimeEditorError, RuntimeModelEditor,
+    RuntimeModelPathKind, ResourceResidencyPolicy, StreamCircuitNodeInstanceStatePolicy,
+    classify_runtime_model_path, discover_runtime_devices, validate_runtime_editor_control_value,
 };
 
 pub(crate) type EditorLoader = Arc<
     dyn Fn(&Path) -> Result<RuntimeModelEditor, RuntimeEditorError> + Send + Sync,
 >;
+pub(crate) type DeviceRefresher =
+    Arc<dyn Fn(&RuntimeModelEditor) -> Vec<RuntimeAvailableDevice> + Send + Sync>;
 
 use super::compiler::{
     CompilerEvent, CompilerJob, CompilerJobKind, CompilerLaunch, CompilerMessage,
@@ -155,7 +156,11 @@ pub(crate) struct SourceDiscovery {
 
 impl SourceDiscovery {
     fn from_event(event: &CompilerEvent) -> Option<Self> {
-        let source = event.value("source")?.clone();
+        let source = event.value("source")?;
+        if !source.is_object() {
+            return None;
+        }
+        let source = source.clone();
         Some(Self {
             model_type: source
                 .get("model_type")
@@ -230,6 +235,8 @@ impl ModelSelectorState {
     }
 
     fn refresh(&mut self) {
+        self.diagnostics.clear();
+        self.diagnostic_scroll = 0;
         let selected = self.selected_path();
         self.detected = Some(classify_runtime_model_path(&selected).map_err(|error| error.0));
         self.discovery = None;
@@ -530,6 +537,8 @@ pub struct App {
     pub(crate) focus: FocusRegion,
     pub(crate) selected_instance_id: Option<String>,
     pub(crate) graph_scroll: usize,
+    pub(crate) graph_viewport_capacity: usize,
+    pub(crate) graph_manual_pan: bool,
     pub(crate) overlay: Option<Overlay>,
     help_return_overlay: Option<Overlay>,
     pub(crate) status: String,
@@ -541,5 +550,56 @@ pub struct App {
     pub(crate) compiler_job: Option<CompilerJob>,
     pub(crate) compiler_launch: Result<CompilerLaunch, String>,
     pub(crate) editor_loader: EditorLoader,
+    pub(crate) device_refresher: DeviceRefresher,
     terminal_reset_requested: bool,
+}
+
+#[cfg(test)]
+mod app_state_contract_tests {
+    use super::*;
+
+    #[test]
+    fn hit_map_ignores_empty_rectangles_and_prefers_topmost_target() {
+        let mut hit_map = HitMap::default();
+        hit_map.insert(Rect::new(0, 0, 0, 2), HitTarget::OpenModel);
+        hit_map.insert(Rect::new(1, 1, 4, 4), HitTarget::OpenModel);
+        hit_map.insert(Rect::new(2, 2, 2, 2), HitTarget::ModalCancel);
+        assert_eq!(hit_map.resolve(0, 0), None);
+        assert_eq!(hit_map.resolve(1, 1), Some(&HitTarget::OpenModel));
+        assert_eq!(hit_map.resolve(2, 2), Some(&HitTarget::ModalCancel));
+        assert_eq!(hit_map.resolve(5, 5), None);
+        hit_map.clear();
+        assert_eq!(hit_map.resolve(2, 2), None);
+    }
+
+    #[test]
+    fn source_discovery_defaults_optional_fields_without_inventing_assets() {
+        let event = CompilerEvent {
+            schema: "nerve.compiler_event.v1".to_string(),
+            sequence: 0,
+            kind: "SourceDiscovered".to_string(),
+            payload: [("source".to_string(), serde_json::json!({"model_type": 7}))]
+                .into_iter()
+                .collect(),
+        };
+        let discovery = SourceDiscovery::from_event(&event).unwrap();
+        assert_eq!(discovery.model_type, "unknown");
+        assert!(discovery.architecture.is_empty());
+        assert!(discovery.weight_files.is_empty());
+        assert!(discovery.tokenizer_files.is_empty());
+        assert!(!discovery.has_chat_template);
+    }
+
+    #[test]
+    fn source_discovery_rejects_a_non_object_source_payload() {
+        let event = CompilerEvent {
+            schema: "nerve.compiler_event.v1".to_string(),
+            sequence: 0,
+            kind: "SourceDiscovered".to_string(),
+            payload: [("source".to_string(), serde_json::json!(7))]
+                .into_iter()
+                .collect(),
+        };
+        assert!(SourceDiscovery::from_event(&event).is_none());
+    }
 }

@@ -106,12 +106,22 @@ impl TextBuffer {
     }
 
     pub fn move_left(&mut self, selecting: bool) {
+        if !selecting && let Some((start, _)) = self.selection() {
+            self.cursor = start;
+            self.anchor = None;
+            return;
+        }
         self.prepare_selection(selecting);
         self.cursor = self.cursor.saturating_sub(1);
         self.finish_selection(selecting);
     }
 
     pub fn move_right(&mut self, selecting: bool) {
+        if !selecting && let Some((_, end)) = self.selection() {
+            self.cursor = end;
+            self.anchor = None;
+            return;
+        }
         self.prepare_selection(selecting);
         self.cursor = (self.cursor + 1).min(self.text.chars().count());
         self.finish_selection(selecting);
@@ -351,5 +361,77 @@ mod tests {
         buffer.select_all();
         buffer.backspace();
         assert_eq!(buffer.text(), "");
+    }
+
+    #[test]
+    fn text_buffer_arrows_collapse_selection_to_the_nearest_edge() {
+        let mut buffer = TextBuffer::new("abcd");
+        buffer.move_home(false);
+        buffer.move_right(true);
+        buffer.move_right(true);
+        assert_eq!(buffer.selection(), Some((0, 2)));
+
+        buffer.move_left(false);
+        assert_eq!(buffer.cursor(), 0);
+        assert_eq!(buffer.selection(), None);
+
+        buffer.move_right(true);
+        buffer.move_right(true);
+        buffer.move_right(false);
+        assert_eq!(buffer.cursor(), 2);
+        assert_eq!(buffer.selection(), None);
+    }
+
+    #[test]
+    fn parser_rejects_each_invalid_grammar_boundary_without_partial_output() {
+        let available = [0, 2, 3].into_iter().collect();
+        for (input, expected) in [
+            ("", "begin"),
+            ("0", "begin"),
+            ("[]", "at least one"),
+            ("[,]", "numeric"),
+            ("[0,]", "numeric"),
+            ("[0 2]", "`,` or `]`"),
+            ("[-1]", "numeric"),
+            ("[0] trailing", "Unexpected text"),
+            ("[0,2", "closing"),
+        ] {
+            let error = parse_layer_sequence(input, &available).unwrap_err();
+            assert!(
+                error.message.contains(expected),
+                "input {input:?} produced unexpected error {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_reports_sparse_available_layers_and_integer_overflow_precisely() {
+        let available = [0, 2, 3, 7].into_iter().collect();
+        let unknown = parse_layer_sequence("[1]", &available).unwrap_err();
+        assert!(unknown.message.contains("0, 2-3, 7"));
+
+        let overflow = format!("[{}0]", usize::MAX);
+        let error = parse_layer_sequence(&overflow, &available).unwrap_err();
+        assert!(error.message.contains("too large"));
+        assert_eq!(error.column, 2);
+    }
+
+    #[test]
+    fn text_buffer_deletion_and_reverse_selection_are_unicode_safe_at_boundaries() {
+        let mut buffer = TextBuffer::new("a界λ");
+        buffer.delete();
+        assert_eq!(buffer.text(), "a界λ");
+        buffer.backspace();
+        assert_eq!(buffer.text(), "a界");
+        buffer.move_home(false);
+        buffer.backspace();
+        assert_eq!(buffer.text(), "a界");
+        buffer.move_end(false);
+        buffer.move_left(true);
+        buffer.move_left(true);
+        assert_eq!(buffer.selection(), Some((0, 2)));
+        buffer.delete();
+        assert_eq!(buffer.text(), "");
+        assert_eq!(buffer.cursor(), 0);
     }
 }

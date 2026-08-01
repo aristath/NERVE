@@ -61,7 +61,20 @@ fn cycle_index(current: usize, len: usize, delta: i32) -> usize {
     if len == 0 {
         return 0;
     }
-    (current as i32 + delta).rem_euclid(len as i32) as usize
+    let current = current % len;
+    let offset = delta.unsigned_abs() as usize % len;
+    if delta >= 0 {
+        let remaining = len - current;
+        if offset >= remaining {
+            offset - remaining
+        } else {
+            current + offset
+        }
+    } else if offset <= current {
+        current - offset
+    } else {
+        len - (offset - current)
+    }
 }
 
 fn cycle_selectable_index(current: usize, selectable: &[bool], delta: i32) -> usize {
@@ -190,6 +203,18 @@ mod tests {
     }
 
     #[test]
+    fn cyclic_selection_handles_empty_lists_wraparound_and_extreme_deltas() {
+        assert_eq!(cycle_index(9, 0, 1), 0);
+        assert_eq!(cycle_index(0, 3, -1), 2);
+        assert_eq!(cycle_index(2, 3, 1), 0);
+        assert_eq!(cycle_index(1, 3, i32::MIN), 2);
+        assert_eq!(cycle_index(usize::MAX, 3, 0), usize::MAX % 3);
+
+        assert_eq!(cycle_selectable_index(0, &[false, false], 1), 0);
+        assert_eq!(cycle_selectable_index(0, &[false, true, false], -1), 1);
+    }
+
+    #[test]
     fn property_draft_tracks_real_changes_and_schema_validation() {
         let schema = crate::runtime_editor_control_schema(
             0,
@@ -245,6 +270,88 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("declared type"))
         );
+    }
+
+    #[test]
+    fn property_draft_handles_every_generic_editor_kind_and_invalid_number_text() {
+        let schema = |kind: &str, current: Value, extra: Value| {
+            let mut raw = serde_json::json!({
+                "id":"property", "type":kind, "current":current,
+                "editable_at_runtime":true, "scope":"instance"
+            });
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            crate::runtime_editor_control_schema(0, &raw)
+        };
+
+        let mut boolean = NodePropertyDraft::new(
+            schema("boolean", Value::Bool(false), serde_json::json!({})),
+            Value::Bool(false),
+        );
+        boolean.change(1);
+        assert_eq!(boolean.value, Value::Bool(true));
+        assert_eq!(boolean.display_value(), "true");
+
+        let mut enumeration = NodePropertyDraft::new(
+            schema(
+                "enum",
+                serde_json::json!("a"),
+                serde_json::json!({
+                    "choices":[
+                        {"value":"a", "label":"Alpha"},
+                        {"value":"b", "label":"Beta"}
+                    ]
+                }),
+            ),
+            serde_json::json!("a"),
+        );
+        enumeration.change(-1);
+        assert_eq!(enumeration.value, serde_json::json!("b"));
+        assert_eq!(enumeration.display_value(), "Beta");
+
+        let mut number = NodePropertyDraft::new(
+            schema(
+                "number",
+                serde_json::json!(0.5),
+                serde_json::json!({"min":0.0, "max":1.0, "step":0.25}),
+            ),
+            serde_json::json!(0.5),
+        );
+        number.change(10);
+        assert_eq!(number.value, serde_json::json!(1.0));
+        number.buffer.set("NaN");
+        number.reparse_buffer();
+        assert!(
+            number
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("finite"))
+        );
+
+        let mut text = NodePropertyDraft::new(
+            schema(
+                "text",
+                serde_json::json!("old"),
+                serde_json::json!({}),
+            ),
+            serde_json::json!("old"),
+        );
+        text.buffer.set("νέο");
+        text.reparse_buffer();
+        assert_eq!(text.value, serde_json::json!("νέο"));
+
+        let readonly_schema = crate::runtime_editor_control_schema(
+            0,
+            &serde_json::json!({
+                "id":"read", "type":"readonly", "current":7,
+                "editable_at_runtime":true, "scope":"instance"
+            }),
+        );
+        let mut readonly = NodePropertyDraft::new(readonly_schema, serde_json::json!(7));
+        readonly.change(1);
+        assert_eq!(readonly.value, serde_json::json!(7));
+        assert!(!readonly.editable());
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Block::default().style(Style::default()), area);
     render_workspace(frame, app, area);
     if let Some(overlay) = app.overlay.clone() {
+        app.hit_map.clear();
         match overlay {
             Overlay::ModelSelector(selector) => render_model_selector(frame, app, &selector),
             Overlay::Compiler(progress) => render_compiler(frame, app, &progress),
@@ -214,6 +215,8 @@ fn render_graph(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let edge_width = if inner.width >= 80 { 5 } else { 3 };
     let unit_width = component_width + edge_width;
     let visible_count = ((inner.width + edge_width) / unit_width).max(1) as usize;
+    let viewport_changed = app.graph_viewport_capacity != visible_count;
+    app.graph_viewport_capacity = visible_count;
     let selected_index = app
         .selected_instance_id
         .as_ref()
@@ -223,11 +226,14 @@ fn render_graph(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .position(|instance| &instance.instance_id == id)
         })
         .unwrap_or(0);
-    if selected_index < app.graph_scroll {
-        app.graph_scroll = selected_index;
-    }
-    if selected_index >= app.graph_scroll + visible_count {
-        app.graph_scroll = selected_index + 1 - visible_count;
+    if viewport_changed || !app.graph_manual_pan {
+        if selected_index < app.graph_scroll {
+            app.graph_scroll = selected_index;
+        }
+        if selected_index >= app.graph_scroll + visible_count {
+            app.graph_scroll = selected_index + 1 - visible_count;
+        }
+        app.graph_manual_pan = false;
     }
     app.graph_scroll = app
         .graph_scroll

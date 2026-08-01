@@ -302,10 +302,12 @@ impl App {
         };
         match job {
             Ok(job) => {
-                let selector = match self.overlay.take() {
+                let mut selector = match self.overlay.take() {
                     Some(Overlay::ModelSelector(selector)) => selector,
                     _ => ModelSelectorState::new(source_path.clone()),
                 };
+                selector.diagnostics.clear();
+                selector.diagnostic_scroll = 0;
                 self.overlay = Some(Overlay::Compiler(CompilerProgressState {
                     kind,
                     source_path,
@@ -371,17 +373,24 @@ impl App {
                 progress.protocol_error.get_or_insert(error.clone());
                 progress.diagnostics.push(error);
             }
-            if progress
-                .events
-                .last()
-                .is_some_and(|previous| event.sequence <= previous.sequence)
-            {
-                let error = format!(
-                    "compiler event sequence {} is not greater than the previous sequence",
-                    event.sequence
-                );
-                progress.protocol_error.get_or_insert(error.clone());
-                progress.diagnostics.push(error);
+            if let Some(previous) = progress.events.last() {
+                let expected = previous.sequence.checked_add(1);
+                if expected != Some(event.sequence) {
+                    let error = expected.map_or_else(
+                        || {
+                            "compiler emitted an event after exhausting its sequence space"
+                                .to_string()
+                        },
+                        |expected| {
+                            format!(
+                                "compiler emitted sequence {}, expected sequence {expected}",
+                                event.sequence
+                            )
+                        },
+                    );
+                    progress.protocol_error.get_or_insert(error.clone());
+                    progress.diagnostics.push(error);
+                }
             }
             progress.stage = compiler_stage_label(&event.kind).to_string();
             if let Some((current, total)) = event.progress() {
@@ -421,7 +430,7 @@ impl App {
             self.fail_compiler_job(format!("Compiler protocol failed: {error}"));
             return;
         }
-        if terminal_event.is_none() && cancel_requested {
+        if cancel_requested {
             let mut selector = match self.overlay.take() {
                 Some(Overlay::Compiler(progress)) => {
                     let mut selector = progress.selector;
@@ -430,6 +439,15 @@ impl App {
                 }
                 _ => return,
             };
+            if terminal_event
+                .as_ref()
+                .is_some_and(|event| event.kind == "Completed")
+            {
+                selector.diagnostics.push(
+                    "Compiler completion was ignored because cancellation was requested; no package was loaded"
+                        .to_string(),
+                );
+            }
             if forced_termination {
                 selector.diagnostics.push(
                     "Compiler ignored graceful cancellation and was force-stopped; staged output was not published"
@@ -581,6 +599,8 @@ impl App {
         self.sequence_error = None;
         self.selected_instance_id = selected_instance_id;
         self.graph_scroll = 0;
+        self.graph_viewport_capacity = 1;
+        self.graph_manual_pan = false;
         self.status = format!(
             "Loaded {} · {} source components · residency {} · graph draft not mounted",
             editor.package_id(),

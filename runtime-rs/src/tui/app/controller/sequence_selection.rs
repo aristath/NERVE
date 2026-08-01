@@ -13,6 +13,7 @@ impl App {
                 Ok(()) => {
                     self.last_valid_sequence = sequence;
                     self.sequence_error = None;
+                    self.graph_manual_pan = false;
                     self.ensure_selection_exists();
                     self.status = "Graph draft updated · not mounted".to_string();
                 }
@@ -52,6 +53,7 @@ impl App {
     fn select_index(&mut self, index: usize) {
         if let Some(instance) = self.instances().get(index) {
             self.selected_instance_id = Some(instance.instance_id.clone());
+            self.graph_manual_pan = false;
         }
     }
 
@@ -62,6 +64,7 @@ impl App {
             .any(|instance| instance.instance_id == instance_id)
         {
             self.selected_instance_id = Some(instance_id.to_string());
+            self.graph_manual_pan = false;
             self.focus = FocusRegion::Graph;
         }
     }

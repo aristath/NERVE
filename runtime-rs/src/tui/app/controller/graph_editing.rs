@@ -67,6 +67,24 @@ impl App {
         }
     }
 
+    fn pan_graph(&mut self, delta: i16) {
+        let instances = self.instances();
+        if instances.is_empty() {
+            self.graph_scroll = 0;
+            return;
+        }
+        let visible = self
+            .graph_viewport_capacity
+            .max(1)
+            .min(instances.len());
+        let maximum_scroll = instances.len().saturating_sub(visible);
+        self.graph_scroll = self
+            .graph_scroll
+            .saturating_add_signed(delta as isize)
+            .min(maximum_scroll);
+        self.graph_manual_pan = true;
+    }
+
     fn ensure_selection_exists(&mut self) {
         let instances = self.instances();
         if self.selected_instance_id.as_ref().is_none_or(|selected| {
@@ -107,6 +125,7 @@ impl App {
             .set(format_layer_sequence(&self.last_valid_sequence));
         self.sequence_error = None;
         self.selected_instance_id = selected_instance_id;
+        self.graph_manual_pan = false;
         self.ensure_selection_exists();
     }
 }

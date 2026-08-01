@@ -140,7 +140,9 @@ fn action_from_key(app: &App, key: KeyEvent) -> Option<AppAction> {
         },
         Some(Overlay::Node(_)) => match key.code {
             KeyCode::Esc => Some(AppAction::CloseOverlay),
-            KeyCode::Char('a') if !ctrl && !alt => Some(AppAction::ToggleModuleAnatomy),
+            KeyCode::Char('a') if !ctrl && !alt && !app.modal_text_entry_active() => {
+                Some(AppAction::ToggleModuleAnatomy)
+            }
             KeyCode::PageUp => Some(AppAction::ScrollModuleAnatomy(-8)),
             KeyCode::PageDown => Some(AppAction::ScrollModuleAnatomy(8)),
             KeyCode::Up => Some(AppAction::ModalPrevious),
@@ -342,6 +344,91 @@ mod tests {
         assert_eq!(
             action_from_mouse(&app, mouse),
             Some(AppAction::OpenNode("layer_00".to_string()))
+        );
+    }
+
+    #[test]
+    fn event_mapping_ignores_release_focus_resize_and_unhandled_mouse_events() {
+        let app = App::new();
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert_eq!(action_from_event(&app, Event::Key(release)), None);
+        assert_eq!(action_from_event(&app, Event::FocusGained), None);
+        assert_eq!(action_from_event(&app, Event::FocusLost), None);
+        assert_eq!(action_from_event(&app, Event::Resize(10, 10)), None);
+        assert_eq!(
+            action_from_event(
+                &app,
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: 1,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn keyboard_shortcuts_map_to_graph_navigation_and_editing_actions() {
+        let mut app = App::new();
+        app.overlay = None;
+        app.focus = FocusRegion::Graph;
+        for (key, expected) in [
+            (
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                AppAction::SelectFirstNode,
+            ),
+            (
+                KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+                AppAction::SelectLastNode,
+            ),
+            (
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                AppAction::OpenSelectedNode,
+            ),
+            (
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+                AppAction::RemoveSelected,
+            ),
+            (
+                KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+                AppAction::MoveSelected(-1),
+            ),
+            (
+                KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+                AppAction::MoveSelected(1),
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                AppAction::DuplicateSelected,
+            ),
+        ] {
+            assert_eq!(action_from_key(&app, key), Some(expected));
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_maps_by_active_context() {
+        let scroll = |kind| MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut app = App::new();
+        assert_eq!(
+            action_from_mouse(&app, scroll(MouseEventKind::ScrollDown)),
+            Some(AppAction::ModalNext)
+        );
+        app.overlay = None;
+        assert_eq!(
+            action_from_mouse(&app, scroll(MouseEventKind::ScrollUp)),
+            Some(AppAction::PanGraph(-1))
         );
     }
 }

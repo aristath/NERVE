@@ -484,4 +484,41 @@ mod tests {
         );
         fs::remove_dir_all(source).unwrap();
     }
+
+    #[test]
+    fn compiler_event_extractors_ignore_malformed_optional_payloads() {
+        let event: CompilerEvent = serde_json::from_value(serde_json::json!({
+            "schema":"nerve.compiler_event.v1",
+            "sequence":0,
+            "type":"Progress",
+            "current":"one",
+            "total":2,
+            "diagnostics":[
+                {"message":"usable"},
+                {"message":7},
+                "not an object"
+            ],
+            "tensor_name":"weight"
+        }))
+        .unwrap();
+        assert_eq!(event.progress(), None);
+        assert_eq!(event.current_item(), Some("weight"));
+        assert_eq!(event.diagnostics(), ["usable"]);
+        assert_eq!(event.nested_string("missing", "field"), None);
+    }
+
+    #[test]
+    fn compiler_launch_reports_spawn_failure_without_creating_a_job() {
+        let launch = CompilerLaunch::new(
+            "/definitely/missing/nerve-compiler",
+            std::iter::empty::<OsString>(),
+            env::temp_dir(),
+        );
+        let error = match launch.start_discovery(Path::new("/tmp/source")) {
+            Ok(_) => panic!("missing compiler executable unexpectedly started"),
+            Err(error) => error,
+        };
+        assert!(error.contains("could not start compiler"));
+        assert!(error.contains("nerve-compiler"));
+    }
 }

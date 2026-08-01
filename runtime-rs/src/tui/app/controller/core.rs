@@ -9,6 +9,8 @@ impl App {
             focus: FocusRegion::Graph,
             selected_instance_id: None,
             graph_scroll: 0,
+            graph_viewport_capacity: 1,
+            graph_manual_pan: false,
             overlay: Some(Overlay::ModelSelector(ModelSelectorState::new(
                 initial_path,
             ))),
@@ -22,6 +24,9 @@ impl App {
             compiler_job: None,
             compiler_launch: CompilerLaunch::from_environment(),
             editor_loader: Arc::new(|path: &Path| RuntimeModelEditor::load(path)),
+            device_refresher: Arc::new(|editor: &RuntimeModelEditor| {
+                discover_runtime_devices(&editor.draft().default_device_id, None)
+            }),
             terminal_reset_requested: false,
         }
     }
@@ -129,7 +134,8 @@ impl App {
             AppAction::OpenModelSelector => self.open_model_selector(),
             AppAction::RefreshDevices => {
                 if let Some(editor) = &mut self.editor {
-                    editor.refresh_devices();
+                    let available_devices = (self.device_refresher)(editor);
+                    editor.replace_available_devices(available_devices);
                     self.terminal_reset_requested = true;
                     self.status = format!(
                         "Detected {} runtime device target(s)",
@@ -180,9 +186,7 @@ impl App {
                 self.select_instance(&instance_id);
                 self.open_selected_node();
             }
-            AppAction::PanGraph(delta) => {
-                self.graph_scroll = self.graph_scroll.saturating_add_signed(delta as isize)
-            }
+            AppAction::PanGraph(delta) => self.pan_graph(delta),
             AppAction::DuplicateSelected => self.duplicate_selected(),
             AppAction::RemoveSelected => self.remove_selected(),
             AppAction::MoveSelected(delta) => self.move_selected(delta),

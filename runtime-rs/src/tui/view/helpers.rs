@@ -1,8 +1,27 @@
 fn buffer_line(buffer: &TextBuffer, width: usize) -> (usize, Line<'static>, usize) {
     let chars = buffer.text().chars().collect::<Vec<_>>();
     let cursor = buffer.cursor().min(chars.len());
-    let start = cursor.saturating_sub(width.saturating_sub(1));
-    let end = (start + width).min(chars.len());
+    let mut start = cursor;
+    let mut cursor_cells = 0usize;
+    let cursor_capacity = width.saturating_sub(1);
+    while start > 0 {
+        let character_cells = chars[start - 1].width().unwrap_or(0);
+        if cursor_cells + character_cells > cursor_capacity {
+            break;
+        }
+        cursor_cells += character_cells;
+        start -= 1;
+    }
+    let mut end = start;
+    let mut line_cells = 0usize;
+    while end < chars.len() {
+        let character_cells = chars[end].width().unwrap_or(0);
+        if line_cells + character_cells > width {
+            break;
+        }
+        line_cells += character_cells;
+        end += 1;
+    }
     let selection = buffer.selection();
     let mut spans = Vec::new();
     let mut run_start = start;
@@ -16,7 +35,7 @@ fn buffer_line(buffer: &TextBuffer, width: usize) -> (usize, Line<'static>, usiz
         }
     }
     spans.push(buffer_span(&chars[run_start..end], run_selected));
-    (start, Line::from(spans), cursor.saturating_sub(start))
+    (start, Line::from(spans), cursor_cells)
 }
 
 fn buffer_span(chars: &[char], selected: bool) -> Span<'static> {
@@ -117,6 +136,20 @@ mod tests {
     fn truncation_respects_terminal_cell_width() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("λx", 4), "λx");
+        assert_eq!(truncate("界x", 2), "…");
+        assert_eq!(truncate("anything", 1), "…");
+        assert_eq!(truncate("anything", 0), "");
+    }
+
+    #[test]
+    fn centered_rect_never_exceeds_even_a_zero_sized_terminal() {
+        for area in [Rect::new(0, 0, 0, 0), Rect::new(2, 3, 10, 4)] {
+            let centered = centered_rect(area, 90, 90, 50, 20);
+            assert!(centered.x >= area.x);
+            assert!(centered.y >= area.y);
+            assert!(centered.right() <= area.right());
+            assert!(centered.bottom() <= area.bottom());
+        }
     }
 
     #[test]
@@ -126,6 +159,16 @@ mod tests {
         assert_eq!(start, 5);
         assert_eq!(cursor, 4);
         assert_eq!(line.to_string(), "2,3]");
+    }
+
+    #[test]
+    fn text_buffer_view_uses_terminal_cell_width_for_wide_characters() {
+        let buffer = TextBuffer::new("界界x");
+        let (_, line, cursor) = buffer_line(&buffer, 3);
+        assert!(line.width() <= 3);
+        assert!(cursor <= 3);
+        assert_eq!(line.to_string(), "x");
+        assert_eq!(cursor, 1);
     }
 
     #[test]
@@ -301,5 +344,12 @@ mod tests {
         assert!(rendered.contains("finite_state_recurrence"));
         assert!(rendered.contains("fixture_provider"));
         assert!(rendered.contains("passed"));
+    }
+
+    #[test]
+    fn modal_render_map_does_not_expose_workspace_controls_behind_the_overlay() {
+        let mut app = App::new();
+        let _ = rendered_text(&mut app, 80, 24);
+        assert_eq!(app.action_at(79, 0), None);
     }
 }
