@@ -1,4 +1,82 @@
-impl VulkanResidentSpeculativeDecoderProcessor {
+fn mount_speculative_decoder_device_slice(
+    device: &VulkanComputeDevice,
+    model: &VulkanResidentSpeculativeDecoderModelPackage,
+) -> Result<
+    VulkanResidentInProcessPlacedStreamProcessorDevice,
+    VulkanResidentInProcessPlacedRuntimeError,
+> {
+    let mounted = model
+        .device_slice
+        .create_mounted_stream_circuit(device)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+    mounted
+        .buffers
+        .initialize_state_buffers(device)
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to initialize speculative decoder {:?} state: {error}",
+                    model.id
+                )),
+            )
+        })?;
+    mounted
+        .buffers
+        .apply_clone_state_policies()
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to initialize speculative decoder {:?} cloned state: {error}",
+                    model.id
+                )),
+            )
+        })?;
+    let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
+    let mounted_bound = mounted
+        .mounted_placed_bound_dispatch_plan(&reusable_manifest)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BoundDispatchPlan)?;
+    let tick_plan = VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted_bound);
+    let execution_plan = VulkanMountedPlacedResidentStreamTickExecutionPlan::
+        from_tick_plan_with_distributed_dispatch_groups_and_demand(
+            device,
+            &mounted,
+            &mounted_bound,
+            model.device_slice.loaded_manifest(),
+            tick_plan,
+            &[],
+            model
+                .demand_residency_context
+                .as_ref()
+                .map(|_| model.device_slice.physical_residency_schedule()),
+            model.demand_residency_context.as_ref(),
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
+    if execution_plan.distributed_dispatch_count != 0
+        || execution_plan.tick_plan.receive_stage_count != 0
+        || execution_plan.tick_plan.publish_stage_count != 0
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} did not compile to one device-resident circuit",
+                model.id
+            )),
+        ));
+    }
+    Ok(VulkanResidentInProcessPlacedStreamProcessorDevice {
+        device_id: model.device_id.clone(),
+        hosted_component_count: model.device_slice.hosted_component_count,
+        incoming_edge_count: model.device_slice.incoming_edge_count,
+        outgoing_edge_count: model.device_slice.outgoing_edge_count,
+        dispatch_count: mounted_bound.dispatches.len(),
+        package_slice: Arc::clone(&model.device_slice),
+        mounted,
+        mounted_bound,
+        resident_execution_plan: execution_plan,
+        demand_residency_context: model.demand_residency_context.clone(),
+    })
+}
+
+impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     fn mounted(&self) -> &VulkanMountedPlacedStreamCircuit {
         &self.device_slice.mounted
     }
@@ -29,66 +107,34 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         sampler_spec: &VulkanResidentSamplerSpec,
         random_seed: u32,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let mounted = model
-            .device_slice
-            .create_mounted_stream_circuit(device)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-        mounted
-            .buffers
-            .initialize_state_buffers(device)
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to initialize speculative decoder {:?} state: {error}",
-                        model.id
-                    )),
-                )
-            })?;
-        mounted
-            .buffers
-            .apply_clone_state_policies()
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to initialize speculative decoder {:?} cloned state: {error}",
-                        model.id
-                    )),
-                )
-            })?;
-        let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
-        let mounted_bound = mounted
-            .mounted_placed_bound_dispatch_plan(&reusable_manifest)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BoundDispatchPlan)?;
-        let tick_plan = VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted_bound);
-        let execution_plan =
-            VulkanMountedPlacedResidentStreamTickExecutionPlan::
-                from_tick_plan_with_distributed_dispatch_groups_and_demand(
-                    device,
-                    &mounted,
-                    &mounted_bound,
-                    model.device_slice.loaded_manifest(),
-                    tick_plan,
-                    &[],
-                    model
-                        .demand_residency_context
-                        .as_ref()
-                        .map(|_| model.device_slice.physical_residency_schedule()),
-                    model.demand_residency_context.as_ref(),
-                )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
-        if execution_plan.distributed_dispatch_count != 0
-            || execution_plan.tick_plan.receive_stage_count != 0
-            || execution_plan.tick_plan.publish_stage_count != 0
-        {
+        let VulkanResidentSpeculativeDecoderModelExecution::Autoregressive {
+            input_embedding_spec,
+            input_embedding_spirv_words,
+            input_embedding_batch_spirv_words,
+            input_embedding_batch_control,
+            output_norm_spirv_words,
+            output_projection_spirv_words,
+            ..
+        } = &model.execution
+        else {
             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "speculative decoder {:?} did not compile to one device-resident circuit",
+                    "parallel-block speculative decoder {:?} cannot mount as autoregressive",
                     model.id
                 )),
             ));
-        }
+        };
+        let device_slice = mount_speculative_decoder_device_slice(device, model)?;
+        let mounted = &device_slice.mounted;
 
-        let adapter = &model.package.input_adapter;
+        let adapter = model.package.dedicated_input_adapter().ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "autoregressive speculative decoder {:?} has no input adapter",
+                    model.id
+                )),
+            )
+        })?;
         let hidden_input = mounted
             .boundary_io
             .input_buffer(&adapter.target_hidden_signal_id)
@@ -103,12 +149,12 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         let input_embedding_weight = model
             .parameter(
                 target_output_parameters,
-                &model.input_embedding_spec.parameter_tensor,
+                &input_embedding_spec.parameter_tensor,
             )
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::InputTransducer(
                     VulkanResidentInputEmbeddingTransducerRunnerError::MissingTransducerParameterBuffer {
-                        tensor: model.input_embedding_spec.parameter_tensor.clone(),
+                        tensor: input_embedding_spec.parameter_tensor.clone(),
                     },
                 )
             })?;
@@ -122,12 +168,19 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 device,
                 &mounted,
                 input_embedding_weight,
-                &model.input_embedding_spirv_words,
-                &model.input_embedding_spec,
+                input_embedding_spirv_words,
+                input_embedding_spec,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::InputTransducer)?;
         let output_spec = model
-            .output_transducer_spec(model.package.output_transducer.input_signal_id.clone())
+            .output_transducer_spec(
+                model
+                    .package
+                    .dedicated_output_transducer()
+                    .expect("validated autoregressive decoder has output I/O")
+                    .input_signal_id
+                    .clone(),
+            )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
         let norm_weight = model
             .parameter(target_output_parameters, &output_spec.norm_parameter_tensor)
@@ -169,8 +222,8 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                 norm_weight,
                 projection_weight,
                 projection_scale,
-                &model.output_norm_spirv_words,
-                &model.output_projection_spirv_words,
+                output_norm_spirv_words,
+                output_projection_spirv_words,
                 &output_spec,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
@@ -261,29 +314,14 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
-        let device_slice = VulkanResidentInProcessPlacedStreamProcessorDevice {
-            device_id: model.device_id.clone(),
-            hosted_component_count: model.device_slice.hosted_component_count,
-            incoming_edge_count: model.device_slice.incoming_edge_count,
-            outgoing_edge_count: model.device_slice.outgoing_edge_count,
-            dispatch_count: mounted_bound.dispatches.len(),
-            package_slice: Arc::clone(&model.device_slice),
-            mounted,
-            mounted_bound,
-            resident_execution_plan: execution_plan,
-            demand_residency_context: model.demand_residency_context.clone(),
-        };
-
         Ok(Self {
             id: model.id.clone(),
             device_id: model.device_id.clone(),
             device_slice,
             input_transducer,
-            input_embedding_batch_spirv_words: model
-                .input_embedding_batch_spirv_words
-                .clone(),
-            input_embedding_batch_control: model.input_embedding_batch_control,
-            input_embedding_spec: model.input_embedding_spec.clone(),
+            input_embedding_batch_spirv_words: input_embedding_batch_spirv_words.clone(),
+            input_embedding_batch_control: *input_embedding_batch_control,
+            input_embedding_spec: input_embedding_spec.clone(),
             input_embedding_weight: input_embedding_weight_allocation,
             output_transducer,
             sampler,

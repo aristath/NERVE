@@ -256,6 +256,10 @@
             "frame",
             &[4, 4096],
         ));
+        assert_eq!(
+            scatter.physical_shape(&[7, 4, 4096], &[4, 4096]),
+            &[7, 4, 4096]
+        );
 
         let gather = StreamCircuitConnection::ParallelBlockGather { width: 7 };
         assert!(gather.is_instantaneous());
@@ -271,6 +275,10 @@
             "stream_frame_block",
             &[7, 4096],
         ));
+        assert_eq!(
+            gather.physical_shape(&[4, 4096], &[7, 4, 4096]),
+            &[7, 4, 4096]
+        );
         assert!(StreamCircuitConnection::Forward.is_instantaneous());
         assert!(StreamCircuitConnection::SharedContext {
             state_update: "committed_target_only".to_string(),

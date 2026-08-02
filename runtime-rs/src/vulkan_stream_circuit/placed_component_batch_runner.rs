@@ -6,6 +6,44 @@ impl VulkanResidentPlacedComponentBatchRunner {
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        Self::new_single_device_with_scope(
+            device,
+            slice,
+            runtime_execution_identity,
+            lane_capacity,
+            execution_mode,
+            VulkanComponentBatchExecutionScope::all(),
+        )
+    }
+
+    fn new_single_device_for_components(
+        device: &VulkanComputeDevice,
+        slice: &VulkanResidentInProcessPlacedStreamProcessorDevice,
+        runtime_execution_identity: &str,
+        lane_capacity: usize,
+        execution_mode: VulkanComponentBatchExecutionMode,
+        component_ids: impl IntoIterator<Item = String>,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let execution_scope = VulkanComponentBatchExecutionScope::components(component_ids)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        Self::new_single_device_with_scope(
+            device,
+            slice,
+            runtime_execution_identity,
+            lane_capacity,
+            execution_mode,
+            execution_scope,
+        )
+    }
+
+    fn new_single_device_with_scope(
+        device: &VulkanComputeDevice,
+        slice: &VulkanResidentInProcessPlacedStreamProcessorDevice,
+        runtime_execution_identity: &str,
+        lane_capacity: usize,
+        execution_mode: VulkanComponentBatchExecutionMode,
+        execution_scope: VulkanComponentBatchExecutionScope,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let devices = BTreeMap::new();
         let distributed_execution_plan = VulkanDistributedExecutionPlan {
             device_ids: Vec::new(),
@@ -35,6 +73,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &lane_mounteds,
             lane_capacity,
             execution_mode,
+            &execution_scope,
             false,
             &distributed_execution_plan,
             Rc::new(RefCell::new(RuntimeExecutionQuantumCalibrator::default())),
@@ -86,6 +125,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             capture_causal_state_snapshots,
             distributed_execution_plan,
             distributed_parameter_buffers,
+            &VulkanComponentBatchExecutionScope::all(),
         )
     }
 
@@ -136,6 +176,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             false,
             &first.model.distributed_execution_plan,
             &first.model.distributed_parameter_buffers,
+            &VulkanComponentBatchExecutionScope::all(),
         )
     }
 
@@ -154,6 +195,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
+        execution_scope: &VulkanComponentBatchExecutionScope,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         if lane_mounteds_by_slice.len() != placed_slices.len() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -164,6 +206,18 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 )),
             ));
         }
+        execution_scope
+            .validate_component_ids(placed_slices.iter().flat_map(|slice| {
+                slice
+                    .mounted_bound
+                    .dispatches
+                    .iter()
+                    .map(|dispatch| dispatch.component_id.as_str())
+            }))
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let phase_execution_plan = execution_scope
+            .filter_distributed_plan(distributed_execution_plan)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let slices = placed_slices
             .iter()
             .zip(lane_mounteds_by_slice)
@@ -190,8 +244,9 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     lane_mounteds,
                     lane_capacity,
                     execution_mode,
+                    execution_scope,
                     capture_causal_state_snapshots,
-                    distributed_execution_plan,
+                    &phase_execution_plan,
                     quantum_calibrator,
                 )
             })
@@ -200,7 +255,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             devices,
             placed_slices,
             &slices,
-            distributed_execution_plan,
+            &phase_execution_plan,
             distributed_parameter_buffers,
             lane_capacity,
             execution_mode,
@@ -228,10 +283,13 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     })?;
                 let source = slices[source_device_index].signal_buffer(
                     &VulkanComponentBatchSignalKey::OutgoingEdge(outgoing.endpoint.edge_index),
-                )?;
+                );
                 let destination = slices[destination_device_index].signal_buffer(
                     &VulkanComponentBatchSignalKey::IncomingEdge(outgoing.endpoint.edge_index),
-                )?;
+                );
+                let (Ok(source), Ok(destination)) = (source, destination) else {
+                    continue;
+                };
                 if source.frame_byte_capacity != destination.frame_byte_capacity
                     || source.buffer.byte_capacity() != destination.buffer.byte_capacity()
                 {
@@ -368,6 +426,22 @@ impl VulkanResidentPlacedComponentBatchRunner {
         })
     }
 
+    fn single_device_edge_signal_buffer(
+        &self,
+        edge_index: usize,
+    ) -> Result<&VulkanComponentBatchSignalBuffer, VulkanResidentInProcessPlacedRuntimeError> {
+        if self.slices.len() != 1 {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "single-device component batch edge requested from a distributed runner"
+                        .to_string(),
+                ),
+            ));
+        }
+        self.slice(0)?
+            .signal_buffer(&VulkanComponentBatchSignalKey::LocalEdge(edge_index))
+    }
+
     fn commit_causal_state_prefix(
         &self,
         processed_tick_count: usize,
@@ -476,6 +550,24 @@ impl VulkanResidentPlacedComponentBatchRunner {
         )
     }
 
+    fn run_parallel_block_single_device(
+        &self,
+        device: &VulkanComputeDevice,
+        owner_device_id: &str,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.slice(0)?.run_parallel_block(
+            device,
+            owner_device_id,
+            &self.distributed_dispatches,
+            input_token_ids,
+            start_stream_tick,
+            dynamic_state_capacity_activations,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_independent_streams(
         &self,
@@ -530,7 +622,10 @@ fn component_batch_signal_target(
         VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge }
         | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => Some((
             VulkanComponentBatchSignalKey::LocalEdge(edge.edge.edge_index),
-            edge.byte_capacity,
+            component_batch_edge_frame_byte_capacity(
+                &edge.edge.connection,
+                edge.byte_capacity,
+            )?,
         )),
         VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { endpoint } => Some((
             VulkanComponentBatchSignalKey::IncomingEdge(endpoint.endpoint.edge_index),
@@ -542,6 +637,26 @@ fn component_batch_signal_target(
         )),
     };
     Ok(target)
+}
+
+fn component_batch_edge_frame_byte_capacity(
+    connection: &StreamCircuitConnection,
+    byte_capacity: usize,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+    match connection {
+        StreamCircuitConnection::ParallelBlockScatter { width }
+        | StreamCircuitConnection::ParallelBlockGather { width } => {
+            if *width == 0 || byte_capacity % width != 0 {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "parallel-block edge capacity {byte_capacity} is not divisible by width {width}"
+                    )),
+                ));
+            }
+            Ok(byte_capacity / width)
+        }
+        _ => Ok(byte_capacity),
+    }
 }
 
 fn component_batch_bindings<'a>(

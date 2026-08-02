@@ -435,25 +435,39 @@ fn plan_speculative_decoder_residency(
             "speculative decoder activation bytes",
         )?;
 
-    let output_workspace = checked_residency_add(
-        decoder.output_transducer.output_hidden_byte_capacity,
-        decoder.output_transducer.logits_byte_capacity,
-        "speculative decoder output workspace",
-    )?;
-    let sampler_workspace = sampler_workspace_bytes(
-        &target_runtime_model.package.sampler.spec,
-        context_capacity_activations,
-        true,
-    )?;
-    let auxiliary_workspace = checked_residency_add(
-        decoder.input_adapter.target_hidden_byte_capacity,
-        checked_residency_mul(
-            VULKAN_BACKEND_LOOP_MAX_WINDOW,
-            VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-            "speculative catch-up controls",
-        )?,
-        "speculative decoder auxiliary workspace",
-    )?;
+    let (output_workspace, sampler_workspace, auxiliary_workspace) = match (
+        decoder.dedicated_input_adapter(),
+        decoder.dedicated_output_transducer(),
+    ) {
+        (Some(input), Some(output)) => (
+            checked_residency_add(
+                output.output_hidden_byte_capacity,
+                output.logits_byte_capacity,
+                "speculative decoder output workspace",
+            )?,
+            sampler_workspace_bytes(
+                &target_runtime_model.package.sampler.spec,
+                context_capacity_activations,
+                true,
+            )?,
+            checked_residency_add(
+                input.target_hidden_byte_capacity,
+                checked_residency_mul(
+                    VULKAN_BACKEND_LOOP_MAX_WINDOW,
+                    VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                    "speculative catch-up controls",
+                )?,
+                "speculative decoder auxiliary workspace",
+            )?,
+        ),
+        (None, None) => (0, 0, 0),
+        _ => {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "speculative decoder {:?} has incomplete dedicated I/O",
+                decoder.id
+            )))
+        }
+    };
     breakdown.speculative_decoder_workspace_bytes = checked_residency_add(
         breakdown.speculative_decoder_workspace_bytes,
         [output_workspace, sampler_workspace, auxiliary_workspace]

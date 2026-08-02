@@ -556,7 +556,7 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
             *[
                 _system_port(
                     signal_id,
-                    "stream_frame",
+                    "frame",
                     [stream_multiplicity, hidden_size],
                     signal_id,
                 )

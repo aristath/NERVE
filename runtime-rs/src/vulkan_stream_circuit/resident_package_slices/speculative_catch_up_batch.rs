@@ -14,7 +14,7 @@ fn speculative_catch_up_preceding_target_bytes(
         .ok_or_else(|| VulkanError("speculative catch-up hidden range overflowed".to_string()))
 }
 
-impl VulkanResidentSpeculativeDecoderProcessor {
+impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     fn run_batched_catch_up_window(
         &self,
         device: &VulkanComputeDevice,

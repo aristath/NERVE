@@ -38,6 +38,15 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
         BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
     compiled_resource_physical_placements:
         Vec<VulkanCompiledResourcePhysicalPlacement>,
+    runtime_component_instances: Vec<VulkanRuntimeComponentInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanRuntimeComponentInstance {
+    instance_id: String,
+    source_component_id: String,
+    device_id: String,
+    execution_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -177,6 +177,11 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
         [4, 8],
         [4, 8],
     ]
+    assert [port["signal"] for port in input_circuit["boundary"]["inputs"][1:]] == [
+        "frame",
+        "frame",
+        "frame",
+    ]
     assert [port["id"] for port in input_circuit["boundary"]["outputs"]] == [
         "query_frames",
         "main_context",

@@ -81,6 +81,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 ),
             )
         })?;
+        let draft_token_count = decoder.effective_draft_token_count(draft_token_count);
         let target_tick_count = draft_token_count
             .checked_add(1)
             .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;

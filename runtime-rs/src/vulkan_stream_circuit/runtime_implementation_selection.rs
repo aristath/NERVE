@@ -1103,7 +1103,11 @@ fn validate_runtime_output_transducer_overlay(
         .package
         .speculative_decoders
         .iter()
-        .map(|decoder| (decoder.id.as_str(), &decoder.output_transducer))
+        .filter_map(|decoder| {
+            decoder
+                .dedicated_output_transducer()
+                .map(|output| (decoder.id.as_str(), output))
+        })
         .collect::<BTreeMap<_, _>>();
     let overlay_draft_ids = overlay
         .speculative_output_transducers
@@ -1260,7 +1264,11 @@ fn rebase_output_transducer_overlay_shader_paths(
     let source_drafts = source
         .speculative_decoders
         .iter()
-        .map(|decoder| (decoder.id.as_str(), &decoder.output_transducer))
+        .filter_map(|decoder| {
+            decoder
+                .dedicated_output_transducer()
+                .map(|output| (decoder.id.as_str(), output))
+        })
         .collect::<BTreeMap<_, _>>();
     for draft in &mut overlay.speculative_output_transducers {
         let source_draft = source_drafts[draft.decoder_id.as_str()];
@@ -1380,10 +1388,14 @@ fn mount_runtime_output_transducer_overlay(
         .map(|draft| (draft.decoder_id, draft.output_transducer))
         .collect::<BTreeMap<_, _>>();
     for decoder in &mut runtime_model.package.speculative_decoders {
-        decoder.output_transducer = speculative_outputs
-            .get(&decoder.id)
-            .expect("validated output overlay must cover every speculative decoder")
-            .clone();
+        if decoder.output_transducer.is_some() {
+            decoder.output_transducer = Some(
+                speculative_outputs
+                    .get(&decoder.id)
+                    .expect("validated output overlay must cover every dedicated speculative output")
+                    .clone(),
+            );
+        }
     }
     Ok(())
 }

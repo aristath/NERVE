@@ -511,14 +511,19 @@ fn validate_resident_package_paths(
             .execution_contract
             .validate(&decoder.id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        validate_resident_package_relative_path(
-            "draft output norm shader",
-            &decoder.output_transducer.norm_shader_path,
-        )?;
-        validate_resident_package_relative_path(
-            "draft output projection shader",
-            &decoder.output_transducer.projection_shader_path,
-        )?;
+        decoder
+            .validate_execution_io()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if let Some(output) = decoder.dedicated_output_transducer() {
+            validate_resident_package_relative_path(
+                "draft output norm shader",
+                &output.norm_shader_path,
+            )?;
+            validate_resident_package_relative_path(
+                "draft output projection shader",
+                &output.projection_shader_path,
+            )?;
+        }
         for execution in &decoder.component_executions {
             for kernel in &execution.kernels {
                 validate_resident_package_relative_path(
@@ -593,10 +598,12 @@ fn validate_resident_package_artifact_integrity(
                     )
                 })
             })
-            .chain([
-                decoder.output_transducer.norm_shader_path.clone(),
-                decoder.output_transducer.projection_shader_path.clone(),
-            ])
+            .chain(decoder.dedicated_output_transducer().into_iter().flat_map(|output| {
+                [
+                    output.norm_shader_path.clone(),
+                    output.projection_shader_path.clone(),
+                ]
+            }))
     });
     let sampler_shaders = manifest
         .sampler
@@ -739,8 +746,10 @@ fn validate_resident_package_spirv_requirements(
             .map(|kernel| kernel.shader_path.as_str()),
     );
     for decoder in &manifest.speculative_decoders {
-        mandatory_shader_paths.insert(decoder.output_transducer.norm_shader_path.as_str());
-        mandatory_shader_paths.insert(decoder.output_transducer.projection_shader_path.as_str());
+        if let Some(output) = decoder.dedicated_output_transducer() {
+            mandatory_shader_paths.insert(output.norm_shader_path.as_str());
+            mandatory_shader_paths.insert(output.projection_shader_path.as_str());
+        }
     }
 
     for execution in executions {

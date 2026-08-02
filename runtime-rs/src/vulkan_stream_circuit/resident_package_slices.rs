@@ -7,3 +7,5 @@ include!("resident_package_slices/speculative_decoder_package.rs");
 include!("resident_package_slices/processor_types.rs");
 include!("resident_package_slices/speculative_catch_up_batch.rs");
 include!("resident_package_slices/speculative_decoder_processor.rs");
+include!("resident_package_slices/parallel_speculative_decoder_processor.rs");
+include!("resident_package_slices/speculative_decoder_dispatch.rs");

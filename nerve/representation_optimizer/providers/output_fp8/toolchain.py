@@ -458,6 +458,8 @@ class BlockScaledOutputOrdinaryRelowerer:
             manifest.get("speculative_decoders", []),
             key=lambda item: item["id"],
         ):
+            if not isinstance(decoder.get("output_transducer"), dict):
+                continue
             draft = deepcopy(decoder["output_transducer"])
             if draft.get("projection_parameter_tensor") == source["projection"]["name"]:
                 if decoder["id"] in role_specialized_decoders:

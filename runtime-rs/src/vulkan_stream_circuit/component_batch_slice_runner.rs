@@ -228,6 +228,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         lane_mounteds: &[&VulkanMountedPlacedStreamCircuit],
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
+        execution_scope: &VulkanComponentBatchExecutionScope,
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
@@ -245,8 +246,17 @@ impl VulkanResidentComponentBatchSliceRunner {
                 )),
             ));
         }
+        let selected_dispatches = slice
+            .mounted_bound
+            .dispatches
+            .iter()
+            .filter(|dispatch| execution_scope.includes(&dispatch.component_id))
+            .collect::<Vec<_>>();
         let (signal_buffer_indices, signal_buffer_plan) =
-            component_batch_signal_buffer_plan(&slice.mounted, &slice.mounted_bound.dispatches)?;
+            component_batch_signal_buffer_plan_for_dispatches(
+                &slice.mounted,
+                selected_dispatches.iter().copied(),
+            )?;
         let private_distributed_activations =
             distributed_component_batch_private_activation_specs(distributed_execution_plan);
         let mut shared_device_ids_by_buffer = BTreeMap::<usize, BTreeSet<String>>::new();
@@ -408,7 +418,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut steps = Vec::new();
         let mut dispatch_spans = Vec::with_capacity(slice.mounted_bound.dispatches.len());
-        for dispatch in &slice.mounted_bound.dispatches {
+        for dispatch in selected_dispatches {
             let dispatch_step_start = steps.len();
             let static_state_write_indices =
                 component_batch_static_state_write_indices(&slice.mounted, dispatch)?;
@@ -882,6 +892,38 @@ impl VulkanResidentComponentBatchSliceRunner {
             start_stream_tick,
             dynamic_state_capacity_activations,
             devices,
+            owner_device_id,
+            distributed_dispatches,
+            VulkanComponentBatchCompletionMode::Blocking,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_parallel_block(
+        &self,
+        device: &VulkanComputeDevice,
+        owner_device_id: &str,
+        distributed_dispatches: &VulkanDistributedComponentBatchRunners,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if self.execution_mode != VulkanComponentBatchExecutionMode::ParallelBlock {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError("component batch is not a parallel-block execution".to_string()),
+            ));
+        }
+        let stream_ticks = consecutive_component_batch_stream_ticks(
+            start_stream_tick,
+            input_token_ids.len(),
+        )?;
+        self.run(
+            device,
+            input_token_ids,
+            &stream_ticks,
+            start_stream_tick,
+            dynamic_state_capacity_activations,
+            &BTreeMap::new(),
             owner_device_id,
             distributed_dispatches,
             VulkanComponentBatchCompletionMode::Blocking,

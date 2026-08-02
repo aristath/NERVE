@@ -82,6 +82,20 @@ fn component_batch_signal_buffer_plan(
     ),
     VulkanResidentInProcessPlacedRuntimeError,
 > {
+    component_batch_signal_buffer_plan_for_dispatches(mounted, dispatches.iter())
+}
+
+fn component_batch_signal_buffer_plan_for_dispatches<'a>(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    dispatches: impl IntoIterator<Item = &'a VulkanMountedPlacedBoundDispatch>,
+) -> Result<
+    (
+        BTreeMap<VulkanComponentBatchSignalKey, usize>,
+        Vec<VulkanComponentBatchSignalBufferPlan>,
+    ),
+    VulkanResidentInProcessPlacedRuntimeError,
+> {
+    let dispatches = dispatches.into_iter().collect::<Vec<_>>();
     let dispatch_count = dispatches.len();
     let mut lifetimes = BTreeMap::<VulkanComponentBatchSignalKey, (usize, bool, usize, usize)>::new();
     for (dispatch_index, dispatch) in dispatches.iter().enumerate() {

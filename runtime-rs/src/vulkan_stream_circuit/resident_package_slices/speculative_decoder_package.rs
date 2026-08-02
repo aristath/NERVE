@@ -4,14 +4,21 @@ pub struct VulkanResidentSpeculativeDecoderModelPackage {
     pub hosted_component_count: usize,
     package: VulkanResidentSpeculativeDecoderPackageSpec,
     device_slice: Arc<VulkanResidentModelPackageDeviceSlice>,
-    additional_parameter_buffers: Option<Arc<VulkanPermanentParameterBuffers>>,
-    input_embedding_spec: VulkanResidentInputEmbeddingTransducerSpec,
-    input_embedding_spirv_words: Vec<u32>,
-    input_embedding_batch_spirv_words: Vec<u32>,
-    input_embedding_batch_control: VulkanResidentComponentBatchControlSpec,
-    output_norm_spirv_words: Vec<u32>,
-    output_projection_spirv_words: Vec<u32>,
+    execution: VulkanResidentSpeculativeDecoderModelExecution,
     demand_residency_context: Option<VulkanDemandResidencyExecutionContext>,
+}
+
+enum VulkanResidentSpeculativeDecoderModelExecution {
+    Autoregressive {
+        additional_parameter_buffers: Option<Arc<VulkanPermanentParameterBuffers>>,
+        input_embedding_spec: VulkanResidentInputEmbeddingTransducerSpec,
+        input_embedding_spirv_words: Vec<u32>,
+        input_embedding_batch_spirv_words: Vec<u32>,
+        input_embedding_batch_control: VulkanResidentComponentBatchControlSpec,
+        output_norm_spirv_words: Vec<u32>,
+        output_projection_spirv_words: Vec<u32>,
+    },
+    ParallelBlock { block_width: usize },
 }
 
 struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
@@ -31,13 +38,11 @@ struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
 
 fn speculative_decoder_additional_parameter_tensors<'a>(
     input_embedding: &'a VulkanResidentInputEmbeddingTransducerSpec,
-    decoder: &'a VulkanResidentSpeculativeDecoderPackageSpec,
+    output: &'a VulkanResidentDraftOutputTransducerPackageSpec,
     mut target_has_tensor: impl FnMut(&str) -> bool,
 ) -> Vec<&'a str> {
     std::iter::once(input_embedding.parameter_tensor.as_str())
-        .chain(speculative_decoder_output_parameter_tensors(
-            &decoder.output_transducer,
-        ))
+        .chain(speculative_decoder_output_parameter_tensors(output))
         .filter(|tensor| !target_has_tensor(tensor))
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -125,43 +130,78 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
         }
         let device_slice = Arc::new(device_slice);
 
-        let additional_tensors = speculative_decoder_additional_parameter_tensors(
-            context.input_embedding_spec,
-            decoder,
-            |tensor| {
-                context
-                    .target_output_parameters
-                    .parameter_buffer(tensor)
-                    .is_some()
-            },
-        );
-        let additional_parameter_buffers = if additional_tensors.is_empty() {
-            None
-        } else {
-            Some(Arc::new(
-                load_resident_package_parameter_buffers_for_tensors(
-                    device,
-                    device_id,
-                    context.tensor_index,
-                    &additional_tensors,
+        let execution = match &decoder.execution_contract {
+            VulkanResidentSpeculativeExecutionContract::AutoregressiveFeedback { .. } => {
+                let input = decoder.dedicated_input_adapter().ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "speculative decoder {:?} has no dedicated input adapter",
+                            decoder.id
+                        )),
+                    )
+                })?;
+                let output = decoder.dedicated_output_transducer().ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "speculative decoder {:?} has no dedicated output transducer",
+                            decoder.id
+                        )),
+                    )
+                })?;
+                let additional_tensors = speculative_decoder_additional_parameter_tensors(
+                    context.input_embedding_spec,
+                    output,
+                    |tensor| {
+                        context
+                            .target_output_parameters
+                            .parameter_buffer(tensor)
+                            .is_some()
+                    },
+                );
+                let additional_parameter_buffers = if additional_tensors.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(
+                        load_resident_package_parameter_buffers_for_tensors(
+                            device,
+                            device_id,
+                            context.tensor_index,
+                            &additional_tensors,
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
+                    ))
+                };
+                let output_norm_spirv_words = load_required_resident_model_package_shader(
+                    context.manifest_dir,
+                    &output.norm_shader_path,
                 )
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
-            ))
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+                let output_projection_spirv_words = load_required_resident_model_package_shader(
+                    context.manifest_dir,
+                    &output.projection_shader_path,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+                let mut input_embedding_spec = context.input_embedding_spec.clone();
+                input_embedding_spec.transducer_id = input.component_id.clone();
+                input_embedding_spec.output_signal_id = input.token_embedding_signal_id.clone();
+                VulkanResidentSpeculativeDecoderModelExecution::Autoregressive {
+                    additional_parameter_buffers,
+                    input_embedding_spec,
+                    input_embedding_spirv_words: context.input_embedding_spirv_words.to_vec(),
+                    input_embedding_batch_spirv_words: context
+                        .input_embedding_batch_spirv_words
+                        .to_vec(),
+                    input_embedding_batch_control: context.input_embedding_batch_control,
+                    output_norm_spirv_words,
+                    output_projection_spirv_words,
+                }
+            }
+            VulkanResidentSpeculativeExecutionContract::ParallelBlock { block_width, .. } => {
+                VulkanResidentSpeculativeDecoderModelExecution::ParallelBlock {
+                    block_width: *block_width,
+                }
+            }
         };
-        let output_norm_spirv_words = load_required_resident_model_package_shader(
-            context.manifest_dir,
-            &decoder.output_transducer.norm_shader_path,
-        )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-        let output_projection_spirv_words = load_required_resident_model_package_shader(
-            context.manifest_dir,
-            &decoder.output_transducer.projection_shader_path,
-        )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-        let mut input_embedding_spec = context.input_embedding_spec.clone();
-        input_embedding_spec.transducer_id = decoder.input_adapter.component_id.clone();
-        input_embedding_spec.output_signal_id =
-            decoder.input_adapter.token_embedding_signal_id.clone();
 
         let demand_residency_context =
             if context.resource_residency_policy == ResourceResidencyPolicy::DemandRetained {
@@ -201,15 +241,7 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
             hosted_component_count: device_slice.hosted_component_count,
             package: decoder.clone(),
             device_slice,
-            additional_parameter_buffers,
-            input_embedding_spec,
-            input_embedding_spirv_words: context.input_embedding_spirv_words.to_vec(),
-            input_embedding_batch_spirv_words: context
-                .input_embedding_batch_spirv_words
-                .to_vec(),
-            input_embedding_batch_control: context.input_embedding_batch_control,
-            output_norm_spirv_words,
-            output_projection_spirv_words,
+            execution,
             demand_residency_context,
         })
     }
@@ -219,7 +251,14 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
         target_output_parameters: &'a VulkanPermanentParameterBuffers,
         tensor: &str,
     ) -> Option<&'a VulkanPermanentParameterBufferAllocation> {
-        self.additional_parameter_buffers
+        let VulkanResidentSpeculativeDecoderModelExecution::Autoregressive {
+            additional_parameter_buffers,
+            ..
+        } = &self.execution
+        else {
+            return None;
+        };
+        additional_parameter_buffers
             .as_deref()
             .and_then(|buffers| buffers.parameter_buffer(tensor))
             .or_else(|| target_output_parameters.parameter_buffer(tensor))
@@ -229,16 +268,22 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
         &self,
         input_signal_id: String,
     ) -> Result<VulkanResidentOutputTransducerSpec, VulkanResidentTokenModelPackageError> {
+        let output = self.package.dedicated_output_transducer().ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} does not use a dedicated output transducer",
+                self.id
+            ))
+        })?;
         let component = self
             .package
             .circuit_graph
             .components
             .iter()
-            .find(|component| component.component_id == self.package.output_transducer.component_id)
+            .find(|component| component.component_id == output.component_id)
             .ok_or_else(|| {
                 VulkanResidentTokenModelPackageError::new(format!(
                     "speculative decoder {:?} has no output transducer component {:?}",
-                    self.id, self.package.output_transducer.component_id
+                    self.id, output.component_id
                 ))
             })?;
         let node_ids = component
@@ -254,7 +299,6 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
                 node_ids.len()
             )));
         }
-        let output = &self.package.output_transducer;
         Ok(VulkanResidentOutputTransducerSpec {
             transducer_id: output.component_id.clone(),
             input_signal_id,

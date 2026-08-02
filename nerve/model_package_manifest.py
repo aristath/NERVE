@@ -625,6 +625,7 @@ def build_vulkan_resident_package_manifest(
             .removesuffix(".spv")
             + ".comp"
             for decoder in speculative_decoders
+            if "output_transducer" in decoder
         }
         | {
             decoder["output_transducer"]["projection_shader_path"]
@@ -632,6 +633,7 @@ def build_vulkan_resident_package_manifest(
             .removesuffix(".spv")
             + ".comp"
             for decoder in speculative_decoders
+            if "output_transducer" in decoder
         },
     )
     optional_device_shader_files = {
@@ -952,102 +954,104 @@ def speculative_decoder_specs(
             )
             for ref in executable_refs
         ]
-        output_circuit = compiled_circuits[output_ref["id"]]
-        output_refs = output_circuit["parameters"]["refs"]
-        norm_tensor = output_refs["norm"]["tensor"]
-        projection_tensor = output_refs["projection"]["tensor"]
-        projection_scale_tensor = output_refs.get("weight_scale_inv", {}).get("tensor")
-        projection_dtype = tensor_dtype(tensor_index, projection_tensor)
-        if projection_dtype == "F8_E4M3" and not isinstance(
-            projection_scale_tensor, str
-        ):
-            raise ModelCompileError(
-                f"FP8 draft output projection tensor {projection_tensor!r} has no scale tensor"
+        decoder = {
+            "id": draft["id"],
+            "type": draft["type"],
+            "source_prefix": draft["source_prefix"],
+            "execution_contract": execution_contract,
+            "circuit_graph": package_auxiliary_circuit_graph(
+                draft, lowered_dir, compiled_circuits
+            ),
+            "component_executions": executions,
+            "state_contract": deepcopy(draft["state_contract"]),
+            "verification_contract": {
+                "target_execution": "multi_token",
+                "state_updates": "transactional",
+                "acceptance": "longest_matching_prefix",
+            },
+        }
+        if "proposal_contract" in draft:
+            decoder["proposal_contract"] = deepcopy(draft["proposal_contract"])
+        if execution_contract.get("output_schedule") == "dedicated_token_transducer":
+            output_circuit = compiled_circuits[output_ref["id"]]
+            output_refs = output_circuit["parameters"]["refs"]
+            norm_tensor = output_refs["norm"]["tensor"]
+            projection_tensor = output_refs["projection"]["tensor"]
+            projection_scale_tensor = output_refs.get("weight_scale_inv", {}).get(
+                "tensor"
             )
-        if projection_dtype == "BF16" and projection_scale_tensor is not None:
-            raise ModelCompileError(
-                "BF16 draft output projection must not bind an FP8 scale tensor"
+            projection_dtype = tensor_dtype(tensor_index, projection_tensor)
+            if projection_dtype == "F8_E4M3" and not isinstance(
+                projection_scale_tensor, str
+            ):
+                raise ModelCompileError(
+                    f"FP8 draft output projection tensor {projection_tensor!r} has no scale tensor"
+                )
+            if projection_dtype == "BF16" and projection_scale_tensor is not None:
+                raise ModelCompileError(
+                    "BF16 draft output projection must not bind an FP8 scale tensor"
+                )
+            projection_scale_dtype = (
+                tensor_dtype(tensor_index, projection_scale_tensor)
+                if isinstance(projection_scale_tensor, str)
+                else None
             )
-        projection_scale_dtype = (
-            tensor_dtype(tensor_index, projection_scale_tensor)
-            if isinstance(projection_scale_tensor, str)
-            else None
-        )
-        projection_scale_shape = (
-            tensor_shape(tensor_index, projection_scale_tensor)
-            if isinstance(projection_scale_tensor, str)
-            else None
-        )
-        projection_scale_byte_capacity = (
-            tensor_byte_count(tensor_index, projection_scale_tensor)
-            if isinstance(projection_scale_tensor, str)
-            else None
-        )
-        decoders.append(
-            {
-                "id": draft["id"],
-                "type": draft["type"],
-                "source_prefix": draft["source_prefix"],
-                "execution_contract": execution_contract,
-                "circuit_graph": package_auxiliary_circuit_graph(
-                    draft, lowered_dir, compiled_circuits
-                ),
-                "input_adapter": {
-                    "component_id": input_ref["id"],
-                    "token_embedding_signal_id": "token_embedding",
-                    "target_hidden_signal_id": "target_hidden",
-                    "output_signal_id": "output_frame",
-                    "input_frame_byte_capacity": frame_bytes,
-                    "target_hidden_byte_capacity": frame_bytes,
-                    "output_frame_byte_capacity": frame_bytes,
-                },
-                "output_transducer": {
-                    "component_id": output_ref["id"],
-                    "input_signal_id": "output_frame",
-                    "hidden_signal_id": "output_hidden",
-                    "logits_signal_id": "output_logits",
-                    "norm_parameter_tensor": norm_tensor,
-                    "norm_parameter_dtype": tensor_dtype(tensor_index, norm_tensor),
-                    "norm_parameter_shape": tensor_shape(tensor_index, norm_tensor),
-                    "norm_parameter_byte_capacity": tensor_byte_count(
-                        tensor_index, norm_tensor
-                    ),
-                    "projection_parameter_tensor": projection_tensor,
-                    "projection_parameter_dtype": projection_dtype,
-                    "projection_parameter_shape": tensor_shape(
-                        tensor_index, projection_tensor
-                    ),
-                    "projection_parameter_byte_capacity": tensor_byte_count(
-                        tensor_index, projection_tensor
-                    ),
-                    "projection_scale_parameter_tensor": projection_scale_tensor,
-                    "projection_scale_parameter_dtype": projection_scale_dtype,
-                    "projection_scale_parameter_shape": projection_scale_shape,
-                    "projection_scale_parameter_byte_capacity": projection_scale_byte_capacity,
-                    "input_frame_byte_capacity": frame_bytes,
-                    "output_hidden_byte_capacity": frame_bytes,
-                    "logits_byte_capacity": logits_bytes,
-                    "vocabulary_size": vocab_size,
-                    "hidden_size": hidden_size,
-                    "projection_workgroup_count_x": projection_workgroup_count_x,
-                    "norm_local_size_x": 64,
-                    "projection_local_size_x": projection_local_size_x,
-                    "norm_shader_path": compiled_shader_path(
-                        f"shaders/{norm_shader_file}"
-                    ),
-                    "projection_shader_path": compiled_shader_path(
-                        f"shaders/{projection_shader_file}"
-                    ),
-                },
-                "component_executions": executions,
-                "state_contract": deepcopy(draft["state_contract"]),
-                "verification_contract": {
-                    "target_execution": "multi_token",
-                    "state_updates": "transactional",
-                    "acceptance": "longest_matching_prefix",
-                },
+            projection_scale_shape = (
+                tensor_shape(tensor_index, projection_scale_tensor)
+                if isinstance(projection_scale_tensor, str)
+                else None
+            )
+            projection_scale_byte_capacity = (
+                tensor_byte_count(tensor_index, projection_scale_tensor)
+                if isinstance(projection_scale_tensor, str)
+                else None
+            )
+            decoder["input_adapter"] = {
+                "component_id": input_ref["id"],
+                "token_embedding_signal_id": "token_embedding",
+                "target_hidden_signal_id": "target_hidden",
+                "output_signal_id": "output_frame",
+                "input_frame_byte_capacity": frame_bytes,
+                "target_hidden_byte_capacity": frame_bytes,
+                "output_frame_byte_capacity": frame_bytes,
             }
-        )
+            decoder["output_transducer"] = {
+                "component_id": output_ref["id"],
+                "input_signal_id": "output_frame",
+                "hidden_signal_id": "output_hidden",
+                "logits_signal_id": "output_logits",
+                "norm_parameter_tensor": norm_tensor,
+                "norm_parameter_dtype": tensor_dtype(tensor_index, norm_tensor),
+                "norm_parameter_shape": tensor_shape(tensor_index, norm_tensor),
+                "norm_parameter_byte_capacity": tensor_byte_count(
+                    tensor_index, norm_tensor
+                ),
+                "projection_parameter_tensor": projection_tensor,
+                "projection_parameter_dtype": projection_dtype,
+                "projection_parameter_shape": tensor_shape(
+                    tensor_index, projection_tensor
+                ),
+                "projection_parameter_byte_capacity": tensor_byte_count(
+                    tensor_index, projection_tensor
+                ),
+                "projection_scale_parameter_tensor": projection_scale_tensor,
+                "projection_scale_parameter_dtype": projection_scale_dtype,
+                "projection_scale_parameter_shape": projection_scale_shape,
+                "projection_scale_parameter_byte_capacity": projection_scale_byte_capacity,
+                "input_frame_byte_capacity": frame_bytes,
+                "output_hidden_byte_capacity": frame_bytes,
+                "logits_byte_capacity": logits_bytes,
+                "vocabulary_size": vocab_size,
+                "hidden_size": hidden_size,
+                "projection_workgroup_count_x": projection_workgroup_count_x,
+                "norm_local_size_x": 64,
+                "projection_local_size_x": projection_local_size_x,
+                "norm_shader_path": compiled_shader_path(f"shaders/{norm_shader_file}"),
+                "projection_shader_path": compiled_shader_path(
+                    f"shaders/{projection_shader_file}"
+                ),
+            }
+        decoders.append(decoder)
     return decoders
 
 

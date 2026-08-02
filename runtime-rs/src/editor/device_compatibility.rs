@@ -299,21 +299,32 @@ impl RuntimeModelEditor {
                     .manifest
                     .speculative_decoders
                     .iter()
-                    .map(|decoder| &decoder.output_transducer)
+                    .filter_map(|decoder| decoder.dedicated_output_transducer())
                     .find(|output| output.component_id == source_component_id)
-                    .ok_or_else(|| {
-                        format!("draft output {source_component_id:?} has no execution contract")
-                    })?;
-                capabilities.validate_shader(
-                    &self.package_root,
-                    &output.norm_shader_path,
-                    output.norm_local_size_x,
-                )?;
-                capabilities.validate_shader(
-                    &self.package_root,
-                    &output.projection_shader_path,
-                    output.projection_local_size_x,
-                )?;
+                    ;
+                if let Some(output) = output {
+                    capabilities.validate_shader(
+                        &self.package_root,
+                        &output.norm_shader_path,
+                        output.norm_local_size_x,
+                    )?;
+                    capabilities.validate_shader(
+                        &self.package_root,
+                        &output.projection_shader_path,
+                        output.projection_local_size_x,
+                    )?;
+                } else {
+                    let execution = self
+                        .manifest
+                        .speculative_decoders
+                        .iter()
+                        .flat_map(|decoder| &decoder.component_executions)
+                        .find(|execution| execution.component_id == source_component_id)
+                        .ok_or_else(|| {
+                            format!("draft output {source_component_id:?} has no execution contract")
+                        })?;
+                    self.validate_component_execution(execution, capabilities)?;
+                }
             }
             CircuitRuntimeRole::DraftInputAdapter => {}
         }

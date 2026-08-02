@@ -69,7 +69,12 @@ impl VulkanResidentSpeculativeTargetFrameHistory {
         output_transducer: &VulkanResidentOutputTransducerRunner,
         sampler: &VulkanResidentSamplerRunner,
     ) -> Result<Option<Self>, VulkanError> {
-        if model.speculative_decoders.is_empty() {
+        if !model.speculative_decoders.iter().any(|decoder| {
+            matches!(
+                decoder.execution,
+                VulkanResidentSpeculativeDecoderModelExecution::Autoregressive { .. }
+            )
+        }) {
             return Ok(None);
         }
         let lane_capacity =

@@ -1015,6 +1015,30 @@ impl VulkanResidentInProcessPlacedModelPackage {
             );
         }
 
+        let runtime_instance_by_id = runtime_model
+            .runtime_graph
+            .instances
+            .iter()
+            .map(|instance| (instance.instance_id.as_str(), instance))
+            .collect::<BTreeMap<_, _>>();
+        let runtime_component_instances = runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .enumerate()
+            .map(|(execution_index, component)| {
+                let instance = runtime_instance_by_id
+                    .get(component.component_id.as_str())
+                    .expect("mounted circuit graph components come from validated runtime instances");
+                VulkanRuntimeComponentInstance {
+                    instance_id: instance.instance_id.clone(),
+                    source_component_id: instance.source_component_id.clone(),
+                    device_id: instance.device_id.clone(),
+                    execution_index,
+                }
+            })
+            .collect();
+
         Ok(Self {
             package_id,
             execution_scope,
@@ -1062,6 +1086,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             distributed_parameter_buffers,
             compiled_resource_device_stores,
             compiled_resource_physical_placements,
+            runtime_component_instances,
         })
     }
 
@@ -1531,11 +1556,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
             speculative_decoders.push(VulkanResidentSpeculativeDecoderProcessor::from_model(
                 draft_device,
                 decoder,
+                self,
+                &devices,
                 output_transducer.normalized_frame_buffer(),
                 &self.output_transducer_parameter_buffers,
                 &self.sampler_kernels,
                 &self.sampler_spec,
                 random_seed,
+                &device_for,
             )?);
         }
         let execution_quantum_calibrators = devices

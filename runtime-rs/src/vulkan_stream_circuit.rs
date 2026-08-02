@@ -24,7 +24,8 @@ use crate::stream_circuit::{
     LoweredExecutionGraphSummary, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, ResolvedCircuitArtifact,
     ResolvedLoweredExecutionGraph, RuntimeSelectedResourceCountReport,
     RuntimeSelectionCoverageReport, RuntimeSelectionDomainCoverageReport,
-    RuntimeSparseMoeWorkReport, StreamCircuit, StreamCircuitGraphBoundary,
+    RuntimeSparseMoeWorkReport, StreamCircuit, StreamCircuitConnection, StreamCircuitGraphBoundary,
+    StreamCircuitGraphSourceTap, StreamCircuitGraphSourceTapInstanceSelection,
     StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan, StreamCircuitPlacementSpec,
     StreamCircuitRuntimeGraph,
 };
@@ -89,7 +90,7 @@ pub const VULKAN_STREAM_CIRCUIT_BACKEND_ID: &str = "vulkan_stream_circuit_ir";
 pub const VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA: &str =
     "nerve.vulkan_reusable_kernel_artifacts.v1";
 pub const VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA: &str =
-    "nerve.vulkan_resident_model_package.v6";
+    "nerve.vulkan_resident_model_package.v7";
 const CONTRACT_DIGEST_ALGORITHM: &str = "nerve.json_tree_sha256.v1";
 const VULKAN_STREAM_CONTROL_BYTE_CAPACITY: usize = 5 * std::mem::size_of::<u32>();
 const VULKAN_STREAM_CONTROL_TOKEN_BYTE_CAPACITY: usize = std::mem::size_of::<u32>();
@@ -122,6 +123,8 @@ include!("vulkan_stream_circuit/feedback_loop.rs");
 include!("vulkan_stream_circuit/speculative_decode.rs");
 include!("vulkan_stream_circuit/state_transaction.rs");
 include!("vulkan_stream_circuit/causal_state_snapshots.rs");
+include!("vulkan_stream_circuit/component_batch_execution_scope.rs");
+include!("vulkan_stream_circuit/speculative_source_taps.rs");
 include!("vulkan_stream_circuit/component_batch_buffers.rs");
 include!("vulkan_stream_circuit/component_batch_kernel_selection.rs");
 include!("vulkan_stream_circuit/component_batch_slice_runner.rs");

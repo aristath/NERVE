@@ -293,7 +293,7 @@ where
         .collect()
 }
 
-struct VulkanResidentSpeculativeDecoderProcessor {
+struct VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     id: String,
     device_id: String,
     device_slice: VulkanResidentInProcessPlacedStreamProcessorDevice,
@@ -317,4 +317,30 @@ struct VulkanResidentSpeculativeDecoderProcessor {
     catch_up_controls: VulkanResidentBuffer,
     catch_up_controls_initial_copy: VulkanResidentBufferCopy,
     state_transaction: VulkanResidentStateTransactionBank,
+}
+
+struct VulkanResidentParallelBlockSpeculativeDecoderProcessor {
+    device_slice: VulkanResidentInProcessPlacedStreamProcessorDevice,
+    input_phase: VulkanMountedPlacedResidentExecutionGraphRunner,
+    processor_phase: VulkanResidentPlacedComponentBatchRunner,
+    output_phase: VulkanMountedPlacedResidentExecutionGraphRunner,
+    source_taps: Vec<VulkanSpeculativeSourceTapTransfer>,
+    ingress_copies: VulkanResidentBufferCopyBatch,
+    egress_copies: VulkanResidentBufferCopyBatch,
+    anchor_input_signal_id: String,
+    draft_tokens_output_signal_id: String,
+    confidence_output_signal_id: String,
+    block_width: usize,
+    state_transaction: VulkanResidentStateTransactionBank,
+}
+
+struct VulkanResidentSpeculativeDecoderProcessor {
+    id: String,
+    device_id: String,
+    execution: VulkanResidentSpeculativeDecoderExecutionProcessor,
+}
+
+enum VulkanResidentSpeculativeDecoderExecutionProcessor {
+    Autoregressive(VulkanResidentAutoregressiveSpeculativeDecoderProcessor),
+    ParallelBlock(VulkanResidentParallelBlockSpeculativeDecoderProcessor),
 }

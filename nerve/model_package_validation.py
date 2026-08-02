@@ -371,12 +371,17 @@ def validate_compiled_speculative_decoders(
             )
         elif execution_mode == "parallel_block":
             block_width = execution_contract.get("block_width")
+            proposal_contract = decoder.get("proposal_contract")
             valid_execution_contract = (
                 isinstance(block_width, int)
                 and not isinstance(block_width, bool)
                 and block_width > 0
                 and execution_contract.get("processor_schedule") == "parallel_lanes"
                 and output_schedule == "compiled_component_graph"
+                and isinstance(proposal_contract, dict)
+                and proposal_contract.get("default_draft_tokens") == block_width
+                and proposal_contract.get("confidence_prefix")
+                == "first_sigmoid_below_runtime_threshold"
             )
         else:
             valid_execution_contract = False
@@ -453,11 +458,14 @@ def validate_compiled_speculative_decoders(
                         "does not match its circuit node"
                     )
         if output_schedule == "dedicated_token_transducer":
+            input_spec = decoder.get("input_adapter")
             output_id = roles["draft_output_transducer"][0]
             output_spec = decoder.get("output_transducer")
             output_refs = graph_candidates[output_id]["parameters"]["refs"]
             if (
-                not isinstance(output_spec, dict)
+                not isinstance(input_spec, dict)
+                or input_spec.get("component_id") != roles["draft_input_adapter"][0]
+                or not isinstance(output_spec, dict)
                 or output_spec.get("component_id") != output_id
                 or output_spec.get("norm_parameter_tensor")
                 != output_refs.get("norm", {}).get("tensor")
@@ -472,6 +480,11 @@ def validate_compiled_speculative_decoders(
                 raise ModelCompileError(
                     f"speculative decoder {decoder_id!r} output execution does not match its circuit"
                 )
+        elif "input_adapter" in decoder or "output_transducer" in decoder:
+            raise ModelCompileError(
+                f"speculative decoder {decoder_id!r} embeds dedicated autoregressive I/O "
+                "for a compiled component-graph output schedule"
+            )
         expected_state_contract = {
             "ownership": "per_stream_per_node_instance",
             "draft_updates": "tentative",
@@ -1287,10 +1300,12 @@ def validate_compiled_spirv_requirements(package_dir: Path, manifest: Json) -> N
         *(
             decoder["output_transducer"]["norm_shader_path"]
             for decoder in speculative_decoders
+            if "output_transducer" in decoder
         ),
         *(
             decoder["output_transducer"]["projection_shader_path"]
             for decoder in speculative_decoders
+            if "output_transducer" in decoder
         ),
     }
     for execution in executions:

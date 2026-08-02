@@ -162,7 +162,10 @@ impl StreamCircuitPlacementPlan {
                 edge_index,
                 connection: edge.connection.clone(),
                 signal: output.signal.clone(),
-                shape: output.shape.clone(),
+                shape: edge
+                    .connection
+                    .physical_shape(&output.shape, &input.shape)
+                    .to_vec(),
                 source_component_id: source.component.id.clone(),
                 source_device_id,
                 source_port_id: output.id.clone(),

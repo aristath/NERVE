@@ -296,12 +296,68 @@ pub struct VulkanResidentSpeculativeDecoderPackageSpec {
     pub decoder_type: String,
     pub source_prefix: String,
     pub execution_contract: VulkanResidentSpeculativeExecutionContract,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_contract: Option<Value>,
     pub circuit_graph: VulkanResidentPackageCircuitGraph,
-    pub input_adapter: VulkanResidentDraftInputAdapterPackageSpec,
-    pub output_transducer: VulkanResidentDraftOutputTransducerPackageSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_adapter: Option<VulkanResidentDraftInputAdapterPackageSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_transducer: Option<VulkanResidentDraftOutputTransducerPackageSpec>,
     pub component_executions: Vec<VulkanResidentComponentExecutionSpec>,
     pub state_contract: Value,
     pub verification_contract: Value,
+}
+
+impl VulkanResidentSpeculativeDecoderPackageSpec {
+    pub fn dedicated_input_adapter(&self) -> Option<&VulkanResidentDraftInputAdapterPackageSpec> {
+        self.input_adapter.as_ref()
+    }
+
+    pub fn dedicated_output_transducer(
+        &self,
+    ) -> Option<&VulkanResidentDraftOutputTransducerPackageSpec> {
+        self.output_transducer.as_ref()
+    }
+
+    pub fn validate_execution_io(&self) -> Result<(), String> {
+        let has_dedicated_io = self.input_adapter.is_some() && self.output_transducer.is_some();
+        let has_partial_io = self.input_adapter.is_some() != self.output_transducer.is_some();
+        if has_partial_io
+            || self.execution_contract.uses_dedicated_autoregressive_io() != has_dedicated_io
+        {
+            return Err(format!(
+                "speculative decoder {:?} dedicated I/O does not match its execution contract",
+                self.id
+            ));
+        }
+        if let VulkanResidentSpeculativeExecutionContract::ParallelBlock { block_width, .. } =
+            &self.execution_contract
+        {
+            let proposal = self
+                .proposal_contract
+                .as_ref()
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    format!(
+                        "parallel speculative decoder {:?} has no proposal contract",
+                        self.id
+                    )
+                })?;
+            if proposal
+                .get("default_draft_tokens")
+                .and_then(Value::as_u64)
+                != u64::try_from(*block_width).ok()
+                || proposal.get("confidence_prefix").and_then(Value::as_str)
+                    != Some("first_sigmoid_below_runtime_threshold")
+            {
+                return Err(format!(
+                    "parallel speculative decoder {:?} proposal contract disagrees with execution",
+                    self.id
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +404,10 @@ impl VulkanResidentSpeculativeExecutionContract {
             Self::AutoregressiveFeedback { .. } => None,
             Self::ParallelBlock { block_width, .. } => Some(*block_width),
         }
+    }
+
+    pub fn uses_dedicated_autoregressive_io(&self) -> bool {
+        matches!(self, Self::AutoregressiveFeedback { .. })
     }
 }
 

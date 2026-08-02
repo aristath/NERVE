@@ -942,6 +942,17 @@ impl StreamCircuitConnection {
             _ => output_signal == input_signal && output_shape == input_shape,
         }
     }
+
+    pub(crate) fn physical_shape<'a>(
+        &self,
+        output_shape: &'a [usize],
+        input_shape: &'a [usize],
+    ) -> &'a [usize] {
+        match self {
+            Self::ParallelBlockGather { .. } => input_shape,
+            _ => output_shape,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

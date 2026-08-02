@@ -131,6 +131,92 @@ fn component_batch_signal_liveness_reuses_only_compatible_dead_buffers() {
 }
 
 #[test]
+fn component_batch_execution_scope_is_exact_and_rejects_absent_components() {
+    let scope = VulkanComponentBatchExecutionScope::components([
+        "draft_00".to_string(),
+        "draft_01".to_string(),
+    ])
+    .unwrap();
+
+    assert!(scope.includes("draft_00"));
+    assert!(scope.includes("draft_01"));
+    assert!(!scope.includes("input_adapter"));
+    scope
+        .validate_component_ids(["input_adapter", "draft_00", "draft_01", "output_adapter"])
+        .unwrap();
+    assert!(
+        scope
+            .validate_component_ids(["draft_00", "output_adapter"])
+            .unwrap_err()
+            .0
+            .contains("draft_01")
+    );
+    assert!(VulkanComponentBatchExecutionScope::components(Vec::new()).is_err());
+}
+
+#[test]
+fn parallel_block_edge_capacity_is_partitioned_into_exact_lane_frames() {
+    assert_eq!(
+        component_batch_edge_frame_byte_capacity(
+            &StreamCircuitConnection::ParallelBlockScatter { width: 7 },
+            7 * 4096,
+        )
+        .unwrap(),
+        4096
+    );
+    assert_eq!(
+        component_batch_edge_frame_byte_capacity(
+            &StreamCircuitConnection::ParallelBlockGather { width: 7 },
+            7 * 4096,
+        )
+        .unwrap(),
+        4096
+    );
+    assert!(
+        component_batch_edge_frame_byte_capacity(
+            &StreamCircuitConnection::ParallelBlockScatter { width: 7 },
+            4096,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn speculative_source_tap_selects_last_runtime_instance_of_source_component() {
+    let instances = vec![
+        VulkanRuntimeComponentInstance {
+            instance_id: "layer_05_first".to_string(),
+            source_component_id: "layer_05".to_string(),
+            device_id: "amd0".to_string(),
+            execution_index: 5,
+        },
+        VulkanRuntimeComponentInstance {
+            instance_id: "layer_05_last".to_string(),
+            source_component_id: "layer_05".to_string(),
+            device_id: "amd1".to_string(),
+            execution_index: 9,
+        },
+    ];
+    let tap = StreamCircuitGraphSourceTap {
+        component_id: "layer_05".to_string(),
+        port_id: "output_frame".to_string(),
+        instance_selection: StreamCircuitGraphSourceTapInstanceSelection::LastInExecutionOrder,
+    };
+
+    assert_eq!(
+        resolve_speculative_source_tap_instance(&instances, &tap)
+            .unwrap()
+            .instance_id,
+        "layer_05_last"
+    );
+    let missing = StreamCircuitGraphSourceTap {
+        component_id: "missing".to_string(),
+        ..tap
+    };
+    assert!(resolve_speculative_source_tap_instance(&instances, &missing).is_err());
+}
+
+#[test]
 fn component_batch_execution_uses_standalone_component_submissions() {
     let span = |component_id: &str,
                 dispatch_index: usize,
