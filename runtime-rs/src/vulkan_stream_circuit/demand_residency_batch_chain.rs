@@ -502,13 +502,20 @@ impl VulkanDemandResidencyBatchChain {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             self.continuation_enabled.set(true);
         }
-        self.run_from_gate(
-            device,
-            None,
-            steps,
-            stream_ticks,
-            dynamic_state_capacity_activations,
-        )?;
+        {
+            let _execution = context.store.begin_execution().map_err(|error| {
+                demand_batch_error(format!(
+                    "failed to enter compiled-resource batch execution epoch: {error}"
+                ))
+            })?;
+            self.run_from_gate(
+                device,
+                None,
+                steps,
+                stream_ticks,
+                dynamic_state_capacity_activations,
+            )?;
+        }
         let mut resume_count = 0usize;
         loop {
             let notification_epoch = self
@@ -566,16 +573,28 @@ impl VulkanDemandResidencyBatchChain {
                         gate.selector_id
                     ))
                 })?;
-            let resource_indices = missing
+            let missing_resource_indices = missing
                 .requests
                 .iter()
                 .map(|request| request.resource_index)
                 .collect::<BTreeSet<_>>();
-            let resource_indices =
-                resource_indices.into_iter().collect::<Vec<_>>();
-            context
+            let selected_resource_indices = gate
+                .gate
+                .selected_resource_indices(gate.selection_count)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if !missing_resource_indices
+                .is_subset(&selected_resource_indices)
+            {
+                return Err(demand_batch_error(
+                    "GPU batch residency misses are not a subset of the selector output",
+                ));
+            }
+            let resource_indices = selected_resource_indices
+                .into_iter()
+                .collect::<Vec<_>>();
+            let (_, _execution) = context
                 .store
-                .load_selector_resources(
+                .load_selector_resources_for_execution(
                     device,
                     &gate.selector_id,
                     &resource_indices,

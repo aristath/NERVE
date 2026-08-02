@@ -55,6 +55,11 @@ pub struct VulkanCompiledResourceStoreReport {
     pub successful_load_count: u64,
     pub failed_load_count: u64,
     pub cancelled_load_count: u64,
+    pub eviction_count: u64,
+    pub evicted_unit_count: u64,
+    pub evicted_payload_bytes: u64,
+    pub released_device_bytes: u64,
+    pub reload_count: u64,
     pub logical_read_count: u64,
     pub physical_read_count: u64,
     pub logical_bytes_read: u64,
@@ -95,6 +100,11 @@ pub struct VulkanCompiledResourceResidencyTotalsReport {
     pub successful_load_count: u64,
     pub failed_load_count: u64,
     pub cancelled_load_count: u64,
+    pub eviction_count: u64,
+    pub evicted_unit_count: u64,
+    pub evicted_payload_bytes: u64,
+    pub released_device_bytes: u64,
+    pub reload_count: u64,
     pub physical_read_count: u64,
     pub physical_bytes_read: u64,
     pub uploaded_bytes: u64,
@@ -122,6 +132,10 @@ struct VulkanCompiledResourceStoreInstrumentation {
     uploaded_bytes: std::sync::atomic::AtomicU64,
     upload_time_ns: std::sync::atomic::AtomicU64,
     blocking_time_ns: std::sync::atomic::AtomicU64,
+    eviction_count: std::sync::atomic::AtomicU64,
+    evicted_unit_count: std::sync::atomic::AtomicU64,
+    evicted_payload_bytes: std::sync::atomic::AtomicU64,
+    released_device_bytes: std::sync::atomic::AtomicU64,
     gpu_misses_by_component:
         std::sync::Mutex<BTreeMap<(String, String), u64>>,
 }
@@ -177,6 +191,29 @@ impl VulkanCompiledResourceStoreInstrumentation {
         self.blocking_time_ns.fetch_add(
             blocking_time_ns,
             std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn record_eviction(
+        &self,
+        group_count: usize,
+        payload_bytes: usize,
+        released_device_bytes: usize,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        self.eviction_count.fetch_add(1, Ordering::Relaxed);
+        self.evicted_unit_count.fetch_add(
+            u64::try_from(group_count).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.evicted_payload_bytes.fetch_add(
+            u64::try_from(payload_bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.released_device_bytes.fetch_add(
+            u64::try_from(released_device_bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
         );
     }
 
@@ -568,6 +605,11 @@ impl VulkanCompiledResourceResidencyTotalsReport {
         add_u64!(successful_load_count);
         add_u64!(failed_load_count);
         add_u64!(cancelled_load_count);
+        add_u64!(eviction_count);
+        add_u64!(evicted_unit_count);
+        add_u64!(evicted_payload_bytes);
+        add_u64!(released_device_bytes);
+        add_u64!(reload_count);
         add_u64!(physical_read_count);
         add_u64!(physical_bytes_read);
         add_u64!(uploaded_bytes);
@@ -730,6 +772,11 @@ mod compiled_resource_residency_report_tests {
             residency_load_required_count: 2,
             deduplicated_load_count: 1,
             successful_load_count: 2,
+            eviction_count: 3,
+            evicted_unit_count: 4,
+            evicted_payload_bytes: 40,
+            released_device_bytes: 48,
+            reload_count: 1,
             physical_read_count: 2,
             physical_bytes_read: 50,
             uploaded_bytes: 50,
@@ -755,6 +802,11 @@ mod compiled_resource_residency_report_tests {
         assert_eq!(totals.gpu_resident_hit_count, 18);
         assert_eq!(totals.gpu_miss_count, 4);
         assert_eq!(totals.physical_bytes_read, 100);
+        assert_eq!(totals.eviction_count, 6);
+        assert_eq!(totals.evicted_unit_count, 8);
+        assert_eq!(totals.evicted_payload_bytes, 80);
+        assert_eq!(totals.released_device_bytes, 96);
+        assert_eq!(totals.reload_count, 2);
         assert_eq!(totals.blocking_time_ns, 14);
     }
 

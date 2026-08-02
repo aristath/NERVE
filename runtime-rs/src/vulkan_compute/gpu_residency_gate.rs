@@ -53,7 +53,8 @@ pub struct VulkanGpuResidencyMissQueue {
 
 pub struct VulkanGpuResidencyGate {
     maximum_selection_count: usize,
-    _selection_buffer: Arc<VulkanResidentBuffer>,
+    selection_buffer: Arc<VulkanResidentBuffer>,
+    config: VulkanGpuResidencyGateConfig,
     _address_table_buffer: Arc<VulkanResidentBuffer>,
     _configuration: Arc<VulkanResidentBuffer>,
     _resource_group_records: Arc<VulkanResidentBuffer>,
@@ -520,7 +521,8 @@ impl VulkanGpuResidencyGate {
         )?;
         Ok(Self {
             maximum_selection_count: config.maximum_selection_count,
-            _selection_buffer: selection_buffer,
+            selection_buffer,
+            config,
             _address_table_buffer: address_table_buffer,
             _configuration: configuration,
             _resource_group_records: resource_group_records,
@@ -534,6 +536,81 @@ impl VulkanGpuResidencyGate {
 
     pub fn dispatch(&self) -> &VulkanResidentKernelDispatch {
         &self.dispatch
+    }
+
+    pub fn selected_resource_indices(
+        &self,
+        active_selection_count: usize,
+    ) -> Result<BTreeSet<usize>, VulkanError> {
+        if active_selection_count == 0
+            || active_selection_count > self.maximum_selection_count
+        {
+            return Err(VulkanError(format!(
+                "GPU residency selected-resource readback count {active_selection_count} exceeds its bounded capacity {}",
+                self.maximum_selection_count
+            )));
+        }
+        let lane_count = active_selection_count
+            .div_ceil(self.config.selection_count_per_lane);
+        let final_lane_count = active_selection_count
+            - (lane_count - 1) * self.config.selection_count_per_lane;
+        let required_word_count = lane_count
+            .saturating_sub(1)
+            .checked_mul(self.config.selection_lane_stride_words)
+            .and_then(|offset| {
+                offset.checked_add(final_lane_count)
+            })
+            .ok_or_else(|| {
+                VulkanError(
+                    "GPU residency selected-resource readback overflowed"
+                        .to_string(),
+                )
+            })?;
+        let required_byte_count = required_word_count
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                VulkanError(
+                    "GPU residency selected-resource readback overflowed"
+                        .to_string(),
+                )
+            })?;
+        let bytes = self.selection_buffer.read_bytes(required_byte_count)?;
+        let words = bytes
+            .chunks_exact(size_of::<u32>())
+            .map(|bytes| {
+                u32::from_le_bytes(
+                    bytes
+                        .try_into()
+                        .expect("u32 selection chunks are exact"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let resource_count = self.config.address_mapping.resource_count();
+        let mut selected = BTreeSet::new();
+        let mut remaining = active_selection_count;
+        for lane_index in 0..lane_count {
+            let lane_offset = lane_index
+                .checked_mul(self.config.selection_lane_stride_words)
+                .expect("selection lane layout was prevalidated");
+            let lane_selection_count = remaining
+                .min(self.config.selection_count_per_lane);
+            for selection_index in 0..lane_selection_count {
+                let encoded = words[lane_offset + selection_index];
+                let resource_index = usize::try_from(
+                    (encoded >> self.config.selection_index_shift)
+                        & self.config.selection_index_mask,
+                )
+                .expect("u32 selection index fits usize");
+                if resource_index >= resource_count {
+                    return Err(VulkanError(format!(
+                        "GPU residency selection index {resource_index} exceeds {resource_count} resources"
+                    )));
+                }
+                selected.insert(resource_index);
+            }
+            remaining -= lane_selection_count;
+        }
+        Ok(selected)
     }
 
     pub fn push_constants(

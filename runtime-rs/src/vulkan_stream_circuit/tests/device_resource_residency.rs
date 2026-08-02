@@ -320,6 +320,130 @@ fn demand_retained_package_can_exceed_capacity_until_its_observed_working_set_do
 }
 
 #[test]
+fn demand_residency_evicts_the_least_recently_used_inactive_group_and_observes_reload() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 100, 0,
+    )
+    .unwrap();
+    let first = residency_descriptor('a', '1', 50);
+    let second = residency_descriptor('b', '2', 50);
+    let drops = SyncArc::new(AtomicUsize::new(0));
+
+    for descriptor in [&first, &second] {
+        let permit = match manager
+            .request(descriptor.clone(), owner("conversation"))
+            .unwrap()
+        {
+            DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+            _ => panic!("first access did not require a load"),
+        };
+        drop(
+            permit
+                .publish(resident_test_group(
+                    descriptor.clone(),
+                    SyncArc::clone(&drops),
+                ))
+                .unwrap(),
+        );
+    }
+
+    drop(
+        match manager
+            .request(first.clone(), owner("conversation"))
+            .unwrap()
+        {
+            DeviceResourceResidencyRequest::Resident(lease) => lease,
+            _ => panic!("resident group was not reused"),
+        },
+    );
+    let candidates = manager.eviction_candidates(&BTreeSet::new()).unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.group_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.id.as_str(), first.id.as_str()],
+    );
+
+    let eviction = manager
+        .evict_inactive_groups(BTreeSet::from([second.id.clone()]))
+        .unwrap();
+    assert_eq!(eviction.release().group_count, 1);
+    assert_eq!(eviction.release().byte_count, 50);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 50);
+    drop(eviction);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+    let permit = match manager
+        .request(second.clone(), owner("conversation"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("evicted group was not loaded again"),
+    };
+    drop(
+        permit
+            .publish(resident_test_group(second, SyncArc::clone(&drops)))
+            .unwrap(),
+    );
+    let stats = manager.statistics().unwrap();
+    assert_eq!(stats.eviction_count, 1);
+    assert_eq!(stats.evicted_group_count, 1);
+    assert_eq!(stats.evicted_byte_count, 50);
+    assert_eq!(stats.reload_count, 1);
+}
+
+#[test]
+fn demand_residency_refuses_an_atomic_eviction_when_any_group_is_in_use() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 100, 0,
+    )
+    .unwrap();
+    let first = residency_descriptor('c', '3', 50);
+    let second = residency_descriptor('d', '4', 50);
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let active = match manager
+        .request(first.clone(), owner("conversation"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit
+            .publish(resident_test_group(
+                first.clone(),
+                SyncArc::clone(&drops),
+            ))
+            .unwrap(),
+        _ => panic!("first access did not require a load"),
+    };
+    let second_lease = match manager
+        .request(second.clone(), owner("conversation"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit
+            .publish(resident_test_group(
+                second.clone(),
+                SyncArc::clone(&drops),
+            ))
+            .unwrap(),
+        _ => panic!("first access did not require a load"),
+    };
+    drop(second_lease);
+
+    let error = manager
+        .evict_inactive_groups(BTreeSet::from([
+            first.id.clone(),
+            second.id.clone(),
+        ]))
+        .err()
+        .expect("an active execution lease must prevent eviction");
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::InUse);
+    assert_eq!(manager.statistics().unwrap().resident_group_count, 2);
+    assert_eq!(manager.statistics().unwrap().eviction_count, 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(active);
+}
+
+#[test]
 fn per_device_residency_cancellation_and_failure_wake_waiters_cleanly() {
     let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
         "gpu0", 4096, 512,

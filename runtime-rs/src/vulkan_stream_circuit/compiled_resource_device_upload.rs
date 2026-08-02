@@ -48,6 +48,11 @@ impl VulkanResidentCompiledResource {
             }
         }
     }
+
+    fn stable_chunk_id(&self) -> Option<u64> {
+        self.stable_allocation()
+            .map(|allocation| allocation.chunk_id())
+    }
 }
 
 impl DeviceResidentResourcePayload for VulkanResidentCompiledResource {

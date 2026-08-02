@@ -318,6 +318,15 @@ pub struct DeviceResourceResidencyDirectoryEntry {
     pub location: DeviceResourceResidencyLocation,
     pub byte_count: usize,
     pub owner_count: usize,
+    pub active_lease_count: usize,
+    pub last_access_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceResourceResidencyEvictionCandidate {
+    pub group_id: String,
+    pub byte_count: usize,
+    pub last_access_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -337,6 +346,10 @@ pub struct DeviceResourceResidencyStatistics {
     pub successful_load_count: u64,
     pub failed_load_count: u64,
     pub cancelled_load_count: u64,
+    pub eviction_count: u64,
+    pub evicted_group_count: u64,
+    pub evicted_byte_count: u64,
+    pub reload_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -416,6 +429,7 @@ enum DeviceResourceResidencyEntry<P: DeviceResidentResourcePayload> {
         descriptor: DeviceResourceGroupDescriptor,
         owners: BTreeSet<DeviceResourceResidencyOwnerId>,
         active_leases: BTreeMap<DeviceResourceResidencyOwnerId, usize>,
+        last_access_epoch: u64,
         group: Arc<DeviceResidentResourceGroup<P>>,
     },
     Failed {
@@ -426,7 +440,9 @@ enum DeviceResourceResidencyEntry<P: DeviceResidentResourcePayload> {
 
 struct DeviceResourceResidencyState<P: DeviceResidentResourcePayload> {
     next_operation_id: u64,
+    next_access_epoch: u64,
     entries: BTreeMap<String, DeviceResourceResidencyEntry<P>>,
+    loaded_group_ids: BTreeSet<String>,
     reserved_loading_bytes: usize,
     dynamic_resident_bytes: usize,
     high_water_dynamic_resident_bytes: usize,
@@ -437,6 +453,10 @@ struct DeviceResourceResidencyState<P: DeviceResidentResourcePayload> {
     successful_load_count: u64,
     failed_load_count: u64,
     cancelled_load_count: u64,
+    eviction_count: u64,
+    evicted_group_count: u64,
+    evicted_byte_count: u64,
+    reload_count: u64,
 }
 
 impl<P: DeviceResidentResourcePayload> Default
@@ -445,7 +465,9 @@ impl<P: DeviceResidentResourcePayload> Default
     fn default() -> Self {
         Self {
             next_operation_id: 0,
+            next_access_epoch: 0,
             entries: BTreeMap::new(),
+            loaded_group_ids: BTreeSet::new(),
             reserved_loading_bytes: 0,
             dynamic_resident_bytes: 0,
             high_water_dynamic_resident_bytes: 0,
@@ -456,6 +478,10 @@ impl<P: DeviceResidentResourcePayload> Default
             successful_load_count: 0,
             failed_load_count: 0,
             cancelled_load_count: 0,
+            eviction_count: 0,
+            evicted_group_count: 0,
+            evicted_byte_count: 0,
+            reload_count: 0,
         }
     }
 }
@@ -663,6 +689,14 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
 
         let mut requests = Vec::with_capacity(descriptors.len());
         for descriptor in descriptors {
+            let access_epoch = if matches!(
+                state.entries.get(&descriptor.id),
+                Some(DeviceResourceResidencyEntry::Resident { .. })
+            ) {
+                Some(next_residency_access_epoch(&mut state)?)
+            } else {
+                None
+            };
             if let Some(entry) = state.entries.get_mut(&descriptor.id) {
                 match entry {
                     DeviceResourceResidencyEntry::Loading {
@@ -684,11 +718,14 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
                     DeviceResourceResidencyEntry::Resident {
                         owners,
                         active_leases,
+                        last_access_epoch,
                         group,
                         ..
                     } => {
                         owners.insert(owner.clone());
                         *active_leases.entry(owner.clone()).or_default() += 1;
+                        *last_access_epoch = access_epoch
+                            .expect("resident access reserved an epoch");
                         let group = Arc::clone(group);
                         state.hit_count = state.hit_count.saturating_add(1);
                         requests.push(DeviceResourceResidencyRequest::Resident(
@@ -789,6 +826,124 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
         unload_entire_manager(&self.inner)
     }
 
+    pub fn eviction_candidates(
+        &self,
+        excluded_group_ids: &BTreeSet<String>,
+    ) -> Result<Vec<DeviceResourceResidencyEvictionCandidate>, DeviceResourceResidencyError>
+    {
+        let state = self.inner.state.lock().map_err(|_| {
+            DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Stopped,
+                "per-device residency manager was poisoned",
+            )
+        })?;
+        let mut candidates = state
+            .entries
+            .iter()
+            .filter_map(|(group_id, entry)| match entry {
+                DeviceResourceResidencyEntry::Resident {
+                    descriptor,
+                    active_leases,
+                    last_access_epoch,
+                    ..
+                } if active_leases.is_empty()
+                    && !excluded_group_ids.contains(group_id) =>
+                {
+                    Some(DeviceResourceResidencyEvictionCandidate {
+                        group_id: group_id.clone(),
+                        byte_count: descriptor.byte_count,
+                        last_access_epoch: *last_access_epoch,
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            (left.last_access_epoch, left.group_id.as_str())
+                .cmp(&(right.last_access_epoch, right.group_id.as_str()))
+        });
+        Ok(candidates)
+    }
+
+    pub fn evict_inactive_groups(
+        &self,
+        group_ids: BTreeSet<String>,
+    ) -> Result<DeviceResourceResidencyEviction<P>, DeviceResourceResidencyError>
+    {
+        if group_ids.is_empty() {
+            return Err(DeviceResourceResidencyError::invalid_descriptor(
+                "device residency eviction batch is empty",
+            ));
+        }
+        let mut state = self.inner.state.lock().map_err(|_| {
+            DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Stopped,
+                "per-device residency manager was poisoned",
+            )
+        })?;
+        for group_id in &group_ids {
+            match state.entries.get(group_id) {
+                Some(DeviceResourceResidencyEntry::Resident {
+                    active_leases, ..
+                }) if active_leases.is_empty() => {}
+                Some(DeviceResourceResidencyEntry::Resident { .. }) => {
+                    return Err(DeviceResourceResidencyError::new(
+                        DeviceResourceResidencyErrorKind::InUse,
+                        format!(
+                            "cannot evict residency group {group_id:?} while an execution lease is active"
+                        ),
+                    ));
+                }
+                Some(_) => {
+                    return Err(DeviceResourceResidencyError::new(
+                        DeviceResourceResidencyErrorKind::InUse,
+                        format!(
+                            "cannot evict residency group {group_id:?} while it is not resident"
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(DeviceResourceResidencyError::new(
+                        DeviceResourceResidencyErrorKind::StaleOperation,
+                        format!(
+                            "cannot evict absent residency group {group_id:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut release = DeviceResourceResidencyRelease::default();
+        let mut retired_groups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            let DeviceResourceResidencyEntry::Resident {
+                descriptor, group, ..
+            } = state
+                .entries
+                .remove(&group_id)
+                .expect("eviction batch was prevalidated")
+            else {
+                unreachable!("eviction batch changed while manager lock was held")
+            };
+            state.dynamic_resident_bytes = state
+                .dynamic_resident_bytes
+                .saturating_sub(descriptor.byte_count);
+            release.group_count += 1;
+            release.byte_count += descriptor.byte_count;
+            retired_groups.push(group);
+        }
+        state.eviction_count = state.eviction_count.saturating_add(1);
+        state.evicted_group_count = state
+            .evicted_group_count
+            .saturating_add(u64::try_from(release.group_count).unwrap_or(u64::MAX));
+        state.evicted_byte_count = state
+            .evicted_byte_count
+            .saturating_add(u64::try_from(release.byte_count).unwrap_or(u64::MAX));
+        Ok(DeviceResourceResidencyEviction {
+            release,
+            retired_groups,
+        })
+    }
+
     pub fn statistics(
         &self,
     ) -> Result<DeviceResourceResidencyStatistics, DeviceResourceResidencyError>
@@ -831,6 +986,21 @@ pub struct DeviceResourceResidencyLease<P: DeviceResidentResourcePayload> {
     group_id: String,
     owner: DeviceResourceResidencyOwnerId,
     group: Arc<DeviceResidentResourceGroup<P>>,
+}
+
+pub struct DeviceResourceResidencyEviction<P: DeviceResidentResourcePayload> {
+    release: DeviceResourceResidencyRelease,
+    retired_groups: Vec<Arc<DeviceResidentResourceGroup<P>>>,
+}
+
+impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyEviction<P> {
+    pub fn release(&self) -> DeviceResourceResidencyRelease {
+        self.release
+    }
+
+    pub fn retired_group_count(&self) -> usize {
+        self.retired_groups.len()
+    }
 }
 
 impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyLease<P> {
@@ -1007,6 +1177,21 @@ pub struct DeviceResourceResidencyRelease {
     pub cancelled_load_count: usize,
 }
 
+fn next_residency_access_epoch<P: DeviceResidentResourcePayload>(
+    state: &mut DeviceResourceResidencyState<P>,
+) -> Result<u64, DeviceResourceResidencyError> {
+    state.next_access_epoch = state
+        .next_access_epoch
+        .checked_add(1)
+        .ok_or_else(|| {
+            DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Stopped,
+                "per-device residency access epoch exhausted",
+            )
+        })?;
+    Ok(state.next_access_epoch)
+}
+
 fn acquire_published_lease<P: DeviceResidentResourcePayload>(
     manager: &Arc<DeviceResourceResidencyManagerInner<P>>,
     group_id: &str,
@@ -1018,19 +1203,23 @@ fn acquire_published_lease<P: DeviceResidentResourcePayload>(
             "per-device residency manager was poisoned",
         )
     })?;
+    let access_epoch = next_residency_access_epoch(&mut state)?;
     let entry = state.entries.get_mut(group_id).ok_or_else(|| {
         DeviceResourceResidencyError::new(
             DeviceResourceResidencyErrorKind::Cancelled,
             "residency owner was unloaded before the request resumed",
         )
     })?;
-    let (active_leases, group) = match entry {
+    let (active_leases, last_access_epoch, group) = match entry {
         DeviceResourceResidencyEntry::Resident {
             owners,
             active_leases,
+            last_access_epoch,
             group,
             ..
-        } if owners.contains(owner) => (active_leases, group),
+        } if owners.contains(owner) => {
+            (active_leases, last_access_epoch, group)
+        }
         _ => {
             return Err(DeviceResourceResidencyError::new(
                 DeviceResourceResidencyErrorKind::Cancelled,
@@ -1039,6 +1228,7 @@ fn acquire_published_lease<P: DeviceResidentResourcePayload>(
         }
     };
     *active_leases.entry(owner.clone()).or_default() += 1;
+    *last_access_epoch = access_epoch;
     Ok(DeviceResourceResidencyLease {
         manager: Arc::downgrade(manager),
         group_id: group_id.to_string(),
@@ -1089,6 +1279,7 @@ fn publish_loaded_group<P: DeviceResidentResourcePayload>(
             "per-device residency manager was poisoned",
         )
     })?;
+    let access_epoch = next_residency_access_epoch(&mut state)?;
     let published_dynamic_bytes = state
         .dynamic_resident_bytes
         .checked_add(descriptor.byte_count)
@@ -1134,12 +1325,16 @@ fn publish_loaded_group<P: DeviceResidentResourcePayload>(
         .max(published_dynamic_bytes);
     state.successful_load_count =
         state.successful_load_count.saturating_add(1);
+    if !state.loaded_group_ids.insert(descriptor.id.clone()) {
+        state.reload_count = state.reload_count.saturating_add(1);
+    }
     state.entries.insert(
         descriptor.id.clone(),
         DeviceResourceResidencyEntry::Resident {
             descriptor: descriptor.clone(),
             owners,
             active_leases: BTreeMap::new(),
+            last_access_epoch: access_epoch,
             group: Arc::clone(&group),
         },
     );
@@ -1446,6 +1641,10 @@ fn statistics_for_state<P: DeviceResidentResourcePayload>(
         successful_load_count: state.successful_load_count,
         failed_load_count: state.failed_load_count,
         cancelled_load_count: state.cancelled_load_count,
+        eviction_count: state.eviction_count,
+        evicted_group_count: state.evicted_group_count,
+        evicted_byte_count: state.evicted_byte_count,
+        reload_count: state.reload_count,
     }
 }
 
@@ -1457,26 +1656,42 @@ fn directory_for_state<P: DeviceResidentResourcePayload>(
         .entries
         .iter()
         .map(|(group_id, entry)| {
-            let (residency_state, descriptor, owner_count) = match entry {
+            let (
+                residency_state,
+                descriptor,
+                owner_count,
+                active_lease_count,
+                last_access_epoch,
+            ) = match entry {
                 DeviceResourceResidencyEntry::Loading {
                     descriptor, owners, ..
                 } => (
                     ResourceResidencyState::Loading,
                     descriptor,
                     owners.len(),
+                    0,
+                    0,
                 ),
                 DeviceResourceResidencyEntry::Resident {
-                    descriptor, owners, ..
+                    descriptor,
+                    owners,
+                    active_leases,
+                    last_access_epoch,
+                    ..
                 } => (
                     ResourceResidencyState::Resident,
                     descriptor,
                     owners.len(),
+                    active_leases.values().copied().sum(),
+                    *last_access_epoch,
                 ),
                 DeviceResourceResidencyEntry::Failed {
                     descriptor, ..
                 } => (
                     ResourceResidencyState::Failed,
                     descriptor,
+                    0,
+                    0,
                     0,
                 ),
             };
@@ -1488,6 +1703,8 @@ fn directory_for_state<P: DeviceResidentResourcePayload>(
                 },
                 byte_count: descriptor.byte_count,
                 owner_count,
+                active_lease_count,
+                last_access_epoch,
             }
         })
         .collect()

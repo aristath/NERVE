@@ -35,11 +35,81 @@ fn compiled_resource_backing_worker_count(
     )
 }
 
+fn compiled_resource_lru_eviction_groups(
+    candidates: &[DeviceResourceResidencyEvictionCandidate],
+    group_chunks: &BTreeMap<String, BTreeSet<u64>>,
+    chunk_groups: &BTreeMap<u64, BTreeSet<String>>,
+    protected_group_ids: &BTreeSet<String>,
+    required_payload_bytes: usize,
+) -> Result<BTreeSet<String>, VulkanCompiledResourceDeviceStoreError> {
+    if required_payload_bytes == 0 {
+        return Ok(BTreeSet::new());
+    }
+    let candidates_by_id = candidates
+        .iter()
+        .map(|candidate| (candidate.group_id.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::new();
+    let mut selected_payload_bytes = 0usize;
+    for candidate in candidates {
+        if selected.contains(&candidate.group_id) {
+            continue;
+        }
+        let chunks = group_chunks.get(&candidate.group_id).ok_or_else(|| {
+            VulkanCompiledResourceDeviceStoreError::new(format!(
+                "resident group {:?} has no stable allocation cohort",
+                candidate.group_id
+            ))
+        })?;
+        let mut cohort = BTreeSet::new();
+        for chunk_id in chunks {
+            let groups = chunk_groups.get(chunk_id).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "stable allocation cohort {chunk_id} has no resident groups"
+                ))
+            })?;
+            cohort.extend(groups.iter().cloned());
+        }
+        if cohort.is_empty()
+            || cohort
+                .iter()
+                .any(|group_id| protected_group_ids.contains(group_id))
+            || cohort
+                .iter()
+                .any(|group_id| !candidates_by_id.contains_key(group_id.as_str()))
+        {
+            continue;
+        }
+        for group_id in cohort {
+            if selected.insert(group_id.clone()) {
+                let candidate = candidates_by_id
+                    .get(group_id.as_str())
+                    .expect("eviction cohort was restricted to candidates");
+                selected_payload_bytes = selected_payload_bytes
+                    .checked_add(candidate.byte_count)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "compiled resource eviction byte count overflowed",
+                        )
+                    })?;
+            }
+        }
+        if selected_payload_bytes >= required_payload_bytes {
+            return Ok(selected);
+        }
+    }
+    Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+        "compiled resource residency needs to reclaim {required_payload_bytes} payload bytes, but inactive allocation cohorts provide only {selected_payload_bytes} bytes"
+    )))
+}
+
 struct VulkanCompiledResourceDeviceAddressState {
     transfer: VulkanResidentTransferStream,
     address_table: VulkanStableResourceAddressTable,
     publications:
         BTreeMap<String, Vec<VulkanStableResourceAddressPublication>>,
+    group_chunks: BTreeMap<String, BTreeSet<u64>>,
+    chunk_groups: BTreeMap<u64, BTreeSet<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +132,10 @@ struct VulkanCompiledResourceStoreLoadGuard<'a> {
     store: &'a VulkanCompiledResourceDeviceStore,
 }
 
+struct VulkanCompiledResourceExecutionGuard<'a> {
+    _guard: std::sync::RwLockReadGuard<'a, ()>,
+}
+
 struct VulkanCompiledResourceLoadPlan {
     descriptor: DeviceResourceGroupDescriptor,
     resolved: ResolvedCompiledResourceGroup,
@@ -79,6 +153,8 @@ pub struct VulkanCompiledResourceDeviceStore {
     arena: VulkanStableResourceArena,
     address_state:
         std::sync::Mutex<VulkanCompiledResourceDeviceAddressState>,
+    execution_barrier: std::sync::RwLock<()>,
+    residency_mutation: std::sync::Mutex<()>,
     backing_store: CompiledResourceBackingStore,
     manager: DeviceResourceResidencyManager<VulkanResidentCompiledResource>,
     upload_alignment: usize,
@@ -304,8 +380,12 @@ impl VulkanCompiledResourceDeviceStore {
                     transfer,
                     address_table,
                     publications: BTreeMap::new(),
+                    group_chunks: BTreeMap::new(),
+                    chunk_groups: BTreeMap::new(),
                 },
             ),
+            execution_barrier: std::sync::RwLock::new(()),
+            residency_mutation: std::sync::Mutex::new(()),
             backing_store,
             manager,
             upload_alignment,
@@ -424,6 +504,52 @@ impl VulkanCompiledResourceDeviceStore {
         resource_indices: &[usize],
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let _mutation = self.residency_mutation.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource residency mutation lock was poisoned",
+            )
+        })?;
+        self.load_selector_resources_while_active_locked(
+            device,
+            selector_id,
+            resource_indices,
+            owner,
+        )
+    }
+
+    fn load_selector_resources_for_execution(
+        &self,
+        device: &VulkanComputeDevice,
+        selector_id: &str,
+        resource_indices: &[usize],
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<
+        (usize, VulkanCompiledResourceExecutionGuard<'_>),
+        VulkanCompiledResourceDeviceStoreError,
+    > {
+        let _load = self.begin_load_operation()?;
+        let _mutation = self.residency_mutation.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource residency mutation lock was poisoned",
+            )
+        })?;
+        let loaded = self.load_selector_resources_while_active_locked(
+            device,
+            selector_id,
+            resource_indices,
+            owner,
+        )?;
+        let execution = self.begin_execution()?;
+        Ok((loaded, execution))
+    }
+
+    fn load_selector_resources_while_active_locked(
+        &self,
+        device: &VulkanComputeDevice,
+        selector_id: &str,
+        resource_indices: &[usize],
+        owner: DeviceResourceResidencyOwnerId,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
         if resource_indices.is_empty() {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource load batch is empty",
@@ -468,8 +594,17 @@ impl VulkanCompiledResourceDeviceStore {
             }
         }
         let plans = plans_by_group.into_values().collect::<Vec<_>>();
+        let protected_group_ids = plans
+            .iter()
+            .map(|plan| plan.descriptor.id.clone())
+            .collect::<BTreeSet<_>>();
         for wave in plans.chunks(self.maximum_load_wave_group_count) {
-            self.load_compiled_resource_wave(device, wave, owner.clone())?;
+            self.load_compiled_resource_wave(
+                device,
+                wave,
+                &protected_group_ids,
+                owner.clone(),
+            )?;
         }
         Ok(plans.len())
     }
@@ -478,8 +613,13 @@ impl VulkanCompiledResourceDeviceStore {
         &self,
         device: &VulkanComputeDevice,
         plans: &[VulkanCompiledResourceLoadPlan],
+        protected_group_ids: &BTreeSet<String>,
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        self.evict_for_compiled_resource_wave(
+            plans,
+            protected_group_ids,
+        )?;
         let requests = self
             .manager
             .request_batch(
@@ -551,6 +691,172 @@ impl VulkanCompiledResourceDeviceStore {
                 .map_err(compiled_device_store_residency_error)?;
         }
         Ok(())
+    }
+
+    fn evict_for_compiled_resource_wave(
+        &self,
+        plans: &[VulkanCompiledResourceLoadPlan],
+        protected_group_ids: &BTreeSet<String>,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let required_payload_bytes = || {
+            let snapshot = self
+                .manager
+                .snapshot()
+                .map_err(compiled_device_store_residency_error)?;
+            let known_group_ids = snapshot
+                .directory
+                .iter()
+                .map(|entry| entry.group_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let new_payload_bytes = plans
+                .iter()
+                .filter(|plan| {
+                    !known_group_ids.contains(plan.descriptor.id.as_str())
+                })
+                .try_fold(0usize, |total, plan| {
+                    total
+                        .checked_add(plan.descriptor.byte_count)
+                        .ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "compiled resource admission byte count overflowed",
+                            )
+                        })
+                })?;
+            let used_payload_bytes = snapshot
+                .statistics
+                .always_resident_bytes
+                .checked_add(snapshot.statistics.dynamic_resident_bytes)
+                .and_then(|used| {
+                    used.checked_add(
+                        snapshot.statistics.reserved_loading_bytes,
+                    )
+                })
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource residency accounting overflowed",
+                    )
+                })?;
+            Ok::<usize, VulkanCompiledResourceDeviceStoreError>(
+                used_payload_bytes
+                    .saturating_add(new_payload_bytes)
+                    .saturating_sub(snapshot.statistics.capacity_bytes),
+            )
+        };
+        if required_payload_bytes()? == 0 {
+            return Ok(());
+        }
+
+        let _execution = self.execution_barrier.write().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource execution barrier was poisoned",
+            )
+        })?;
+        let required_payload_bytes = required_payload_bytes()?;
+        if required_payload_bytes == 0 {
+            return Ok(());
+        }
+        let candidates = self
+            .manager
+            .eviction_candidates(protected_group_ids)
+            .map_err(compiled_device_store_residency_error)?;
+        let mut address_state = self.address_state.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource address state was poisoned",
+            )
+        })?;
+        let selected_group_ids = compiled_resource_lru_eviction_groups(
+            &candidates,
+            &address_state.group_chunks,
+            &address_state.chunk_groups,
+            protected_group_ids,
+            required_payload_bytes,
+        )?;
+        let committed_before = self
+            .arena
+            .stats()
+            .map_err(compiled_device_store_vulkan_error)?
+            .committed_byte_capacity;
+        let eviction = self
+            .manager
+            .evict_inactive_groups(selected_group_ids.clone())
+            .map_err(compiled_device_store_residency_error)?;
+        let publications = selected_group_ids
+            .iter()
+            .flat_map(|group_id| {
+                address_state
+                    .publications
+                    .get(group_id)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if publications.is_empty() {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "resident eviction cohort has no address publications",
+            ));
+        }
+        {
+            let VulkanCompiledResourceDeviceAddressState {
+                transfer,
+                address_table,
+                ..
+            } = &mut *address_state;
+            address_table
+                .clear_group(transfer, &publications)
+                .map_err(compiled_device_store_vulkan_error)?;
+        }
+        for group_id in &selected_group_ids {
+            address_state.publications.remove(group_id);
+            let chunks = address_state
+                .group_chunks
+                .remove(group_id)
+                .unwrap_or_default();
+            for chunk_id in chunks {
+                let remove_chunk = if let Some(groups) =
+                    address_state.chunk_groups.get_mut(&chunk_id)
+                {
+                    groups.remove(group_id);
+                    groups.is_empty()
+                } else {
+                    false
+                };
+                if remove_chunk {
+                    address_state.chunk_groups.remove(&chunk_id);
+                }
+            }
+        }
+        let release = eviction.release();
+        drop(eviction);
+        let committed_after = self
+            .arena
+            .stats()
+            .map_err(compiled_device_store_vulkan_error)?
+            .committed_byte_capacity;
+        if committed_after >= committed_before {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "evicting {} complete allocation-cohort groups released no physical device bytes",
+                release.group_count
+            )));
+        }
+        self.instrumentation.record_eviction(
+            release.group_count,
+            release.byte_count,
+            committed_before - committed_after,
+        );
+        Ok(())
+    }
+
+    fn begin_execution(
+        &self,
+    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanCompiledResourceDeviceStoreError>
+    {
+        let guard = self.execution_barrier.read().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource execution barrier was poisoned",
+            )
+        })?;
+        Ok(VulkanCompiledResourceExecutionGuard { _guard: guard })
     }
 
     fn publish_loaded_compiled_resource_wave(
@@ -630,6 +936,8 @@ impl VulkanCompiledResourceDeviceStore {
             transfer,
             address_table,
             publications: resident_publications,
+            group_chunks,
+            chunk_groups,
         } = &mut *state;
         let uploads = match
             upload_loaded_compiled_resource_groups_to_stable_address_space(
@@ -662,25 +970,46 @@ impl VulkanCompiledResourceDeviceStore {
             .zip(uploads)
             .map(|((plan, permit, _), upload)| {
                 let (group, publications) = upload.into_parts();
+                let chunks = group
+                    .resources()
+                    .iter()
+                    .filter_map(|resource| {
+                        resource.payload().stable_chunk_id()
+                    })
+                    .collect::<BTreeSet<_>>();
                 (
                     plan.descriptor.id.clone(),
                     permit,
                     group,
                     publications,
+                    chunks,
                 )
             })
             .collect::<Vec<_>>();
         while !staged.is_empty() {
-            let (group_id, permit, group, publications) =
+            let (group_id, permit, group, publications, chunks) =
                 staged.remove(0);
+            if chunks.is_empty() {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "stable compiled resource publication has no allocation cohort",
+                ));
+            }
             match permit.publish(group) {
                 Ok(lease) => {
-                    resident_publications.insert(group_id, publications);
+                    resident_publications
+                        .insert(group_id.clone(), publications);
+                    group_chunks.insert(group_id.clone(), chunks.clone());
+                    for chunk_id in chunks {
+                        chunk_groups
+                            .entry(chunk_id)
+                            .or_default()
+                            .insert(group_id.clone());
+                    }
                     drop(lease);
                 }
                 Err(error) => {
                     let mut unpublished = publications;
-                    for (_, _, _, remaining_publications) in &staged {
+                    for (_, _, _, remaining_publications, _) in &staged {
                         unpublished.extend(remaining_publications.iter().cloned());
                     }
                     address_table
@@ -1080,6 +1409,14 @@ impl VulkanCompiledResourceDeviceStore {
             successful_load_count: residency.successful_load_count,
             failed_load_count: residency.failed_load_count,
             cancelled_load_count: residency.cancelled_load_count,
+            eviction_count: residency.eviction_count,
+            evicted_unit_count: residency.evicted_group_count,
+            evicted_payload_bytes: residency.evicted_byte_count,
+            released_device_bytes: self
+                .instrumentation
+                .released_device_bytes
+                .load(Ordering::Relaxed),
+            reload_count: residency.reload_count,
             logical_read_count: backing.logical_ranges,
             physical_read_count: backing.physical_reads,
             logical_bytes_read: backing.logical_bytes,
@@ -1183,6 +1520,11 @@ impl VulkanCompiledResourceDeviceStore {
     fn teardown_after_quiescence(
         &self,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let _execution = self.execution_barrier.write().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource execution barrier was poisoned during teardown",
+            )
+        })?;
         let release = self
             .manager
             .unload_device()
@@ -1254,6 +1596,8 @@ impl VulkanCompiledResourceDeviceStore {
                 .clear_group(transfer, &publications)
                 .map_err(compiled_device_store_vulkan_error)?;
             state.publications.clear();
+            state.group_chunks.clear();
+            state.chunk_groups.clear();
         }
         drop(state);
         self.arena

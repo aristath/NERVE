@@ -248,6 +248,10 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
             .requests
             .is_empty()
     );
+    assert_eq!(
+        gate.selected_resource_indices(4).unwrap(),
+        BTreeSet::from([0, 1])
+    );
     let resolved =
         stable_resource_bytes_to_u32(&gate.resolved_addresses_buffer().read_bytes(
             gate.resolved_addresses_buffer().byte_capacity(),
@@ -283,6 +287,10 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
         &increment,
         1,
         42,
+    );
+    assert_eq!(
+        gate.selected_resource_indices(1).unwrap(),
+        BTreeSet::from([1])
     );
     assert_eq!(
         u32::from_le_bytes(output.read_bytes(4).unwrap().try_into().unwrap()),

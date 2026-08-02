@@ -32,6 +32,66 @@ fn compiled_resource_backing_workers_follow_wave_width_without_oversubscribing_c
 }
 
 #[test]
+fn compiled_resource_eviction_reclaims_complete_unprotected_allocation_cohorts() {
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "old-protected-sibling".to_string(),
+            byte_count: 40,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "next-a".to_string(),
+            byte_count: 40,
+            last_access_epoch: 3,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "next-b".to_string(),
+            byte_count: 40,
+            last_access_epoch: 4,
+        },
+    ];
+    let group_chunks = BTreeMap::from([
+        (
+            "old-protected-sibling".to_string(),
+            BTreeSet::from([10]),
+        ),
+        ("protected".to_string(), BTreeSet::from([10])),
+        ("next-a".to_string(), BTreeSet::from([20])),
+        ("next-b".to_string(), BTreeSet::from([20])),
+    ]);
+    let chunk_groups = BTreeMap::from([
+        (
+            10,
+            BTreeSet::from([
+                "old-protected-sibling".to_string(),
+                "protected".to_string(),
+            ]),
+        ),
+        (
+            20,
+            BTreeSet::from([
+                "next-a".to_string(),
+                "next-b".to_string(),
+            ]),
+        ),
+    ]);
+
+    let selected = compiled_resource_lru_eviction_groups(
+        &candidates,
+        &group_chunks,
+        &chunk_groups,
+        &BTreeSet::from(["protected".to_string()]),
+        60,
+    )
+    .unwrap();
+
+    assert_eq!(
+        selected,
+        BTreeSet::from(["next-a".to_string(), "next-b".to_string()])
+    );
+}
+
+#[test]
 fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let device =
         selected_test_vulkan_device().expect("selected Vulkan test device must open");
@@ -226,19 +286,34 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(fitting_working_set.current_payload_bytes, 8);
     assert_eq!(fitting_working_set.resident_unit_count, 1);
     assert_eq!(fitting_working_set.addressable_unit_count, 2);
-    let capacity_error = over_capacity_store
+    over_capacity_store
         .load_selector_resource(
             &device,
             &selector_id,
             1,
+            over_capacity_owner.clone(),
+        )
+        .unwrap();
+    let bounded_growth = over_capacity_store.residency_report().unwrap();
+    assert_eq!(bounded_growth.current_payload_bytes, 8);
+    assert_eq!(bounded_growth.resident_unit_count, 1);
+    assert_eq!(bounded_growth.failed_unit_count, 0);
+    assert_eq!(bounded_growth.eviction_count, 1);
+    assert_eq!(bounded_growth.evicted_unit_count, 1);
+    assert_eq!(bounded_growth.evicted_payload_bytes, 8);
+    assert!(bounded_growth.released_device_bytes >= 8);
+
+    over_capacity_store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            0,
             over_capacity_owner,
         )
-        .unwrap_err();
-    assert!(capacity_error.to_string().contains("capacity"));
-    let rejected_growth = over_capacity_store.residency_report().unwrap();
-    assert_eq!(rejected_growth.current_payload_bytes, 8);
-    assert_eq!(rejected_growth.resident_unit_count, 1);
-    assert_eq!(rejected_growth.failed_unit_count, 0);
+        .unwrap();
+    let reloaded = over_capacity_store.residency_report().unwrap();
+    assert_eq!(reloaded.eviction_count, 2);
+    assert_eq!(reloaded.reload_count, 1);
     assert_eq!(
         over_capacity_store.unload().unwrap(),
         DeviceResourceResidencyRelease {

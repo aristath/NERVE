@@ -333,6 +333,14 @@ fn print_runtime_resource_residency(
         totals.cancelled_load_count
     );
     println!(
+        "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)={}/{}/{}/{}/{}",
+        totals.eviction_count,
+        totals.evicted_unit_count,
+        totals.evicted_payload_bytes,
+        totals.released_device_bytes,
+        totals.reload_count,
+    );
+    println!(
         "  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={}/{}/{}/{:.3}/{:.3}/{:.3}",
         totals.physical_read_count,
         totals.physical_bytes_read,

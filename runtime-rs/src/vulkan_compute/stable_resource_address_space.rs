@@ -814,6 +814,10 @@ impl VulkanStableResourceAllocation {
         self.device_address
     }
 
+    pub(crate) fn chunk_id(&self) -> u64 {
+        self.chunk_id
+    }
+
     fn allocation_id(&self) -> u64 {
         self.allocation_id
     }
