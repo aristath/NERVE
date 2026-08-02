@@ -62,11 +62,9 @@ def shader_file_for_node(
     if op == "hyper_connection_post":
         attrs = node.get("attrs", {})
         multiplicity = int(attrs.get("multiplicity", 0))
-        node_hidden_size = int(attrs.get("hidden_size", 0))
         if (
             multiplicity <= 0
             or hidden_size <= 0
-            or node_hidden_size != hidden_size
             or hidden_size % 2
             or len(node.get("inputs", [])) != 4
             or len(node.get("outputs", [])) != 1
@@ -1742,7 +1740,13 @@ def shader_file_for_node(
     )
 
 
-def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) -> int:
+def workgroup_count_x_for_node(
+    circuit: Json,
+    node: Json,
+    tensor_index: Json,
+    *,
+    dimensions: Json | None = None,
+) -> int:
     if node["op"] == "repeat_stream_lanes":
         attrs = node["attrs"]
         output_words = int(attrs["multiplicity"]) * int(attrs["hidden_size"]) // 2
@@ -1783,8 +1787,17 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         return 1
     if node["op"] == "hyper_connection_post":
         attrs = node["attrs"]
+        if not isinstance(dimensions, dict):
+            raise ModelCompileError(
+                "hyper-connection post dispatch requires model dimensions"
+            )
+        hidden_size = int(dimensions.get("hidden_size", 0))
+        if hidden_size <= 0 or hidden_size % 2:
+            raise ModelCompileError(
+                "hyper-connection post dispatch requires a positive even hidden size"
+            )
         output_words = (
-            int(attrs["multiplicity"]) * int(attrs["hidden_size"]) // 2
+            int(attrs["multiplicity"]) * hidden_size // 2
         )
         return (output_words + 63) // 64
     if node["op"] == "anchor_noise_embedding_block":

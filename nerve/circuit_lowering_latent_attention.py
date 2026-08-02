@@ -16,7 +16,6 @@ def latent_sparse_attention_nodes(
     attributes = operator["attributes"]
     heads = operator["heads"]
     residual_mixer = component.get("residual_mixer")
-    hidden_size = int(component["feed_forward"]["hidden_size"])
     operator_input = "input_frame"
     nodes: list[Json] = []
     if residual_mixer is not None:
@@ -519,7 +518,6 @@ def latent_sparse_attention_nodes(
                     "outputs": ["operator_residual_out"],
                     "attrs": {
                         **_hyper_connection_attrs(residual_mixer),
-                        "hidden_size": hidden_size,
                         "output_element_bytes": [2],
                     },
                 },
@@ -554,7 +552,6 @@ def latent_sparse_attention_nodes(
                     "outputs": ["output_frame"],
                     "attrs": {
                         **_hyper_connection_attrs(residual_mixer),
-                        "hidden_size": hidden_size,
                         "output_element_bytes": [2],
                     },
                 },
