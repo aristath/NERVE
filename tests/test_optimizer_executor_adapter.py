@@ -76,6 +76,7 @@ class FixtureExecutor:
                 "candidate_id": document["candidate_id"],
                 "component_id": document["component_id"],
                 "physical_node_id": document["physical_node_id"],
+                "execution_scope": document["execution_scope"],
                 "logical_device_id": document["logical_device_id"],
                 "physical_device_id": document["physical_device_id"],
                 "device_name": "AMD fixture",
@@ -217,6 +218,7 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert executor.commands[0]["candidate_id"] == candidate_id
     assert executor.commands[0]["candidate_root"] == str(candidate_root.resolve())
     assert executor.commands[0]["physical_device_id"] == "vulkan:amd-fixture"
+    assert executor.commands[0]["execution_scope"] == "node"
     assert executor.commands[0]["maximum_quantum_wait_ns"] == 9_000_000
     assert executor.commands[1]["useful_units"] == 8
     assert [command["command"] for command in executor.commands] == [

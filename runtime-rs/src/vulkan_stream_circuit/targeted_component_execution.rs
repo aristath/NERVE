@@ -6,6 +6,12 @@ pub enum VulkanTargetedComponentExecutionPhase {
     Prefill { activation_batch_width: usize },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VulkanTargetedComponentExecutionScope {
+    Node,
+    DecodeComponentPrefix,
+}
+
 impl VulkanTargetedComponentExecutionPhase {
     pub fn activation_batch_width(self) -> usize {
         match self {
@@ -37,6 +43,8 @@ pub struct VulkanTargetedComponentExecutionReport {
     pub output_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_values_f32_le_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured_outputs: Option<Vec<VulkanTargetedCapturedOutput>>,
     pub state_digest: String,
     pub throughput_windows: Vec<VulkanTargetedComponentThroughputWindow>,
     pub resident_parameter_bytes: usize,
@@ -48,6 +56,14 @@ pub struct VulkanTargetedComponentExecutionReport {
     pub queue_wait_ns: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanTargetedCapturedOutput {
+    pub binding: usize,
+    pub name: String,
+    pub byte_count: usize,
+    pub bytes_le_hex: String,
+}
+
 pub struct VulkanResidentTargetedComponentSession {
     component_id: String,
     node_id: String,
@@ -57,6 +73,7 @@ pub struct VulkanResidentTargetedComponentSession {
     mounted: VulkanMountedPlacedStreamCircuit,
     source_dispatch: VulkanMountedPlacedBoundDispatch,
     execution: VulkanTargetedComponentExecution,
+    capture_output_values: bool,
 }
 
 pub enum VulkanResidentTargetedExecutionSession {
@@ -94,8 +111,13 @@ enum VulkanTargetedComponentExecution {
 }
 
 struct VulkanTargetedDecodeExecution {
-    dispatch: VulkanResidentKernelDispatch,
+    source_dispatches: Vec<VulkanMountedPlacedBoundDispatch>,
+    steps: Vec<VulkanTargetedDecodeStep>,
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+}
+
+struct VulkanTargetedDecodeStep {
+    dispatch: VulkanResidentKernelDispatch,
     push_constants: Vec<u8>,
 }
 
@@ -124,6 +146,77 @@ struct VulkanTargetedComponentRunCounters {
     queue_wait_ns: u64,
 }
 
+fn targeted_component_execution_dispatches(
+    plan: &VulkanMountedPlacedBoundDispatchPlan,
+    component_id: &str,
+    target: &VulkanMountedPlacedBoundDispatch,
+    phase: VulkanTargetedComponentExecutionPhase,
+    scope: VulkanTargetedComponentExecutionScope,
+) -> Result<Vec<VulkanMountedPlacedBoundDispatch>, VulkanResidentTokenModelPackageError> {
+    match scope {
+        VulkanTargetedComponentExecutionScope::Node => Ok(vec![target.clone()]),
+        VulkanTargetedComponentExecutionScope::DecodeComponentPrefix => {
+            if phase != VulkanTargetedComponentExecutionPhase::Decode {
+                return targeted_component_error(
+                    "component-prefix targeted execution requires decode phase",
+                );
+            }
+            let dispatches = plan
+                .dispatches
+                .iter()
+                .filter(|dispatch| {
+                    dispatch.component_id == component_id
+                        && dispatch.dispatch_index <= target.dispatch_index
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if dispatches
+                .last()
+                .is_none_or(|dispatch| dispatch.dispatch_index != target.dispatch_index)
+            {
+                return targeted_component_error(format!(
+                    "component-prefix target {component_id}.{} is not the terminal dispatch in its compiled prefix",
+                    target.node_id
+                ));
+            }
+            Ok(dispatches)
+        }
+    }
+}
+
+fn targeted_signal_byte_count(
+    descriptor: &VulkanMountedPlacedBoundDescriptor,
+    bound_byte_count: usize,
+) -> usize {
+    match &descriptor.target {
+        VulkanMountedPlacedBoundDescriptorTarget::Resident {
+            target:
+                VulkanBoundDescriptorTarget::ActivationSlot {
+                    signal_byte_capacity,
+                    ..
+                },
+        } => *signal_byte_capacity,
+        _ => bound_byte_count,
+    }
+}
+
+fn targeted_signal_accepts_fixture_mutation(
+    descriptor: &VulkanMountedPlacedBoundDescriptor,
+) -> bool {
+    matches!(
+        &descriptor.target,
+        VulkanMountedPlacedBoundDescriptorTarget::Resident {
+            target: VulkanBoundDescriptorTarget::ActivationSlot { .. },
+        }
+            | VulkanMountedPlacedBoundDescriptorTarget::ModelInput { .. }
+            | VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { .. }
+            | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { .. }
+            | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { .. }
+            | VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { .. }
+            | VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { .. }
+    )
+}
+
 impl VulkanResidentTargetedExecutionSession {
     pub fn from_device_slice(
         device: &VulkanComputeDevice,
@@ -131,6 +224,7 @@ impl VulkanResidentTargetedExecutionSession {
         component_id: impl AsRef<str>,
         node_id: impl AsRef<str>,
         phase: VulkanTargetedComponentExecutionPhase,
+        scope: VulkanTargetedComponentExecutionScope,
         capture_output_values: bool,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let component_id = component_id.as_ref();
@@ -145,6 +239,7 @@ impl VulkanResidentTargetedExecutionSession {
                 component_id,
                 node_id,
                 phase,
+                scope,
                 capture_output_values,
             )
             .map(Self::OutputTransducer);
@@ -155,6 +250,8 @@ impl VulkanResidentTargetedExecutionSession {
             component_id,
             node_id,
             phase,
+            scope,
+            capture_output_values,
         )
         .map(Self::Component)
     }
@@ -198,8 +295,14 @@ impl VulkanResidentTargetedOutputTransducerSession {
         component_id: &str,
         node_id: impl AsRef<str>,
         phase: VulkanTargetedComponentExecutionPhase,
+        scope: VulkanTargetedComponentExecutionScope,
         capture_output_values: bool,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        if scope != VulkanTargetedComponentExecutionScope::Node {
+            return targeted_component_error(
+                "output-transducer targeted execution only supports node scope",
+            );
+        }
         let output = slice.targeted_output.as_ref().ok_or_else(|| {
             targeted_component_error_value(
                 "resident device slice has no targeted output-transducer resources",
@@ -396,6 +499,7 @@ impl VulkanResidentTargetedOutputTransducerSession {
             output_values_f32_le_hex: self
                 .capture_output_values
                 .then(|| hex_bytes(&output_values)),
+            captured_outputs: None,
             state_digest: targeted_finalized_artifact_digest(
                 Sha256::digest([]).as_slice(),
             ),
@@ -664,6 +768,8 @@ impl VulkanResidentTargetedComponentSession {
         component_id: impl AsRef<str>,
         node_id: impl AsRef<str>,
         phase: VulkanTargetedComponentExecutionPhase,
+        scope: VulkanTargetedComponentExecutionScope,
+        capture_output_values: bool,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let component_id = component_id.as_ref();
         let node_id = node_id.as_ref();
@@ -708,6 +814,13 @@ impl VulkanResidentTargetedComponentSession {
                     "resident device slice has no dispatch {component_id}.{node_id}"
                 ))
             })?;
+        let execution_dispatches = targeted_component_execution_dispatches(
+            &mounted_bound,
+            component_id,
+            &source_dispatch,
+            phase,
+            scope,
+        )?;
         let input_count = source_dispatch
             .descriptors
             .iter()
@@ -733,7 +846,7 @@ impl VulkanResidentTargetedComponentSession {
                     Box::new(VulkanTargetedDecodeExecution::new(
                         device,
                         &mounted,
-                        &source_dispatch,
+                        &execution_dispatches,
                         slice.loaded_manifest(),
                         dynamic_state_capacity_activations,
                     )?),
@@ -761,6 +874,7 @@ impl VulkanResidentTargetedComponentSession {
             mounted,
             source_dispatch,
             execution,
+            capture_output_values,
         })
     }
 
@@ -795,6 +909,10 @@ impl VulkanResidentTargetedComponentSession {
                 )?,
             };
         let output_digest = self.output_digest()?;
+        let captured_outputs = self
+            .capture_output_values
+            .then(|| self.captured_outputs())
+            .transpose()?;
         let state_digest = self.state_digest()?;
         Ok(VulkanTargetedComponentExecutionReport {
             component_id: self.component_id.clone(),
@@ -810,6 +928,7 @@ impl VulkanResidentTargetedComponentSession {
             execution_ns: counters.execution_ns,
             output_digest,
             output_values_f32_le_hex: None,
+            captured_outputs,
             state_digest,
             throughput_windows: counters.windows,
             resident_parameter_bytes: self.resident_parameter_bytes,
@@ -878,42 +997,66 @@ impl VulkanResidentTargetedComponentSession {
         &self,
         seed: u32,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        for descriptor in &self.source_dispatch.descriptors {
-            let binding = self
-                .mounted
-                .resident_kernel_buffer_binding(&self.source_dispatch, descriptor)
-                .map_err(|error| targeted_component_error_value(format!(
-                    "failed to resolve targeted descriptor {}: {error}",
-                    descriptor.name
-                )))?;
-            match descriptor.usage {
-                VulkanKernelDescriptorUsage::InputSignal => {
-                    let bytes = targeted_fixture_bytes(
-                        binding.byte_len,
-                        seed,
-                        descriptor.binding,
-                    );
-                    binding
-                        .buffer
-                        .write_bytes_at(binding.byte_offset, &bytes)
-                        .map_err(|error| targeted_component_error_value(format!(
-                            "failed to write targeted input {}: {error}",
-                            descriptor.name
-                        )))?;
+        let VulkanTargetedComponentExecution::Decode(execution) = &self.execution else {
+            unreachable!("decode fixture is only written for decode execution");
+        };
+        let produced_signals = execution
+            .source_dispatches
+            .iter()
+            .flat_map(|dispatch| {
+                dispatch.descriptors.iter().filter(|descriptor| {
+                    descriptor.usage == VulkanKernelDescriptorUsage::OutputSignal
+                })
+            })
+            .map(|descriptor| descriptor.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut initialized_inputs = BTreeSet::new();
+        let mut cleared_outputs = BTreeSet::new();
+        for dispatch in &execution.source_dispatches {
+            for descriptor in &dispatch.descriptors {
+                let binding = self
+                    .mounted
+                    .resident_kernel_buffer_binding(dispatch, descriptor)
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "failed to resolve targeted descriptor {}: {error}",
+                        descriptor.name
+                    )))?;
+                match descriptor.usage {
+                    VulkanKernelDescriptorUsage::InputSignal
+                        if !produced_signals.contains(descriptor.name.as_str())
+                            && targeted_signal_accepts_fixture_mutation(descriptor)
+                            && initialized_inputs.insert(descriptor.name.clone()) =>
+                    {
+                        let bytes = targeted_fixture_bytes(
+                            binding.byte_len,
+                            seed,
+                            descriptor.binding,
+                        );
+                        binding
+                            .buffer
+                            .write_bytes_at(binding.byte_offset, &bytes)
+                            .map_err(|error| targeted_component_error_value(format!(
+                                "failed to write targeted input {}: {error}",
+                                descriptor.name
+                            )))?;
+                    }
+                    VulkanKernelDescriptorUsage::OutputSignal
+                        if targeted_signal_accepts_fixture_mutation(descriptor)
+                            && cleared_outputs.insert(descriptor.name.clone()) =>
+                    {
+                        binding
+                            .buffer
+                            .write_bytes_at(
+                                binding.byte_offset,
+                                &vec![0; binding.byte_len],
+                            )
+                            .map_err(|error| targeted_component_error_value(format!(
+                                "failed to clear targeted output {}: {error}",
+                                descriptor.name
+                            )))?;
+                    }
+                    _ => {}
                 }
-                VulkanKernelDescriptorUsage::OutputSignal => {
-                    binding
-                        .buffer
-                        .write_bytes_at(
-                            binding.byte_offset,
-                            &vec![0; binding.byte_len],
-                        )
-                        .map_err(|error| targeted_component_error_value(format!(
-                            "failed to clear targeted output {}: {error}",
-                            descriptor.name
-                        )))?;
-                }
-                _ => {}
             }
         }
         Ok(())
@@ -940,10 +1083,14 @@ impl VulkanResidentTargetedComponentSession {
                         )))?;
                     digest.update(descriptor.binding.to_le_bytes());
                     digest.update(descriptor.name.as_bytes());
+                    let byte_count = targeted_signal_byte_count(
+                        descriptor,
+                        binding.byte_len,
+                    );
                     digest.update(
                         binding
                             .buffer
-                            .read_bytes_at(binding.byte_offset, binding.byte_len)
+                            .read_bytes_at(binding.byte_offset, byte_count)
                             .map_err(|error| targeted_component_error_value(format!(
                                 "failed to read targeted output {}: {error}",
                                 descriptor.name
@@ -960,6 +1107,48 @@ impl VulkanResidentTargetedComponentSession {
             }
         }
         Ok(targeted_finalized_artifact_digest(digest.finalize().as_slice()))
+    }
+
+    fn captured_outputs(
+        &self,
+    ) -> Result<Vec<VulkanTargetedCapturedOutput>, VulkanResidentTokenModelPackageError> {
+        let mut outputs = Vec::new();
+        for descriptor in self.source_dispatch.descriptors.iter().filter(|descriptor| {
+            descriptor.usage == VulkanKernelDescriptorUsage::OutputSignal
+        }) {
+            let bytes = match &self.execution {
+                VulkanTargetedComponentExecution::Decode(_) => {
+                    let binding = self
+                        .mounted
+                        .resident_kernel_buffer_binding(&self.source_dispatch, descriptor)
+                        .map_err(|error| targeted_component_error_value(format!(
+                            "failed to resolve targeted output {}: {error}",
+                            descriptor.name
+                        )))?;
+                    let byte_count = targeted_signal_byte_count(
+                        descriptor,
+                        binding.byte_len,
+                    );
+                    binding
+                        .buffer
+                        .read_bytes_at(binding.byte_offset, byte_count)
+                        .map_err(|error| targeted_component_error_value(format!(
+                            "failed to capture targeted output {}: {error}",
+                            descriptor.name
+                        )))?
+                }
+                VulkanTargetedComponentExecution::Prefill(execution) => {
+                    execution.read_output(&self.mounted, descriptor)?
+                }
+            };
+            outputs.push(VulkanTargetedCapturedOutput {
+                binding: descriptor.binding,
+                name: descriptor.name.clone(),
+                byte_count: bytes.len(),
+                bytes_le_hex: hex_bytes(&bytes),
+            });
+        }
+        Ok(outputs)
     }
 
     fn state_digest(&self) -> Result<String, VulkanResidentTokenModelPackageError> {
@@ -985,19 +1174,15 @@ impl VulkanTargetedDecodeExecution {
     fn new(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
-        dispatch: &VulkanMountedPlacedBoundDispatch,
+        dispatches: &[VulkanMountedPlacedBoundDispatch],
         loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
         dynamic_state_capacity_activations: u32,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
-        let resident = mounted
-            .create_resident_kernel_dispatch_for_bound_dispatch(
-                device,
-                dispatch,
-                loaded_manifest,
-            )
-            .map_err(|error| targeted_component_error_value(format!(
-                "failed to create targeted decode dispatch: {error}"
-            )))?;
+        if dispatches.is_empty() {
+            return targeted_component_error(
+                "targeted decode execution requires at least one dispatch",
+            );
+        }
         let control = VulkanMountedPlacedStreamControl {
             stream_tick: 0,
             control_flags: 0,
@@ -1012,15 +1197,37 @@ impl VulkanTargetedDecodeExecution {
             .map_err(|error| targeted_component_error_value(format!(
                 "failed to initialize targeted stream control: {error}"
             )))?;
-        let push_constants =
-            stream_control_push_constant_bytes(&dispatch.push_constants, control)
+        let steps = dispatches
+            .iter()
+            .map(|dispatch| {
+                let resident = mounted
+                    .create_resident_kernel_dispatch_for_bound_dispatch(
+                        device,
+                        dispatch,
+                        loaded_manifest,
+                    )
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "failed to create targeted decode dispatch {}.{}: {error}",
+                        dispatch.component_id, dispatch.node_id
+                    )))?;
+                let push_constants = stream_control_push_constant_bytes(
+                    &dispatch.push_constants,
+                    control,
+                )
                 .map_err(|error| targeted_component_error_value(format!(
-                    "failed to bind targeted decode stream control: {error}"
+                    "failed to bind targeted decode stream control for {}.{}: {error}",
+                    dispatch.component_id, dispatch.node_id
                 )))?;
+                Ok(VulkanTargetedDecodeStep {
+                    dispatch: resident,
+                    push_constants,
+                })
+            })
+            .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
         Ok(Self {
-            dispatch: resident,
+            source_dispatches: dispatches.to_vec(),
+            steps,
             sequence_catalog: RefCell::new(BTreeMap::new()),
-            push_constants,
         })
     }
 
@@ -1070,7 +1277,11 @@ impl VulkanTargetedDecodeExecution {
         Ok(VulkanTargetedComponentRunCounters {
             execution_ns: execution_ns.max(1),
             windows,
-            physical_dispatch_count: useful_units,
+            physical_dispatch_count: useful_units
+                .checked_mul(self.steps.len())
+                .ok_or_else(|| targeted_component_error_value(
+                    "targeted decode physical dispatch count overflowed",
+                ))?,
             queue_submission_count: submission_count,
             synchronization_wait_ns,
             queue_wait_ns,
@@ -1090,14 +1301,15 @@ impl VulkanTargetedDecodeExecution {
             .map_err(|error| targeted_component_error_value(format!(
                 "failed to create targeted decode sequence: {error}"
             )))?;
-        let steps = (0..repetitions)
-            .map(|_| {
-                VulkanResidentKernelSequenceStep::new(
-                    &self.dispatch,
-                    &self.push_constants,
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut steps = Vec::with_capacity(repetitions * self.steps.len());
+        for _ in 0..repetitions {
+            for step in &self.steps {
+                steps.push(VulkanResidentKernelSequenceStep::new(
+                    &step.dispatch,
+                    &step.push_constants,
+                ));
+            }
+        }
         device
             .record_resident_kernel_sequence(&sequence, &steps)
             .map_err(|error| targeted_component_error_value(format!(
@@ -1550,6 +1762,39 @@ impl VulkanTargetedPrefillExecution {
             );
         }
         Ok(())
+    }
+
+    fn read_output(
+        &self,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        descriptor: &VulkanMountedPlacedBoundDescriptor,
+    ) -> Result<Vec<u8>, VulkanResidentTokenModelPackageError> {
+        let (key, frame_byte_capacity) =
+            component_batch_signal_target_with_mounted(mounted, descriptor)
+                .map_err(|error| targeted_component_error_value(format!(
+                    "failed to resolve targeted prefill output: {error}"
+                )))?
+                .ok_or_else(|| targeted_component_error_value(format!(
+                    "targeted prefill output {} has no signal buffer",
+                    descriptor.name
+                )))?;
+        let buffer_index = *self.signal_buffer_indices.get(&key).ok_or_else(|| {
+            targeted_component_error_value(format!(
+                "targeted prefill output {key:?} was not allocated"
+            ))
+        })?;
+        let byte_count = frame_byte_capacity
+            .checked_mul(self.activation_batch_width)
+            .ok_or_else(|| targeted_component_error_value(
+                "targeted prefill output size overflowed",
+            ))?;
+        self.signal_buffers[buffer_index]
+            .buffer
+            .read_bytes(byte_count)
+            .map_err(|error| targeted_component_error_value(format!(
+                "failed to capture targeted prefill output {}: {error}",
+                descriptor.name
+            )))
     }
 }
 

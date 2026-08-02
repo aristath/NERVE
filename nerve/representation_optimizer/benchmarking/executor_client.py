@@ -46,6 +46,7 @@ class ResidentExecutorMountSpec:
     dynamic_state_capacity_activations: int
     maximum_quantum_wait_ns: int
     request_identity: Json
+    execution_scope: str = "node"
     capture_output_values: bool = False
     cancel_requested: Callable[[], bool] | None = None
 
@@ -137,6 +138,7 @@ class ResidentExecutorClient:
             "component_id": spec.component_id,
             "physical_node_id": spec.physical_node_id,
             "phase": spec.phase,
+            "execution_scope": spec.execution_scope,
             "activation_batch_width": spec.activation_batch_width,
             "logical_device_id": logical_device_id,
             "physical_device_id": spec.physical_device_id,
@@ -190,6 +192,19 @@ def _validate_mount_spec(spec: ResidentExecutorMountSpec) -> None:
     if spec.phase not in {"decode", "prefill"}:
         raise ModelCompileError(
             "resident executor phase must be decode or prefill"
+        )
+    if spec.execution_scope not in {"node", "decode_component_prefix"}:
+        raise ModelCompileError(
+            "resident executor execution scope must be node or "
+            "decode_component_prefix"
+        )
+    if (
+        spec.execution_scope == "decode_component_prefix"
+        and spec.phase != "decode"
+    ):
+        raise ModelCompileError(
+            "resident executor decode_component_prefix scope requires "
+            "decode phase"
         )
     for value, label in (
         (spec.activation_batch_width, "activation batch width"),
@@ -353,6 +368,7 @@ def _validate_mount_payload(
         "candidate_id": candidate_id,
         "component_id": spec.component_id,
         "physical_node_id": spec.physical_node_id,
+        "execution_scope": spec.execution_scope,
         "logical_device_id": logical_device_id,
         "physical_device_id": spec.physical_device_id,
     }

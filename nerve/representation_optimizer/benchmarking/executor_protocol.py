@@ -12,7 +12,7 @@ from nerve.representation_optimizer.contracts import (
 )
 
 
-EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v2"
+EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v3"
 EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v3"
 ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
 

@@ -9,12 +9,12 @@ use nerve_runtime::{
     RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
     VulkanResidentBufferPool, VulkanResidentModelPackageDeviceSlice,
     VulkanResidentModelPackageManifest, VulkanResidentTargetedExecutionSession,
-    VulkanTargetedComponentExecutionPhase,
+    VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v2";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v3";
 const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v3";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
@@ -31,6 +31,7 @@ enum ExecutorCommand {
         component_id: String,
         physical_node_id: String,
         phase: String,
+        execution_scope: String,
         activation_batch_width: usize,
         logical_device_id: String,
         physical_device_id: String,
@@ -62,6 +63,7 @@ struct MountCommand {
     component_id: String,
     physical_node_id: String,
     phase: VulkanTargetedComponentExecutionPhase,
+    execution_scope: VulkanTargetedComponentExecutionScope,
     logical_device_id: String,
     physical_device_id: String,
     dynamic_state_capacity_activations: usize,
@@ -189,6 +191,7 @@ fn execute_session(
         &mount.component_id,
         &mount.physical_node_id,
         mount.phase,
+        mount.execution_scope,
         mount.capture_output_values,
     )?;
     let mounted_digest = mounted_state_digest(
@@ -209,6 +212,10 @@ fn execute_session(
             "candidate_id": mount.candidate_id,
             "component_id": mount.component_id,
             "physical_node_id": mount.physical_node_id,
+            "execution_scope": match mount.execution_scope {
+                VulkanTargetedComponentExecutionScope::Node => "node",
+                VulkanTargetedComponentExecutionScope::DecodeComponentPrefix => "decode_component_prefix",
+            },
             "logical_device_id": mount.logical_device_id,
             "physical_device_id": mount.physical_device_id,
             "device_name": device.device_name(),
@@ -435,6 +442,7 @@ impl MountCommand {
             component_id,
             physical_node_id,
             phase,
+            execution_scope,
             activation_batch_width,
             logical_device_id,
             physical_device_id,
@@ -492,6 +500,24 @@ impl MountCommand {
                 .into());
             }
         };
+        let execution_scope = match execution_scope.as_str() {
+            "node" => VulkanTargetedComponentExecutionScope::Node,
+            "decode_component_prefix" if phase == VulkanTargetedComponentExecutionPhase::Decode => {
+                VulkanTargetedComponentExecutionScope::DecodeComponentPrefix
+            }
+            "decode_component_prefix" => {
+                return Err(invalid_input(
+                    "decode_component_prefix execution scope requires decode phase",
+                )
+                .into());
+            }
+            _ => {
+                return Err(invalid_input(
+                    "executor execution_scope must be node or decode_component_prefix",
+                )
+                .into());
+            }
+        };
         Ok(Self {
             request_id,
             package_manifest,
@@ -500,6 +526,7 @@ impl MountCommand {
             component_id,
             physical_node_id,
             phase,
+            execution_scope,
             logical_device_id,
             physical_device_id,
             dynamic_state_capacity_activations,
@@ -610,6 +637,7 @@ mod tests {
             component_id: "block_1".to_string(),
             physical_node_id: "norm".to_string(),
             phase: phase.to_string(),
+            execution_scope: "node".to_string(),
             activation_batch_width: width,
             logical_device_id: "optimizer:amd0".to_string(),
             physical_device_id: format!("vulkan-uuid:{}", "0".repeat(32)),
@@ -634,6 +662,38 @@ mod tests {
             VulkanTargetedComponentExecutionPhase::Prefill {
                 activation_batch_width: 64,
             }
+        );
+    }
+
+    #[test]
+    fn optimizer_executor_component_prefix_is_explicitly_decode_only() {
+        let mut decode = mount_command("decode", 1);
+        let ExecutorCommand::Mount {
+            execution_scope, ..
+        } = &mut decode
+        else {
+            unreachable!("fixture is a mount command");
+        };
+        *execution_scope = "decode_component_prefix".to_string();
+        assert_eq!(
+            MountCommand::from_command(decode).unwrap().execution_scope,
+            VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+        );
+
+        let mut prefill = mount_command("prefill", 64);
+        let ExecutorCommand::Mount {
+            execution_scope, ..
+        } = &mut prefill
+        else {
+            unreachable!("fixture is a mount command");
+        };
+        *execution_scope = "decode_component_prefix".to_string();
+        let error = MountCommand::from_command(prefill)
+            .err()
+            .expect("prefill prefix must fail");
+        assert!(
+            error.to_string().contains("requires decode phase"),
+            "{error}",
         );
     }
 
