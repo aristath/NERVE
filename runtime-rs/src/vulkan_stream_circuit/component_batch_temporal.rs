@@ -2,12 +2,40 @@ struct VulkanResidentPlacedTemporalBlockRunner {
     execution_graph: VulkanResidentPlacedComponentBatchRunner,
     input_embedding: VulkanResidentBatchedInputEmbeddingRunner,
     output_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
+    speculative_source_tap_frame_copies: Vec<Vec<VulkanResidentBufferCopyBatch>>,
     speculative_target_output: Option<VulkanResidentBatchedOutputProjectionRunner>,
     pipeline: Vec<usize>,
 }
 
+impl VulkanResidentPlacedTemporalBlockRunner {
+    fn publish_speculative_source_tap_frame(
+        &self,
+        frame_index: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if self.speculative_source_tap_frame_copies.is_empty() {
+            return Ok(());
+        }
+        let copies = self
+            .speculative_source_tap_frame_copies
+            .get(frame_index)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    format!(
+                        "speculative source-tap frame {frame_index} exceeds retained batch capacity {}",
+                        self.speculative_source_tap_frame_copies.len()
+                    ),
+                ))
+            })?;
+        for copy in copies {
+            copy.run()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
+        Ok(())
+    }
+}
+
 struct VulkanResidentTemporalBlockRun {
-    sampled_token_id: Option<u32>,
+    sampled_token: Option<VulkanResidentSampledToken>,
     scheduler_turn_count_per_tick: usize,
     completed_stage_count_per_tick: usize,
     transport_stats: VulkanPlacedEdgeTransportStats,

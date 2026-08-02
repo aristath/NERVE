@@ -114,12 +114,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .chain(draft_token_ids.iter().copied())
                 .collect::<Vec<_>>();
             let target_start = Instant::now();
-            let target_token_ids =
+            let target_tokens =
                 self.run_causal_verification_window(devices, &target_inputs, start_stream_tick)?;
             let target_verification_time_ns =
                 u64::try_from(target_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let mut verification =
-                verify_speculative_token_prefix(&draft_token_ids, &target_token_ids)
+                verify_speculative_token_prefix(&draft_token_ids, &target_tokens)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             truncate_speculative_verification_at_stop(&mut verification, stop_token_ids);
             if verification.committed_target_tick_count < target_inputs.len() {
@@ -139,9 +139,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     )?;
                 }
             }
+            self.publish_causal_verification_source_taps(
+                target_inputs.len(),
+                verification.committed_target_tick_count,
+            )?;
             let committed_feedback_token_id = *verification
-                .emitted_token_ids
+                .emitted_tokens
                 .last()
+                .map(|token| &token.token_id)
                 .expect("speculative verification always emits one target token");
             let committed_tick_delta =
                 u64::try_from(verification.committed_target_tick_count).map_err(|_| {
@@ -186,7 +191,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 initial_token_id,
                 start_stream_tick,
                 draft_token_ids,
-                target_token_ids,
+                target_tokens,
                 verification,
                 draft_time_ns,
                 target_verification_time_ns,

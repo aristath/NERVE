@@ -8,8 +8,7 @@ use crate::stream_circuit::{
 };
 use crate::stream_plan::{StreamCircuitExecutionPlan, StreamCircuitResourcePlan};
 use crate::test_support::{
-    tiny_model_dir, tiny_model_lowered_graph_path, tiny_model_package_manifest_path,
-    tiny_model_tensor_index_path,
+    tiny_model_dir, tiny_model_package_manifest_path, tiny_model_tensor_index_path,
 };
 
 const FIXTURE_MODEL_GREEDY_SAMPLER_COMPONENT_ID: &str = "greedy_sampler";
@@ -59,7 +58,7 @@ fn loaded_artifact_manifest_preserves_compiled_launch_geometry() {
                 workgroup_count_x: 2_048,
                 descriptor_signature: Vec::new(),
                 push_constants: Vec::new(),
-                uses_stream_tick: false,
+                stream_control_binding: None,
             },
             resolved_path: PathBuf::from("kernels/sparse-moe-gate-up.spv"),
             words: vec![0x0723_0203],
@@ -128,6 +127,73 @@ fn component_batch_signal_liveness_reuses_only_compatible_dead_buffers() {
         indices[&key("first")],
         indices[&VulkanComponentBatchSignalKey::IncomingEdge(7)]
     );
+}
+
+#[test]
+fn speculative_source_tap_signal_liveness_survives_the_complete_batch() {
+    let key = |signal_id: &str| VulkanComponentBatchSignalKey::Activation {
+        component_id: "component".to_string(),
+        signal_id: signal_id.to_string(),
+    };
+    let retained = key("retained_target_hidden");
+    let later = key("later_scratch");
+    let mut lifetimes = vec![
+        VulkanComponentBatchSignalLifetime {
+            key: retained.clone(),
+            frame_byte_capacity: 4_096,
+            host_visible: false,
+            first_dispatch: 0,
+            last_dispatch: 1,
+        },
+        VulkanComponentBatchSignalLifetime {
+            key: later.clone(),
+            frame_byte_capacity: 4_096,
+            host_visible: false,
+            first_dispatch: 2,
+            last_dispatch: 3,
+        },
+    ];
+
+    retain_component_batch_signal_lifetimes(
+        &mut lifetimes,
+        &BTreeSet::from([retained.clone()]),
+        4,
+    )
+    .unwrap();
+    let (indices, buffers) = allocate_component_batch_signal_lifetimes(lifetimes);
+
+    assert_eq!(buffers.len(), 2);
+    assert_ne!(indices[&retained], indices[&later]);
+}
+
+#[test]
+fn speculative_source_tap_retention_rejects_an_unproduced_signal() {
+    let retained = VulkanComponentBatchSignalKey::Activation {
+        component_id: "component".to_string(),
+        signal_id: "target_hidden".to_string(),
+    };
+    let missing = VulkanComponentBatchSignalKey::Activation {
+        component_id: "missing".to_string(),
+        signal_id: "target_hidden".to_string(),
+    };
+    let mut lifetimes = vec![VulkanComponentBatchSignalLifetime {
+        key: retained,
+        frame_byte_capacity: 4_096,
+        host_visible: false,
+        first_dispatch: 0,
+        last_dispatch: 1,
+    }];
+
+    let error = retain_component_batch_signal_lifetimes(
+        &mut lifetimes,
+        &BTreeSet::from([missing]),
+        2,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("has no physical lifetime"));
 }
 
 #[test]
@@ -214,6 +280,24 @@ fn speculative_source_tap_selects_last_runtime_instance_of_source_component() {
         ..tap
     };
     assert!(resolve_speculative_source_tap_instance(&instances, &missing).is_err());
+}
+
+#[test]
+fn speculative_planning_mounts_every_executable_draft_phase() {
+    for role in [
+        CircuitRuntimeRole::DraftInputAdapter,
+        CircuitRuntimeRole::DraftProcessor,
+        CircuitRuntimeRole::DraftOutputTransducer,
+    ] {
+        assert_eq!(
+            speculative_decoder_planning_role(role),
+            CircuitRuntimeRole::SignalProcessor
+        );
+    }
+    assert_eq!(
+        speculative_decoder_planning_role(CircuitRuntimeRole::OutputTransducer),
+        CircuitRuntimeRole::OutputTransducer
+    );
 }
 
 #[test]
@@ -421,25 +505,27 @@ const FIXTURE_MODEL_EMBED_TOKENS_BYTES: usize = 32 * FIXTURE_MODEL_FRAME_BYTES;
 
 #[test]
 fn speculative_verification_commits_through_the_first_mismatch() {
-    let result = verify_speculative_token_prefix(&[11, 12, 13], &[11, 99, 88, 77]).unwrap();
+    let targets = [11, 99, 88, 77].map(sampled_token);
+    let result = verify_speculative_token_prefix(&[11, 12, 13], &targets).unwrap();
 
     assert_eq!(result.accepted_draft_count, 1);
     assert_eq!(result.committed_target_tick_count, 2);
-    assert_eq!(result.emitted_token_ids, [11, 99]);
+    assert_eq!(result.emitted_tokens, targets[..2]);
 }
 
 #[test]
 fn speculative_verification_emits_the_bonus_token_when_all_drafts_match() {
-    let result = verify_speculative_token_prefix(&[11, 12], &[11, 12, 13]).unwrap();
+    let targets = [11, 12, 13].map(sampled_token);
+    let result = verify_speculative_token_prefix(&[11, 12], &targets).unwrap();
 
     assert_eq!(result.accepted_draft_count, 2);
     assert_eq!(result.committed_target_tick_count, 3);
-    assert_eq!(result.emitted_token_ids, [11, 12, 13]);
+    assert_eq!(result.emitted_tokens, targets);
 }
 
 #[test]
 fn speculative_verification_rejects_incomplete_target_results() {
-    let error = verify_speculative_token_prefix(&[11, 12], &[11, 12]).unwrap_err();
+    let error = verify_speculative_token_prefix(&[11, 12], &[11, 12].map(sampled_token)).unwrap_err();
 
     assert!(
         error
@@ -450,13 +536,14 @@ fn speculative_verification_rejects_incomplete_target_results() {
 
 #[test]
 fn speculative_verification_stops_at_the_first_emitted_stop_token() {
-    let mut result = verify_speculative_token_prefix(&[11, 12], &[11, 12, 99]).unwrap();
+    let mut result =
+        verify_speculative_token_prefix(&[11, 12], &[11, 12, 99].map(sampled_token)).unwrap();
 
     truncate_speculative_verification_at_stop(&mut result, &BTreeSet::from([11]));
 
     assert_eq!(result.accepted_draft_count, 1);
     assert_eq!(result.committed_target_tick_count, 1);
-    assert_eq!(result.emitted_token_ids, [11]);
+    assert_eq!(result.emitted_tokens, [sampled_token(11)]);
 }
 
 #[test]
@@ -485,11 +572,11 @@ fn speculative_decode_stats_report_rollbacks_and_total_cost() {
         initial_token_id: 1,
         start_stream_tick: 0,
         draft_token_ids: vec![2, 3],
-        target_token_ids: vec![2, 9, 4],
+        target_tokens: vec![2, 9, 4].into_iter().map(sampled_token).collect(),
         verification: VulkanSpeculativeVerificationResult {
             accepted_draft_count: 1,
             committed_target_tick_count: 2,
-            emitted_token_ids: vec![2, 9],
+            emitted_tokens: vec![sampled_token(2), sampled_token(9)],
         },
         draft_time_ns: 20,
         target_verification_time_ns: 60,
@@ -764,6 +851,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                 source_node_ids: vec!["project".to_string()],
                 semantic_module_ids: vec!["layer.token_mixer.output_projection".to_string()],
                 execution_domain: VulkanResidentComponentKernelExecutionDomain::Decode,
+                stream_control_binding: None,
                 shader_path: "shaders/project.spv".to_string(),
                 local_size_x: 64,
                 workgroup_count_x: 1,

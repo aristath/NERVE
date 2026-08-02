@@ -10,6 +10,126 @@ fn causal_component_block_lane_capacity(block_width: usize) -> Result<usize, Vul
     })
 }
 
+fn speculative_source_tap_signal_keys_by_device(
+    model: &VulkanResidentInProcessPlacedModelPackage,
+    target_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+) -> Result<
+    BTreeMap<String, BTreeSet<VulkanComponentBatchSignalKey>>,
+    VulkanResidentInProcessPlacedRuntimeError,
+> {
+    let mut retained = BTreeMap::<String, BTreeSet<VulkanComponentBatchSignalKey>>::new();
+    for decoder in &model.speculative_decoders {
+        for tap in decoder
+            .package
+            .circuit_graph
+            .boundary
+            .external_inputs
+            .iter()
+            .filter_map(|port| port.source_tap.as_ref())
+        {
+            let resolved =
+                resolved_speculative_source_tap_buffer(model, target_slices, tap)?;
+            retained
+                .entry(resolved.device_id.to_string())
+                .or_default()
+                .insert(resolved.batch_signal_key);
+        }
+    }
+    Ok(retained)
+}
+
+fn mount_speculative_source_tap_frame_copies(
+    devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+    model: &VulkanResidentInProcessPlacedModelPackage,
+    target_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+    execution_graph: &VulkanResidentPlacedComponentBatchRunner,
+    block_width: usize,
+) -> Result<Vec<Vec<VulkanResidentBufferCopyBatch>>, VulkanResidentInProcessPlacedRuntimeError> {
+    let retained = speculative_source_tap_signal_keys_by_device(model, target_slices)?;
+    if retained.is_empty() {
+        return Ok(Vec::new());
+    }
+    (0..block_width)
+        .map(|frame_index| {
+            let mut ranges_by_device =
+                BTreeMap::<String, Vec<VulkanResidentBufferRangeCopy<'_>>>::new();
+            let mut mounted_keys = BTreeSet::new();
+            for decoder in &model.speculative_decoders {
+                for tap in decoder
+                    .package
+                    .circuit_graph
+                    .boundary
+                    .external_inputs
+                    .iter()
+                    .filter_map(|port| port.source_tap.as_ref())
+                {
+                    let resolved =
+                        resolved_speculative_source_tap_buffer(model, target_slices, tap)?;
+                    if !mounted_keys.insert((
+                        resolved.device_id.to_string(),
+                        resolved.batch_signal_key.clone(),
+                    )) {
+                        continue;
+                    }
+                    let device_index = target_slices
+                        .iter()
+                        .position(|slice| slice.device_id == resolved.device_id)
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                                device_id: resolved.device_id.to_string(),
+                            }
+                        })?;
+                    let source = execution_graph
+                        .slice(device_index)?
+                        .signal_buffer(&resolved.batch_signal_key)?;
+                    if source.frame_byte_capacity != resolved.frame_byte_capacity {
+                        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                            VulkanError(format!(
+                                "speculative source-tap batch frame has {} bytes, expected {}",
+                                source.frame_byte_capacity, resolved.frame_byte_capacity
+                            )),
+                        ));
+                    }
+                    let source_offset = frame_index
+                        .checked_mul(source.frame_byte_capacity)
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                "speculative source-tap frame offset overflowed".to_string(),
+                            ))
+                        })?;
+                    ranges_by_device
+                        .entry(resolved.device_id.to_string())
+                        .or_default()
+                        .push(
+                            VulkanResidentBufferRangeCopy::new(
+                                &source.buffer,
+                                resolved.scalar_buffer,
+                                source_offset,
+                                0,
+                                resolved.frame_byte_capacity,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        );
+                }
+            }
+            ranges_by_device
+                .into_iter()
+                .map(|(device_id, ranges)| {
+                    devices
+                        .get(&device_id)
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                                device_id: device_id.clone(),
+                            }
+                        })?
+                        .create_resident_buffer_copy_batch(&ranges)
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect()
+}
+
 impl VulkanResidentInProcessPlacedStreamProcessor {
     fn linear_pipeline_device_indices(
         &self,
@@ -222,6 +342,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 "temporal pipeline is empty".to_string(),
             ))
         })?;
+        let retained_signal_keys =
+            speculative_source_tap_signal_keys_by_device(&self.model, &self.device_slices)?;
         let execution_graph = VulkanResidentPlacedComponentBatchRunner::new(
             devices,
             &self.device_slices,
@@ -229,6 +351,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             &self.execution_quantum_calibrators,
             block_width,
             VulkanComponentBatchExecutionMode::CausalSequence,
+            &retained_signal_keys,
             capture_causal_state_snapshots,
             &self.model.distributed_execution_plan,
             &self.model.distributed_parameter_buffers,
@@ -366,12 +489,21 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let speculative_source_tap_frame_copies =
+            mount_speculative_source_tap_frame_copies(
+                devices,
+                &self.model,
+                &self.device_slices,
+                &execution_graph,
+                block_width,
+            )?;
         self.temporal_block_executions.borrow_mut().insert(
             execution_key,
             VulkanResidentPlacedTemporalBlockRunner {
                 execution_graph,
                 input_embedding,
                 output_frame_copies,
+                speculative_source_tap_frame_copies,
                 speculative_target_output,
                 pipeline,
             },
@@ -565,6 +697,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
 
         if !self.speculative_decoders.is_empty() {
+            runner.publish_speculative_source_tap_frame(input_token_ids.len() - 1)?;
             let target_output = runner.speculative_target_output.as_ref().ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "temporal speculative target normalization is not mounted".to_string(),
@@ -588,7 +721,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             )?;
         }
 
-        let sampled_token_id = if sample_last {
+        let sampled_token = if sample_last {
             let last_device_index = *runner.pipeline.last().ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "temporal pipeline is empty".to_string(),
@@ -625,18 +758,18 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             self.output_transducer
                 .run(output_device)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
-            Some(
-                self.sampler
+            Some(VulkanResidentSampledToken::from(
+                &self
+                    .sampler
                     .run(output_device)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?
-                    .token_id,
-            )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?,
+            ))
         } else {
             None
         };
 
         Ok(VulkanResidentTemporalBlockRun {
-            sampled_token_id,
+            sampled_token,
             scheduler_turn_count_per_tick: self.activation_schedule.turns.len(),
             completed_stage_count_per_tick: self
                 .device_slices

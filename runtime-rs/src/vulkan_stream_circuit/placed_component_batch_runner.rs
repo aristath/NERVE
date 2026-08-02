@@ -74,6 +74,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             lane_capacity,
             execution_mode,
             &execution_scope,
+            &BTreeSet::new(),
             false,
             &distributed_execution_plan,
             Rc::new(RefCell::new(RuntimeExecutionQuantumCalibrator::default())),
@@ -106,6 +107,8 @@ impl VulkanResidentPlacedComponentBatchRunner {
         >,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
+        retained_signal_keys_by_device:
+            &BTreeMap<String, BTreeSet<VulkanComponentBatchSignalKey>>,
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
@@ -122,6 +125,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             quantum_calibrators,
             lane_capacity,
             execution_mode,
+            retained_signal_keys_by_device,
             capture_causal_state_snapshots,
             distributed_execution_plan,
             distributed_parameter_buffers,
@@ -173,6 +177,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &first.execution_quantum_calibrators,
             lane_capacity,
             VulkanComponentBatchExecutionMode::IndependentStreams,
+            &BTreeMap::new(),
             false,
             &first.model.distributed_execution_plan,
             &first.model.distributed_parameter_buffers,
@@ -192,6 +197,8 @@ impl VulkanResidentPlacedComponentBatchRunner {
         >,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
+        retained_signal_keys_by_device:
+            &BTreeMap<String, BTreeSet<VulkanComponentBatchSignalKey>>,
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
@@ -218,6 +225,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         let phase_execution_plan = execution_scope
             .filter_distributed_plan(distributed_execution_plan)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let no_retained_signal_keys = BTreeSet::new();
         let slices = placed_slices
             .iter()
             .zip(lane_mounteds_by_slice)
@@ -245,6 +253,9 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     lane_capacity,
                     execution_mode,
                     execution_scope,
+                    retained_signal_keys_by_device
+                        .get(&slice.device_id)
+                        .unwrap_or(&no_retained_signal_keys),
                     capture_causal_state_snapshots,
                     &phase_execution_plan,
                     quantum_calibrator,
@@ -875,13 +886,26 @@ fn component_batch_bindings<'a>(
         );
     }
     if let Some(stream_control_buffer) = stream_control_buffer {
+        let binding = dispatch.stream_control_binding.ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "component batch dispatch {}.{} received a stream-control buffer without a compiled binding",
+                dispatch.component_id, dispatch.node_id
+            )))
+        })?;
+        if usize::try_from(binding).ok() != Some(dispatch.descriptors.len()) {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "component batch dispatch {}.{} compiled stream-control binding {} disagrees with runtime descriptor count {}",
+                    dispatch.component_id,
+                    dispatch.node_id,
+                    binding,
+                    dispatch.descriptors.len()
+                )),
+            ));
+        }
         bindings.push(
             VulkanResidentKernelBufferBinding::new(
-                u32::try_from(dispatch.descriptors.len()).map_err(|_| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                        "component batch stream-control binding exceeds u32".to_string(),
-                    ))
-                })?,
+                binding,
                 stream_control_buffer,
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
             )

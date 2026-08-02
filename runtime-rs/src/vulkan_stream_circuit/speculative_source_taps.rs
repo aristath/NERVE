@@ -9,6 +9,13 @@ enum VulkanSpeculativeSourceTapTransfer {
     },
 }
 
+struct VulkanResolvedSpeculativeSourceTap<'a> {
+    device_id: &'a str,
+    scalar_buffer: &'a VulkanResidentBuffer,
+    batch_signal_key: VulkanComponentBatchSignalKey,
+    frame_byte_capacity: usize,
+}
+
 impl VulkanSpeculativeSourceTapTransfer {
     fn new(
         source_device: &VulkanComputeDevice,
@@ -104,10 +111,7 @@ fn resolved_speculative_source_tap_buffer<'a>(
     model: &VulkanResidentInProcessPlacedModelPackage,
     target_slices: &'a [VulkanResidentInProcessPlacedStreamProcessorDevice],
     tap: &StreamCircuitGraphSourceTap,
-) -> Result<
-    (&'a str, &'a VulkanResidentBuffer, usize),
-    VulkanResidentInProcessPlacedRuntimeError,
-> {
+) -> Result<VulkanResolvedSpeculativeSourceTap<'a>, VulkanResidentInProcessPlacedRuntimeError> {
     let instance =
         resolve_speculative_source_tap_instance(&model.runtime_component_instances, tap)?;
     let slice = target_slices
@@ -191,7 +195,7 @@ fn resolved_speculative_source_tap_buffer<'a>(
                         "speculative source tap model output {signal_id:?} is absent"
                     )))
                 })?;
-            (&allocation.buffer, allocation.byte_capacity)
+            (allocation.buffer.as_ref(), allocation.byte_capacity)
         }
         VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => {
             let allocation = slice
@@ -230,5 +234,28 @@ fn resolved_speculative_source_tap_buffer<'a>(
             ))
         }
     };
-    Ok((slice.device_id.as_str(), buffer, byte_len))
+    let (batch_signal_key, batch_frame_byte_capacity) =
+        component_batch_signal_target_with_mounted(&slice.mounted, descriptor)?
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "speculative source tap target {}.{} is not addressable in a component batch",
+                        instance.instance_id, tap.port_id
+                    )),
+                )
+            })?;
+    if batch_frame_byte_capacity != byte_len {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative source tap target {}.{} has scalar frame bytes {byte_len} but batch frame bytes {batch_frame_byte_capacity}",
+                instance.instance_id, tap.port_id
+            )),
+        ));
+    }
+    Ok(VulkanResolvedSpeculativeSourceTap {
+        device_id: slice.device_id.as_str(),
+        scalar_buffer: buffer,
+        batch_signal_key,
+        frame_byte_capacity: byte_len,
+    })
 }

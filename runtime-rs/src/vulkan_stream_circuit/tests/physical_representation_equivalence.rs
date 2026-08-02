@@ -98,6 +98,7 @@ fn run_fixture_layer_00_causal_batch(
         &quantum_calibrators,
         16,
         VulkanComponentBatchExecutionMode::CausalSequence,
+        &BTreeMap::new(),
         true,
         &distributed_execution_plan,
         &distributed_parameter_buffers,

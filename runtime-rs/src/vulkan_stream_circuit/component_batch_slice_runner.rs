@@ -230,6 +230,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
         execution_scope: &VulkanComponentBatchExecutionScope,
+        retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
@@ -254,9 +255,10 @@ impl VulkanResidentComponentBatchSliceRunner {
             .filter(|dispatch| execution_scope.includes(&dispatch.component_id))
             .collect::<Vec<_>>();
         let (signal_buffer_indices, signal_buffer_plan) =
-            component_batch_signal_buffer_plan_for_dispatches(
+            component_batch_signal_buffer_plan_for_dispatches_retaining(
                 &slice.mounted,
                 selected_dispatches.iter().copied(),
+                retained_signal_keys,
             )?;
         let private_distributed_activations =
             distributed_component_batch_private_activation_specs(distributed_execution_plan);
@@ -478,7 +480,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             .filter(|artifact| {
                 execution_mode == VulkanComponentBatchExecutionMode::CausalSequence
                     || artifact.batch_mode != VulkanResidentComponentKernelBatchMode::WeightShared
-                    || (!dispatch.uses_stream_tick
+                    || (dispatch.stream_control_binding.is_none()
                         && !dispatch.descriptors.iter().any(|descriptor| {
                             matches!(
                                 descriptor.usage,
@@ -651,7 +653,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     &signal_buffer_indices,
                     Some(lane_index),
                     Some((stream_control_buffer, size_of::<u32>())),
-                    dispatch.uses_stream_tick.then_some(stream_control_buffer),
+                    dispatch.stream_control_binding.map(|_| stream_control_buffer),
                 )?;
                 let resident = device
                     .create_resident_kernel_dispatch_labeled(
@@ -1435,12 +1437,15 @@ impl VulkanResidentComponentBatchSliceRunner {
             execution_region.commits_state_after = active_steps
                 .iter()
                 .any(|step| step.commits_state);
-            let record_result = if sequence.has_recorded_commands() {
-                Ok(())
-            } else {
-                device.record_resident_kernel_sequence(sequence, &sequence_steps)
-            };
-            record_result
+            // A recorded sequence owns its direct dispatch dimensions and push-
+            // constant bytes. Both can change between causal windows even when
+            // the buffer bindings and lane-capacity class stay the same. Always
+            // pass the current steps through the sequence recorder: it compares
+            // the complete command shape and reuses the command buffer when it
+            // is truly identical, or re-records it before a cached submission
+            // template can replay stale stream controls.
+            device
+                .record_resident_kernel_sequence(sequence, &sequence_steps)
                 .and_then(|_| {
                     submission_batch.enqueue_recorded_sequence_with_execution_region(
                         device,

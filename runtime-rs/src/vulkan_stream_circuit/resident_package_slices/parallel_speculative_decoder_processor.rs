@@ -132,7 +132,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             .filter(|port| port.source_tap.is_some())
         {
             let tap = port.source_tap.as_ref().expect("filtered source tap");
-            let (source_device_id, source, source_byte_len) =
+            let source =
                 resolved_speculative_source_tap_buffer(target_model, target_slices, tap)?;
             let destination = device_slice
                 .mounted
@@ -146,25 +146,25 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                         )),
                     )
                 })?;
-            if destination.byte_capacity != source_byte_len {
+            if destination.byte_capacity != source.frame_byte_capacity {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
                         "parallel speculative decoder {:?} source tap {}.{} has {} bytes, destination {:?} has {}",
                         model.id,
                         tap.component_id,
                         tap.port_id,
-                        source_byte_len,
+                        source.frame_byte_capacity,
                         port.id,
                         destination.byte_capacity
                     )),
                 ));
             }
             source_taps.push(VulkanSpeculativeSourceTapTransfer::new(
-                device_for(source_device_id)?,
+                device_for(source.device_id)?,
                 device,
-                source,
+                source.scalar_buffer,
                 &destination.buffer,
-                source_byte_len,
+                source.frame_byte_capacity,
             )?);
         }
 

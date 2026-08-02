@@ -82,12 +82,17 @@ fn component_batch_signal_buffer_plan(
     ),
     VulkanResidentInProcessPlacedRuntimeError,
 > {
-    component_batch_signal_buffer_plan_for_dispatches(mounted, dispatches.iter())
+    component_batch_signal_buffer_plan_for_dispatches_retaining(
+        mounted,
+        dispatches.iter(),
+        &BTreeSet::new(),
+    )
 }
 
-fn component_batch_signal_buffer_plan_for_dispatches<'a>(
+fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
     mounted: &VulkanMountedPlacedStreamCircuit,
     dispatches: impl IntoIterator<Item = &'a VulkanMountedPlacedBoundDispatch>,
+    retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
 ) -> Result<
     (
         BTreeMap<VulkanComponentBatchSignalKey, usize>,
@@ -152,20 +157,46 @@ fn component_batch_signal_buffer_plan_for_dispatches<'a>(
             }
         }
     }
-    Ok(allocate_component_batch_signal_lifetimes(
-        lifetimes
-            .into_iter()
-            .map(
-                |(key, (frame_byte_capacity, host_visible, first_dispatch, last_dispatch))| {
-                    VulkanComponentBatchSignalLifetime {
-                        key,
-                        frame_byte_capacity,
-                        host_visible,
-                        first_dispatch,
-                        last_dispatch,
-                    }
-                },
-            )
-            .collect(),
-    ))
+    let mut lifetimes = lifetimes
+        .into_iter()
+        .map(
+            |(key, (frame_byte_capacity, host_visible, first_dispatch, last_dispatch))| {
+                VulkanComponentBatchSignalLifetime {
+                    key,
+                    frame_byte_capacity,
+                    host_visible,
+                    first_dispatch,
+                    last_dispatch,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    retain_component_batch_signal_lifetimes(
+        &mut lifetimes,
+        retained_signal_keys,
+        dispatch_count,
+    )
+    .map_err(|error| {
+        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error)
+    })?;
+    Ok(allocate_component_batch_signal_lifetimes(lifetimes))
+}
+
+fn retain_component_batch_signal_lifetimes(
+    lifetimes: &mut [VulkanComponentBatchSignalLifetime],
+    retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
+    retention_boundary: usize,
+) -> Result<(), VulkanError> {
+    for key in retained_signal_keys {
+        let lifetime = lifetimes
+            .iter_mut()
+            .find(|lifetime| &lifetime.key == key)
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "retained component batch signal {key:?} has no physical lifetime"
+                ))
+            })?;
+        lifetime.last_dispatch = lifetime.last_dispatch.max(retention_boundary);
+    }
+    Ok(())
 }

@@ -1120,6 +1120,59 @@ mod tests {
     }
 
     #[test]
+    fn resident_kernel_sequence_rerecords_changed_push_constants() {
+        let Some(spirv_words) = compile_test_shader_words() else {
+            eprintln!("skipping Vulkan sequence test: no GLSL to SPIR-V compiler found");
+            return;
+        };
+        let device = match selected_test_vulkan_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping Vulkan sequence test: {error}");
+                return;
+            }
+        };
+        let buffer = device.create_resident_buffer(4).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &buffer, 4)],
+                1,
+                64,
+                4,
+            )
+            .unwrap();
+        let sequence = device.create_resident_kernel_sequence().unwrap();
+        let first = 17u32.to_le_bytes();
+        let second = 29u32.to_le_bytes();
+
+        reset_vulkan_resident_execution_counters();
+        device
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[VulkanResidentKernelSequenceStep::new(&dispatch, &first)],
+            )
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[VulkanResidentKernelSequenceStep::new(&dispatch, &second)],
+            )
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[VulkanResidentKernelSequenceStep::new(&dispatch, &second)],
+            )
+            .unwrap();
+
+        let counters = vulkan_resident_execution_counters();
+        assert_eq!(counters.resident_sequence_prepare_calls, 3);
+        assert_eq!(counters.resident_sequence_recorded_command_buffers, 2);
+        assert_eq!(counters.resident_sequence_reused_command_buffers, 1);
+    }
+
+    #[test]
     fn separate_resident_sequences_publish_compute_writes_to_the_next_sequence() {
         let Some(spirv_words) = compile_test_shader_words() else {
             eprintln!("skipping Vulkan sequence boundary test: no GLSL to SPIR-V compiler found");
@@ -2070,4 +2123,36 @@ fn physical_device_allowlist_preserves_real_indices_and_excludes_other_devices()
     )
     .unwrap_err();
     assert!(missing.0.contains("are not present"));
+}
+#[test]
+fn memory_type_selection_rejects_implicit_amd_coherent_memory() {
+    let mut properties = vk::PhysicalDeviceMemoryProperties {
+        memory_type_count: 2,
+        memory_heap_count: 1,
+        ..Default::default()
+    };
+    properties.memory_heaps[0].size = 16 * 1024 * 1024;
+    properties.memory_types[0] = vk::MemoryType {
+        property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+            | vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT,
+        heap_index: 0,
+    };
+    properties.memory_types[1] = vk::MemoryType {
+        property_flags: properties.memory_types[0].property_flags
+            | vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+            | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD,
+        heap_index: 0,
+    };
+
+    assert_eq!(
+        select_memory_type_index(
+            &properties,
+            0b11,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ),
+        Some(0)
+    );
 }

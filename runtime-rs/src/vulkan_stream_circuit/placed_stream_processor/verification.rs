@@ -155,7 +155,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         input_token_ids: &[u32],
         start_stream_tick: u64,
-    ) -> Result<Vec<u32>, VulkanResidentInProcessPlacedRuntimeError> {
+    ) -> Result<Vec<VulkanResidentSampledToken>, VulkanResidentInProcessPlacedRuntimeError> {
         if input_token_ids.is_empty() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
         }
@@ -171,7 +171,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         input_token_ids: &[u32],
         start_stream_tick: u64,
-    ) -> Result<Vec<u32>, VulkanResidentInProcessPlacedRuntimeError> {
+    ) -> Result<Vec<VulkanResidentSampledToken>, VulkanResidentInProcessPlacedRuntimeError> {
         self.run_causal_component_block(
             devices,
             input_token_ids,
@@ -225,7 +225,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map(|stream_tick| {
                 self.sampler
                     .completed_run_at(*stream_tick)
-                    .map(|run| run.token_id)
+                    .map(|run| VulkanResidentSampledToken::from(&run))
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -249,6 +249,30 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             })?
             .execution_graph
             .commit_causal_state_prefix(committed_tick_count)
+    }
+
+    fn publish_causal_verification_source_taps(
+        &self,
+        target_tick_count: usize,
+        committed_tick_count: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if committed_tick_count == 0 || committed_tick_count > target_tick_count {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "speculative verification cannot publish {committed_tick_count} committed target frames from a {target_tick_count}-frame window"
+                )),
+            ));
+        }
+        let verification_capacity = self.causal_block_lane_capacity(target_tick_count)?;
+        self.temporal_block_executions
+            .borrow()
+            .get(&(verification_capacity, true))
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative causal target window was not initialized".to_string(),
+                ))
+            })?
+            .publish_speculative_source_tap_frame(committed_tick_count - 1)
     }
 
     fn catch_up_speculative_decoder_after_verification(
