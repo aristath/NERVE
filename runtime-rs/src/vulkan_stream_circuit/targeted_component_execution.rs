@@ -114,6 +114,9 @@ struct VulkanTargetedDecodeExecution {
     source_dispatches: Vec<VulkanMountedPlacedBoundDispatch>,
     steps: Vec<VulkanTargetedDecodeStep>,
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
+    demand_dispatches: Vec<VulkanMountedPlacedResidentComponentDispatch>,
+    demand_residency: Option<VulkanDemandResidencySegment>,
+    control: VulkanMountedPlacedStreamControl,
 }
 
 struct VulkanTargetedDecodeStep {
@@ -218,9 +221,53 @@ fn targeted_signal_accepts_fixture_mutation(
 }
 
 impl VulkanResidentTargetedExecutionSession {
+    pub fn from_targeted_device_slice(
+        device: &VulkanComputeDevice,
+        targeted: VulkanResidentTargetedModelPackageDeviceSlice,
+        component_id: impl AsRef<str>,
+        node_id: impl AsRef<str>,
+        phase: VulkanTargetedComponentExecutionPhase,
+        scope: VulkanTargetedComponentExecutionScope,
+        capture_output_values: bool,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::from_device_slice_with_demand_context(
+            device,
+            targeted.slice,
+            targeted.demand_context,
+            component_id,
+            node_id,
+            phase,
+            scope,
+            capture_output_values,
+        )
+    }
+
     pub fn from_device_slice(
         device: &VulkanComputeDevice,
         slice: VulkanResidentModelPackageDeviceSlice,
+        component_id: impl AsRef<str>,
+        node_id: impl AsRef<str>,
+        phase: VulkanTargetedComponentExecutionPhase,
+        scope: VulkanTargetedComponentExecutionScope,
+        capture_output_values: bool,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::from_device_slice_with_demand_context(
+            device,
+            slice,
+            None,
+            component_id,
+            node_id,
+            phase,
+            scope,
+            capture_output_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_device_slice_with_demand_context(
+        device: &VulkanComputeDevice,
+        slice: VulkanResidentModelPackageDeviceSlice,
+        demand_context: Option<VulkanDemandResidencyExecutionContext>,
         component_id: impl AsRef<str>,
         node_id: impl AsRef<str>,
         phase: VulkanTargetedComponentExecutionPhase,
@@ -247,6 +294,7 @@ impl VulkanResidentTargetedExecutionSession {
         VulkanResidentTargetedComponentSession::from_device_slice(
             device,
             slice,
+            demand_context,
             component_id,
             node_id,
             phase,
@@ -762,9 +810,10 @@ impl VulkanResidentTargetedOutputTransducerSession {
 }
 
 impl VulkanResidentTargetedComponentSession {
-    pub fn from_device_slice(
+    fn from_device_slice(
         device: &VulkanComputeDevice,
         slice: VulkanResidentModelPackageDeviceSlice,
+        demand_context: Option<VulkanDemandResidencyExecutionContext>,
         component_id: impl AsRef<str>,
         node_id: impl AsRef<str>,
         phase: VulkanTargetedComponentExecutionPhase,
@@ -846,8 +895,11 @@ impl VulkanResidentTargetedComponentSession {
                     Box::new(VulkanTargetedDecodeExecution::new(
                         device,
                         &mounted,
+                        &mounted_bound,
                         &execution_dispatches,
                         slice.loaded_manifest(),
+                        slice.physical_residency_schedule(),
+                        demand_context,
                         dynamic_state_capacity_activations,
                     )?),
                 )
@@ -1174,8 +1226,11 @@ impl VulkanTargetedDecodeExecution {
     fn new(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
+        mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         dispatches: &[VulkanMountedPlacedBoundDispatch],
         loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        physical_residency_schedule: &VulkanPhysicalResidencySchedule,
+        demand_context: Option<VulkanDemandResidencyExecutionContext>,
         dynamic_state_capacity_activations: u32,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         if dispatches.is_empty() {
@@ -1197,7 +1252,7 @@ impl VulkanTargetedDecodeExecution {
             .map_err(|error| targeted_component_error_value(format!(
                 "failed to initialize targeted stream control: {error}"
             )))?;
-        let steps = dispatches
+        let resident_dispatches = dispatches
             .iter()
             .map(|dispatch| {
                 let resident = mounted
@@ -1210,24 +1265,60 @@ impl VulkanTargetedDecodeExecution {
                         "failed to create targeted decode dispatch {}.{}: {error}",
                         dispatch.component_id, dispatch.node_id
                     )))?;
-                let push_constants = stream_control_push_constant_bytes(
-                    &dispatch.push_constants,
-                    control,
-                )
-                .map_err(|error| targeted_component_error_value(format!(
-                    "failed to bind targeted decode stream control for {}.{}: {error}",
-                    dispatch.component_id, dispatch.node_id
-                )))?;
-                Ok(VulkanTargetedDecodeStep {
-                    dispatch: resident,
-                    push_constants,
+                Ok(VulkanMountedPlacedResidentComponentDispatch {
+                    dispatch_index: dispatch.dispatch_index,
+                    kernel_id: dispatch.kernel_id.clone(),
+                    component_id: dispatch.component_id.clone(),
+                    node_id: dispatch.node_id.clone(),
+                    op: dispatch.op.clone(),
+                    reusable_family_id: dispatch.reusable_family_id.clone(),
+                    push_constants: dispatch.push_constants.clone(),
+                    resident_dispatch: resident,
                 })
             })
             .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
+        let demand_residency = match demand_context {
+            Some(context) => VulkanDemandResidencySegment::from_segment(
+                mounted,
+                mounted_bound_plan,
+                physical_residency_schedule,
+                &resident_dispatches,
+                context,
+            )
+            .map_err(|error| targeted_component_error_value(format!(
+                "failed to mount targeted demand-resident prefix: {error}"
+            )))?,
+            None => None,
+        };
+        let (steps, demand_dispatches) = if demand_residency.is_none() {
+            let steps = resident_dispatches
+                .into_iter()
+                .map(|dispatch| {
+                    let push_constants = stream_control_push_constant_bytes(
+                        &dispatch.push_constants,
+                        control,
+                    )
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "failed to bind targeted decode stream control for {}.{}: {error}",
+                        dispatch.component_id, dispatch.node_id
+                    )))?;
+                    Ok(VulkanTargetedDecodeStep {
+                        dispatch: dispatch.resident_dispatch,
+                        push_constants,
+                    })
+                })
+                .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
+            (steps, Vec::new())
+        } else {
+            (Vec::new(), resident_dispatches)
+        };
         Ok(Self {
             source_dispatches: dispatches.to_vec(),
             steps,
             sequence_catalog: RefCell::new(BTreeMap::new()),
+            demand_dispatches,
+            demand_residency,
+            control,
         })
     }
 
@@ -1244,20 +1335,43 @@ impl VulkanTargetedDecodeExecution {
         let mut queue_wait_ns = 0u64;
         let mut start_unit = 0usize;
         for (index, repetitions) in quanta.into_iter().enumerate() {
-            self.ensure_sequence(device, repetitions)?;
-            let catalog = self.sequence_catalog.borrow();
-            let sequence = catalog
-                .get(&repetitions)
-                .expect("targeted decode sequence was inserted");
             let wait_started = Instant::now();
-            let duration_ns = device
-                .run_timestamped_recorded_resident_kernel_sequence_for(
-                    sequence,
-                    maximum_quantum_wait,
-                )
-                .map_err(|error| targeted_component_error_value(format!(
-                    "targeted decode quantum failed: {error}"
-                )))?;
+            let duration_ns = if let Some(demand) = &self.demand_residency {
+                let started = Instant::now();
+                for _ in 0..repetitions {
+                    demand
+                        .run(
+                            device,
+                            &self.demand_dispatches,
+                            self.control,
+                            &[],
+                            &[],
+                            0,
+                            &[],
+                            &[],
+                            &[],
+                            &[],
+                        )
+                        .map_err(|error| targeted_component_error_value(format!(
+                            "targeted demand-resident decode quantum failed: {error}"
+                        )))?;
+                }
+                elapsed_nanoseconds(started)
+            } else {
+                self.ensure_sequence(device, repetitions)?;
+                let catalog = self.sequence_catalog.borrow();
+                let sequence = catalog
+                    .get(&repetitions)
+                    .expect("targeted decode sequence was inserted");
+                device
+                    .run_timestamped_recorded_resident_kernel_sequence_for(
+                        sequence,
+                        maximum_quantum_wait,
+                    )
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "targeted decode quantum failed: {error}"
+                    )))?
+            };
             let wait_ns = elapsed_nanoseconds(wait_started);
             synchronization_wait_ns =
                 synchronization_wait_ns.saturating_add(wait_ns);
@@ -1274,11 +1388,16 @@ impl VulkanTargetedDecodeExecution {
             start_unit = end_unit;
         }
         let submission_count = windows.len();
+        let dispatches_per_unit = if self.demand_residency.is_some() {
+            self.demand_dispatches.len()
+        } else {
+            self.steps.len()
+        };
         Ok(VulkanTargetedComponentRunCounters {
             execution_ns: execution_ns.max(1),
             windows,
             physical_dispatch_count: useful_units
-                .checked_mul(self.steps.len())
+                .checked_mul(dispatches_per_unit)
                 .ok_or_else(|| targeted_component_error_value(
                     "targeted decode physical dispatch count overflowed",
                 ))?,

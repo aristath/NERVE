@@ -238,6 +238,40 @@ fn targeted_fixture_only_mutates_true_signal_buffers() {
 }
 
 #[test]
+fn targeted_demand_mount_owns_only_its_component_selectors() {
+    let selector = |id: &str, scope: &str, component: &str| {
+        CompiledResourceSelector {
+            id: id.to_string(),
+            execution_scope: scope.to_string(),
+            component_id: component.to_string(),
+            node_id: "route".to_string(),
+            domain_id: "experts".to_string(),
+            resource_count: 256,
+            selection_signal: "selected_experts".to_string(),
+            encoding: CompiledResourceSelectionEncoding {
+                element_type: CompiledResourceSelectionElementType::U32,
+                selection_count_per_activation: 6,
+                index_shift: 0,
+                index_mask: 0xffff,
+            },
+            mapping: CompiledResourceSelectorMapping::GroupTable {
+                atomic_group_ids: Vec::new(),
+            },
+        }
+    };
+    let selectors = vec![
+        selector("layer-0", "target", "layer_00"),
+        selector("layer-1", "target", "layer_01"),
+        selector("draft-layer-0", "draft:0", "layer_00"),
+    ];
+
+    assert_eq!(
+        targeted_demand_selector_ids(&selectors, "target", "layer_00"),
+        BTreeSet::from(["layer-0".to_string()]),
+    );
+}
+
+#[test]
 fn targeted_output_identity_remains_an_artifact_digest() {
     let digest = targeted_finalized_artifact_digest(&[0xAB; 32]);
 

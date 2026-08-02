@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use nerve_runtime::{
     RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanResidentBufferPool, VulkanResidentModelPackageDeviceSlice,
-    VulkanResidentModelPackageManifest, VulkanResidentTargetedExecutionSession,
+    VulkanResidentBufferPool, VulkanResidentModelPackageManifest,
+    VulkanResidentTargetedExecutionSession,
+    VulkanResidentTargetedModelPackageDeviceSlice,
     VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
 };
 use serde::Deserialize;
@@ -176,16 +177,17 @@ fn execute_session(
         .into());
     }
     let package_id = runtime_model.package.package_id.clone();
-    let slice =
-        VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device_with_parameter_pool(
+    let slice = VulkanResidentTargetedModelPackageDeviceSlice::
+        from_runtime_model_for_device_with_parameter_pool(
             &device,
             &package_root,
             runtime_model,
+            &mount.component_id,
             &mount.logical_device_id,
             Some(mount.dynamic_state_capacity_activations),
             &host.parameter_pool,
         )?;
-    let session = VulkanResidentTargetedExecutionSession::from_device_slice(
+    let session = VulkanResidentTargetedExecutionSession::from_targeted_device_slice(
         &device,
         slice,
         &mount.component_id,

@@ -137,6 +137,7 @@ include!("vulkan_stream_circuit/token_stream.rs");
 include!("vulkan_stream_circuit/token_runtime.rs");
 include!("vulkan_stream_circuit/token_engine.rs");
 include!("vulkan_stream_circuit/resident_package_slices.rs");
+include!("vulkan_stream_circuit/targeted_component_mount.rs");
 include!("vulkan_stream_circuit/targeted_component_execution.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
