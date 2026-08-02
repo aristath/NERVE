@@ -1054,14 +1054,7 @@ def validate_compiled_generation_contract(
                 "repetition_penalty",
             )
         )
-        or not (
-            sampler_spec.get("top_k") == sampler_attrs.get("top_k")
-            or (
-                sampler_spec.get("method") == "temperature_top_p"
-                and sampler_spec.get("top_k") == 0
-                and sampler_attrs.get("top_k") is None
-            )
-        )
+        or sampler_spec.get("top_k") != sampler_attrs.get("top_k")
         or not isinstance(sampler_package.get("kernels"), list)
         or not sampler_package["kernels"]
     ):

@@ -272,7 +272,11 @@ def build_system_circuits(model: Json) -> Json:
         sampler_min_p = 0.0
     else:
         sampler_temperature = sampling["temperature"]
-        sampler_top_k = sampling.get("top_k")
+        # The executable sampler ABI uses zero as the canonical value for a
+        # disabled top-k filter.  Keep the circuit IR identical to that ABI so
+        # independently validated artifacts cannot disagree about whether the
+        # filter is present.
+        sampler_top_k = int(sampling.get("top_k", 0))
         sampler_top_p = sampling["top_p"]
         sampler_min_p = sampling["min_p"]
     sampler_circuit = _system_circuit(

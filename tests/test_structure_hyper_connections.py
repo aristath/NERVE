@@ -147,6 +147,24 @@ def test_rejects_incomplete_hyper_connection_tensor_set() -> None:
         discover_model_structure(Path("synthetic"), config, tensors)
 
 
+def test_system_circuit_canonicalizes_disabled_top_k_to_runtime_zero() -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    graph = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    graph["sampling"] = {
+        "method": "temperature_top_p",
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
+    }
+
+    sampler = build_system_circuits(graph)["sampler"]
+
+    assert sampler["nodes"][0]["attrs"]["top_k"] == 0
+
+
 def test_compiles_stream_boundary_adapters_as_normal_processors(
     tmp_path: Path,
 ) -> None:
