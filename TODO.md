@@ -33,7 +33,15 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    otherwise evaluate only structurally valid candidates from INT4 2:4, dense
    INT4, FP8 2:4, dense FP8/INT8, and FP16. Promote a candidate only after
    hardware measurement and behavioral equivalence checks. Keep representation
-   and placement as runtime choices, never model-family switches.
+   and placement as runtime choices, never model-family switches. Production
+   compiler/runtime control flow currently contains no DeepSeek, Qwen, Llama,
+   Gemma, LFM, or other model-family dispatch; source spelling is normalized at
+   the compiler boundary and the execution ABI is structural. Vulkan capability
+   discovery and calibration now include cooperative SINT8 matrix shapes. On the
+   healthy RDNA4 device, the focused 16x16x16 calibration measured 16.3 us for
+   SINT8 versus 22.6 us for F16 over the same 8,192-tile workload (about 1.39x
+   faster). Add SINT8-backed physical implementations only for compatible
+   structural scopes and retain the normal benchmark/equivalence promotion gate.
 
 3. Complete a real DeepSeek multi-turn quality gate with official thinking and
    sampling defaults, a 65,536-or-larger output allowance, and agentic context.
