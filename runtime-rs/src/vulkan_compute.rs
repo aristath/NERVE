@@ -4,6 +4,7 @@ use crate::execution_schedule::{
 };
 
 include!("vulkan_compute/features.rs");
+include!("vulkan_compute/device_fault.rs");
 include!("vulkan_compute/device_types.rs");
 include!("vulkan_compute/resident_buffers.rs");
 include!("vulkan_compute/resident_buffer_pool.rs");

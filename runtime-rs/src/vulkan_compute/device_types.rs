@@ -29,6 +29,8 @@ pub struct VulkanComputeDevice {
     memory_budget_supported: bool,
     timestamp_period_ns: f32,
     conditional_rendering: Option<ash::ext::conditional_rendering::Device>,
+    device_fault: Option<ash::ext::device_fault::Device>,
+    device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     generic_storage_pipelines: RefCell<HashMap<VulkanGenericPipelineKey, VulkanStoragePipeline>>,
     immediate_kernel_sequence: RefCell<Option<VulkanResidentKernelSequence>>,
 }
@@ -256,6 +258,7 @@ pub struct VulkanResidentBuffer {
     memory_access: VulkanResidentMemoryAccess,
     byte_capacity: vk::DeviceSize,
     device_address: Option<vk::DeviceAddress>,
+    device_address_registry: Option<Arc<Mutex<VulkanDeviceAddressRegistry>>>,
     persistent_mapping: Option<usize>,
     persistent_mapping_requires_unmap: bool,
     _shared_host_allocation: Option<Arc<VulkanSharedHostAllocation>>,
@@ -444,6 +447,8 @@ struct VulkanResidentQueueSubmitter {
     device: ash::Device,
     device_handle: vk::Device,
     queue: vk::Queue,
+    device_fault: Option<ash::ext::device_fault::Device>,
+    device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
 }
 
 #[derive(Clone, Copy)]
@@ -775,6 +780,10 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                     device: group.device.device.clone(),
                     device_handle: group.device.device.handle(),
                     queue: group.device.queue,
+                    device_fault: group.device.device_fault.clone(),
+                    device_address_registry: Arc::clone(
+                        &group.device.device_address_registry,
+                    ),
                 },
                 submissions: group.submissions,
                 quantum_ranges: group.quantum_ranges,

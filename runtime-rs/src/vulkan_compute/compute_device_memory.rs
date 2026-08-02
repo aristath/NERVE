@@ -209,6 +209,7 @@ impl VulkanComputeDevice {
                 memory_access,
                 byte_capacity: allocation.byte_capacity as vk::DeviceSize,
                 device_address: None,
+                device_address_registry: None,
                 persistent_mapping: Some(allocation.address),
                 persistent_mapping_requires_unmap: false,
                 _shared_host_allocation: Some(allocation),
@@ -604,6 +605,7 @@ impl VulkanComputeDevice {
                     memory_access,
                     byte_capacity: byte_capacity as vk::DeviceSize,
                     device_address: None,
+                    device_address_registry: None,
                     persistent_mapping: None,
                     persistent_mapping_requires_unmap: false,
                     _shared_host_allocation: None,
@@ -882,6 +884,7 @@ impl VulkanComputeDevice {
             memory_access,
             byte_capacity,
             device_address: None,
+            device_address_registry: None,
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
@@ -919,6 +922,7 @@ impl VulkanComputeDevice {
             memory_access,
             byte_capacity,
             device_address: None,
+            device_address_registry: None,
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
@@ -961,18 +965,19 @@ impl VulkanComputeDevice {
                 "Vulkan returned a null device address for an addressable buffer".to_string(),
             ));
         }
-        Ok(VulkanResidentBuffer {
+        self.track_addressable_buffer(VulkanResidentBuffer {
             device: self.device.clone(),
             buffer,
             memory: Some(memory),
             memory_access,
             byte_capacity,
             device_address: Some(device_address),
+            device_address_registry: None,
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
-        })
+        }, "device-local addressable buffer")
     }
 
     pub fn create_host_visible_addressable_resident_buffer(
@@ -1011,18 +1016,19 @@ impl VulkanComputeDevice {
                     .to_string(),
             ));
         }
-        Ok(VulkanResidentBuffer {
+        self.track_addressable_buffer(VulkanResidentBuffer {
             device: self.device.clone(),
             buffer,
             memory: Some(memory),
             memory_access,
             byte_capacity,
             device_address: Some(device_address),
+            device_address_registry: None,
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
-        })
+        }, "host-visible addressable buffer")
     }
 
     pub fn create_host_visible_resident_buffer(
@@ -1046,6 +1052,7 @@ impl VulkanComputeDevice {
             memory_access,
             byte_capacity,
             device_address: None,
+            device_address_registry: None,
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
@@ -1074,6 +1081,7 @@ impl VulkanComputeDevice {
             memory_access,
             byte_capacity,
             device_address: None,
+            device_address_registry: None,
             persistent_mapping: None,
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,

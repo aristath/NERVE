@@ -139,6 +139,25 @@ fn physical_device_supports_conditional_rendering(
     Ok(conditional.conditional_rendering == vk::TRUE)
 }
 
+fn physical_device_supports_device_fault(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<bool, VulkanError> {
+    if !physical_device_supports_extension(
+        instance,
+        physical_device,
+        ash::ext::device_fault::NAME,
+    )? {
+        return Ok(false);
+    }
+    let mut fault = vk::PhysicalDeviceFaultFeaturesEXT::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut fault);
+    unsafe {
+        instance.get_physical_device_features2(physical_device, &mut features);
+    }
+    Ok(fault.device_fault == vk::TRUE)
+}
+
 fn physical_device_supports_device_coherent_memory(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,

@@ -295,6 +295,8 @@ impl VulkanComputeDeviceCatalog {
                     instance,
                     physical_device,
                 )?;
+            let device_fault_supported =
+                physical_device_supports_device_fault(instance, physical_device)?;
             let enabled_shader_features =
                 physical_device_supported_shader_features(instance, physical_device)?;
             let shader_float8_support = VulkanShaderFloat8Support {
@@ -472,6 +474,9 @@ impl VulkanComputeDeviceCatalog {
             let mut conditional_rendering_features =
                 vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default()
                     .conditional_rendering(conditional_rendering_supported);
+            let mut device_fault_features =
+                vk::PhysicalDeviceFaultFeaturesEXT::default()
+                    .device_fault(device_fault_supported);
             let mut device_coherent_memory_features =
                 vk::PhysicalDeviceCoherentMemoryFeaturesAMD::default()
                     .device_coherent_memory(device_coherent_memory_supported);
@@ -586,6 +591,13 @@ impl VulkanComputeDeviceCatalog {
                 device_info =
                     device_info.push_next(&mut conditional_rendering_features);
             }
+            if device_fault_supported {
+                extension_names.push(ash::ext::device_fault::NAME.as_ptr());
+                enabled_device_extensions.insert(
+                    ash::ext::device_fault::NAME.to_string_lossy().into_owned(),
+                );
+                device_info = device_info.push_next(&mut device_fault_features);
+            }
             if device_coherent_memory_supported {
                 extension_names
                     .push(ash::amd::device_coherent_memory::NAME.as_ptr());
@@ -630,6 +642,9 @@ impl VulkanComputeDeviceCatalog {
                 })?;
             let conditional_rendering = conditional_rendering_supported.then(|| {
                 ash::ext::conditional_rendering::Device::new(instance, &device)
+            });
+            let device_fault = device_fault_supported.then(|| {
+                ash::ext::device_fault::Device::new(instance, &device)
             });
             let queue = device.get_device_queue(queue_family_index, 0);
             let transfer_queue_is_distinct = queue_priorities.len() >= 2;
@@ -680,6 +695,10 @@ impl VulkanComputeDeviceCatalog {
                 memory_budget_supported,
                 timestamp_period_ns: limits.timestamp_period,
                 conditional_rendering,
+                device_fault,
+                device_address_registry: Arc::new(Mutex::new(
+                    VulkanDeviceAddressRegistry::default(),
+                )),
                 generic_storage_pipelines: RefCell::new(HashMap::new()),
                 immediate_kernel_sequence: RefCell::new(None),
             })

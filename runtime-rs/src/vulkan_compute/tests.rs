@@ -2156,3 +2156,69 @@ fn memory_type_selection_rejects_implicit_amd_coherent_memory() {
         Some(0)
     );
 }
+
+#[test]
+fn device_fault_address_registry_rejects_overlap_and_resolves_boundaries() {
+    let mut registry = VulkanDeviceAddressRegistry::default();
+    registry
+        .register(7, 0x1_0000, 0x2000, "first allocation")
+        .unwrap();
+    registry
+        .register(8, 0x2_0000, 0x1000, "second allocation")
+        .unwrap();
+
+    let first = registry.resolve(0x1_1abc).unwrap();
+    assert_eq!(first.label, "first allocation");
+    assert_eq!(first.byte_offset, 0x1abc);
+    assert_eq!(first.byte_capacity, 0x2000);
+    assert!(registry.resolve(0x1_2000).is_none());
+
+    let overlap = registry
+        .register(9, 0x1_1000, 0x2000, "overlapping allocation")
+        .unwrap_err();
+    assert!(overlap.0.contains("overlaps"));
+
+    registry.unregister(7, 0x1_0000).unwrap();
+    assert!(registry.resolve(0x1_1abc).is_none());
+    assert_eq!(registry.resolve(0x2_0000).unwrap().label, "second allocation");
+}
+
+#[test]
+fn live_addressable_buffers_are_registered_for_device_fault_attribution() {
+    let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+        eprintln!("skipping device-fault attribution test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(
+        raw_device_index
+            .parse()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer"),
+    )
+    .expect("explicit idle AMD Vulkan device must open");
+    assert_eq!(
+        device.supports_device_fault_reporting(),
+        device.has_enabled_device_extension("VK_EXT_device_fault")
+    );
+
+    let buffer = device.create_addressable_resident_buffer(4096).unwrap();
+    let address = buffer.device_address().unwrap();
+    let resolved = device
+        .device_address_registry
+        .lock()
+        .unwrap()
+        .resolve(address + 2048)
+        .unwrap();
+    assert_eq!(resolved.byte_offset, 2048);
+    assert_eq!(resolved.byte_capacity, 4096);
+    assert!(resolved.label.contains("device-local addressable buffer"));
+
+    drop(buffer);
+    assert!(
+        device
+            .device_address_registry
+            .lock()
+            .unwrap()
+            .resolve(address)
+            .is_none()
+    );
+}

@@ -302,6 +302,12 @@ impl Drop for VulkanTimelineSemaphore {
 
 impl Drop for VulkanResidentBuffer {
     fn drop(&mut self) {
+        if let (Some(address), Some(registry)) =
+            (self.device_address, &self.device_address_registry)
+            && let Ok(mut registry) = registry.lock()
+        {
+            let _ = registry.unregister(self.buffer.as_raw(), address);
+        }
         unsafe {
             if self.persistent_mapping_requires_unmap {
                 if let Some(memory) = self.memory {

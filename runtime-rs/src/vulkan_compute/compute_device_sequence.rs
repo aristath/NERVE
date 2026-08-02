@@ -58,9 +58,10 @@ impl VulkanComputeDevice {
                     "resident kernel sequence exceeded bounded wait of {} ns",
                     timeout_ns
                 ))),
-                Err(error) => Err(VulkanError(format!(
-                    "failed waiting for resident kernel sequence: {error:?}"
-                ))),
+                Err(error) => Err(self.vulkan_operation_error(
+                    "failed waiting for resident kernel sequence",
+                    error,
+                )),
             }
         }
     }
@@ -454,9 +455,10 @@ impl VulkanResidentQueueSubmitter {
             self.device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to wait for resident execution quantum: {error:?}"
-                    ))
+                    self.vulkan_operation_error(
+                        "failed to wait for resident execution quantum",
+                        error,
+                    )
                 })?;
         }
         RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
@@ -473,9 +475,10 @@ impl VulkanComputeDevice {
             self.device
                 .wait_for_fences(&[sequence.completion_fence], true, u64::MAX)
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed waiting for resident kernel sequence: {error:?}"
-                    ))
+                    self.vulkan_operation_error(
+                        "failed waiting for resident kernel sequence",
+                        error,
+                    )
                 })?;
             RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
         }
