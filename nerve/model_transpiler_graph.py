@@ -320,7 +320,7 @@ def make_draft_execution_graph_descriptor(
         for name, tensor in draft.tensors.items()
         if name not in {"output_norm", "output_projection"}
     }
-    return make_standard_mtp_draft_descriptor(structure, draft, adapter_params)
+    return make_autoregressive_draft_descriptor(structure, draft, adapter_params)
 
 
 def make_parallel_markov_draft_descriptor(
@@ -445,7 +445,7 @@ def make_parallel_markov_draft_descriptor(
     }
 
 
-def make_standard_mtp_draft_descriptor(
+def make_autoregressive_draft_descriptor(
     structure: ModelStructure,
     draft: DraftExecutionGraphStructure,
     adapter_params: Json,

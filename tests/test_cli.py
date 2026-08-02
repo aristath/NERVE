@@ -242,7 +242,7 @@ class RuntimeCliCommandTest(unittest.TestCase):
             build_runtime_command(args, package),
         )
 
-    def test_build_runtime_command_forwards_explicit_mtp_window(self) -> None:
+    def test_build_runtime_command_forwards_explicit_speculative_window(self) -> None:
         package = Path("compiled_models/model_x/vulkan_resident_package.json")
         args = runtime_args(prompt="Hello", speculative_draft_tokens=5)
 

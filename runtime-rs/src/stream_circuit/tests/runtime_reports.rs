@@ -874,7 +874,7 @@
                             execution_scope: "target".to_string(),
                             ..Default::default()
                         },
-                    mtp: Vec::new(),
+                    drafts: Vec::new(),
                     stores: Vec::new(),
                 },
             shutdown:

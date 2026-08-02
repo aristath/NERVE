@@ -26,7 +26,8 @@ mod tests {
         parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
         resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
-        runtime_physical_device_bindings_in, validate_explicit_logical_device_bindings,
+        runtime_physical_device_bindings_in, usage,
+        validate_explicit_logical_device_bindings,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -107,6 +108,21 @@ mod tests {
             assert_eq!(
                 error,
                 "--speculative-confidence-threshold must be finite and in [0, 1]"
+            );
+        }
+    }
+
+    #[test]
+    fn speculative_controls_are_described_by_contract_not_model_family() {
+        let usage = usage();
+        let normalized = usage.to_ascii_lowercase();
+
+        assert!(normalized.contains("compiled speculative-decoder tokens"));
+        assert!(normalized.contains("compiled confidence"));
+        for family in ["DeepSeek", "DSpark", "Qwen", "MTP"] {
+            assert!(
+                !usage.contains(family),
+                "runtime usage leaked model-family term {family:?}"
             );
         }
     }

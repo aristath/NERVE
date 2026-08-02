@@ -119,7 +119,7 @@ pub struct VulkanCompiledResourceResidencyReport {
     pub policy: ResourceResidencyPolicy,
     pub totals: VulkanCompiledResourceResidencyTotalsReport,
     pub target: VulkanCompiledResourceScopeCoverageReport,
-    pub mtp: Vec<VulkanCompiledResourceScopeCoverageReport>,
+    pub drafts: Vec<VulkanCompiledResourceScopeCoverageReport>,
     pub stores: Vec<VulkanCompiledResourceStoreReport>,
 }
 
@@ -408,14 +408,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 "compiled resource report has unsupported execution scope {scope:?}"
             )));
         }
-        let mtp = scopes.into_values().collect();
+        let drafts = scopes.into_values().collect();
         Ok(VulkanCompiledResourceResidencyReport {
             schema:
                 VULKAN_COMPILED_RESOURCE_RESIDENCY_REPORT_SCHEMA.to_string(),
             policy: self.resource_residency_policy,
             totals,
             target,
-            mtp,
+            drafts,
             stores,
         })
     }

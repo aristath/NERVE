@@ -227,8 +227,9 @@ def main() -> None:
         "--speculative-draft-tokens",
         type=int,
         help=(
-            "MTP draft tokens per verification cycle for runtime execution "
-            "or optimizer product qualification; 0 disables MTP (default: 0)"
+            "compiled speculative-decoder tokens per verification cycle for runtime "
+            "execution or optimizer product qualification; 0 disables speculative "
+            "decoding (default: 0)"
         ),
     )
     parser.add_argument(

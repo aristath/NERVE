@@ -567,7 +567,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if !self.speculative_decoders.is_empty() {
             let target_output = runner.speculative_target_output.as_ref().ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "temporal MTP target normalization is not mounted".to_string(),
+                    "temporal speculative target normalization is not mounted".to_string(),
                 ))
             })?;
             target_output

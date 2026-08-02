@@ -358,9 +358,9 @@ fn print_runtime_resource_residency(
         report.target.gpu_resident_hit_count,
         report.target.gpu_miss_count,
     );
-    for scope in &report.mtp {
+    for scope in &report.drafts {
         println!(
-            "  mtp scope={} components={} units={}/{} gpu_accesses={}/{}/{}",
+            "  draft scope={} components={} units={}/{} gpu_accesses={}/{}/{}",
             scope.execution_scope,
             scope.component_count,
             scope.resident_unit_count,

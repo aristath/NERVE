@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,78 @@ def test_discovers_parallel_backbone_markov_draft_from_tensor_contract(
         "markov_embedding": {"tensor": "mtp.2.markov_head.markov_w1.weight"},
         "markov_projection": {"tensor": "mtp.2.markov_head.markov_w2.weight"},
         "confidence_projection": {"tensor": "mtp.2.confidence_head.proj.weight"},
+    }
+
+
+def test_parallel_markov_discovery_depends_on_structure_not_model_identity() -> None:
+    config, tensors = _source()
+    config["architectures"] = ["KnownParallelDraftDecoder"]
+    known = discover_model_structure(Path("synthetic"), config, tensors)
+
+    future_config = dict(config)
+    future_config["model_type"] = "previously_unseen_parallel_draft_decoder"
+    future_config["architectures"] = ["PreviouslyUnseenParallelDraftDecoder"]
+    future = discover_model_structure(Path("synthetic"), future_config, tensors)
+
+    assert future.model_type == "previously_unseen_parallel_draft_decoder"
+    assert future.architectures == ("PreviouslyUnseenParallelDraftDecoder",)
+    assert replace(
+        future,
+        model_type=known.model_type,
+        architectures=known.architectures,
+    ) == known
+    assert make_model_graph(future, Path("future"), {"source": {}})["graph"][
+        "draft_execution_graphs"
+    ] == make_model_graph(known, Path("known"), {"source": {}})["graph"][
+        "draft_execution_graphs"
+    ]
+
+
+def test_parallel_markov_discovery_reuses_contract_for_unseen_config_and_tensor_roots() -> None:
+    config, tensors = _source()
+    future_config = {
+        (
+            key.replace("dspark_", "future_accelerator_")
+            if key.startswith("dspark_")
+            else key
+        ): value
+        for key, value in config.items()
+    }
+    future_config["model_type"] = "previously_unseen_parallel_draft_decoder"
+    future_tensors = {
+        (
+            name.replace("mtp.", "future_auxiliary.", 1)
+            if name.startswith("mtp.")
+            else name
+        ): value
+        for name, value in tensors.items()
+    }
+
+    future = discover_model_structure(
+        Path("synthetic"), future_config, future_tensors
+    )
+    [draft] = future.draft_execution_graphs
+    [graph] = make_model_graph(future, Path("future"), {"source": {}})["graph"][
+        "draft_execution_graphs"
+    ]
+
+    assert draft.prefix == "future_auxiliary"
+    assert draft.draft_type == "parallel_backbone_markov"
+    assert graph["proposal_contract"] == {
+        "schedule": "parallel_backbone_then_sequential_markov",
+        "configured_block_size": 5,
+        "minimum_draft_tokens": 5,
+        "default_draft_tokens": 5,
+        "noise_token_id": 31,
+        "sampling": "greedy",
+        "confidence_prefix": "first_sigmoid_below_runtime_threshold",
+        "verification": "lossless_target_longest_matching_prefix",
+    }
+    assert graph["input_adapter"]["params"]["target_projection"] == {
+        "tensor": "future_auxiliary.0.main_proj.weight"
+    }
+    assert graph["output_transducer"]["params"]["markov_projection"] == {
+        "tensor": "future_auxiliary.2.markov_head.markov_w2.weight"
     }
 
 
