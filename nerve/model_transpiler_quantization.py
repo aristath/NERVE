@@ -1,4 +1,7 @@
 from nerve.model_transpiler_types import *
+from nerve.model_transpiler_sparse_experts import (
+    parse_independent_expert_projection_weight,
+)
 from nerve.quantized_layouts import (
     AUTO_GPTQ_FIXED_ZERO_8,
     AUTO_GPTQ_INPUT_MAJOR_PACKING,
@@ -6,7 +9,6 @@ from nerve.quantized_layouts import (
 )
 
 
-MXFP4_EXPERT_WEIGHT_PATTERN = re.compile(r"^.+\.ffn\.experts\.\d+\.w[123]\.weight$")
 MXFP4_FORMAT = "mxfp4_e2m1"
 MXFP4_GROUP_SIZE = 32
 MXFP4_VALUES_PER_BYTE = 2
@@ -428,7 +430,7 @@ def annotate_mxfp4_expert_tensors(config: Json, tensors: dict[str, Json]) -> Non
 
     matched = 0
     for name, info in tensors.items():
-        if MXFP4_EXPERT_WEIGHT_PATTERN.fullmatch(name) is None:
+        if parse_independent_expert_projection_weight(name) is None:
             continue
         matched += 1
         shape = [int(value) for value in info.get("shape", [])]

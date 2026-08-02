@@ -1,21 +1,82 @@
 from __future__ import annotations
 
-import re
-
 from nerve.model_transpiler_types import Json, ModelTranspileError
 
 
-EXPERT_WEIGHT_PATTERN = re.compile(
-    r"^(?P<prefix>.+)\.ffn\.experts\.(?P<expert>\d+)\."
-    r"(?P<projection>w[123])\.weight$"
-)
+EXPERT_PROJECTION_ROLE_ALIASES = {
+    "w1": "w1",
+    "gate_proj": "w1",
+    "w2": "w2",
+    "down_proj": "w2",
+    "w3": "w3",
+    "up_proj": "w3",
+}
+
+
+def parse_independent_expert_projection_weight(
+    tensor_name: str,
+) -> tuple[str, int, str, str] | None:
+    """Return the structural expert root, index, canonical role, and storage.
+
+    Source checkpoints are allowed to spell an equivalent SwiGLU projection as
+    either ``w1/w2/w3`` or ``gate_proj/down_proj/up_proj``.  Everything after
+    this compiler boundary uses the canonical roles, so runtime execution does
+    not depend on the source model family or tensor dialect.
+    """
+
+    parts = tensor_name.split(".")
+    if (
+        len(parts) < 5
+        or parts[-4] != "experts"
+        or parts[-1] not in {"weight", "weight_packed"}
+    ):
+        return None
+    try:
+        expert = int(parts[-3])
+    except ValueError:
+        return None
+    if expert < 0:
+        return None
+    projection = EXPERT_PROJECTION_ROLE_ALIASES.get(parts[-2])
+    if projection is None:
+        return None
+    root = ".".join(parts[:-4])
+    if not root:
+        return None
+    return root, expert, projection, parts[-1]
 
 
 def has_independent_sparse_experts(tensors: dict[str, Json], prefix: str) -> bool:
-    expected_prefix = f"{prefix}.ffn.experts."
-    return any(
-        name.startswith(expected_prefix) and name.endswith(".w1.weight")
+    expected_root = f"{prefix}."
+    candidate_roots = {
+        parsed[0]
         for name in tensors
+        if (parsed := parse_independent_expert_projection_weight(name)) is not None
+        and parsed[0].startswith(expected_root)
+        and parsed[2] == "w1"
+    }
+    return any(
+        not _has_aggregate_expert_representation(tensors, root)
+        for root in candidate_roots
+    )
+
+
+def _has_aggregate_expert_representation(
+    tensors: dict[str, Json], expert_root: str
+) -> bool:
+    """Whether the source/compiler already exposes one executable expert bank.
+
+    An aggregate bank and independently addressable experts are two physical
+    representations of the same semantic MoE.  Representation availability,
+    not a model name, decides which discovery path owns the layer.
+    """
+
+    return all(
+        name in tensors
+        for name in (
+            f"{expert_root}.experts.gate_up_proj",
+            f"{expert_root}.experts.down_proj",
+        )
     )
 
 
@@ -27,14 +88,29 @@ def discover_independent_sparse_experts(
     hidden_size: int,
     vocab_size: int,
 ) -> tuple[dict[str, str], Json, int]:
-    projections: dict[int, dict[str, str]] = {}
+    candidates: dict[str, dict[int, dict[str, str]]] = {}
     for name in tensors:
-        match = EXPERT_WEIGHT_PATTERN.fullmatch(name)
-        if match is None or match.group("prefix") != prefix:
+        parsed = parse_independent_expert_projection_weight(name)
+        if parsed is None:
             continue
-        projections.setdefault(int(match.group("expert")), {})[
-            match.group("projection")
-        ] = name
+        root, expert, projection, _storage = parsed
+        if not root.startswith(f"{prefix}.") or _has_aggregate_expert_representation(
+            tensors, root
+        ):
+            continue
+        found = candidates.setdefault(root, {}).setdefault(expert, {})
+        if projection in found:
+            raise ModelTranspileError(
+                f"layer prefix {prefix!r} has ambiguous {projection} projection "
+                f"for independent expert {expert}"
+            )
+        found[projection] = name
+    if len(candidates) != 1:
+        raise ModelTranspileError(
+            f"layer prefix {prefix!r} must expose exactly one independently stored "
+            f"expert block; found {sorted(candidates)}"
+        )
+    expert_root, projections = next(iter(candidates.items()))
     expert_ids = sorted(projections)
     if not expert_ids:
         raise ModelTranspileError(
@@ -99,15 +175,25 @@ def discover_independent_sparse_experts(
             + ", ".join(sorted(source_expert_formats))
         )
     source_expert_format = next(iter(source_expert_formats))
-    router = f"{prefix}.ffn.gate.weight"
-    if router not in tensors:
-        raise ModelTranspileError(
-            f"layer prefix {prefix!r} has no sparse expert router weight"
+    router_candidates = [
+        name
+        for name in (
+            f"{expert_root}.gate.weight",
+            f"{expert_root}.router.weight",
         )
+        if name in tensors
+    ]
+    if len(router_candidates) != 1:
+        raise ModelTranspileError(
+            f"layer prefix {prefix!r} must expose exactly one sparse expert router "
+            f"weight; found {router_candidates}"
+        )
+    router = router_candidates[0]
     _require_shape(tensors, router, [len(expert_ids), hidden_size])
     parameters["moe_router"] = router
-    route_table = f"{prefix}.ffn.gate.tid2eid"
-    selection_bias = f"{prefix}.ffn.gate.bias"
+    router_root = router.removesuffix(".weight")
+    route_table = f"{router_root}.tid2eid"
+    selection_bias = f"{router_root}.bias"
     has_route_table = route_table in tensors
     has_selection_bias = selection_bias in tensors
     if has_route_table == has_selection_bias:
@@ -136,17 +222,32 @@ def discover_independent_sparse_experts(
         parameters["moe_router_selection_bias"] = selection_bias
         selection = "score_topk"
 
-    shared_names = {
-        projection: f"{prefix}.ffn.shared_experts.{projection}.weight"
-        for projection in ("w1", "w2", "w3")
-    }
-    present_shared = {
-        projection: name for projection, name in shared_names.items() if name in tensors
-    }
-    if present_shared != shared_names:
-        raise ModelTranspileError(
-            f"layer prefix {prefix!r} has an incomplete shared expert"
+    source_role_aliases = {
+        canonical: tuple(
+            source
+            for source, normalized in EXPERT_PROJECTION_ROLE_ALIASES.items()
+            if normalized == canonical
         )
+        for canonical in ("w1", "w2", "w3")
+    }
+    shared_names: dict[str, str] = {}
+    for projection, aliases in source_role_aliases.items():
+        matches = [
+            name
+            for shared_root in (
+                f"{expert_root}.shared_experts",
+                f"{expert_root}.shared_expert",
+            )
+            for alias in aliases
+            for storage in ("weight", "weight_packed")
+            if (name := f"{shared_root}.{alias}.{storage}") in tensors
+        ]
+        if len(matches) != 1:
+            raise ModelTranspileError(
+                f"layer prefix {prefix!r} must expose exactly one shared expert "
+                f"{projection} projection; found {matches}"
+            )
+        shared_names[projection] = matches[0]
     _require_logical_shape(
         tensors, shared_names["w1"], [intermediate_size, hidden_size]
     )

@@ -9,6 +9,7 @@ from nerve.circuit_lowering import build_component_circuit
 from nerve.circuit_ir import validate_circuit
 from nerve.model_transpiler_discovery import discover_model_structure
 from nerve.model_transpiler_graph import make_layer
+from nerve.model_transpiler_quantization import annotate_mxfp4_expert_tensors
 from nerve.model_transpiler_types import ModelTranspileError
 
 
@@ -145,6 +146,110 @@ def test_sparse_expert_discovery_depends_on_structure_not_model_identity() -> No
         architectures=known.architectures,
     ) == known
     assert make_layer(future, future.layers[0]) == make_layer(known, known.layers[0])
+
+
+def test_sparse_expert_discovery_normalizes_unseen_equivalent_tensor_roles() -> None:
+    config, tensors = _source()
+    future_config = dict(config)
+    future_config["model_type"] = "previously_unseen_sparse_decoder"
+    future_tensors: dict[str, dict[str, object]] = {}
+    for name, info in tensors.items():
+        renamed = name.replace(".ffn.", ".future_sparse_block.")
+        renamed = renamed.replace(".gate.", ".router.")
+        renamed = renamed.replace(".shared_experts.", ".shared_expert.")
+        renamed = renamed.replace(".w1.weight", ".gate_proj.weight")
+        renamed = renamed.replace(".w2.weight", ".down_proj.weight")
+        renamed = renamed.replace(".w3.weight", ".up_proj.weight")
+        future_tensors[renamed] = info
+
+    future = discover_model_structure(
+        Path("synthetic"), future_config, future_tensors
+    )
+
+    hashed, scored = future.layers
+    assert hashed.feed_forward_attributes["routing"]["selection"] == "token_id_table"
+    assert scored.feed_forward_attributes["routing"]["selection"] == "score_topk"
+    assert hashed.tensors["routed_expert_001_w1"] == (
+        "model.layers.0.future_sparse_block.experts.1.gate_proj.weight"
+    )
+    assert hashed.tensors["routed_expert_001_w2"] == (
+        "model.layers.0.future_sparse_block.experts.1.down_proj.weight"
+    )
+    assert hashed.tensors["routed_expert_001_w3"] == (
+        "model.layers.0.future_sparse_block.experts.1.up_proj.weight"
+    )
+    assert hashed.tensors["shared_expert_w1"] == (
+        "model.layers.0.future_sparse_block.shared_expert.gate_proj.weight"
+    )
+    assert hashed.feed_forward_type == "sparse_moe"
+
+
+def test_mxfp4_annotation_normalizes_unseen_equivalent_expert_tensor_roles() -> None:
+    config = {"future_quantization": {"expert_dtype": "fp4"}}
+    tensors: dict[str, dict[str, object]] = {}
+    projection_shapes = {
+        "gate_proj": [6, 16],
+        "down_proj": [8, 16],
+        "up_proj": [6, 16],
+    }
+    for role, storage_shape in projection_shapes.items():
+        name = f"future.blocks.0.sparse.experts.0.{role}.weight"
+        tensors[name] = {
+            "dtype": "I8",
+            "shape": storage_shape,
+            "byte_count": storage_shape[0] * storage_shape[1],
+        }
+        tensors[name.removesuffix(".weight") + ".scale"] = _tensor(
+            [storage_shape[0], 1], "F8_E8M0"
+        )
+
+    annotate_mxfp4_expert_tensors(config, tensors)
+
+    for role, storage_shape in projection_shapes.items():
+        info = tensors[f"future.blocks.0.sparse.experts.0.{role}.weight"]
+        assert info["logical_shape"] == [storage_shape[0], storage_shape[1] * 2]
+        assert info["quantization"]["format"] == "mxfp4_e2m1"
+
+
+def test_aggregate_expert_representation_takes_precedence_by_structure() -> None:
+    config, tensors = _source()
+    del tensors["model.layers.0.ffn.gate.tid2eid"]
+    tensors["model.layers.0.ffn.gate.bias"] = _tensor([3], "F32")
+    aggregate_source: dict[str, dict[str, object]] = {}
+    for name, info in tensors.items():
+        renamed = name.replace(".ffn.", ".mlp.")
+        renamed = renamed.replace(".w1.weight", ".gate_proj.weight")
+        renamed = renamed.replace(".w2.weight", ".down_proj.weight")
+        renamed = renamed.replace(".w3.weight", ".up_proj.weight")
+        copied = dict(info)
+        if ".experts." in renamed and renamed.endswith(".weight"):
+            byte_count = 2
+            for dimension in copied["shape"]:
+                byte_count *= int(dimension)
+            copied.update(
+                {
+                    "byte_count": byte_count,
+                    "source_file": "synthetic.safetensors",
+                    "source_header_bytes": 0,
+                    "data_offsets": [0, byte_count],
+                }
+            )
+        aggregate_source[renamed] = copied
+
+    structure = discover_model_structure(Path("synthetic"), config, aggregate_source)
+
+    for layer in structure.layers:
+        assert layer.feed_forward_type == "sparse_moe"
+        assert layer.tensors["moe_input"].endswith(".mlp.experts.gate_up_proj")
+        assert "routed_expert_000_w1" not in layer.tensors
+
+
+def test_rejects_ambiguous_independent_expert_projection_aliases() -> None:
+    config, tensors = _source()
+    tensors["model.layers.0.ffn.experts.0.gate_proj.weight"] = _tensor([6, 8])
+
+    with pytest.raises(ModelTranspileError, match="ambiguous w1 projection"):
+        discover_model_structure(Path("synthetic"), config, tensors)
 
 
 def test_rejects_incomplete_independent_expert() -> None:
