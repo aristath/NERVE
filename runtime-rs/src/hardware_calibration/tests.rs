@@ -131,6 +131,107 @@ fn explicit_vulkan_calibration_runs_a_real_resident_shader_sequentially() {
 
 #[cfg(feature = "vulkan")]
 #[test]
+fn explicit_vulkan_cooperative_sint8_calibration_executes_alongside_f16() {
+    let Some(device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        eprintln!("skipping cooperative SINT8 calibration: explicit idle AMD device is unset");
+        return;
+    };
+    let tile_count = 8_192u64;
+    let workloads = ["f16", "i8"]
+        .into_iter()
+        .map(|format| {
+            let mut candidate = workload(
+                "cooperative_matrix_multiply",
+                &[("format", format), ("shape", "16x16x16")],
+            );
+            candidate.executor = CalibrationExecutor::VulkanCompute;
+            candidate.work = CalibrationUsefulWork {
+                items_per_iteration: tile_count,
+                operations_per_iteration: tile_count * 2 * 16 * 16 * 16,
+                bytes_read_per_iteration: tile_count * 512 * if format == "i8" { 1 } else { 2 },
+                bytes_written_per_iteration: tile_count * 256 * 4,
+            };
+            candidate.artifacts = vec![CalibrationArtifactDeclaration {
+                name: format!("cooperative_matrix_{format}_16x16x16_{tile_count}"),
+                kind: "spirv_compute".to_string(),
+                digest: None,
+            }];
+            candidate.validation = CalibrationValidationContract {
+                mode: if format == "i8" { "exact" } else { "tolerance" }.to_string(),
+                expected_digest: None,
+                maximum_error_ppm: if format == "i8" { 0 } else { 500 },
+            };
+            refresh_workload_id(&mut candidate);
+            candidate
+        })
+        .collect::<Vec<_>>();
+    let mut calibration_plan = plan(workloads);
+    calibration_plan.policy.minimum_sample_duration_ns = 1_000_000;
+    calibration_plan.policy.sustained_window_duration_ms = 1;
+    calibration_plan.policy.sustained_window_count = 1;
+    calibration_plan.plan_id = stable_hardware_id(
+        "calibration_plan",
+        &[
+            Value::String(calibration_plan.hardware_profile_id.clone()),
+            Value::String(calibration_plan.capability_class.clone()),
+            serde_json::to_value(&calibration_plan.implementation).unwrap(),
+            serde_json::to_value(&calibration_plan.policy).unwrap(),
+            serde_json::to_value(&calibration_plan.workloads).unwrap(),
+            serde_json::to_value(&calibration_plan.excluded_processes).unwrap(),
+        ],
+    )
+    .unwrap();
+    let temporary = std::env::temp_dir().join(format!(
+        "nerve-vulkan-cooperative-sint8-test-{}",
+        std::process::id()
+    ));
+    let result = run_calibration_plan(
+        &calibration_plan,
+        &CalibrationRunnerOptions {
+            artifact_directory: temporary.clone(),
+            vulkan_physical_device_index: Some(device_index),
+            ..CalibrationRunnerOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.status, CalibrationRunStatus::Completed);
+    assert_eq!(result.workloads.len(), 2);
+    for workload in &result.workloads {
+        assert_eq!(
+            workload.validation.status,
+            CalibrationValidationStatus::Passed
+        );
+        let (device_ns, iterations) = workload
+            .samples
+            .iter()
+            .filter(|sample| sample.phase == CalibrationSamplePhase::Steady)
+            .fold((0u64, 0u64), |(duration, iterations), sample| {
+                (
+                    duration + sample.device_duration_ns.unwrap_or_default(),
+                    iterations + sample.iterations,
+                )
+            });
+        assert!(device_ns > 0 && iterations > 0);
+        let format = &calibration_plan
+            .workloads
+            .iter()
+            .find(|candidate| candidate.workload_id == workload.workload_id)
+            .unwrap()
+            .regime["format"];
+        eprintln!(
+            "cooperative {} mean_device_ns={}",
+            format,
+            device_ns / iterations
+        );
+    }
+    std::fs::remove_dir_all(temporary).unwrap();
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
 fn explicit_vulkan_transfer_calibration_moves_real_bytes_sequentially() {
     let Some(device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
         .ok()
@@ -687,6 +788,7 @@ fn explicit_vulkan_compute_calibration_executes_every_native_family_sequentially
         ("cooperative_matrix_multiply", "format", "f16"),
         ("cooperative_matrix_multiply", "format", "bf16"),
         ("cooperative_matrix_multiply", "format", "f8_e4m3"),
+        ("cooperative_matrix_multiply", "format", "i8"),
         ("subgroup_reduce", "operation", "reduce"),
         ("subgroup_scan", "operation", "scan"),
         ("subgroup_shuffle", "operation", "shuffle"),
@@ -791,6 +893,7 @@ fn every_generated_vulkan_compute_calibration_shader_compiles_for_vulkan_1_4() {
         ("cooperative_matrix_multiply", "format", "f16"),
         ("cooperative_matrix_multiply", "format", "bf16"),
         ("cooperative_matrix_multiply", "format", "f8_e4m3"),
+        ("cooperative_matrix_multiply", "format", "i8"),
         ("subgroup_reduce", "operation", "reduce"),
         ("subgroup_scan", "operation", "scan"),
         ("subgroup_shuffle", "operation", "shuffle"),

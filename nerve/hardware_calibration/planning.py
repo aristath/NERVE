@@ -513,6 +513,7 @@ def _gpu_matrix(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
         ("f16", "float16_shapes"),
         ("bf16", "bfloat16_shapes"),
         ("f8_e4m3", "float8_e4m3_shapes"),
+        ("i8", "sint8_shapes"),
     ):
         shapes = properties.get(property_name, "")
         for shape in filter(None, shapes.split(",")):
@@ -539,7 +540,7 @@ def _gpu_matrix(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
                         operations,
                         tile_count
                         * 512
-                        * (1 if numeric_format == "f8_e4m3" else 2),
+                        * (1 if numeric_format in {"f8_e4m3", "i8"} else 2),
                         tile_count * 256 * 4,
                     ),
                     artifacts=(
@@ -548,8 +549,10 @@ def _gpu_matrix(process: Json, _profile: Json) -> Iterable[WorkloadSpec]:
                             "spirv_compute",
                         ),
                     ),
-                    validation_mode="tolerance",
-                    maximum_error_ppm=500,
+                    validation_mode=(
+                        "exact" if numeric_format == "i8" else "tolerance"
+                    ),
+                    maximum_error_ppm=0 if numeric_format == "i8" else 500,
                 )
 
 

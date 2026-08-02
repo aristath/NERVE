@@ -294,7 +294,7 @@ void main() {{
 }
 
 fn cooperative_matrix_source(format: &str) -> Result<String, String> {
-    let (extensions, value_type) = match format {
+    let (extensions, value_type, accumulator_type, zero) = match format {
         "bf16" => (
             concat!(
                 "#extension GL_EXT_shader_16bit_storage : require\n",
@@ -302,6 +302,8 @@ fn cooperative_matrix_source(format: &str) -> Result<String, String> {
                 "#extension GL_EXT_bfloat16 : require\n"
             ),
             "bfloat16_t",
+            "float",
+            "0.0",
         ),
         "f16" => (
             concat!(
@@ -309,6 +311,8 @@ fn cooperative_matrix_source(format: &str) -> Result<String, String> {
                 "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n"
             ),
             "float16_t",
+            "float",
+            "0.0",
         ),
         "f8_e4m3" => (
             concat!(
@@ -317,6 +321,17 @@ fn cooperative_matrix_source(format: &str) -> Result<String, String> {
                 "#extension GL_EXT_float_e4m3 : require\n"
             ),
             "floate4m3_t",
+            "float",
+            "0.0",
+        ),
+        "i8" => (
+            concat!(
+                "#extension GL_EXT_shader_8bit_storage : require\n",
+                "#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require\n"
+            ),
+            "int8_t",
+            "int",
+            "0",
         ),
         _ => {
             return Err(format!(
@@ -331,11 +346,11 @@ fn cooperative_matrix_source(format: &str) -> Result<String, String> {
 #extension GL_KHR_memory_scope_semantics : require
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer InputValues {{ {value_type} values[]; }} input_values;
-layout(set = 0, binding = 1) buffer OutputValues {{ float values[]; }} output_values;
+layout(set = 0, binding = 1) buffer OutputValues {{ {accumulator_type} values[]; }} output_values;
 layout(push_constant) uniform Control {{ uint tile_count; }} control;
 shared {value_type} a_values[256];
 shared {value_type} b_values[256];
-shared float result_values[256];
+shared {accumulator_type} result_values[256];
 void main() {{
     uint tile = gl_WorkGroupID.x;
     if (tile >= control.tile_count) {{ return; }}
@@ -347,8 +362,8 @@ void main() {{
     barrier();
     coopmat<{value_type}, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a;
     coopmat<{value_type}, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b;
-    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> result =
-        coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+    coopmat<{accumulator_type}, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> result =
+        coopmat<{accumulator_type}, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>({zero});
     coopMatLoad(a, a_values, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
     coopMatLoad(b, b_values, 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
     result = coopMatMulAdd(a, b, result);

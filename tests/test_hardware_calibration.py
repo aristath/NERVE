@@ -91,7 +91,7 @@ def hardware_profile(*, include_unknown: bool = False) -> dict[str, object]:
             "api": "vulkan",
             "operations": ["probe"],
             "numeric_formats": (
-                ["bf16", "f16", "f32", "f8_e4m3"]
+                ["bf16", "f16", "f32", "f8_e4m3", "i8"]
                 if name
                 in {
                     "cooperative_matrix",
@@ -109,6 +109,7 @@ def hardware_profile(*, include_unknown: bool = False) -> dict[str, object]:
                     "bfloat16_shapes": "16x16x16",
                     "float16_shapes": "16x16x16",
                     "float8_e4m3_shapes": "16x16x16",
+                    "sint8_shapes": "16x16x16",
                 }
                 if name == "cooperative_matrix"
                 else {}
@@ -381,6 +382,11 @@ def test_plan_covers_every_exposed_process_and_is_deterministic() -> None:
             "sparse_compaction",
         }
     )
+    assert {
+        workload["regime"]["format"]
+        for workload in first["workloads"]
+        if workload["operation"] == "cooperative_matrix_multiply"
+    } == {"bf16", "f16", "f8_e4m3", "i8"}
     assert {
         int(workload["regime"]["working_set_bytes"])
         for workload in first["workloads"]

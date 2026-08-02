@@ -294,7 +294,7 @@ fn workload_buffer_shape(
         let tiles = u32::try_from(workload.work.items_per_iteration)
             .map_err(|_| "cooperative-matrix tile count exceeds u32".to_string())?;
         let format_bytes = match workload.regime.get("format").map(String::as_str) {
-            Some("f8_e4m3") => 1usize,
+            Some("f8_e4m3" | "i8") => 1usize,
             Some("f16" | "bf16") => 2usize,
             other => return Err(format!("unsupported cooperative-matrix format {other:?}")),
         };
