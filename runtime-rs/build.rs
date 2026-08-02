@@ -42,7 +42,10 @@ fn recursive_directory_files_with_extension(
 }
 
 fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("Cargo provides CARGO_MANIFEST_DIR to the build script"),
+    );
     compile_runtime_shader(
         &manifest_dir.join("shaders/gpu_residency_gate.comp"),
         &PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"))
