@@ -233,6 +233,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--residency-policy",
+        choices=("eager", "demand-retained"),
+        default="eager",
+        help=(
+            "compiled resource residency: eager or demand-retained "
+            "(default: eager)"
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         help="explicit sampler randomness seed (default: 0)",
@@ -543,6 +552,7 @@ def validate_action_options(
         ("--duplicate-after", bool(args.duplicate_after)),
         ("--chain", args.chain is not None),
         ("--context-size", args.context_size is not None),
+        ("--residency-policy", args.residency_policy != "eager"),
         ("--vulkan-device-index", args.vulkan_device_index is not None),
         ("--max-new-tokens", args.max_new_tokens is not None),
         ("--seed", args.seed is not None),
@@ -724,6 +734,8 @@ def build_runtime_command(
         runtime_args.extend(
             ["--speculative-draft-tokens", str(args.speculative_draft_tokens)]
         )
+    if args.residency_policy != "eager":
+        runtime_args.extend(["--residency-policy", args.residency_policy])
     if args.device is not None:
         runtime_args.extend(["--device", args.device])
     for raw_placement in args.place_node:

@@ -33,6 +33,7 @@ def runtime_args(**overrides: object) -> Namespace:
         "chain": None,
         "max_new_tokens": 4,
         "speculative_draft_tokens": 0,
+        "residency_policy": "eager",
         "context_size": None,
         "vulkan_device_index": None,
         "seed": 0,
@@ -259,6 +260,17 @@ class RuntimeCliCommandTest(unittest.TestCase):
                 "5",
             ],
             build_runtime_command(args, package),
+        )
+
+    def test_build_runtime_command_forwards_resource_residency_policy(self) -> None:
+        package = Path("compiled_models/model_x/vulkan_resident_package.json")
+        args = runtime_args(prompt="Hello", residency_policy="demand-retained")
+
+        command = build_runtime_command(args, package)
+
+        self.assertIn(
+            ["--residency-policy", "demand-retained"],
+            [command[index : index + 2] for index in range(len(command) - 1)],
         )
 
     def test_build_runtime_command_can_inspect_device_slice_without_prompt(
