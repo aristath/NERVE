@@ -15,13 +15,18 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    decoder. The compiler and runtime already discover it from graph, tensor,
    and state contracts without family-name dispatch. The rebuilt v20 package
    still reached an SQC data-read GPUVM fault during its first real turn on a
-   previously healthy AMD GPU, despite the current MXFP4 route/address guards.
-   `VK_EXT_device_fault` reporting and live addressable-buffer attribution are
-   now capability-driven runtime facilities. Reproduce safely enough to capture
-   an attributed fault, identify and fix the invalid lifetime, range, or address
-   transition, and complete a multi-cycle conversation before enabling the
-   decoder by default. The guards and passing direct-buffer microtests are
-   defense in depth, not proof that the real execution path is correct.
+   previously healthy AMD GPU. The runtime was violating the declared
+   `demand-retained` policy by silently evicting inactive groups, clearing their
+   stable-address publications, and reusing physical allocations. That bounded
+   cache path is now removed: an observed working set that exceeds capacity
+   fails admission atomically while every previously loaded component and
+   address remains resident. `VK_EXT_device_fault` reporting and live
+   addressable-buffer attribution are capability-driven runtime facilities.
+   Reproduce safely enough on a verified-healthy placement to determine whether
+   the invalid address transition was the complete fault cause, then complete a
+   multi-cycle conversation before enabling the decoder by default. The guards,
+   retained-capacity regression, and passing batched MXFP4 tests are necessary
+   evidence, not proof that the real execution path is correct.
 
 2. Complete runtime per-layer/per-component representation selection. Preserve
    a native source representation when it is optimal on the selected device;
@@ -47,8 +52,9 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. Qwen3.6-35B-A3B currently passes the full five-turn gate at 74.51
    mean decode tok/s and 209.70 mean prefill tok/s. Qwen3.5-9B now passes the
-   complete sampled, thinking-enabled five-turn gate at 50.08 mean decode tok/s
-   and 123.79 mean prefill tok/s, including recall of the earlier Greece turn.
+   complete sampled, thinking-enabled five-turn gate at 50.11 mean decode tok/s
+   and 122.95 mean prefill tok/s after the demand-retained correction, including
+   recall of the earlier Greece turn.
    Keep the live gate's repetition and conversation checks active so throughput
    alone cannot pass. Do not use faulted AMD devices merely to satisfy this
    gate; defer a model when no verified-healthy placement exists.
