@@ -1696,6 +1696,7 @@ def discover_quantization_policy(config: Json) -> Json | None:
         activation_per_tensor = bool(candidate.get("act_per_tensor", False))
         if weight_per_tensor or activation_per_tensor:
             continue
+        activation_scale_format = _fp8_activation_scale_format(candidate)
         policies.append(
             {
                 "weight": {
@@ -1707,6 +1708,7 @@ def discover_quantization_policy(config: Json) -> Json | None:
                     "format": "dynamic_block_fp8_e4m3",
                     "group_size": int(block_shape[1]),
                     "per_tensor": False,
+                    "scale_format": activation_scale_format,
                 },
             }
         )
@@ -1749,6 +1751,7 @@ def discover_quantization_policy(config: Json) -> Json | None:
                 "activation": {
                     "format": "dynamic_token_fp8_e4m3",
                     "per_tensor": False,
+                    "scale_format": "f32_exact",
                 },
             }
         )
@@ -1761,6 +1764,28 @@ def discover_quantization_policy(config: Json) -> Json | None:
             "source contains conflicting dynamic block-FP8 quantization contracts"
         )
     return first
+
+
+def _fp8_activation_scale_format(quantization: Json) -> str:
+    declared = quantization.get("scale_fmt")
+    if declared is None:
+        declared = quantization.get("scale_dtype")
+    if declared is None:
+        return "f32_exact"
+    token = str(declared).strip().lower().replace("-", "_")
+    if token in {
+        "ue8m0",
+        "e8m0",
+        "f8_e8m0",
+        "float8_e8m0fnu",
+        "fp8",
+    }:
+        return "e8m0_power_of_two"
+    if token in {"f32", "fp32", "float32", "exact"}:
+        return "f32_exact"
+    raise ModelTranspileError(
+        f"unsupported FP8 activation scale format {declared!r}"
+    )
 
 
 def discover_sampling_policy(generation_config: Json) -> Json:

@@ -17,6 +17,7 @@ layout(set = 0, binding = 2) readonly buffer StreamControl {
 const uint HEAD_COUNT = {{HEAD_COUNT}}u;
 const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
 const uint ROTARY_WIDTH = {{ROTARY_WIDTH}}u;
+const uint ROTARY_OFFSET = {{ROTARY_OFFSET}};
 const float ROPE_THETA = {{ROPE_THETA}};
 const bool ROPE_INTERLEAVED = {{ROPE_INTERLEAVED}};
 const bool ROPE_PROPORTIONAL = {{ROPE_PROPORTIONAL}};
@@ -56,14 +57,15 @@ float rotate_value(uint base, uint dim) {
             ? -read_input(base + dim + half_width)
             : read_input(base + dim - half_width);
     }
+    uint rotary_dim = dim - ROTARY_OFFSET;
     if (ROPE_INTERLEAVED) {
-        return (dim & 1u) == 0u
-            ? -read_input(base + dim + 1u)
-            : read_input(base + dim - 1u);
+        return (rotary_dim & 1u) == 0u
+            ? -read_input(base + ROTARY_OFFSET + rotary_dim + 1u)
+            : read_input(base + ROTARY_OFFSET + rotary_dim - 1u);
     }
-    return dim < (ROTARY_WIDTH / 2u)
-        ? -read_input(base + dim + (ROTARY_WIDTH / 2u))
-        : read_input(base + dim - (ROTARY_WIDTH / 2u));
+    return rotary_dim < (ROTARY_WIDTH / 2u)
+        ? -read_input(base + ROTARY_OFFSET + rotary_dim + (ROTARY_WIDTH / 2u))
+        : read_input(base + ROTARY_OFFSET + rotary_dim - (ROTARY_WIDTH / 2u));
 }
 
 float rope_inverse_frequency(uint frequency_index, uint frequency_width) {
@@ -92,16 +94,20 @@ float rope_angle(uint dim) {
         return (float(stream_control.words[1]) + float(POSITION_OFFSET)) *
             inv_freq * ROPE_DIRECTION;
     }
+    uint rotary_dim = dim - ROTARY_OFFSET;
     uint frequency_index = ROPE_INTERLEAVED
-        ? dim / 2u
-        : dim % (ROTARY_WIDTH / 2u);
+        ? rotary_dim / 2u
+        : rotary_dim % (ROTARY_WIDTH / 2u);
     float inv_freq = rope_inverse_frequency(frequency_index, ROTARY_WIDTH);
     return (float(stream_control.words[1]) + float(POSITION_OFFSET)) *
         inv_freq * ROPE_DIRECTION;
 }
 
 float rotate(uint base, uint dim) {
-    if (!ROPE_PROPORTIONAL && dim >= ROTARY_WIDTH) {
+    if (
+        !ROPE_PROPORTIONAL
+        && (dim < ROTARY_OFFSET || dim >= ROTARY_OFFSET + ROTARY_WIDTH)
+    ) {
         return read_input(base + dim);
     }
     float angle = rope_angle(dim);

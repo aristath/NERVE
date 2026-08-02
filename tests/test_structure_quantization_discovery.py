@@ -114,8 +114,41 @@ def test_discovers_dynamic_block_fp8_by_numerical_structure() -> None:
             "format": "dynamic_block_fp8_e4m3",
             "group_size": 128,
             "per_tensor": False,
+            "scale_format": "f32_exact",
         },
     }
+
+
+def test_discovers_power_of_two_fp8_activation_scales() -> None:
+    config = {
+        "quantization_config": {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+            "scale_fmt": "ue8m0",
+        }
+    }
+
+    assert discover_quantization_policy(config)["activation"] == {
+        "format": "dynamic_block_fp8_e4m3",
+        "group_size": 128,
+        "per_tensor": False,
+        "scale_format": "e8m0_power_of_two",
+    }
+
+
+def test_rejects_unknown_fp8_activation_scale_format() -> None:
+    with pytest.raises(ModelTranspileError, match="activation scale format"):
+        discover_quantization_policy(
+            {
+                "quantization_config": {
+                    "quant_method": "fp8",
+                    "activation_scheme": "dynamic",
+                    "weight_block_size": [128, 128],
+                    "scale_fmt": "mystery_float",
+                }
+            }
+        )
 
 
 def test_does_not_invent_dynamic_activation_quantization() -> None:
@@ -169,6 +202,7 @@ def test_discovers_compressed_tensors_channel_fp8_by_numerical_structure() -> No
         "activation": {
             "format": "dynamic_token_fp8_e4m3",
             "per_tensor": False,
+            "scale_format": "f32_exact",
         },
     }
 

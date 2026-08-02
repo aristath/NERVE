@@ -793,6 +793,82 @@ def test_compiler_renders_fused_pairpacked_int8_representation_producers(
     compile_shader_artifacts(tmp_path)
 
 
+def test_fp8_projection_preserves_power_of_two_activation_scale_contract(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "id": "projection",
+        "op": "linear",
+        "inputs": ["normalized"],
+        "outputs": ["projected"],
+        "params": ["weight", "weight_scale"],
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "weight": {"tensor": "weight"},
+                "weight_scale": {"tensor": "weight_scale"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "weight": {
+                "dtype": "F8_E4M3",
+                "shape": [4096, 4096],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "weight_scale": {
+                "dtype": "F8_E8M0",
+                "shape": [32, 32],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+
+    assert physical_input_prequantization_spec(
+        circuit,
+        node,
+        tensor_index,
+        activation_quantization={
+            "format": "dynamic_block_fp8_e4m3",
+            "group_size": 128,
+            "per_tensor": False,
+            "scale_format": "e8m0_power_of_two",
+        },
+    ) == {
+        "contract": (
+            "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+        ),
+        "input_size": 4096,
+        "block_columns": 128,
+    }
+
+    quantize = {
+        "id": "projection__quantize_input",
+        "op": "quantize_fp8_e4m3_e8m0",
+        "inputs": ["normalized"],
+        "outputs": ["normalized_fp8", "normalized_scale"],
+        "attrs": {"block_columns": 128, "element_count": 4096},
+    }
+    scalar = shader_file_for_node(
+        circuit,
+        quantize,
+        tensor_index,
+        {"hidden_size": 4096, "intermediate_size": 4096},
+    )
+    batch = weight_shared_batch_shader_file(scalar, tile_width=16)
+    assert scalar == "quantize_fp8_e4m3_spow2_b128_h4096.comp"
+    assert batch == "quantize_batch16_fp8_e4m3_spow2_b128_h4096.comp"
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {scalar, batch})
+    for shader_file in (scalar, batch):
+        source = (tmp_path / shader_file).read_text()
+        assert "exp2(ceil(log2(max(block_max, 1e-4) / 448.0)))" in source
+    compile_shader_artifacts(tmp_path)
+
+
 def test_packed_int4_projection_requests_reusable_int8_input_representation() -> None:
     node = {
         "id": "projection",

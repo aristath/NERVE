@@ -78,6 +78,9 @@ def make_layer(
             ),
             "per_layer_model_projection_scale": hidden_size**-0.5,
             "per_layer_input_scale": 2.0**-0.5,
+            "activation_quantization": deepcopy(
+                (structure.quantization or {}).get("activation")
+            ),
         },
         "ports": {
             "inputs": [

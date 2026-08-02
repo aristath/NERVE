@@ -6,6 +6,9 @@ from nerve.compilation import Json, ModelCompileError
 
 
 FP8_PREQUANTIZATION_CONTRACT = "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+FP8_E8M0_PREQUANTIZATION_CONTRACT = (
+    "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+)
 SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT = (
     "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1"
 )
@@ -33,6 +36,12 @@ _CONTRACTS = {
         PhysicalRepresentationContract(
             id=FP8_PREQUANTIZATION_CONTRACT,
             helper_op="quantize_fp8_e4m3",
+            output_signal_suffixes=("fp8_e4m3", "scale_f32"),
+            output_element_bytes=(1, 4),
+        ),
+        PhysicalRepresentationContract(
+            id=FP8_E8M0_PREQUANTIZATION_CONTRACT,
+            helper_op="quantize_fp8_e4m3_e8m0",
             output_signal_suffixes=("fp8_e4m3", "scale_f32"),
             output_element_bytes=(1, 4),
         ),

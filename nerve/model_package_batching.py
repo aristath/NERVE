@@ -261,7 +261,9 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             6
             if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
             else 2
-            if causal_scan_shader.startswith("rotary_temporal_")
+            if causal_scan_shader.startswith(
+                ("rotary_temporal_", "rotary_qdq_fp8_e4m3_")
+            )
             else None
         )
         return [
@@ -660,9 +662,21 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
             ),
         )
     if re.fullmatch(
+        r"rotary_qdq_fp8_e4m3_(?:spow2|sexact)_b\d+_bf16_"
+        r"\d+x\d+_r\d+_theta[0-9eE+.-]+"
+        r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
+        r"_(?:half|interleaved)_tail(?:_po-?\d+)?__sc\d+\.comp",
+        shader_file,
+    ):
+        return re.sub(
+            r"__sc\d+\.comp$",
+            ".comp",
+            shader_file.replace("_bf16_", "_temporal_bf16_", 1),
+        )
+    if re.fullmatch(
         r"rotary_bf16_\d+x\d+_r\d+_theta[0-9eE+.-]+"
         r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
-        r"_(?:half|interleaved|proportional)__sc\d+\.comp",
+        r"_(?:half|interleaved|proportional)(?:_tail)?(?:_po-?\d+)?__sc\d+\.comp",
         shader_file,
     ):
         return re.sub(
@@ -698,9 +712,10 @@ def causal_scan_workgroup_count_x(shader_file: str) -> int:
     if head_norm_rope is not None:
         return int(head_norm_rope.group(1)) + int(head_norm_rope.group(2))
     rotary = re.fullmatch(
-        r"rotary_bf16_(\d+)x\d+_r\d+_theta[0-9eE+.-]+"
+        r"(?:rotary_bf16_|rotary_qdq_fp8_e4m3_(?:spow2|sexact)_b\d+_bf16_)"
+        r"(\d+)x\d+_r\d+_theta[0-9eE+.-]+"
         r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
-        r"_(?:half|interleaved|proportional)__sc\d+\.comp",
+        r"_(?:half|interleaved|proportional)(?:_tail)?(?:_po-?\d+)?__sc\d+\.comp",
         shader_file,
     )
     if rotary is not None:
@@ -726,14 +741,16 @@ def weight_shared_batch_shader_file(
             f"quantize_batch{tile}_int8_symmetric_pairpacked_",
             1,
         )
-    if re.fullmatch(r"quantize_fp8_e4m3_b128_h\d+\.comp", shader_file):
+    if re.fullmatch(
+        r"quantize_fp8_e4m3(?:_spow2)?_b128_h\d+\.comp", shader_file
+    ):
         return shader_file.replace(
             "quantize_fp8_e4m3_",
             f"quantize_batch{tile}_fp8_e4m3_",
             1,
         )
     if re.fullmatch(
-        r"rms_norm_quantize_fp8_e4m3_b128_h\d+_"
+        r"rms_norm_quantize_fp8_e4m3(?:_spow2)?_b128_h\d+_"
         r"eps[0-9eE+.-]+_offset[0-9eE+.-]+\.comp",
         shader_file,
     ):
@@ -762,7 +779,7 @@ def weight_shared_batch_shader_file(
             1,
         )
     if re.fullmatch(
-        r"sigmoid_multiply_quantize_fp8_e4m3_b128_h\d+\.comp",
+        r"sigmoid_multiply_quantize_fp8_e4m3(?:_spow2)?_b128_h\d+\.comp",
         shader_file,
     ):
         return shader_file.replace(

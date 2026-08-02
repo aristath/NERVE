@@ -146,7 +146,7 @@ void main() {
             max(abs(rounded.z), abs(rounded.w))
         );
         float block_max = subgroupMax(lane_max);
-        float block_scale = block_max > 0.0 ? block_max / 448.0 : 1.0;
+        float block_scale = {{DYNAMIC_SCALE}};
 
         if (valid_batch_lane && subgroup_lane == 0u) {
             scales.values[batch_index * BLOCK_COUNT + block] = block_scale;

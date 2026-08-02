@@ -17,6 +17,18 @@ def shader_float_glsl(value: float) -> str:
     return literal
 
 
+def _fp8_dynamic_scale_expression(
+    maximum: str,
+    *,
+    power_of_two: bool,
+) -> str:
+    if power_of_two:
+        return (
+            f"exp2(ceil(log2(max({maximum}, 1e-4) / 448.0)))"
+        )
+    return f"{maximum} > 0.0 ? {maximum} / 448.0 : 1.0"
+
+
 def copy_shader_templates(
     source_dir: Path, dest_dir: Path, shader_files: set[str]
 ) -> None:
@@ -994,15 +1006,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     fp8_quantizer = re.fullmatch(
-        r"quantize(?:_batch(\d+))?_fp8_e4m3_b(\d+)_h(\d+)\.comp",
+        r"quantize(?:_batch(\d+))?_fp8_e4m3(?:_(spow2))?_b(\d+)_h(\d+)\.comp",
         shader_file,
     )
     if fp8_quantizer is not None:
         batch_tile_width = (
             int(fp8_quantizer.group(1)) if fp8_quantizer.group(1) is not None else None
         )
-        block_columns = int(fp8_quantizer.group(2))
-        element_count = int(fp8_quantizer.group(3))
+        power_of_two_scale = fp8_quantizer.group(2) is not None
+        block_columns = int(fp8_quantizer.group(3))
+        element_count = int(fp8_quantizer.group(4))
         if (
             (batch_tile_width is not None and batch_tile_width <= 0)
             or block_columns != 128
@@ -1023,6 +1036,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "BATCH_TILE_WIDTH": str(batch_tile_width or 1),
                 "BLOCK_COLUMNS": str(block_columns),
                 "ELEMENT_COUNT": str(element_count),
+                "DYNAMIC_SCALE": _fp8_dynamic_scale_expression(
+                    "block_max", power_of_two=power_of_two_scale
+                ),
             },
         )
 
@@ -2744,14 +2760,19 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("BATCH_TILE_WIDTH", "BLOCK_COLUMNS", "ELEMENT_COUNT"),
         ),
         (
-            r"sigmoid_multiply_quantize_fp8_e4m3_b(\d+)_h(\d+)\.comp",
+            r"sigmoid_multiply_quantize_fp8_e4m3(?:_(spow2))?_b(\d+)_h(\d+)\.comp",
             "sigmoid_multiply_quantize_fp8_e4m3.comp.template",
-            ("BLOCK_COLUMNS", "ELEMENT_COUNT"),
+            ("SCALE_FORMAT", "BLOCK_COLUMNS", "ELEMENT_COUNT"),
         ),
         (
-            r"sigmoid_multiply_quantize_batch(\d+)_fp8_e4m3_b(\d+)_h(\d+)\.comp",
+            r"sigmoid_multiply_quantize_batch(\d+)_fp8_e4m3(?:_(spow2))?_b(\d+)_h(\d+)\.comp",
             "sigmoid_multiply_quantize_batch_fp8_e4m3.comp.template",
-            ("BATCH_TILE_WIDTH", "BLOCK_COLUMNS", "ELEMENT_COUNT"),
+            (
+                "BATCH_TILE_WIDTH",
+                "SCALE_FORMAT",
+                "BLOCK_COLUMNS",
+                "ELEMENT_COUNT",
+            ),
         ),
         (
             r"sigmoid_multiply_batch(\d+)_bf16\.comp",
@@ -2877,10 +2898,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("BATCH_TILE_WIDTH", "VOCAB_SIZE", "INPUT_SIZE", "OUTPUT_SCALE"),
         ),
         (
-            r"rms_norm_quantize_fp8_e4m3_b(\d+)_h(\d+)_"
+            r"rms_norm_quantize_fp8_e4m3(?:_(spow2))?_b(\d+)_h(\d+)_"
             r"eps([0-9eE+.-]+)_offset([0-9eE+.-]+)\.comp",
             "rms_norm_quantize_fp8_e4m3.comp.template",
             (
+                "SCALE_FORMAT",
                 "BLOCK_COLUMNS",
                 "HIDDEN_SIZE",
                 "NORM_EPS",
@@ -2888,11 +2910,12 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
-            r"rms_norm_quantize_batch(\d+)_fp8_e4m3_b(\d+)_h(\d+)_"
+            r"rms_norm_quantize_batch(\d+)_fp8_e4m3(?:_(spow2))?_b(\d+)_h(\d+)_"
             r"eps([0-9eE+.-]+)_offset([0-9eE+.-]+)\.comp",
             "rms_norm_quantize_batch_fp8_e4m3.comp.template",
             (
                 "BATCH_TILE_WIDTH",
+                "SCALE_FORMAT",
                 "BLOCK_COLUMNS",
                 "HIDDEN_SIZE",
                 "NORM_EPS",
@@ -2989,9 +3012,50 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
+            r"rotary_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_temporal_bf16_"
+            r"(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
+            r"_a([0-9eE+.-]+)_(half|interleaved)_(tail)"
+            r"(?:_po(-?\d+))?\.comp",
+            "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_FACTOR",
+                "ROPE_CORRECTION_LOW",
+                "ROPE_CORRECTION_HIGH",
+                "ROPE_ATTENTION_FACTOR",
+                "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
+                "POSITION_OFFSET",
+            ),
+        ),
+        (
+            r"rotary_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_temporal_bf16_"
+            r"(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_(half|interleaved)_(tail)(?:_po(-?\d+))?\.comp",
+            "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
+                "POSITION_OFFSET",
+            ),
+        ),
+        (
             r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
             r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
-            r"_a([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
+            r"_a([0-9eE+.-]+)_(half|interleaved|proportional)"
+            r"(?:_(tail))?(?:_po(-?\d+))?\.comp",
             "rotary_temporal_bf16.comp.template",
             (
                 "HEAD_COUNT",
@@ -3003,18 +3067,80 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "ROPE_CORRECTION_HIGH",
                 "ROPE_ATTENTION_FACTOR",
                 "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
+                "POSITION_OFFSET",
             ),
         ),
         (
             r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
             "rotary_temporal_bf16.comp.template",
-            ("HEAD_COUNT", "HEAD_WIDTH", "ROTARY_WIDTH", "ROPE_THETA", "ROPE_LAYOUT"),
+            (
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+            ),
+        ),
+        (
+            r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_(half|interleaved|proportional)_(tail)(?:_po(-?\d+))?\.comp",
+            "rotary_temporal_bf16.comp.template",
+            (
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
+                "POSITION_OFFSET",
+            ),
+        ),
+        (
+            r"rotary_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_bf16_"
+            r"(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
+            r"_a([0-9eE+.-]+)_(half|interleaved|proportional)"
+            r"_(tail)(?:_po(-?\d+))?\.comp",
+            "rotary_qdq_fp8_e4m3_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_FACTOR",
+                "ROPE_CORRECTION_LOW",
+                "ROPE_CORRECTION_HIGH",
+                "ROPE_ATTENTION_FACTOR",
+                "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
+                "POSITION_OFFSET",
+            ),
+        ),
+        (
+            r"rotary_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_bf16_"
+            r"(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"_(half|interleaved|proportional)_(tail)(?:_po(-?\d+))?\.comp",
+            "rotary_qdq_fp8_e4m3_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "HEAD_COUNT",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
+                "POSITION_OFFSET",
+            ),
         ),
         (
             r"(inverse_)?rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
             r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
             r"_a([0-9eE+.-]+)_(half|interleaved|proportional)"
-            r"(?:_po(-?\d+))?\.comp",
+            r"(?:_(tail))?(?:_po(-?\d+))?\.comp",
             "rotary_bf16.comp.template",
             (
                 "INVERSE_PREFIX",
@@ -3027,12 +3153,13 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "ROPE_CORRECTION_HIGH",
                 "ROPE_ATTENTION_FACTOR",
                 "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
                 "POSITION_OFFSET",
             ),
         ),
         (
             r"(inverse_)?rotary_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
-            r"_(half|interleaved|proportional)(?:_po(-?\d+))?\.comp",
+            r"_(half|interleaved|proportional)(?:_(tail))?(?:_po(-?\d+))?\.comp",
             "rotary_bf16.comp.template",
             (
                 "INVERSE_PREFIX",
@@ -3041,6 +3168,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "ROTARY_WIDTH",
                 "ROPE_THETA",
                 "ROPE_LAYOUT",
+                "ROTARY_SCOPE",
                 "POSITION_OFFSET",
             ),
         ),
@@ -3218,6 +3346,19 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         match = re.fullmatch(pattern, shader_file)
         if match is not None:
             replacements = dict(zip(names, match.groups(), strict=True))
+            if "SCALE_FORMAT" in replacements:
+                replacements["DYNAMIC_SCALE"] = _fp8_dynamic_scale_expression(
+                    (
+                        "maximum"
+                        if template
+                        in {
+                            "rotary_qdq_fp8_e4m3_bf16.comp.template",
+                            "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template",
+                        }
+                        else "block_max"
+                    ),
+                    power_of_two=replacements.pop("SCALE_FORMAT") == "spow2",
+                )
             if template in (
                 "causal_conv1d_silu_bf16.comp.template",
                 "causal_conv1d_silu_temporal_bf16.comp.template",
@@ -3244,6 +3385,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 replacements.setdefault("ROPE_CORRECTION_LOW", "0.0")
                 replacements.setdefault("ROPE_CORRECTION_HIGH", "1.0")
                 replacements.setdefault("ROPE_ATTENTION_FACTOR", "1.0")
+                replacements["ROTARY_OFFSET"] = (
+                    "HEAD_WIDTH - ROTARY_WIDTH"
+                    if replacements.pop("ROTARY_SCOPE", None) == "tail"
+                    else "0u"
+                )
             if template == "rotary_bf16.comp.template":
                 replacements["ROPE_DIRECTION"] = (
                     "-1.0" if replacements.pop("INVERSE_PREFIX") else "1.0"
@@ -3251,9 +3397,18 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 replacements["POSITION_OFFSET"] = (
                     replacements.get("POSITION_OFFSET") or "0"
                 )
+            if template in {
+                "rotary_qdq_fp8_e4m3_bf16.comp.template",
+                "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template",
+                "rotary_temporal_bf16.comp.template",
+            }:
+                replacements["POSITION_OFFSET"] = (
+                    replacements.get("POSITION_OFFSET") or "0"
+                )
             temporal_control_bindings = {
                 "parallel_head_norm_rope_2way_temporal_bf16.comp.template": "6",
                 "rotary_temporal_bf16.comp.template": "2",
+                "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template": "2",
             }
             if template in temporal_control_bindings:
                 replacements["BATCH_CONTROL_BINDING"] = temporal_control_bindings[

@@ -264,9 +264,10 @@ def shader_file_for_node(
             )
         return f"pack_token_block_b{block_width}.comp"
 
-    if op == "quantize_fp8_e4m3":
+    if op in {"quantize_fp8_e4m3", "quantize_fp8_e4m3_e8m0"}:
+        scale_suffix = "_spow2" if op.endswith("_e8m0") else ""
         return (
-            f"quantize_fp8_e4m3_b{int(node['attrs']['block_columns'])}"
+            f"quantize_fp8_e4m3{scale_suffix}_b{int(node['attrs']['block_columns'])}"
             f"_h{int(node['attrs']['element_count'])}.comp"
         )
     if op == "quantize_int8_symmetric":
@@ -330,7 +331,14 @@ def shader_file_for_node(
             block_columns = int(representations[0].get("block_columns", 0))
             if (
                 valid_common
-                or (contract == FP8_PREQUANTIZATION_CONTRACT and block_columns != 128)
+                or (
+                    contract
+                    in {
+                        FP8_PREQUANTIZATION_CONTRACT,
+                        FP8_E8M0_PREQUANTIZATION_CONTRACT,
+                    }
+                    and block_columns != 128
+                )
                 or (
                     contract == PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT
                     and block_columns != 32
@@ -338,6 +346,7 @@ def shader_file_for_node(
                 or contract
                 not in {
                     FP8_PREQUANTIZATION_CONTRACT,
+                    FP8_E8M0_PREQUANTIZATION_CONTRACT,
                     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
                 }
             ):
@@ -347,11 +356,20 @@ def shader_file_for_node(
                 )
             representation_token = (
                 "fp8_e4m3"
-                if contract == FP8_PREQUANTIZATION_CONTRACT
+                if contract
+                in {
+                    FP8_PREQUANTIZATION_CONTRACT,
+                    FP8_E8M0_PREQUANTIZATION_CONTRACT,
+                }
                 else "int8_pairpacked"
             )
+            scale_suffix = (
+                "_spow2"
+                if contract == FP8_E8M0_PREQUANTIZATION_CONTRACT
+                else ""
+            )
             return (
-                f"rms_norm_quantize_{representation_token}_b{block_columns}_"
+                f"rms_norm_quantize_{representation_token}{scale_suffix}_b{block_columns}_"
                 f"h{node_hidden_size}_eps{shader_float_token(eps)}"
                 f"_offset{shader_float_token(weight_offset)}.comp"
             )
@@ -1171,7 +1189,10 @@ def shader_file_for_node(
             if (
                 len(representations) != 1
                 or representations[0].get("contract")
-                != "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+                not in {
+                    FP8_PREQUANTIZATION_CONTRACT,
+                    FP8_E8M0_PREQUANTIZATION_CONTRACT,
+                }
                 or representations[0].get("logical_signal")
                 != node.get("outputs", [None])[0]
                 or int(representations[0].get("element_count", 0)) <= 0
@@ -1182,7 +1203,9 @@ def shader_file_for_node(
                     "physical FP8 output representation"
                 )
             return (
-                "sigmoid_multiply_quantize_fp8_e4m3_b128_"
+                "sigmoid_multiply_quantize_fp8_e4m3"
+                f"{'_spow2' if representations[0]['contract'] == FP8_E8M0_PREQUANTIZATION_CONTRACT else ''}"
+                "_b128_"
                 f"h{int(representations[0]['element_count'])}.comp"
             )
         return "sigmoid_multiply_bf16.comp"
@@ -1358,11 +1381,45 @@ def shader_file_for_node(
         binding = stream_control_binding_for_node(circuit, node)
         prefix = "inverse_rotary" if op.startswith("inverse_") else "rotary"
         position_offset = int(attrs.get("position_offset", 0))
+        rotary_scope = str(attrs.get("rotary_scope", "prefix"))
+        if rotary_scope not in {"prefix", "tail"}:
+            raise ModelCompileError(
+                f"rotary node {node['id']!r} has an invalid rotary scope"
+            )
+        scope_suffix = "_tail" if rotary_scope == "tail" else ""
+        activation_quantization = attrs.get("activation_quantization")
+        quantization_suffix = ""
+        if activation_quantization is not None:
+            block_columns = int(activation_quantization.get("block_columns", 0))
+            scale_format = activation_quantization.get("scale_format")
+            if (
+                op != "rotary_position_embedding"
+                or activation_quantization.get("format") != "fp8_e4m3"
+                or activation_quantization.get("scope")
+                != "non_rotary_dimensions"
+                or activation_quantization.get("mode")
+                != "quantize_dequantize"
+                or scale_format not in {"f32_exact", "e8m0_power_of_two"}
+                or block_columns <= 0
+                or (head_width - rotary_width) <= 0
+                or (head_width - rotary_width) % block_columns
+                or rotary_scope != "tail"
+                or str(attrs.get("rope_type", "default")) == "proportional"
+            ):
+                raise ModelCompileError(
+                    f"rotary node {node['id']!r} has an invalid activation quantization contract"
+                )
+            scale_token = (
+                "spow2" if scale_format == "e8m0_power_of_two" else "sexact"
+            )
+            prefix = "rotary_qdq_fp8_e4m3"
+            quantization_suffix = f"_{scale_token}_b{block_columns}"
         return (
-            f"{prefix}_bf16_{head_count}x"
+            f"{prefix}{quantization_suffix}_bf16_{head_count}x"
             f"{head_width}"
             f"_r{rotary_width}"
             f"_{rope_shader_suffix(attrs)}"
+            f"{scope_suffix}"
             f"{f'_po{position_offset}' if position_offset else ''}"
             f"__sc{binding}.comp"
         )
@@ -1743,6 +1800,7 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
         return (channel_pairs + 63) // 64
     if node["op"] in {
         "quantize_fp8_e4m3",
+        "quantize_fp8_e4m3_e8m0",
         "quantize_int8_symmetric",
         "quantize_int8_symmetric_pairpacked",
     }:
@@ -2103,6 +2161,7 @@ def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
 def uses_prequantized_fp8_input(node: Json) -> bool:
     return node.get("attrs", {}).get("physical_input_contract") in {
         FP8_PREQUANTIZATION_CONTRACT,
+        FP8_E8M0_PREQUANTIZATION_CONTRACT,
         SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
     }
 

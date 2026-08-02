@@ -99,6 +99,12 @@ def _source() -> tuple[dict[str, object], dict[str, dict[str, object]]]:
             "beta_fast": 32,
             "beta_slow": 1,
         },
+        "quantization_config": {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+            "scale_fmt": "ue8m0",
+        },
     }
     tensors = {
         "embed.weight": _tensor([32, 8]),
@@ -333,8 +339,18 @@ def test_composes_latent_attention_independent_experts_and_hyper_connections() -
     assert nodes["operator_residual"]["attrs"]["output_element_bytes"] == [2]
     assert nodes["query_head_norm"]["attrs"]["head_count"] == 4
     assert nodes["query_rope"]["attrs"]["head_count"] == 4
+    assert nodes["query_rope"]["attrs"]["rotary_scope"] == "tail"
     assert nodes["key_value_rope"]["attrs"]["head_count"] == 1
+    assert nodes["key_value_rope"]["attrs"]["rotary_scope"] == "tail"
+    assert nodes["key_value_rope"]["attrs"]["activation_quantization"] == {
+        "format": "fp8_e4m3",
+        "scale_format": "e8m0_power_of_two",
+        "block_columns": 64,
+        "scope": "non_rotary_dimensions",
+        "mode": "quantize_dequantize",
+    }
     assert nodes["attention_inverse_rope"]["attrs"]["head_count"] == 4
+    assert nodes["attention_inverse_rope"]["attrs"]["rotary_scope"] == "tail"
     assert nodes["attention_inverse_rope"]["attrs"].get("position_offset", 0) == 0
     node_ids = [node["id"] for node in circuit["nodes"]]
     assert node_ids.index("hyper_attention_reduce") < node_ids.index("operator_norm")

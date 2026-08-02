@@ -13,6 +13,7 @@ from nerve.model_package_shader_compiler import (
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_tensors import *
 from nerve.physical_representations import (
+    FP8_E8M0_PREQUANTIZATION_CONTRACT,
     FP8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
     SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
@@ -31,7 +32,10 @@ def can_emit_physical_representation_from_producer(
 ) -> bool:
     contract = scope.get("contract")
     operation = producer.get("op")
-    if contract == FP8_PREQUANTIZATION_CONTRACT:
+    if contract in {
+        FP8_PREQUANTIZATION_CONTRACT,
+        FP8_E8M0_PREQUANTIZATION_CONTRACT,
+    }:
         operation_shape_supported = (
             (operation == "rms_norm" and int(scope["input_size"]) == hidden_size)
             or operation == "sigmoid_multiply"
@@ -546,6 +550,9 @@ def build_vulkan_resident_package_manifest(
                     node,
                     tensor_index,
                     compiler_target=compiler_target,
+                    activation_quantization=(
+                        (model_graph.get("quantization") or {}).get("activation")
+                    ),
                 )
             ),
             can_emit_representation=lambda producer, scope: (

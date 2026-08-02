@@ -61,7 +61,7 @@ void main() {
             max(abs(input_value.z), abs(input_value.w))
         );
         float block_max = subgroupMax(lane_max);
-        float block_scale = block_max > 0.0 ? block_max / 448.0 : 1.0;
+        float block_scale = {{DYNAMIC_SCALE}};
         if (lane == 0u) {
             scales.values[batch_index * BLOCK_COUNT + block] = block_scale;
         }

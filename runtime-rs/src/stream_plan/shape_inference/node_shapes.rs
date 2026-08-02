@@ -41,7 +41,9 @@ fn infer_node_output_shapes(
             let shape = attr_usize(node, "block_width").map(|width| vec![width]);
             Ok(repeat_shape(shape, outputs))
         }
-        "quantize_fp8_e4m3" | "quantize_int8_symmetric" => {
+        "quantize_fp8_e4m3"
+        | "quantize_fp8_e4m3_e8m0"
+        | "quantize_int8_symmetric" => {
             let element_count = attr_usize(node, "element_count");
             let block_columns = attr_usize(node, "block_columns");
             if node.inputs.len() != 1

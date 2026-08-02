@@ -14,6 +14,10 @@ from nerve.model_package import (
     shader_file_for_node,
     workgroup_count_x_for_node,
 )
+from nerve.model_package_batching import (
+    causal_scan_batch_shader_file,
+    causal_scan_workgroup_count_x,
+)
 
 
 def _fixture() -> tuple[dict[str, object], dict[str, object]]:
@@ -199,6 +203,81 @@ def test_forward_rope_keeps_zero_offset_filename_stable() -> None:
     ) == "rotary_bf16_2x64_r32_theta10000_half__sc2.comp"
 
 
+def test_partial_rope_can_target_the_tail_of_each_head(tmp_path: Path) -> None:
+    circuit, tensor_index = _fixture()
+    node = deepcopy(circuit["nodes"][1])
+    node["attrs"]["rotary_scope"] = "tail"
+
+    shader = shader_file_for_node(
+        circuit, node, tensor_index, {"hidden_size": 128}
+    )
+    assert shader == (
+        "inverse_rotary_bf16_2x64_r32_theta10000_half_tail_po1__sc2.comp"
+    )
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {shader})
+    rendered = (tmp_path / shader).read_text()
+    assert "const uint ROTARY_OFFSET = HEAD_WIDTH - ROTARY_WIDTH;" in rendered
+    assert "dim < ROTARY_OFFSET || dim >= ROTARY_OFFSET + ROTARY_WIDTH" in rendered
+    assert "{{" not in rendered
+    compile_shader_artifacts(tmp_path)
+
+
+def test_compiles_local_kv_rope_with_exact_fp8_qat_contract(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _fixture()
+    node = deepcopy(circuit["nodes"][1])
+    node["id"] = "position_and_quantize_local_kv"
+    node["op"] = "rotary_position_embedding"
+    node["attrs"].update(
+        {
+            "head_count": 1,
+            "head_width": 512,
+            "rotary_width": 64,
+            "rotary_scope": "tail",
+            "position_offset": 0,
+            "activation_quantization": {
+                "format": "fp8_e4m3",
+                "scale_format": "e8m0_power_of_two",
+                "block_columns": 64,
+                "scope": "non_rotary_dimensions",
+                "mode": "quantize_dequantize",
+            },
+        }
+    )
+
+    shader = shader_file_for_node(
+        circuit, node, tensor_index, {"hidden_size": 128}
+    )
+    assert shader == (
+        "rotary_qdq_fp8_e4m3_spow2_b64_bf16_1x512_r64_"
+        "theta10000_half_tail__sc2.comp"
+    )
+    temporal_shader = causal_scan_batch_shader_file(shader)
+    assert temporal_shader == (
+        "rotary_qdq_fp8_e4m3_spow2_b64_temporal_bf16_1x512_r64_"
+        "theta10000_half_tail.comp"
+    )
+    assert causal_scan_workgroup_count_x(shader) == 1
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {shader, temporal_shader})
+    rendered = (tmp_path / shader).read_text()
+    assert "const uint NON_ROTARY_WIDTH = HEAD_WIDTH - ROTARY_WIDTH;" in rendered
+    assert "const uint ROTARY_OFFSET = NON_ROTARY_WIDTH;" in rendered
+    assert "exp2(ceil(log2(max(maximum, 1e-4) / 448.0)))" in rendered
+    assert "fe4m3vec4" in rendered
+    assert "dim < NON_ROTARY_WIDTH" in rendered
+    assert "{{" not in rendered
+    temporal_rendered = (tmp_path / temporal_shader).read_text()
+    assert "batch_control.start_stream_tick_low + position" in temporal_rendered
+    assert "{{" not in temporal_rendered
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / shader.replace(".comp", ".spv")).is_file()
+    assert (tmp_path / temporal_shader.replace(".comp", ".spv")).is_file()
+
+
 def test_rms_norm_uses_its_parameter_width_instead_of_model_hidden_size() -> None:
     circuit = {
         "parameters": {
@@ -268,6 +347,16 @@ def test_rms_norm_keeps_parameter_width_with_fused_quantized_outputs() -> None:
         circuit, node, tensor_index, {"hidden_size": 4096}
     ) == "rms_norm_quantize_fp8_e4m3_b128_h1024_eps1e-06_offset0.comp"
 
+    node["attrs"]["physical_output_representations"][0]["contract"] = (
+        "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+    )
+    assert shader_file_for_node(
+        circuit, node, tensor_index, {"hidden_size": 4096}
+    ) == (
+        "rms_norm_quantize_fp8_e4m3_spow2_b128_h1024_"
+        "eps1e-06_offset0.comp"
+    )
+
 
 def test_compiles_parallel_block_latent_attention(tmp_path: Path) -> None:
     circuit, tensor_index = _fixture()
@@ -320,6 +409,9 @@ def test_compiles_parallel_block_latent_attention(tmp_path: Path) -> None:
     assert "const uint MAX_PARALLEL_BLOCK = 64u;" in source
     assert "uint slot = absolute_tick % capacity;" in source
     assert "uintBitsToFloat(attention_sinks.words[query_head])" in source
+    assert "shared float score_partials[MAX_SUBGROUP_COUNT];" in source
+    assert "subgroup < gl_NumSubgroups" in source
+    assert "token * SUBGROUP_COUNT" not in source
     assert all("{{" not in line for line in source.splitlines())
     parallel_source = (tmp_path / parallel_shader_file).read_text()
     assert "uint batch_width;" in parallel_source
@@ -782,5 +874,8 @@ def test_compiles_causal_indexed_attention_with_compressed_memory(
     assert "const uint MAX_COMPRESSED_INDICES = 1024u;" in source
     assert "index - LOCAL_WINDOW < compressed_count" in source
     assert "binding = 8) readonly buffer StreamControl" in source
+    assert "shared float score_partials[MAX_SUBGROUP_COUNT];" in source
+    assert "subgroup < gl_NumSubgroups" in source
+    assert "tile_token * SUBGROUP_COUNT" not in source
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()

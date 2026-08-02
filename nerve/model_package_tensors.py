@@ -1,5 +1,6 @@
 from nerve.model_package_common import *
 from nerve.physical_representations import (
+    FP8_E8M0_PREQUANTIZATION_CONTRACT,
     FP8_PREQUANTIZATION_CONTRACT,
     INT8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
@@ -1024,12 +1025,14 @@ def physical_input_prequantization_spec(
     tensor_index: Json,
     *,
     compiler_target: Json | None = None,
+    activation_quantization: Json | None = None,
 ) -> Json | None:
     fp8_spec = _fp8_prequantization_spec(circuit, node, tensor_index)
     if fp8_spec is not None:
-        contract = str(
-            fp8_spec.get("contract", FP8_PREQUANTIZATION_CONTRACT)
-        )
+        contract = str(fp8_spec.get("contract") or _fp8_activation_contract(
+            activation_quantization,
+            block_columns=int(fp8_spec["block_columns"]),
+        ))
         return prequantization_spec(
             contract,
             input_size=int(fp8_spec["input_size"]),
@@ -1093,6 +1096,36 @@ def physical_input_prequantization_spec(
         contract,
         input_size=input_size,
         block_columns=Q8_0_GROUP_SIZE,
+    )
+
+
+def _fp8_activation_contract(
+    activation_quantization: Json | None,
+    *,
+    block_columns: int,
+) -> str:
+    if activation_quantization is None:
+        return FP8_PREQUANTIZATION_CONTRACT
+    quantization_format = activation_quantization.get("format")
+    if quantization_format == "dynamic_block_fp8_e4m3":
+        group_size = int(activation_quantization.get("group_size", 0))
+        if group_size != block_columns:
+            raise ModelCompileError(
+                "FP8 activation group size does not match the compiled "
+                f"projection block width: {group_size} != {block_columns}"
+            )
+    elif quantization_format != "dynamic_token_fp8_e4m3":
+        raise ModelCompileError(
+            "unsupported FP8 activation quantization format "
+            f"{quantization_format!r}"
+        )
+    scale_format = activation_quantization.get("scale_format")
+    if scale_format == "f32_exact":
+        return FP8_PREQUANTIZATION_CONTRACT
+    if scale_format == "e8m0_power_of_two":
+        return FP8_E8M0_PREQUANTIZATION_CONTRACT
+    raise ModelCompileError(
+        f"unsupported FP8 activation scale format {scale_format!r}"
     )
 
 

@@ -101,9 +101,14 @@ def latent_sparse_attention_nodes(
                 "op": "rotary_position_embedding",
                 "inputs": ["key_value_normed"],
                 "outputs": ["key_value_positioned"],
-                "attrs": _rope_attrs(
-                    numerics, heads, head_count=int(heads["key_value_heads"])
-                ),
+                "attrs": {
+                    **_rope_attrs(
+                        numerics,
+                        heads,
+                        head_count=int(heads["key_value_heads"]),
+                    ),
+                    **_local_kv_activation_quantization(numerics),
+                },
             },
             {
                 "id": "local_memory_update",
@@ -190,6 +195,7 @@ def latent_sparse_attention_nodes(
                             heads,
                             head_count=int(heads["key_value_heads"]),
                         ),
+                        **_local_kv_activation_quantization(numerics),
                         "position_offset": int(
                             execution_contract["query_position_offset"]
                         ),
@@ -625,6 +631,37 @@ def _rope_attrs(numerics: Json, heads: Json, *, head_count: int) -> Json:
         "scaling": numerics.get("rope_scaling"),
         "interleaved": bool(numerics["rope_interleaved"]),
         "rotary_width": int(numerics["rotary_width"]),
+        "rotary_scope": "tail",
         **heads,
         "head_count": head_count,
+    }
+
+
+def _local_kv_activation_quantization(numerics: Json) -> Json:
+    activation = numerics.get("activation_quantization")
+    if activation is None:
+        return {}
+    if activation.get("format") not in {
+        "dynamic_block_fp8_e4m3",
+        "dynamic_token_fp8_e4m3",
+    }:
+        raise ValueError(
+            "latent attention local KV requires dynamic FP8 E4M3 activation quantization"
+        )
+    scale_format = activation.get("scale_format")
+    if scale_format not in {"f32_exact", "e8m0_power_of_two"}:
+        raise ValueError(
+            "latent attention local KV has an unsupported activation scale format"
+        )
+    return {
+        "activation_quantization": {
+            "format": "fp8_e4m3",
+            "scale_format": scale_format,
+            # This is an intrinsic numerical property of the latent-KV
+            # transform, independent of the input block geometry used by
+            # surrounding linear projections.
+            "block_columns": 64,
+            "scope": "non_rotary_dimensions",
+            "mode": "quantize_dequantize",
+        }
     }

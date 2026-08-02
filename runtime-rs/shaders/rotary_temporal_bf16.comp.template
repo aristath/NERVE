@@ -20,6 +20,7 @@ layout(set = 0, binding = {{BATCH_CONTROL_BINDING}}) readonly buffer BatchContro
 const uint HEAD_COUNT = {{HEAD_COUNT}}u;
 const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
 const uint ROTARY_WIDTH = {{ROTARY_WIDTH}}u;
+const uint ROTARY_OFFSET = {{ROTARY_OFFSET}};
 const uint FRAME_WIDTH = HEAD_COUNT * HEAD_WIDTH;
 const uint FRAME_WORDS = (FRAME_WIDTH + 1u) / 2u;
 const float ROPE_THETA = {{ROPE_THETA}};
@@ -30,6 +31,7 @@ const float ROPE_FACTOR = {{ROPE_FACTOR}};
 const float ROPE_CORRECTION_LOW = {{ROPE_CORRECTION_LOW}};
 const float ROPE_CORRECTION_HIGH = {{ROPE_CORRECTION_HIGH}};
 const float ROPE_ATTENTION_FACTOR = {{ROPE_ATTENTION_FACTOR}};
+const int POSITION_OFFSET = {{POSITION_OFFSET}};
 
 float bf16_to_f32(uint value) {
     return uintBitsToFloat((value & 0xffffu) << 16);
@@ -59,14 +61,21 @@ float rotate_value(uint position, uint base, uint dim) {
             ? -read_input(position, base + dim + half_width)
             : read_input(position, base + dim - half_width);
     }
+    uint rotary_dim = dim - ROTARY_OFFSET;
     if (ROPE_INTERLEAVED) {
-        return (dim & 1u) == 0u
-            ? -read_input(position, base + dim + 1u)
-            : read_input(position, base + dim - 1u);
+        return (rotary_dim & 1u) == 0u
+            ? -read_input(position, base + ROTARY_OFFSET + rotary_dim + 1u)
+            : read_input(position, base + ROTARY_OFFSET + rotary_dim - 1u);
     }
-    return dim < (ROTARY_WIDTH / 2u)
-        ? -read_input(position, base + dim + (ROTARY_WIDTH / 2u))
-        : read_input(position, base + dim - (ROTARY_WIDTH / 2u));
+    return rotary_dim < (ROTARY_WIDTH / 2u)
+        ? -read_input(
+            position,
+            base + ROTARY_OFFSET + rotary_dim + (ROTARY_WIDTH / 2u)
+        )
+        : read_input(
+            position,
+            base + ROTARY_OFFSET + rotary_dim - (ROTARY_WIDTH / 2u)
+        );
 }
 
 float rope_inverse_frequency(uint frequency_index, uint frequency_width) {
@@ -92,17 +101,27 @@ float rope_angle(uint dim, uint position) {
             return 0.0;
         }
         float inv_freq = rope_inverse_frequency(frequency_index, HEAD_WIDTH);
-        return float(batch_control.start_stream_tick_low + position) * inv_freq;
+        return (
+            float(batch_control.start_stream_tick_low + position)
+            + float(POSITION_OFFSET)
+        ) * inv_freq;
     }
+    uint rotary_dim = dim - ROTARY_OFFSET;
     uint frequency_index = ROPE_INTERLEAVED
-        ? dim / 2u
-        : dim % (ROTARY_WIDTH / 2u);
+        ? rotary_dim / 2u
+        : rotary_dim % (ROTARY_WIDTH / 2u);
     float inv_freq = rope_inverse_frequency(frequency_index, ROTARY_WIDTH);
-    return float(batch_control.start_stream_tick_low + position) * inv_freq;
+    return (
+        float(batch_control.start_stream_tick_low + position)
+        + float(POSITION_OFFSET)
+    ) * inv_freq;
 }
 
 float rotate(uint position, uint base, uint dim) {
-    if (!ROPE_PROPORTIONAL && dim >= ROTARY_WIDTH) {
+    if (
+        !ROPE_PROPORTIONAL
+        && (dim < ROTARY_OFFSET || dim >= ROTARY_OFFSET + ROTARY_WIDTH)
+    ) {
         return read_input(position, base + dim);
     }
     float angle = rope_angle(dim, position);
