@@ -42,13 +42,16 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    SINT8 versus 22.6 us for F16 over the same 8,192-tile workload (about 1.39x
    faster). MXFP4 E2M1 weights now also have an identity-independent exact
    reconstruction proof into SINT8 codes: multiply each finite E2M1 value by
-   two and halve its E8M0 group scale. This keeps MXFP4 as the compact backing
-   store and permits a demand-constructed SINT8 physical form without numeric
-   requantization. Implement that on-demand physical form and its structurally
-   matched projection kernels, then retain it only when component benchmarks
-   and behavioral validation beat the native MXFP4 path. Add other SINT8-backed
-   implementations only for compatible structural scopes and retain the normal
-   benchmark/equivalence promotion gate.
+   two and halve its E8M0 group scale. A structurally generic inline
+   reconstruction prototype preserved the known finite kernel outputs, but a
+   real 4096x2048 six-expert decode microbenchmark measured 0.679 ms versus
+   0.416 ms for native MXFP4 (1.63x slower). The rejected implementation was
+   removed. Do not promote SINT8 merely because matrix calibration is faster;
+   revisit it only with a representation-level design that amortizes activation
+   quantization and packed-weight reconstruction while retaining MXFP4 as the
+   compact backing store. Add other SINT8-backed implementations only for
+   compatible structural scopes and retain the normal benchmark/equivalence
+   promotion gate.
 
 3. Complete a real DeepSeek multi-turn quality gate with official thinking and
    sampling defaults, a 65,536-or-larger output allowance, and agentic context.
