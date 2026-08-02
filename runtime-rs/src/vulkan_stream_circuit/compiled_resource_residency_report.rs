@@ -153,10 +153,6 @@ struct VulkanCompiledResourceStoreInstrumentation {
     retiering_device_selection_count: std::sync::atomic::AtomicU64,
     retiering_host_visible_selection_count: std::sync::atomic::AtomicU64,
     retiering_time_ns: std::sync::atomic::AtomicU64,
-    eviction_count: std::sync::atomic::AtomicU64,
-    evicted_unit_count: std::sync::atomic::AtomicU64,
-    evicted_payload_bytes: std::sync::atomic::AtomicU64,
-    released_device_bytes: std::sync::atomic::AtomicU64,
     gpu_misses_by_component:
         std::sync::Mutex<BTreeMap<(String, String), u64>>,
 }
@@ -237,29 +233,6 @@ impl VulkanCompiledResourceStoreInstrumentation {
             .fetch_add(report.host_visible_selection_count, Ordering::Relaxed);
         self.retiering_time_ns
             .fetch_add(report.elapsed_ns, Ordering::Relaxed);
-    }
-
-    fn record_eviction(
-        &self,
-        group_count: usize,
-        payload_bytes: usize,
-        released_device_bytes: usize,
-    ) {
-        use std::sync::atomic::Ordering;
-
-        self.eviction_count.fetch_add(1, Ordering::Relaxed);
-        self.evicted_unit_count.fetch_add(
-            u64::try_from(group_count).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
-        self.evicted_payload_bytes.fetch_add(
-            u64::try_from(payload_bytes).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
-        self.released_device_bytes.fetch_add(
-            u64::try_from(released_device_bytes).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
     }
 
     fn record_gpu_gate_misses(

@@ -102,217 +102,6 @@ fn tiered_host_memory_budget_rejects_missing_or_inconsistent_kernel_data() {
 }
 
 #[test]
-fn compiled_resource_eviction_reclaims_complete_unprotected_allocation_cohorts() {
-    let cohort = |chunk_id| VulkanCompiledResourceAllocationCohort {
-        tier: VulkanCompiledResourceMemoryTier::Device,
-        chunk_id,
-    };
-    let candidates = vec![
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "old-protected-sibling".to_string(),
-            byte_count: 40,
-            last_access_epoch: 1,
-        },
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "next-a".to_string(),
-            byte_count: 40,
-            last_access_epoch: 3,
-        },
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "next-b".to_string(),
-            byte_count: 40,
-            last_access_epoch: 4,
-        },
-    ];
-    let group_chunks = BTreeMap::from([
-        (
-            "old-protected-sibling".to_string(),
-            BTreeSet::from([cohort(10)]),
-        ),
-        ("protected".to_string(), BTreeSet::from([cohort(10)])),
-        ("next-a".to_string(), BTreeSet::from([cohort(20)])),
-        ("next-b".to_string(), BTreeSet::from([cohort(20)])),
-    ]);
-    let chunk_groups = BTreeMap::from([
-        (
-            cohort(10),
-            BTreeSet::from(["old-protected-sibling".to_string(), "protected".to_string()]),
-        ),
-        (
-            cohort(20),
-            BTreeSet::from(["next-a".to_string(), "next-b".to_string()]),
-        ),
-    ]);
-
-    let selected = compiled_resource_lru_eviction_groups(
-        &candidates,
-        &group_chunks,
-        &chunk_groups,
-        &BTreeSet::from(["protected".to_string()]),
-        60,
-    )
-    .unwrap();
-
-    assert_eq!(
-        selected,
-        BTreeSet::from(["next-a".to_string(), "next-b".to_string()])
-    );
-}
-
-#[test]
-fn compiled_resource_eviction_preserves_selector_working_sets_across_a_cyclic_scan() {
-    let candidates = vec![
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "layer-a-hot".to_string(),
-            byte_count: 40,
-            last_access_epoch: 1,
-        },
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "layer-b-cold".to_string(),
-            byte_count: 40,
-            last_access_epoch: 20,
-        },
-    ];
-    let directory = vec![
-        DeviceResourceResidencyDirectoryEntry {
-            group_id: "layer-a-hot".to_string(),
-            state: ResourceResidencyState::Resident,
-            location: DeviceResourceResidencyLocation::Local {
-                device_id: "gpu0".to_string(),
-            },
-            byte_count: 100,
-            owner_count: 1,
-            active_lease_count: 0,
-            last_access_epoch: 1,
-        },
-        DeviceResourceResidencyDirectoryEntry {
-            group_id: "layer-b-cold".to_string(),
-            state: ResourceResidencyState::Resident,
-            location: DeviceResourceResidencyLocation::Local {
-                device_id: "gpu0".to_string(),
-            },
-            byte_count: 100,
-            owner_count: 1,
-            active_lease_count: 0,
-            last_access_epoch: 20,
-        },
-    ];
-    let group_selector_ids = BTreeMap::from([
-        ("layer-a-hot".to_string(), "layer-a".to_string()),
-        ("layer-b-cold".to_string(), "layer-b".to_string()),
-    ]);
-    let selector_payload_budgets =
-        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
-
-    let ordered = compiled_resource_selector_fair_eviction_candidates(
-        &candidates,
-        &directory,
-        &group_selector_ids,
-        &selector_payload_budgets,
-        "layer-b",
-        40,
-    )
-    .unwrap();
-
-    assert_eq!(ordered[0].group_id, "layer-b-cold");
-    assert_eq!(ordered[1].group_id, "layer-a-hot");
-}
-
-#[test]
-fn compiled_resource_eviction_reclaims_borrowed_capacity_before_an_under_budget_selector() {
-    let candidates = vec![
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "under-budget-old".to_string(),
-            byte_count: 40,
-            last_access_epoch: 1,
-        },
-        DeviceResourceResidencyEvictionCandidate {
-            group_id: "borrowed-newer".to_string(),
-            byte_count: 140,
-            last_access_epoch: 20,
-        },
-    ];
-    let directory = vec![
-        DeviceResourceResidencyDirectoryEntry {
-            group_id: "under-budget-old".to_string(),
-            state: ResourceResidencyState::Resident,
-            location: DeviceResourceResidencyLocation::Local {
-                device_id: "gpu0".to_string(),
-            },
-            byte_count: 40,
-            owner_count: 1,
-            active_lease_count: 0,
-            last_access_epoch: 1,
-        },
-        DeviceResourceResidencyDirectoryEntry {
-            group_id: "borrowed-newer".to_string(),
-            state: ResourceResidencyState::Resident,
-            location: DeviceResourceResidencyLocation::Local {
-                device_id: "gpu0".to_string(),
-            },
-            byte_count: 140,
-            owner_count: 1,
-            active_lease_count: 0,
-            last_access_epoch: 20,
-        },
-    ];
-    let group_selector_ids = BTreeMap::from([
-        ("under-budget-old".to_string(), "layer-a".to_string()),
-        ("borrowed-newer".to_string(), "layer-b".to_string()),
-    ]);
-    let selector_payload_budgets =
-        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
-
-    let ordered = compiled_resource_selector_fair_eviction_candidates(
-        &candidates,
-        &directory,
-        &group_selector_ids,
-        &selector_payload_budgets,
-        "layer-a",
-        40,
-    )
-    .unwrap();
-
-    assert_eq!(ordered[0].group_id, "borrowed-newer");
-    assert_eq!(ordered[1].group_id, "under-budget-old");
-}
-
-#[test]
-fn compiled_resource_eviction_falls_back_when_a_selector_has_no_evictable_group() {
-    let candidates = vec![DeviceResourceResidencyEvictionCandidate {
-        group_id: "fallback".to_string(),
-        byte_count: 40,
-        last_access_epoch: 1,
-    }];
-    let directory = vec![DeviceResourceResidencyDirectoryEntry {
-        group_id: "fallback".to_string(),
-        state: ResourceResidencyState::Resident,
-        location: DeviceResourceResidencyLocation::Local {
-            device_id: "gpu0".to_string(),
-        },
-        byte_count: 40,
-        owner_count: 1,
-        active_lease_count: 0,
-        last_access_epoch: 1,
-    }];
-    let group_selector_ids = BTreeMap::from([("fallback".to_string(), "layer-a".to_string())]);
-    let selector_payload_budgets =
-        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
-
-    let ordered = compiled_resource_selector_fair_eviction_candidates(
-        &candidates,
-        &directory,
-        &group_selector_ids,
-        &selector_payload_budgets,
-        "layer-b",
-        140,
-    )
-    .unwrap();
-
-    assert_eq!(ordered[0].group_id, "fallback");
-}
-
-#[test]
 fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let root = crate::test_support::TempDir::new("compiled_resource_device_store");
@@ -475,24 +264,24 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(fitting_working_set.current_payload_bytes, 8);
     assert_eq!(fitting_working_set.resident_unit_count, 1);
     assert_eq!(fitting_working_set.addressable_unit_count, 2);
-    over_capacity_store
+    let capacity_error = over_capacity_store
         .load_selector_resource(&device, &selector_id, 1, over_capacity_owner.clone())
-        .unwrap();
-    let bounded_growth = over_capacity_store.residency_report().unwrap();
-    assert_eq!(bounded_growth.current_payload_bytes, 8);
-    assert_eq!(bounded_growth.resident_unit_count, 1);
-    assert_eq!(bounded_growth.failed_unit_count, 0);
-    assert_eq!(bounded_growth.eviction_count, 1);
-    assert_eq!(bounded_growth.evicted_unit_count, 1);
-    assert_eq!(bounded_growth.evicted_payload_bytes, 8);
-    assert!(bounded_growth.released_device_bytes >= 8);
-
+        .expect_err("demand-retained residency must never evict a loaded component");
+    assert!(capacity_error.to_string().contains("capacity is 8 bytes"));
+    let retained = over_capacity_store.residency_report().unwrap();
+    assert_eq!(retained.current_payload_bytes, 8);
+    assert_eq!(retained.resident_unit_count, 1);
+    assert_eq!(retained.failed_unit_count, 0);
+    assert_eq!(retained.eviction_count, 0);
+    assert_eq!(retained.evicted_unit_count, 0);
+    assert_eq!(retained.evicted_payload_bytes, 0);
+    assert_eq!(retained.released_device_bytes, 0);
     over_capacity_store
         .load_selector_resource(&device, &selector_id, 0, over_capacity_owner)
-        .unwrap();
-    let reloaded = over_capacity_store.residency_report().unwrap();
-    assert_eq!(reloaded.eviction_count, 2);
-    assert_eq!(reloaded.reload_count, 1);
+        .expect("the retained component must remain addressable after admission fails");
+    let reused = over_capacity_store.residency_report().unwrap();
+    assert_eq!(reused.eviction_count, 0);
+    assert_eq!(reused.reload_count, 0);
     assert_eq!(
         over_capacity_store.unload().unwrap(),
         DeviceResourceResidencyRelease {
