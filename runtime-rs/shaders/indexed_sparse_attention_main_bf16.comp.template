@@ -36,12 +36,12 @@ const uint LOCAL_WINDOW = {{LOCAL_WINDOW}}u;
 const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
 const uint MAX_COMPRESSED_INDICES = {{MAX_COMPRESSED_INDICES}}u;
 const uint TILE_TOKENS = 64u;
-const uint SUBGROUP_COUNT = HEAD_WIDTH / 32u;
+const uint MAX_SUBGROUP_COUNT = HEAD_WIDTH / 4u;
 const uint STATE_PAGE_TABLE_WORDS = 9u;
 const float ATTENTION_SCALE = {{ATTENTION_SCALE}};
 const float LOWEST_FLOAT = -3.4028234663852886e38;
 
-shared float score_partials[TILE_TOKENS * SUBGROUP_COUNT];
+shared float score_partials[MAX_SUBGROUP_COUNT];
 shared float tile_scores[TILE_TOKENS];
 shared float tile_weights[TILE_TOKENS];
 shared float running_maximum;
@@ -205,16 +205,13 @@ void main() {
                 : 0.0;
             float subgroup_partial = subgroupAdd(query_value * key_value);
             if (subgroupElect()) {
-                score_partials[tile_token * SUBGROUP_COUNT + gl_SubgroupID] =
-                    subgroup_partial;
+                score_partials[gl_SubgroupID] = subgroup_partial;
             }
             barrier();
             if (dim == 0u) {
                 float score = 0.0;
-                for (uint subgroup = 0u; subgroup < SUBGROUP_COUNT; subgroup++) {
-                    score += score_partials[
-                        tile_token * SUBGROUP_COUNT + subgroup
-                    ];
+                for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                    score += score_partials[subgroup];
                 }
                 tile_scores[tile_token] = valid
                     ? score * ATTENTION_SCALE

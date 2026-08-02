@@ -43,12 +43,12 @@ const uint QUERY_WORDS = QUERY_HEADS * HEAD_WORDS;
 const uint LOCAL_WINDOW = {{LOCAL_WINDOW}}u;
 const uint MAX_PARALLEL_BLOCK = 64u;
 const uint MAX_ATTENDED_TOKENS = LOCAL_WINDOW + MAX_PARALLEL_BLOCK;
-const uint SUBGROUP_COUNT = HEAD_WIDTH / 32u;
+const uint MAX_SUBGROUP_COUNT = HEAD_WIDTH / 4u;
 const uint STATE_PAGE_TABLE_WORDS = 9u;
 const float ATTENTION_SCALE = {{ATTENTION_SCALE}};
 const float LOWEST_FLOAT = -3.4028234663852886e38;
 
-shared float score_partials[MAX_ATTENDED_TOKENS * SUBGROUP_COUNT];
+shared float score_partials[MAX_SUBGROUP_COUNT];
 shared float attention_scores[MAX_ATTENDED_TOKENS];
 shared float softmax_denominator;
 shared float output_values[HEAD_WIDTH];
@@ -160,14 +160,13 @@ void main() {
             : read_query_key_value(token - local_tokens, dim);
         float subgroup_partial = subgroupAdd(query_value * key_value);
         if (subgroupElect()) {
-            score_partials[token * SUBGROUP_COUNT + gl_SubgroupID] =
-                subgroup_partial;
+            score_partials[gl_SubgroupID] = subgroup_partial;
         }
         barrier();
         if (dim == 0u) {
             float score = 0.0;
-            for (uint subgroup = 0u; subgroup < SUBGROUP_COUNT; subgroup++) {
-                score += score_partials[token * SUBGROUP_COUNT + subgroup];
+            for (uint subgroup = 0u; subgroup < gl_NumSubgroups; subgroup++) {
+                score += score_partials[subgroup];
             }
             attention_scores[token] = score * ATTENTION_SCALE;
         }
