@@ -128,6 +128,11 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
 
     structure = discover_model_structure(Path("synthetic"), config, tensors)
 
+    # The latent-attention contract uses adjacent rotary pairs on the trailing
+    # rotary slice (x[0], x[1]), (x[2], x[3]), ... .  The source checkpoint
+    # does not need to repeat this invariant as a ceremonial config flag: it
+    # is part of the discovered operator semantics.
+    assert structure.rope_interleaved is True
     sliding, learned, deterministic = structure.layers
     assert {layer.operator_type for layer in structure.layers} == {
         "latent_sparse_attention"
@@ -340,8 +345,10 @@ def test_composes_latent_attention_independent_experts_and_hyper_connections() -
     assert nodes["query_head_norm"]["attrs"]["head_count"] == 4
     assert nodes["query_rope"]["attrs"]["head_count"] == 4
     assert nodes["query_rope"]["attrs"]["rotary_scope"] == "tail"
+    assert nodes["query_rope"]["attrs"]["interleaved"] is True
     assert nodes["key_value_rope"]["attrs"]["head_count"] == 1
     assert nodes["key_value_rope"]["attrs"]["rotary_scope"] == "tail"
+    assert nodes["key_value_rope"]["attrs"]["interleaved"] is True
     assert nodes["key_value_rope"]["attrs"]["activation_quantization"] == {
         "format": "fp8_e4m3",
         "scale_format": "e8m0_power_of_two",
@@ -351,6 +358,7 @@ def test_composes_latent_attention_independent_experts_and_hyper_connections() -
     }
     assert nodes["attention_inverse_rope"]["attrs"]["head_count"] == 4
     assert nodes["attention_inverse_rope"]["attrs"]["rotary_scope"] == "tail"
+    assert nodes["attention_inverse_rope"]["attrs"]["interleaved"] is True
     assert nodes["attention_inverse_rope"]["attrs"].get("position_offset", 0) == 0
     node_ids = [node["id"] for node in circuit["nodes"]]
     assert node_ids.index("hyper_attention_reduce") < node_ids.index("operator_norm")

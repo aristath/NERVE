@@ -257,7 +257,10 @@ def discover_model_structure(
             if first_attention is not None
             else discover_rope_theta(decoder_config)
         ),
-        rope_interleaved=discover_rope_interleaved(decoder_config),
+        rope_interleaved=discover_rope_interleaved(
+            decoder_config,
+            operator_types=(layer.operator_type for layer in layers),
+        ),
         rms_norm_weight_offset=rms_norm_weight_offset,
         embedding_scale=discover_embedding_scale(
             decoder_config,
@@ -1924,7 +1927,11 @@ def discover_rope_theta(config: Json) -> float:
     raise ModelTranspileError("could not discover RoPE theta from model config")
 
 
-def discover_rope_interleaved(config: Json) -> bool:
+def discover_rope_interleaved(
+    config: Json,
+    *,
+    operator_types: Iterable[str] = (),
+) -> bool:
     # Rotary pair layout and multimodal position-axis layout are independent
     # contracts. A multimodal interleave may reorganize position-axis frequency
     # streams before an ordinary half-split rotation without selecting
@@ -1936,4 +1943,9 @@ def discover_rope_interleaved(config: Json) -> bool:
         for key in ("rope_interleaved", "interleaved"):
             if key in rope_parameters:
                 return bool(rope_parameters[key])
-    return False
+    # Adjacent-pair rotary is part of the latent sparse-attention operator
+    # contract.  Checkpoints using this operator do not necessarily duplicate
+    # that semantic invariant in config.json, so derive it from the discovered
+    # circuit structure instead of silently applying the unrelated Llama-style
+    # half-split default.
+    return "latent_sparse_attention" in set(operator_types)
