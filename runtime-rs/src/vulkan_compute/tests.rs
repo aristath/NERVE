@@ -2166,18 +2166,35 @@ fn device_fault_address_registry_rejects_overlap_and_resolves_boundaries() {
     registry
         .register(8, 0x2_0000, 0x1000, "second allocation")
         .unwrap();
+    registry
+        .register_annotation(70, 0x1_0800, 0x400, "stable resource slot=17")
+        .unwrap();
 
     let first = registry.resolve(0x1_1abc).unwrap();
     assert_eq!(first.label, "first allocation");
     assert_eq!(first.byte_offset, 0x1abc);
     assert_eq!(first.byte_capacity, 0x2000);
+    let annotated = registry.resolve(0x1_0920).unwrap();
+    assert_eq!(annotated.label, "stable resource slot=17");
+    assert_eq!(annotated.byte_offset, 0x120);
+    assert_eq!(annotated.byte_capacity, 0x400);
     assert!(registry.resolve(0x1_2000).is_none());
 
     let overlap = registry
         .register(9, 0x1_1000, 0x2000, "overlapping allocation")
         .unwrap_err();
     assert!(overlap.0.contains("overlaps"));
+    let annotation_overlap = registry
+        .register_annotation(71, 0x1_0900, 0x400, "overlapping slot")
+        .unwrap_err();
+    assert!(annotation_overlap.0.contains("overlaps"));
+    let annotation_outside = registry
+        .register_annotation(72, 0x1_1f00, 0x200, "outside allocation")
+        .unwrap_err();
+    assert!(annotation_outside.0.contains("contained"));
 
+    registry.unregister_annotation(70, 0x1_0800).unwrap();
+    assert_eq!(registry.resolve(0x1_0920).unwrap().label, "first allocation");
     registry.unregister(7, 0x1_0000).unwrap();
     assert!(registry.resolve(0x1_1abc).is_none());
     assert_eq!(registry.resolve(0x2_0000).unwrap().label, "second allocation");

@@ -111,6 +111,7 @@ struct VulkanStableResourceAllocationRecord {
 
 pub struct VulkanStableResourceAllocation {
     allocation_id: u64,
+    resource_slot: usize,
     chunk_id: u64,
     group_key: Arc<[usize]>,
     buffer: Arc<VulkanResidentBuffer>,
@@ -118,6 +119,7 @@ pub struct VulkanStableResourceAllocation {
     byte_offset: usize,
     byte_count: usize,
     device_address: vk::DeviceAddress,
+    device_address_registry: Option<Arc<Mutex<VulkanDeviceAddressRegistry>>>,
 }
 
 impl VulkanStableResourceArena {
@@ -551,6 +553,28 @@ fn allocate_stable_resource_groups(
             let byte_count = placement.resource_byte_counts[placement_index];
             let allocation_id = state.next_allocation_id;
             state.next_allocation_id += 1;
+            let device_address = base_address
+                .checked_add(
+                    u64::try_from(byte_offset)
+                        .expect("stable resource offset was prevalidated"),
+                )
+                .expect("stable resource address was prevalidated");
+            let device_address_registry = buffer.device_address_registry.clone();
+            if let Some(registry) = &device_address_registry {
+                registry
+                    .lock()
+                    .map_err(|_| {
+                        VulkanError("device-address registry was poisoned".to_string())
+                    })?
+                    .register_annotation(
+                        allocation_id,
+                        device_address,
+                        byte_count,
+                        format!(
+                            "stable resource slot={slot} allocation={allocation_id} chunk={chunk_id}"
+                        ),
+                    )?;
+            }
             state.allocations.insert(
                 allocation_id,
                 VulkanStableResourceAllocationRecord {
@@ -560,18 +584,15 @@ fn allocate_stable_resource_groups(
             );
             allocations.push(Arc::new(VulkanStableResourceAllocation {
                 allocation_id,
+                resource_slot: slot,
                 chunk_id,
                 group_key: Arc::clone(&allocation_group_key),
                 buffer: Arc::clone(&buffer),
                 arena_state: Arc::clone(arena_state),
                 byte_offset,
                 byte_count,
-                device_address: base_address
-                    .checked_add(
-                        u64::try_from(byte_offset)
-                            .expect("stable resource offset was prevalidated"),
-                    )
-                    .expect("stable resource address was prevalidated"),
+                device_address,
+                device_address_registry,
             }));
         }
         state
@@ -622,40 +643,52 @@ impl VulkanStableResourceAllocation {
 
 impl Drop for VulkanStableResourceAllocation {
     fn drop(&mut self) {
-        let Ok(mut state) = self.arena_state.lock() else {
-            return;
-        };
-        let Some(record) = state.allocations.remove(&self.allocation_id) else {
-            debug_assert!(false, "stable resource allocation was released twice");
-            return;
-        };
-        debug_assert_eq!(record.byte_count, self.byte_count);
-        debug_assert_eq!(record.chunk_id, self.chunk_id);
-        state.allocated_byte_count = state.allocated_byte_count.saturating_sub(record.byte_count);
-        let mut remove_active_group = false;
-        if let Some(active_allocation_count) = state.active_groups.get_mut(self.group_key.as_ref())
-        {
-            *active_allocation_count = active_allocation_count.saturating_sub(1);
-            remove_active_group = *active_allocation_count == 0;
-        } else {
-            debug_assert!(false, "stable resource allocation lost its active group");
-        }
-        if remove_active_group {
-            state.active_groups.remove(self.group_key.as_ref());
-        }
-        let mut remove_chunk = false;
-        if let Some(chunk) = state.chunks.get_mut(&self.chunk_id) {
-            chunk.active_allocation_count = chunk.active_allocation_count.saturating_sub(1);
-            remove_chunk = chunk.active_allocation_count == 0;
-        } else {
-            debug_assert!(false, "stable resource allocation lost its chunk");
-        }
-        if remove_chunk {
-            if let Some(chunk) = state.chunks.remove(&self.chunk_id) {
-                state.committed_byte_capacity = state
-                    .committed_byte_capacity
-                    .saturating_sub(chunk.byte_capacity);
+        if let Ok(mut state) = self.arena_state.lock() {
+            if let Some(record) = state.allocations.remove(&self.allocation_id) {
+                debug_assert_eq!(record.byte_count, self.byte_count);
+                debug_assert_eq!(record.chunk_id, self.chunk_id);
+                state.allocated_byte_count =
+                    state.allocated_byte_count.saturating_sub(record.byte_count);
+                let mut remove_active_group = false;
+                if let Some(active_allocation_count) =
+                    state.active_groups.get_mut(self.group_key.as_ref())
+                {
+                    *active_allocation_count = active_allocation_count.saturating_sub(1);
+                    remove_active_group = *active_allocation_count == 0;
+                } else {
+                    debug_assert!(false, "stable resource allocation lost its active group");
+                }
+                if remove_active_group {
+                    state.active_groups.remove(self.group_key.as_ref());
+                }
+                let mut remove_chunk = false;
+                if let Some(chunk) = state.chunks.get_mut(&self.chunk_id) {
+                    chunk.active_allocation_count =
+                        chunk.active_allocation_count.saturating_sub(1);
+                    remove_chunk = chunk.active_allocation_count == 0;
+                } else {
+                    debug_assert!(false, "stable resource allocation lost its chunk");
+                }
+                if remove_chunk
+                    && let Some(chunk) = state.chunks.remove(&self.chunk_id)
+                {
+                    state.committed_byte_capacity = state
+                        .committed_byte_capacity
+                        .saturating_sub(chunk.byte_capacity);
+                }
+            } else {
+                debug_assert!(false, "stable resource allocation was released twice");
             }
+        }
+        if let Some(registry) = &self.device_address_registry
+            && let Ok(mut registry) = registry.lock()
+        {
+            let result = registry.unregister_annotation(self.allocation_id, self.device_address);
+            debug_assert!(
+                result.is_ok(),
+                "stable resource slot {} lost its device-address annotation",
+                self.resource_slot
+            );
         }
     }
 }

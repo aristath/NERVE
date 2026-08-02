@@ -33,6 +33,7 @@ pub struct VulkanDeviceFaultReport {
 #[derive(Default)]
 struct VulkanDeviceAddressRegistry {
     ranges: BTreeMap<vk::DeviceAddress, VulkanDeviceAddressRange>,
+    annotations: BTreeMap<vk::DeviceAddress, VulkanDeviceAddressRange>,
 }
 
 impl VulkanDeviceAddressRegistry {
@@ -43,46 +44,13 @@ impl VulkanDeviceAddressRegistry {
         byte_capacity: usize,
         label: impl Into<String>,
     ) -> Result<(), VulkanError> {
-        if start == 0 || byte_capacity == 0 {
-            return Err(VulkanError(
-                "device-address registry range must be non-empty".to_string(),
-            ));
-        }
-        let end = start
-            .checked_add(u64::try_from(byte_capacity).map_err(|_| {
-                VulkanError("device-address range exceeds u64".to_string())
-            })?)
-            .ok_or_else(|| VulkanError("device-address range overflowed".to_string()))?;
-        if let Some(previous) = self.ranges.range(..=start).next_back().map(|(_, range)| range) {
-            let previous_end = previous
-                .start
-                .checked_add(u64::try_from(previous.byte_capacity).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX);
-            if previous_end > start {
-                return Err(VulkanError(format!(
-                    "device-address range 0x{start:x}..0x{end:x} overlaps {:?}",
-                    previous.label
-                )));
-            }
-        }
-        if let Some(next) = self.ranges.range(start..).next().map(|(_, range)| range)
-            && next.start < end
-        {
-            return Err(VulkanError(format!(
-                "device-address range 0x{start:x}..0x{end:x} overlaps {:?}",
-                next.label
-            )));
-        }
-        self.ranges.insert(
+        register_device_address_range(
+            &mut self.ranges,
+            owner_id,
             start,
-            VulkanDeviceAddressRange {
-                owner_id,
-                start,
-                byte_capacity,
-                label: label.into(),
-            },
-        );
-        Ok(())
+            byte_capacity,
+            label,
+        )
     }
 
     fn unregister(
@@ -104,18 +72,133 @@ impl VulkanDeviceAddressRegistry {
         Ok(())
     }
 
+    fn register_annotation(
+        &mut self,
+        owner_id: u64,
+        start: vk::DeviceAddress,
+        byte_capacity: usize,
+        label: impl Into<String>,
+    ) -> Result<(), VulkanError> {
+        let end = checked_device_address_range_end(start, byte_capacity)?;
+        let parent = resolve_device_address_range(&self.ranges, start).ok_or_else(|| {
+            VulkanError(format!(
+                "device-address annotation 0x{start:x}..0x{end:x} is not contained in a registered allocation"
+            ))
+        })?;
+        let parent_end = checked_device_address_range_end(parent.start, parent.byte_capacity)?;
+        if end > parent_end {
+            return Err(VulkanError(format!(
+                "device-address annotation 0x{start:x}..0x{end:x} is not contained in registered allocation {:?}",
+                parent.label
+            )));
+        }
+        register_device_address_range(
+            &mut self.annotations,
+            owner_id,
+            start,
+            byte_capacity,
+            label,
+        )
+    }
+
+    fn unregister_annotation(
+        &mut self,
+        owner_id: u64,
+        start: vk::DeviceAddress,
+    ) -> Result<(), VulkanError> {
+        let range = self.annotations.get(&start).ok_or_else(|| {
+            VulkanError(format!(
+                "device-address registry has no annotation at 0x{start:x}"
+            ))
+        })?;
+        if range.owner_id != owner_id {
+            return Err(VulkanError(format!(
+                "device-address annotation at 0x{start:x} belongs to another owner"
+            )));
+        }
+        self.annotations.remove(&start);
+        Ok(())
+    }
+
     fn resolve(
         &self,
         address: vk::DeviceAddress,
     ) -> Option<VulkanResolvedDeviceAddress> {
-        let range = self.ranges.range(..=address).next_back()?.1;
+        let range = resolve_device_address_range(&self.annotations, address)
+            .or_else(|| resolve_device_address_range(&self.ranges, address))?;
         let byte_offset = usize::try_from(address.checked_sub(range.start)?).ok()?;
-        (byte_offset < range.byte_capacity).then(|| VulkanResolvedDeviceAddress {
+        Some(VulkanResolvedDeviceAddress {
             label: range.label.clone(),
             byte_offset,
             byte_capacity: range.byte_capacity,
         })
     }
+}
+
+fn checked_device_address_range_end(
+    start: vk::DeviceAddress,
+    byte_capacity: usize,
+) -> Result<vk::DeviceAddress, VulkanError> {
+    if start == 0 || byte_capacity == 0 {
+        return Err(VulkanError(
+            "device-address registry range must be non-empty".to_string(),
+        ));
+    }
+    start
+        .checked_add(
+            u64::try_from(byte_capacity)
+                .map_err(|_| VulkanError("device-address range exceeds u64".to_string()))?,
+        )
+        .ok_or_else(|| VulkanError("device-address range overflowed".to_string()))
+}
+
+fn resolve_device_address_range(
+    ranges: &BTreeMap<vk::DeviceAddress, VulkanDeviceAddressRange>,
+    address: vk::DeviceAddress,
+) -> Option<&VulkanDeviceAddressRange> {
+    let range = ranges.range(..=address).next_back()?.1;
+    let byte_offset = usize::try_from(address.checked_sub(range.start)?).ok()?;
+    (byte_offset < range.byte_capacity).then_some(range)
+}
+
+fn register_device_address_range(
+    ranges: &mut BTreeMap<vk::DeviceAddress, VulkanDeviceAddressRange>,
+    owner_id: u64,
+    start: vk::DeviceAddress,
+    byte_capacity: usize,
+    label: impl Into<String>,
+) -> Result<(), VulkanError> {
+    let end = checked_device_address_range_end(start, byte_capacity)?;
+    if let Some(previous) = ranges.range(..=start).next_back().map(|(_, range)| range) {
+        let previous_end = previous
+            .start
+            .checked_add(u64::try_from(previous.byte_capacity).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX);
+        if previous_end > start {
+            return Err(VulkanError(format!(
+                "device-address range 0x{start:x}..0x{end:x} overlaps {:?}",
+                previous.label
+            )));
+        }
+    }
+    if let Some(next) = ranges.range(start..).next().map(|(_, range)| range)
+        && next.start < end
+    {
+        return Err(VulkanError(format!(
+            "device-address range 0x{start:x}..0x{end:x} overlaps {:?}",
+            next.label
+        )));
+    }
+    ranges.insert(
+        start,
+        VulkanDeviceAddressRange {
+            owner_id,
+            start,
+            byte_capacity,
+            label: label.into(),
+        },
+    );
+    Ok(())
 }
 
 impl VulkanComputeDevice {

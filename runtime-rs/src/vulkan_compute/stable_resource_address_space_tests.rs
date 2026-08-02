@@ -37,6 +37,52 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
 }
 
 #[test]
+fn stable_resource_allocations_are_attributed_to_compiled_slots() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping stable resource attribution test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(64 * 1024, 256).unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![7, 17],
+            resource_byte_counts: vec![1024, 2048],
+        }],
+    )
+    .unwrap();
+    let mut groups = arena
+        .allocate_groups(&device, &[(&[7, 17], &[1024, 2048])], 256)
+        .unwrap();
+    let allocations = groups.pop().unwrap();
+
+    for (expected_slot, allocation) in [7, 17].into_iter().zip(&allocations) {
+        let resolved = device
+            .device_address_registry
+            .lock()
+            .unwrap()
+            .resolve(allocation.device_address() + allocation.byte_count() as u64 - 1)
+            .unwrap();
+        assert!(resolved.label.contains(&format!("resource slot={expected_slot}")));
+        assert_eq!(resolved.byte_offset, allocation.byte_count() - 1);
+        assert_eq!(resolved.byte_capacity, allocation.byte_count());
+    }
+
+    let first_address = allocations[0].device_address();
+    drop(allocations);
+    assert!(
+        device
+            .device_address_registry
+            .lock()
+            .unwrap()
+            .resolve(first_address)
+            .is_none()
+    );
+    arena.release_backing().unwrap();
+}
+
+#[test]
 fn host_visible_stable_resource_is_directly_gpu_addressable() {
     let Some(device_index) = stable_resource_test_device_index() else {
         eprintln!("skipping host-visible stable resource test: explicit Vulkan device unset");
