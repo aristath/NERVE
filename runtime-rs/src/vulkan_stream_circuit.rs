@@ -32,8 +32,8 @@ use crate::stream_circuit::{
 };
 use crate::stream_plan::{
     CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort,
-    PlannedSelectionEncoding, SignalProducer, SignalStorage, StreamCircuitExecutionPlan,
-    StreamCircuitResourcePlan, TensorIndex,
+    PlannedSelectedParameterLayout, PlannedSelectionEncoding, SignalProducer, SignalStorage,
+    StreamCircuitExecutionPlan, StreamCircuitResourcePlan, TensorIndex,
 };
 use crate::stream_prefix_cache::{RuntimePrefixStateCacheInsert, RuntimePrefixStateCacheKey};
 use crate::stream_runtime::{
@@ -91,7 +91,7 @@ pub const VULKAN_STREAM_CIRCUIT_BACKEND_ID: &str = "vulkan_stream_circuit_ir";
 pub const VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA: &str =
     "nerve.vulkan_reusable_kernel_artifacts.v1";
 pub const VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA: &str =
-    "nerve.vulkan_resident_model_package.v7";
+    "nerve.vulkan_resident_model_package.v8";
 const CONTRACT_DIGEST_ALGORITHM: &str = "nerve.json_tree_sha256.v1";
 const VULKAN_STREAM_CONTROL_BYTE_CAPACITY: usize = 5 * std::mem::size_of::<u32>();
 const VULKAN_STREAM_CONTROL_TOKEN_BYTE_CAPACITY: usize = std::mem::size_of::<u32>();

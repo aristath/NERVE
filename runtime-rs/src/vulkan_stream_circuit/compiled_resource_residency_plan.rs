@@ -243,6 +243,19 @@ fn accumulate_compiled_resource_binding(
                 selection.concrete_always.insert(resource_id.clone());
             }
         }
+        CompiledResourceBindingMapping::SelectedAtomicGroup {
+            atomic_group_id,
+            ..
+        } => {
+            let group = groups.get(atomic_group_id.as_str()).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "selected resource binding references unknown group {atomic_group_id:?}"
+                ))
+            })?;
+            selection
+                .concrete_dynamic
+                .extend(group.resource_ids.iter().cloned());
+        }
         CompiledResourceBindingMapping::PartitionTemplateMember {
             partition_template_id,
             ..

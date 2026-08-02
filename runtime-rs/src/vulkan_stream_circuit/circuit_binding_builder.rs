@@ -430,7 +430,7 @@ fn bind_node(
                 component_id: circuit.component_id.clone(),
                 node_id: node.id.clone(),
                 selection_signal: access.selection_signal.clone(),
-                partition_axis: access.partition_axis,
+                layout: access.layout.clone(),
                 parameter_ids: access.parameter_ids.clone(),
             })
             .collect(),

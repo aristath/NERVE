@@ -448,7 +448,7 @@ def analyze_resource_residency_components(
                         component_id=component_id,
                         node_id=node_id,
                     )
-                    for parameter_id in selected_parameters:
+                    for parameter_slot, parameter_id in enumerate(selected_parameters):
                         node_parameter = (node_id, parameter_id)
                         if node_parameter in covered_node_parameters:
                             raise ModelCompileError(
@@ -481,6 +481,7 @@ def analyze_resource_residency_components(
                                 "parameter_id": parameter_id,
                                 "tensor": tensor_name,
                                 "selector": selector_index,
+                                "parameter_slot": parameter_slot,
                                 "selection_signal": selection_signal,
                             }
                         )
@@ -571,7 +572,13 @@ def analyze_resource_residency_components(
                 group["accesses"] = [
                     {
                         key: access[key]
-                        for key in ("node_id", "parameter_id", "tensor", "selector")
+                        for key in (
+                            "node_id",
+                            "parameter_id",
+                            "tensor",
+                            "selector",
+                            "parameter_slot",
+                        )
                     }
                     for access in accesses
                 ]
@@ -783,9 +790,12 @@ def build_planned_resource_residency_contract(
                     tensor_name = access["tensor"]
                     resource = dynamic_resource(tensor_name)
                     dynamic_binding_mapping[semantic_key] = {
-                        "kind": "atomic_group",
+                        "kind": "selected_atomic_group",
                         "atomic_group_id": atomic_group["id"],
                         "resource_id": resource["id"],
+                        "selection_signal": group["selection_signal"],
+                        "selector_index": access["selector"],
+                        "parameter_slot": access["parameter_slot"],
                     }
             selector_mapping = {
                 "kind": "group_table",
@@ -1175,6 +1185,9 @@ def _binding_sort_key(binding: Json) -> tuple[str, str, str, str, str]:
             "kind",
             "atomic_group_id",
             "resource_id",
+            "selection_signal",
+            "selector_index",
+            "parameter_slot",
             "partition_template_id",
             "resource_identity_seed",
         )

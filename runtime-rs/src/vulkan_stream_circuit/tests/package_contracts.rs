@@ -61,7 +61,7 @@ fn concrete_resource_identity_does_not_depend_on_package_paths() {
 }
 
 #[test]
-fn resource_bindings_are_strictly_typed_for_concrete_and_partition_resources() {
+fn resource_bindings_are_strictly_typed_for_all_resource_representations() {
     let concrete: CompiledResourceBinding = serde_json::from_value(
         serde_json::json!({
             "execution_scope": "target",
@@ -79,6 +79,32 @@ fn resource_bindings_are_strictly_typed_for_concrete_and_partition_resources() {
     assert!(matches!(
         concrete.mapping,
         CompiledResourceBindingMapping::AtomicGroup { .. }
+    ));
+
+    let selected: CompiledResourceBinding = serde_json::from_value(
+        serde_json::json!({
+            "execution_scope": "target",
+            "component_id": "component",
+            "node_id": "selected_compute",
+            "parameter_id": "expert_weight",
+            "mapping": {
+                "kind": "selected_atomic_group",
+                "atomic_group_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "resource_id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "selection_signal": "selected_experts",
+                "selector_index": 7,
+                "parameter_slot": 1
+            }
+        }),
+    )
+    .unwrap();
+    assert!(matches!(
+        selected.mapping,
+        CompiledResourceBindingMapping::SelectedAtomicGroup {
+            selector_index: 7,
+            parameter_slot: 1,
+            ..
+        }
     ));
 
     let partition: CompiledResourceBinding = serde_json::from_value(

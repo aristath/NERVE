@@ -300,7 +300,7 @@ fn binding_is_selected_by(
 ) -> bool {
     match (binding, selector) {
         (
-            CompiledResourceBindingMapping::AtomicGroup {
+            CompiledResourceBindingMapping::SelectedAtomicGroup {
                 atomic_group_id, ..
             },
             CompiledResourceSelectorMapping::GroupTable { atomic_group_ids },

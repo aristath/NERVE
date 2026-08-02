@@ -66,6 +66,16 @@ _BINDING_FIELDS = frozenset(
 _ATOMIC_GROUP_BINDING_FIELDS = frozenset(
     ("kind", "atomic_group_id", "resource_id")
 )
+_SELECTED_ATOMIC_GROUP_BINDING_FIELDS = frozenset(
+    (
+        "kind",
+        "atomic_group_id",
+        "resource_id",
+        "selection_signal",
+        "selector_index",
+        "parameter_slot",
+    )
+)
 _PARTITION_MEMBER_BINDING_FIELDS = frozenset(
     ("kind", "partition_template_id", "resource_identity_seed")
 )
@@ -764,6 +774,7 @@ def validate_resource_residency_contract(
         bindings,
         group_by_id,
         template_by_id,
+        selectors,
         parameter_semantics,
     )
     selector_by_id = _validate_selectors(
@@ -1114,6 +1125,7 @@ def _validate_bindings(
     bindings: list[Json],
     group_by_id: dict[str, Json],
     template_by_id: dict[str, Json],
+    selectors: list[Json],
     parameter_semantics: set[tuple[str, str, str, str]],
 ) -> None:
     resource_ids_by_group = {
@@ -1131,6 +1143,11 @@ def _validate_bindings(
     bound_semantics = []
     bound_concrete_resources: set[str] = set()
     bound_partition_members: set[tuple[str, str]] = set()
+    selected_slots: dict[
+        tuple[str, str, str, str], list[tuple[str, int, int]]
+    ] = (
+        defaultdict(list)
+    )
     for binding in bindings:
         _require_exact_fields(binding, _BINDING_FIELDS, "resource binding")
         for field in ("execution_scope", "component_id", "node_id", "parameter_id"):
@@ -1157,6 +1174,51 @@ def _validate_bindings(
                     "resource binding maps a resource outside its atomic group"
                 )
             bound_concrete_resources.add(resource_id)
+        elif mapping.get("kind") == "selected_atomic_group":
+            _require_exact_fields(
+                mapping,
+                _SELECTED_ATOMIC_GROUP_BINDING_FIELDS,
+                "selected atomic group resource binding",
+            )
+            group_id = _require_content_id(
+                mapping["atomic_group_id"],
+                "resource binding selected atomic group id",
+            )
+            if group_id not in group_by_id:
+                raise ModelCompileError(
+                    f"resource binding references unknown atomic group {group_id!r}"
+                )
+            resource_id = _require_content_id(
+                mapping["resource_id"], "resource binding selected resource id"
+            )
+            if resource_id not in resource_ids_by_group[group_id]:
+                raise ModelCompileError(
+                    "selected resource binding maps a resource outside its atomic group"
+                )
+            _require_non_negative_int(
+                mapping["selector_index"], "selected resource selector index"
+            )
+            _require_non_negative_int(
+                mapping["parameter_slot"], "selected resource parameter slot"
+            )
+            _require_non_empty_string(
+                mapping["selection_signal"], "selected resource selection signal"
+            )
+            bound_concrete_resources.add(resource_id)
+            selected_slots[
+                (
+                    binding["execution_scope"],
+                    binding["component_id"],
+                    binding["node_id"],
+                    mapping["selection_signal"],
+                )
+            ].append(
+                (
+                    group_id,
+                    mapping["selector_index"],
+                    mapping["parameter_slot"],
+                )
+            )
         elif mapping.get("kind") == "partition_template_member":
             _require_exact_fields(
                 mapping,
@@ -1189,6 +1251,56 @@ def _validate_bindings(
         raise ModelCompileError(
             "resource bindings must exactly cover compiled parameter semantics"
         )
+    for (scope, component_id, node_id, selection_signal), slots in selected_slots.items():
+        candidates = []
+        for selector in selectors:
+            mapping = selector.get("mapping")
+            if (
+                selector.get("execution_scope") != scope
+                or selector.get("component_id") != component_id
+                or selector.get("selection_signal") != selection_signal
+                or not isinstance(mapping, dict)
+                or mapping.get("kind") != "group_table"
+                or not isinstance(mapping.get("atomic_group_ids"), list)
+            ):
+                continue
+            group_ids = mapping["atomic_group_ids"]
+            if all(
+                selector_index < len(group_ids)
+                and group_ids[selector_index] == group_id
+                for group_id, selector_index, _parameter_slot in slots
+            ):
+                candidates.append(selector)
+        if len(candidates) != 1:
+            raise ModelCompileError(
+                f"selected resource bindings for {scope} {component_id}.{node_id} "
+                "do not map exactly one group-table selector"
+            )
+        resource_count = candidates[0].get("resource_count")
+        slots_by_selector: dict[int, set[int]] = defaultdict(set)
+        for _group_id, selector_index, parameter_slot in slots:
+            if parameter_slot in slots_by_selector[selector_index]:
+                raise ModelCompileError(
+                    f"selected resource bindings for {scope} {component_id}.{node_id} "
+                    "repeat a selector parameter slot"
+                )
+            slots_by_selector[selector_index].add(parameter_slot)
+        if (
+            not isinstance(resource_count, int)
+            or isinstance(resource_count, bool)
+            or set(slots_by_selector) != set(range(resource_count))
+            or not slots_by_selector
+        ):
+            raise ModelCompileError(
+                f"selected resource bindings for {scope} {component_id}.{node_id} "
+                "do not cover every selector index"
+            )
+        parameter_slots = set(range(len(next(iter(slots_by_selector.values())))))
+        if any(slots != parameter_slots for slots in slots_by_selector.values()):
+            raise ModelCompileError(
+                f"selected resource bindings for {scope} {component_id}.{node_id} "
+                "do not define one contiguous parameter-slot layout"
+            )
     expected_concrete_resources = {
         resource_id
         for group in group_by_id.values()
@@ -1572,6 +1684,9 @@ def _binding_key(binding: Json) -> tuple[str, str, str, str, str]:
             "kind",
             "atomic_group_id",
             "resource_id",
+            "selection_signal",
+            "selector_index",
+            "parameter_slot",
             "partition_template_id",
             "resource_identity_seed",
         )

@@ -708,12 +708,57 @@ def test_builds_concrete_group_table_for_independent_resources(
         binding["mapping"]["atomic_group_id"] for binding in dynamic_bindings
     } == set(selector["mapping"]["atomic_group_ids"])
     assert all(
-        binding["mapping"]["kind"] == "atomic_group" for binding in dynamic_bindings
+        binding["mapping"]["kind"] == "selected_atomic_group"
+        for binding in dynamic_bindings
     )
+    assert sorted(
+        (
+            binding["mapping"]["selector_index"],
+            binding["mapping"]["parameter_slot"],
+        )
+        for binding in dynamic_bindings
+    ) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     assert resource_builds == Counter({tensor_name: 1 for tensor_name in packaged["tensors"]})
     assert len(source_header_catalogs) == 1
     assert len(artifact_size_catalogs) == 1
     validate_resource_residency_contract(package_dir, contract, manifest)
+
+    corrupt = json.loads(json.dumps(contract))
+    corrupt_dynamic = [
+        binding
+        for binding in corrupt["bindings"]
+        if binding["mapping"]["kind"] == "selected_atomic_group"
+    ]
+    corrupt_dynamic[-1]["mapping"]["parameter_slot"] = 2
+    with pytest.raises(ModelCompileError, match="contiguous parameter-slot layout"):
+        validate_resource_residency_contract(package_dir, corrupt, manifest)
+
+    corrupt = json.loads(json.dumps(contract))
+    corrupt_dynamic = [
+        binding
+        for binding in corrupt["bindings"]
+        if binding["mapping"]["kind"] == "selected_atomic_group"
+    ]
+    corrupt_dynamic[-1]["mapping"]["selector_index"] = 0
+    with pytest.raises(ModelCompileError, match="exactly one group-table selector"):
+        validate_resource_residency_contract(package_dir, corrupt, manifest)
+
+    corrupt = json.loads(json.dumps(contract))
+    corrupt_dynamic = [
+        binding
+        for binding in corrupt["bindings"]
+        if binding["mapping"]["kind"] == "selected_atomic_group"
+    ]
+    same_selector = [
+        binding
+        for binding in corrupt_dynamic
+        if binding["mapping"]["selector_index"] == 1
+    ]
+    same_selector[1]["mapping"]["parameter_slot"] = same_selector[0]["mapping"][
+        "parameter_slot"
+    ]
+    with pytest.raises(ModelCompileError, match="repeat a selector parameter slot"):
+        validate_resource_residency_contract(package_dir, corrupt, manifest)
 
 
 def test_composite_packaging_hashes_output_partitions_across_source_parts(

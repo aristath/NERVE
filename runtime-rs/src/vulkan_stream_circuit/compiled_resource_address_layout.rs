@@ -28,7 +28,13 @@ pub struct VulkanCompiledParameterSlotTable {
     pub execution_scope: String,
     pub parameter_ids: Vec<String>,
     pub resource_count: usize,
-    pub parameter_slot_bases: Vec<usize>,
+    pub mapping: VulkanCompiledParameterSlotMapping,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VulkanCompiledParameterSlotMapping {
+    Partitioned { parameter_slot_bases: Vec<usize> },
+    Explicit { parameter_slots: Vec<usize> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,16 +177,31 @@ impl VulkanCompiledSelectorAddressMapping {
 
 impl VulkanCompiledParameterSlotTable {
     pub fn slot_count(&self) -> Option<usize> {
-        self.resource_count
-            .checked_mul(self.parameter_slot_bases.len())
+        match &self.mapping {
+            VulkanCompiledParameterSlotMapping::Partitioned {
+                parameter_slot_bases,
+            } => self.resource_count.checked_mul(parameter_slot_bases.len()),
+            VulkanCompiledParameterSlotMapping::Explicit { parameter_slots } => {
+                Some(parameter_slots.len())
+            }
+        }
     }
 
-    pub fn slots(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..self.resource_count).flat_map(|resource_index| {
-            self.parameter_slot_bases
-                .iter()
-                .map(move |base| base + resource_index)
-        })
+    pub fn slots(&self) -> Box<dyn Iterator<Item = usize> + '_> {
+        match &self.mapping {
+            VulkanCompiledParameterSlotMapping::Partitioned {
+                parameter_slot_bases,
+            } => Box::new((0..self.resource_count).flat_map(
+                move |resource_index| {
+                    parameter_slot_bases
+                        .iter()
+                        .map(move |base| base + resource_index)
+                },
+            )),
+            VulkanCompiledParameterSlotMapping::Explicit { parameter_slots } => {
+                Box::new(parameter_slots.iter().copied())
+            }
+        }
     }
 }
 
@@ -364,8 +385,7 @@ impl VulkanCompiledResourceAddressLayout {
             }
         }
 
-        let mut parameter_slot_tables =
-            Vec::with_capacity(partition_bindings.len());
+        let mut parameter_slot_tables = Vec::new();
         for ((scope, component_id, node_id, template_id), mut bindings) in
             partition_bindings
         {
@@ -422,10 +442,146 @@ impl VulkanCompiledResourceAddressLayout {
                 execution_scope: scope,
                 parameter_ids,
                 resource_count: selector.resource_count,
-                parameter_slot_bases,
+                mapping: VulkanCompiledParameterSlotMapping::Partitioned {
+                    parameter_slot_bases,
+                },
+            });
+        }
+
+        let mut independent_bindings: BTreeMap<
+            (String, String, String, String),
+            Vec<(&str, &str, &str, usize, usize)>,
+        > = BTreeMap::new();
+        for binding in &contract.bindings {
+            if let CompiledResourceBindingMapping::SelectedAtomicGroup {
+                atomic_group_id,
+                resource_id,
+                selection_signal,
+                selector_index,
+                parameter_slot,
+            } = &binding.mapping
+            {
+                independent_bindings
+                    .entry((
+                        binding.execution_scope.clone(),
+                        binding.component_id.clone(),
+                        binding.node_id.clone(),
+                        selection_signal.clone(),
+                    ))
+                    .or_default()
+                    .push((
+                        binding.parameter_id.as_str(),
+                        atomic_group_id.as_str(),
+                        resource_id.as_str(),
+                        *selector_index,
+                        *parameter_slot,
+                    ));
+            }
+        }
+        for ((scope, component_id, node_id, selection_signal), bindings) in
+            independent_bindings
+        {
+            let matching_selectors = contract
+                .selectors
+                .iter()
+                .filter(|selector| {
+                    selector.execution_scope == scope
+                        && selector.component_id == component_id
+                        && selector.selection_signal == selection_signal
+                        && matches!(
+                            &selector.mapping,
+                            CompiledResourceSelectorMapping::GroupTable { .. }
+                        )
+                })
+                .collect::<Vec<_>>();
+            if matching_selectors.len() != 1 {
+                return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                    "{scope} {component_id}.{node_id} independent parameters do not map exactly one selector"
+                )));
+            }
+            let selector = matching_selectors[0];
+            let CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } =
+                &selector.mapping
+            else {
+                unreachable!("matching selector was restricted to group tables")
+            };
+            let parameters_per_resource = bindings
+                .iter()
+                .map(|binding| binding.4)
+                .max()
+                .and_then(|maximum| maximum.checked_add(1))
+                .ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "{scope} {component_id}.{node_id} has no independent parameter slots"
+                    ))
+                })?;
+            let table_len = selector
+                .resource_count
+                .checked_mul(parameters_per_resource)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "{scope} {component_id}.{node_id} independent parameter table overflowed"
+                    ))
+                })?;
+            let mut parameter_slots = vec![None; table_len];
+            let mut parameter_ids = vec![None; parameters_per_resource];
+            for (parameter_id, atomic_group_id, resource_id, selector_index, parameter_slot) in
+                bindings
+            {
+                if atomic_group_ids.get(selector_index).map(String::as_str)
+                    != Some(atomic_group_id)
+                    || parameter_slot >= parameters_per_resource
+                {
+                    return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                        "{scope} {component_id}.{node_id} independent parameter binding disagrees with its selector"
+                    )));
+                }
+                let address_slot = concrete_slots.get(resource_id).copied().ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "{scope} {component_id}.{node_id} independent parameter has no address slot"
+                    ))
+                })?;
+                let table_index = selector_index * parameters_per_resource + parameter_slot;
+                if parameter_slots[table_index].replace(address_slot).is_some() {
+                    return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                        "{scope} {component_id}.{node_id} repeats an independent parameter slot"
+                    )));
+                }
+                if selector_index == 0 {
+                    parameter_ids[parameter_slot] = Some(parameter_id.to_string());
+                }
+            }
+            if parameter_slots.iter().any(Option::is_none)
+                || parameter_ids.iter().any(Option::is_none)
+            {
+                return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                    "{scope} {component_id}.{node_id} independent parameter slots are incomplete"
+                )));
+            }
+            parameter_slot_tables.push(VulkanCompiledParameterSlotTable {
+                key: VulkanDynamicResourceBindingKey::new(
+                    component_id,
+                    node_id,
+                    selection_signal,
+                ),
+                selector_id: selector.id.clone(),
+                execution_scope: scope,
+                parameter_ids: parameter_ids.into_iter().flatten().collect(),
+                resource_count: selector.resource_count,
+                mapping: VulkanCompiledParameterSlotMapping::Explicit {
+                    parameter_slots: parameter_slots.into_iter().flatten().collect(),
+                },
             });
         }
         parameter_slot_tables.sort_by(|left, right| left.key.cmp(&right.key));
+        if parameter_slot_tables
+            .windows(2)
+            .any(|pair| pair[0].key == pair[1].key)
+        {
+            return Err(VulkanCompiledResourceAddressLayoutError(
+                "compiled dynamic parameter-slot keys are not unique".to_string(),
+            ));
+        }
 
         Ok(Self {
             slot_count,
@@ -706,6 +862,143 @@ mod compiled_resource_address_layout_tests {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
 
+    fn independent_selected_contract(
+    ) -> CompiledResourceResidencyContract {
+        let compatibility = CompiledResourceCompatibility {
+            device_api: "vulkan".to_string(),
+            storage_class: "storage_buffer".to_string(),
+            read_only: true,
+            required_features: Vec::new(),
+        };
+        let resources = ['1', '2', '3', '4']
+            .into_iter()
+            .map(|byte| CompiledImmutableResource {
+                id: content_id(byte),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                ranges: Vec::new(),
+                dependencies: Vec::new(),
+                compatibility: compatibility.clone(),
+            })
+            .collect::<Vec<_>>();
+        let groups = vec![
+            CompiledAtomicResidencyGroup {
+                id: content_id('5'),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                resource_ids: vec![resources[0].id.clone(), resources[1].id.clone()],
+                dependencies: Vec::new(),
+            },
+            CompiledAtomicResidencyGroup {
+                id: content_id('6'),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                resource_ids: vec![resources[2].id.clone(), resources[3].id.clone()],
+                dependencies: Vec::new(),
+            },
+        ];
+        let parameter_ids = [
+            "expert_0_scale",
+            "expert_0_weight",
+            "expert_1_scale",
+            "expert_1_weight",
+        ];
+        let bindings = parameter_ids
+            .into_iter()
+            .enumerate()
+            .map(|(index, parameter_id)| {
+                let selector_index = index / 2;
+                let parameter_slot = index % 2;
+                CompiledResourceBinding {
+                    execution_scope: "target".to_string(),
+                    component_id: "layer_00".to_string(),
+                    node_id: "expert_compute".to_string(),
+                    parameter_id: parameter_id.to_string(),
+                    mapping:
+                        CompiledResourceBindingMapping::SelectedAtomicGroup {
+                            atomic_group_id: groups[selector_index].id.clone(),
+                            resource_id: resources[index].id.clone(),
+                            selection_signal: "selected_experts".to_string(),
+                            selector_index,
+                            parameter_slot,
+                        },
+                }
+            })
+            .collect();
+        CompiledResourceResidencyContract {
+            schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
+            identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
+            state_machine_schema:
+                RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
+            supported_policies: vec![
+                ResourceResidencyPolicy::DemandRetained,
+                ResourceResidencyPolicy::Eager,
+            ],
+            resources,
+            atomic_groups: groups.clone(),
+            partition_templates: Vec::new(),
+            bindings,
+            selectors: vec![CompiledResourceSelector {
+                id: content_id('7'),
+                execution_scope: "target".to_string(),
+                component_id: "layer_00".to_string(),
+                node_id: "router".to_string(),
+                domain_id: "experts".to_string(),
+                resource_count: 2,
+                selection_signal: "selected_experts".to_string(),
+                encoding: CompiledResourceSelectionEncoding {
+                    element_type:
+                        CompiledResourceSelectionElementType::U32,
+                    selection_count_per_activation: 1,
+                    index_shift: 0,
+                    index_mask: 0xffff,
+                },
+                mapping: CompiledResourceSelectorMapping::GroupTable {
+                    atomic_group_ids: groups
+                        .iter()
+                        .map(|group| group.id.clone())
+                        .collect(),
+                },
+            }],
+            checkpoints: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn independent_parameters_lower_to_explicit_selector_major_slot_tables() {
+        let contract = independent_selected_contract();
+
+        let layout =
+            VulkanCompiledResourceAddressLayout::from_contract(&contract)
+                .unwrap();
+        let table = layout
+            .parameter_slot_table(&VulkanDynamicResourceBindingKey::new(
+                "layer_00",
+                "expert_compute",
+                "selected_experts",
+            ))
+            .unwrap();
+
+        assert_eq!(table.resource_count, 2);
+        assert_eq!(table.slot_count(), Some(4));
+        assert_eq!(table.slots().collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(
+            table.mapping,
+            VulkanCompiledParameterSlotMapping::Explicit {
+                parameter_slots: vec![0, 1, 2, 3],
+            }
+        );
+    }
+
+    #[test]
+    fn independent_parameter_layout_rejects_incomplete_slots() {
+        let mut contract = independent_selected_contract();
+        contract.bindings.pop();
+
+        let error =
+            VulkanCompiledResourceAddressLayout::from_contract(&contract)
+                .unwrap_err();
+
+        assert!(error.to_string().contains("slots are incomplete"));
+    }
+
     #[test]
     fn partitioned_parameters_lower_to_dense_stable_slot_tables() {
         let template_id = content_id('a');
@@ -964,8 +1257,10 @@ mod compiled_resource_address_layout_tests {
             2 * PARTITION_COUNT
         );
         assert_eq!(
-            layout.parameter_slot_tables[0].parameter_slot_bases,
-            [PARTITION_COUNT, 0]
+            layout.parameter_slot_tables[0].mapping,
+            VulkanCompiledParameterSlotMapping::Partitioned {
+                parameter_slot_bases: vec![PARTITION_COUNT, 0],
+            }
         );
         assert_eq!(
             layout.parameter_slot_tables[0].slot_count(),

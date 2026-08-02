@@ -288,7 +288,9 @@ fn selected_parameters_lower_to_generic_dynamic_resource_descriptors() {
                 component_id: "component".to_string(),
                 node_id: "selected_compute".to_string(),
                 selection_signal: "selected".to_string(),
-                partition_axis: 0,
+                layout: PlannedSelectedParameterLayout::Partitioned {
+                    partition_axis: 0,
+                },
                 parameter_ids: vec!["bank".to_string(), "scale".to_string()],
             },
         ],
@@ -360,7 +362,9 @@ fn selected_parameter_tensors_cannot_alias_permanent_parameters() {
                         component_id: "component".to_string(),
                         node_id: "selected_compute".to_string(),
                         selection_signal: "selected_resources".to_string(),
-                        partition_axis: 0,
+                        layout: PlannedSelectedParameterLayout::Partitioned {
+                            partition_axis: 0,
+                        },
                         parameter_ids: vec!["selected".to_string()],
                     }],
                 ),

@@ -109,6 +109,13 @@ pub enum CompiledResourceBindingMapping {
         atomic_group_id: String,
         resource_id: String,
     },
+    SelectedAtomicGroup {
+        atomic_group_id: String,
+        resource_id: String,
+        selection_signal: String,
+        selector_index: usize,
+        parameter_slot: usize,
+    },
     PartitionTemplateMember {
         partition_template_id: String,
         resource_identity_seed: String,
@@ -1104,6 +1111,10 @@ fn validate_bindings_against_package(
     let mut bound_semantics = BTreeSet::new();
     let mut bound_concrete_resources = BTreeSet::new();
     let mut bound_partition_members = BTreeSet::new();
+    let mut selected_slots: BTreeMap<
+        (String, String, String, String),
+        Vec<(String, usize, usize)>,
+    > = BTreeMap::new();
     for binding in &manifest.resource_residency.bindings {
         let mapping_key = match &binding.mapping {
             CompiledResourceBindingMapping::AtomicGroup {
@@ -1126,6 +1137,47 @@ fn validate_bindings_against_package(
                 }
                 bound_concrete_resources.insert(resource_id.as_str());
                 format!("atomic_group|{atomic_group_id}|{resource_id}|")
+            }
+            CompiledResourceBindingMapping::SelectedAtomicGroup {
+                atomic_group_id,
+                resource_id,
+                selection_signal,
+                selector_index,
+                parameter_slot,
+            } => {
+                let group = manifest
+                    .resource_residency
+                    .atomic_groups
+                    .iter()
+                    .find(|group| group.id == *atomic_group_id);
+                if !group_ids.contains(atomic_group_id.as_str())
+                    || group.is_none_or(|group| {
+                        group.lifetime != CompiledResourceLifetime::Dynamic
+                            || !group.resource_ids.contains(resource_id)
+                    })
+                    || selection_signal.trim().is_empty()
+                {
+                    return invalid_residency(
+                        "compiled selected resource binding maps outside its dynamic atomic group",
+                    );
+                }
+                bound_concrete_resources.insert(resource_id.as_str());
+                selected_slots
+                    .entry((
+                        binding.execution_scope.clone(),
+                        binding.component_id.clone(),
+                        binding.node_id.clone(),
+                        selection_signal.clone(),
+                    ))
+                    .or_default()
+                    .push((
+                        atomic_group_id.clone(),
+                        *selector_index,
+                        *parameter_slot,
+                    ));
+                format!(
+                    "selected_atomic_group|{atomic_group_id}|{resource_id}|{selection_signal}|{selector_index}|{parameter_slot}"
+                )
             }
             CompiledResourceBindingMapping::PartitionTemplateMember {
                 partition_template_id,
@@ -1199,6 +1251,71 @@ fn validate_bindings_against_package(
         return invalid_residency(
             "compiled resource bindings must exactly cover package parameters",
         );
+    }
+    for ((scope, component_id, node_id, selection_signal), slots) in
+        selected_slots
+    {
+        let matching_selectors = manifest
+            .resource_residency
+            .selectors
+            .iter()
+            .filter(|selector| {
+                selector.execution_scope == scope
+                    && selector.component_id == component_id
+                    && selector.selection_signal == selection_signal
+                    && matches!(
+                        &selector.mapping,
+                        CompiledResourceSelectorMapping::GroupTable {
+                            atomic_group_ids
+                        } if slots.iter().all(|(group_id, selector_index, _)| {
+                            atomic_group_ids.get(*selector_index) == Some(group_id)
+                        })
+                    )
+            })
+            .collect::<Vec<_>>();
+        if matching_selectors.len() != 1 {
+            return invalid_residency(format!(
+                "compiled selected resource bindings for {scope} {component_id}.{node_id} do not map exactly one group-table selector"
+            ));
+        }
+        let resource_count = matching_selectors[0].resource_count;
+        let mut slots_by_selector: BTreeMap<usize, BTreeSet<usize>> =
+            BTreeMap::new();
+        for (_, selector_index, parameter_slot) in slots {
+            if !slots_by_selector
+                .entry(selector_index)
+                .or_default()
+                .insert(parameter_slot)
+            {
+                return invalid_residency(format!(
+                    "compiled selected resource bindings for {scope} {component_id}.{node_id} repeat a selector parameter slot"
+                ));
+            }
+        }
+        if slots_by_selector.len() != resource_count
+            || slots_by_selector
+                .keys()
+                .copied()
+                .ne(0..resource_count)
+        {
+            return invalid_residency(format!(
+                "compiled selected resource bindings for {scope} {component_id}.{node_id} do not cover every selector index"
+            ));
+        }
+        let parameter_count = slots_by_selector
+            .first_key_value()
+            .map(|(_, slots)| slots.len())
+            .unwrap_or(0);
+        if parameter_count == 0
+            || slots_by_selector.values().any(|slots| {
+                slots.len() != parameter_count
+                    || slots.iter().copied().ne(0..parameter_count)
+            })
+        {
+            return invalid_residency(format!(
+                "compiled selected resource bindings for {scope} {component_id}.{node_id} do not define one contiguous parameter-slot layout"
+            ));
+        }
     }
     let expected_concrete_resources = manifest
         .resource_residency

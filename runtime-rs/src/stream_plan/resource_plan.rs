@@ -509,8 +509,17 @@ pub struct PlannedSelectionEncoding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedSelectedParameterAccess {
     pub selection_signal: String,
-    pub partition_axis: usize,
+    pub layout: PlannedSelectedParameterLayout,
     pub parameter_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlannedSelectedParameterLayout {
+    Partitioned { partition_axis: usize },
+    Independent {
+        resource_count: usize,
+        parameters_per_resource: usize,
+    },
 }
 
 impl PlannedNode {
@@ -724,11 +733,15 @@ fn planned_node_selected_parameter_accesses(
                 node.id
             ))
         })?;
-        if access.len() != 3
-            || !["selection_signal", "partition_axis", "parameter_ids"]
+        let partitioned = access.len() == 3
+            && ["selection_signal", "partition_axis", "parameter_ids"]
                 .iter()
-                .all(|field| access.contains_key(*field))
-        {
+                .all(|field| access.contains_key(*field));
+        let independent = access.len() == 2
+            && ["selection_signal", "mapping"]
+                .iter()
+                .all(|field| access.contains_key(*field));
+        if !partitioned && !independent {
             return Err(CircuitPlanError(format!(
                 "{component_id} node {} selected parameter access has ambiguous fields",
                 node.id
@@ -752,59 +765,138 @@ fn planned_node_selected_parameter_accesses(
                 node.id
             )));
         }
-        let partition_axis = access
-            .get("partition_axis")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| {
-                CircuitPlanError(format!(
-                    "{component_id} node {} selected parameter partition axis must be a non-negative integer",
-                    node.id
-                ))
-            })?;
-        let parameter_ids = access
-            .get("parameter_ids")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                CircuitPlanError(format!(
-                    "{component_id} node {} selected parameter ids must be an array",
-                    node.id
-                ))
-            })?
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|value| !value.trim().is_empty())
-                    .filter(|value| {
-                        node.params.iter().any(|parameter| parameter == *value)
-                    })
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        CircuitPlanError(format!(
-                            "{component_id} node {} selected parameter id must name a node parameter",
-                            node.id
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if parameter_ids.is_empty()
-            || parameter_ids
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(CircuitPlanError(format!(
-                "{component_id} node {} selected parameter ids must be non-empty, unique, and sorted",
-                node.id
-            )));
-        }
+        let (layout, parameter_ids) = if partitioned {
+            let partition_axis = access
+                .get("partition_axis")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} selected parameter partition axis must be a non-negative integer",
+                        node.id
+                    ))
+                })?;
+            let parameter_ids = selected_parameter_ids(
+                component_id,
+                node,
+                access.get("parameter_ids"),
+            )?;
+            (
+                PlannedSelectedParameterLayout::Partitioned { partition_axis },
+                parameter_ids,
+            )
+        } else {
+            let mapping = access
+                .get("mapping")
+                .and_then(serde_json::Value::as_array)
+                .filter(|mapping| !mapping.is_empty())
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} independent selected parameter mapping must be a non-empty array",
+                        node.id
+                    ))
+                })?;
+            let mut parameter_ids = Vec::new();
+            let mut parameters_per_resource = None;
+            let mut seen_parameters = BTreeSet::new();
+            for (expected_selector, entry) in mapping.iter().enumerate() {
+                let entry = entry.as_object().filter(|entry| {
+                    entry.len() == 2
+                        && entry.contains_key("selector")
+                        && entry.contains_key("parameter_ids")
+                });
+                let Some(entry) = entry else {
+                    return Err(CircuitPlanError(format!(
+                        "{component_id} node {} independent selected parameter mapping has ambiguous fields",
+                        node.id
+                    )));
+                };
+                if entry
+                    .get("selector")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    != Some(expected_selector)
+                {
+                    return Err(CircuitPlanError(format!(
+                        "{component_id} node {} independent selected parameter selectors must be contiguous and ordered",
+                        node.id
+                    )));
+                }
+                let selected = selected_parameter_ids(
+                    component_id,
+                    node,
+                    entry.get("parameter_ids"),
+                )?;
+                if parameters_per_resource
+                    .replace(selected.len())
+                    .is_some_and(|count| count != selected.len())
+                    || selected
+                        .iter()
+                        .any(|parameter| !seen_parameters.insert(parameter.clone()))
+                {
+                    return Err(CircuitPlanError(format!(
+                        "{component_id} node {} independent selected parameter mapping is not rectangular and unique",
+                        node.id
+                    )));
+                }
+                parameter_ids.extend(selected);
+            }
+            (
+                PlannedSelectedParameterLayout::Independent {
+                    resource_count: mapping.len(),
+                    parameters_per_resource: parameters_per_resource.unwrap(),
+                },
+                parameter_ids,
+            )
+        };
         planned.push(PlannedSelectedParameterAccess {
             selection_signal,
-            partition_axis,
+            layout,
             parameter_ids,
         });
     }
     Ok(planned)
+}
+
+fn selected_parameter_ids(
+    component_id: &str,
+    node: &CircuitNode,
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<String>, CircuitPlanError> {
+    let parameter_ids = value
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selected parameter ids must be an array",
+                node.id
+            ))
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .filter(|value| node.params.iter().any(|parameter| parameter == *value))
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} selected parameter id must name a node parameter",
+                        node.id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parameter_ids.is_empty()
+        || parameter_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} selected parameter ids must be non-empty, unique, and sorted",
+            node.id
+        )));
+    }
+    Ok(parameter_ids)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -951,10 +1043,84 @@ mod selection_domain_tests {
             planned_node_selected_parameter_accesses("component", &node).unwrap(),
             vec![PlannedSelectedParameterAccess {
                 selection_signal: "selected".to_string(),
-                partition_axis: 0,
+                layout: PlannedSelectedParameterLayout::Partitioned {
+                    partition_axis: 0,
+                },
                 parameter_ids: vec!["bank".to_string(), "scale".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn independent_selected_parameter_access_preserves_explicit_resource_slots() {
+        let node = CircuitNode {
+            id: "expert_compute".to_string(),
+            op: "generic_compute".to_string(),
+            inputs: vec!["activation".to_string(), "selected".to_string()],
+            outputs: vec!["output".to_string()],
+            params: vec![
+                "expert_0_scale".to_string(),
+                "expert_0_weight".to_string(),
+                "expert_1_scale".to_string(),
+                "expert_1_weight".to_string(),
+            ],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "selected_parameter_accesses": [{
+                    "selection_signal": "selected",
+                    "mapping": [
+                        {"selector": 0, "parameter_ids": ["expert_0_scale", "expert_0_weight"]},
+                        {"selector": 1, "parameter_ids": ["expert_1_scale", "expert_1_weight"]}
+                    ]
+                }]
+            }),
+        };
+
+        assert_eq!(
+            planned_node_selected_parameter_accesses("component", &node).unwrap(),
+            vec![PlannedSelectedParameterAccess {
+                selection_signal: "selected".to_string(),
+                layout: PlannedSelectedParameterLayout::Independent {
+                    resource_count: 2,
+                    parameters_per_resource: 2,
+                },
+                parameter_ids: node.params.clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn independent_selected_parameter_access_rejects_ragged_slots() {
+        let node = CircuitNode {
+            id: "expert_compute".to_string(),
+            op: "generic_compute".to_string(),
+            inputs: vec!["activation".to_string(), "selected".to_string()],
+            outputs: vec!["output".to_string()],
+            params: vec![
+                "expert_0_scale".to_string(),
+                "expert_0_weight".to_string(),
+                "expert_1_weight".to_string(),
+            ],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "selected_parameter_accesses": [{
+                    "selection_signal": "selected",
+                    "mapping": [
+                        {"selector": 0, "parameter_ids": ["expert_0_scale", "expert_0_weight"]},
+                        {"selector": 1, "parameter_ids": ["expert_1_weight"]}
+                    ]
+                }]
+            }),
+        };
+
+        let error = planned_node_selected_parameter_accesses("component", &node)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not rectangular and unique"));
     }
 
     #[test]

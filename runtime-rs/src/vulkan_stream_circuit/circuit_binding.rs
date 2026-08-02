@@ -236,7 +236,7 @@ pub struct VulkanSelectedParameterAccessBinding {
     pub component_id: String,
     pub node_id: String,
     pub selection_signal: String,
-    pub partition_axis: usize,
+    pub layout: PlannedSelectedParameterLayout,
     pub parameter_ids: Vec<String>,
 }
 
