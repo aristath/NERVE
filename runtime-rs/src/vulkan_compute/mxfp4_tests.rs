@@ -252,6 +252,263 @@ mod mxfp4_tests {
     }
 
     #[test]
+    fn native_mxfp4_batch_width_four_matches_real_sparse_geometry() {
+        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+            eprintln!(
+                "skipping native MXFP4 real batch geometry: explicit Vulkan device index unset"
+            );
+            return;
+        };
+        let started = std::time::Instant::now();
+        let device_index = raw_device_index
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let hidden_size = 4096usize;
+        let intermediate_size = 2048usize;
+        let num_experts = 256usize;
+        let experts_per_token = 6usize;
+        let batch_width = 4usize;
+        let selected_experts = [2usize, 17, 63, 127, 191, 255];
+        let gate_shader = render_mxfp4_shader_geometry(
+            "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
+            true,
+        );
+        let down_shader = render_mxfp4_shader_geometry(
+            "independent_sparse_moe_down_batch1_mxfp4.comp.template",
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            &[("{{TILE_ROWS}}", "64")],
+            false,
+        );
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
+            .expect("explicit idle AMD Vulkan device must open");
+
+        let hidden_fp8_words = hidden_size / 4;
+        let hidden_blocks = hidden_size / 128;
+        let quantized_hidden = device
+            .create_resident_buffer(batch_width * hidden_size)
+            .unwrap();
+        quantized_hidden
+            .write_bytes(&vec![0x38; batch_width * hidden_size])
+            .unwrap();
+        let hidden_scales = device
+            .create_resident_buffer(batch_width * hidden_blocks * size_of::<f32>())
+            .unwrap();
+        hidden_scales
+            .write_bytes(
+                &(0..batch_width * hidden_blocks)
+                    .flat_map(|_| 1.0_f32.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(
+            quantized_hidden.byte_capacity(),
+            batch_width * hidden_fp8_words * size_of::<u32>()
+        );
+
+        let routes = device
+            .create_resident_buffer(batch_width * experts_per_token * size_of::<u32>())
+            .unwrap();
+        let packed_routes = (0..batch_width)
+            .flat_map(|batch| {
+                (0..experts_per_token).map(move |route| {
+                    selected_experts[(batch + route) % experts_per_token] as u32
+                        | (u32::from(f32_to_bf16_bits(1.0)) << 16)
+                })
+            })
+            .collect::<Vec<_>>();
+        routes.write_bytes(&u32_bytes(&packed_routes)).unwrap();
+
+        let intermediate_words = intermediate_size / 2;
+        let expert_data_words = experts_per_token * intermediate_words;
+        let expert_frame_words = expert_data_words + experts_per_token;
+        let intermediates = device
+            .create_resident_buffer(batch_width * expert_frame_words * size_of::<u32>())
+            .unwrap();
+        let mut intermediate_storage = vec![0u32; batch_width * expert_frame_words];
+        for batch in 0..batch_width {
+            for route in 0..experts_per_token {
+                intermediate_storage
+                    [batch * expert_frame_words + expert_data_words + route] =
+                    (batch * experts_per_token + route) as u32;
+            }
+        }
+        intermediates
+            .write_bytes(&u32_bytes(&intermediate_storage))
+            .unwrap();
+
+        let gate_weight_bytes = hidden_size * intermediate_size / 2;
+        let gate_scale_bytes = hidden_size * intermediate_size / 32;
+        let gate_groups = (0..experts_per_token)
+            .map(|_| {
+                vec![
+                    (gate_weight_bytes, 0x22),
+                    (gate_scale_bytes, 120),
+                    (gate_weight_bytes, 0x22),
+                    (gate_scale_bytes, 120),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let (_gate_arena, gate_addresses) =
+            stable_resource_table(&device, &gate_groups, 256);
+        let gate_slots = device
+            .create_resident_buffer(num_experts * 4 * size_of::<u32>())
+            .unwrap();
+        let mut gate_slot_words = vec![u32::MAX; num_experts * 4];
+        for (active_index, expert) in selected_experts.iter().copied().enumerate() {
+            for parameter in 0..4 {
+                gate_slot_words[expert * 4 + parameter] =
+                    u32::try_from(active_index * 4 + parameter).unwrap();
+            }
+        }
+        gate_slots.write_bytes(&u32_bytes(&gate_slot_words)).unwrap();
+
+        let gate_dispatch_x = experts_per_token * intermediate_size.div_ceil(32);
+        let gate_batch_control = device.create_resident_buffer(28).unwrap();
+        gate_batch_control
+            .write_bytes(&u32_bytes(&[
+                batch_width as u32,
+                0,
+                0,
+                0,
+                gate_dispatch_x as u32,
+                batch_width as u32,
+                1,
+            ]))
+            .unwrap();
+        let gate_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &gate_shader,
+                &[
+                    read_binding(0, &quantized_hidden, batch_width * hidden_size),
+                    read_binding(
+                        1,
+                        &hidden_scales,
+                        batch_width * hidden_blocks * size_of::<f32>(),
+                    ),
+                    read_binding(
+                        2,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(
+                        3,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(4, gate_addresses.buffer(), gate_addresses.byte_capacity()),
+                    read_binding(5, &gate_slots, num_experts * 4 * size_of::<u32>()),
+                    read_binding(31, &gate_batch_control, 28),
+                ],
+                gate_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&gate_dispatch, &[])
+            .unwrap();
+        let after_gate = intermediates.read_bytes(intermediates.byte_capacity()).unwrap();
+        let after_gate_words = after_gate
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        for batch in 0..batch_width {
+            for route in 0..experts_per_token {
+                assert_eq!(
+                    after_gate_words[batch * expert_frame_words + expert_data_words + route],
+                    (batch * experts_per_token + route) as u32,
+                    "batch compaction metadata must survive real-geometry gate/up"
+                );
+            }
+        }
+
+        let outputs = device
+            .create_resident_buffer(
+                batch_width * experts_per_token * hidden_size * size_of::<u16>(),
+            )
+            .unwrap();
+        outputs
+            .write_bytes(&vec![0; outputs.byte_capacity()])
+            .unwrap();
+        let down_weight_bytes = hidden_size * intermediate_size / 2;
+        let down_scale_bytes = hidden_size * intermediate_size / 32;
+        let down_groups = (0..experts_per_token)
+            .map(|_| vec![(down_weight_bytes, 0x22), (down_scale_bytes, 120)])
+            .collect::<Vec<_>>();
+        let (_down_arena, down_addresses) =
+            stable_resource_table(&device, &down_groups, 256);
+        let down_slots = device
+            .create_resident_buffer(num_experts * 2 * size_of::<u32>())
+            .unwrap();
+        let mut down_slot_words = vec![u32::MAX; num_experts * 2];
+        for (active_index, expert) in selected_experts.iter().copied().enumerate() {
+            for parameter in 0..2 {
+                down_slot_words[expert * 2 + parameter] =
+                    u32::try_from(active_index * 2 + parameter).unwrap();
+            }
+        }
+        down_slots.write_bytes(&u32_bytes(&down_slot_words)).unwrap();
+        let down_dispatch_x = experts_per_token * hidden_size.div_ceil(64);
+        let down_batch_control = device.create_resident_buffer(28).unwrap();
+        down_batch_control
+            .write_bytes(&u32_bytes(&[
+                batch_width as u32,
+                0,
+                0,
+                0,
+                down_dispatch_x as u32,
+                batch_width as u32,
+                1,
+            ]))
+            .unwrap();
+        let down_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &down_shader,
+                &[
+                    read_binding(
+                        0,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(
+                        1,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(2, &outputs, outputs.byte_capacity()),
+                    read_binding(3, down_addresses.buffer(), down_addresses.byte_capacity()),
+                    read_binding(4, &down_slots, num_experts * 2 * size_of::<u32>()),
+                    read_binding(31, &down_batch_control, 28),
+                ],
+                down_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&down_dispatch, &[])
+            .unwrap();
+        assert!(
+            outputs.read_bytes(outputs.byte_capacity()).unwrap().iter().any(|byte| *byte != 0),
+            "real-geometry batched MXFP4 execution must produce routed expert output"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "native MXFP4 real batch geometry exceeded one minute"
+        );
+    }
+
+    #[test]
     fn native_mxfp4_real_geometry_microbenchmark_finishes_under_one_minute() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!(
@@ -271,6 +528,7 @@ mod mxfp4_tests {
             hidden_size,
             intermediate_size,
             expert_count,
+            expert_count,
             &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
             true,
         );
@@ -278,6 +536,7 @@ mod mxfp4_tests {
             "independent_sparse_moe_down_mxfp4.comp.template",
             hidden_size,
             intermediate_size,
+            expert_count,
             expert_count,
             &[("{{TILE_ROWS}}", "64")],
             false,
@@ -654,6 +913,7 @@ mod mxfp4_tests {
         template_name: &str,
         hidden_size: usize,
         intermediate_size: usize,
+        num_experts: usize,
         experts_per_token: usize,
         stage_replacements: &[(&str, &str)],
         prequantized: bool,
@@ -662,12 +922,13 @@ mod mxfp4_tests {
         let mut source = std::fs::read_to_string(shader_dir.join(template_name)).unwrap();
         let hidden_size = hidden_size.to_string();
         let intermediate_size = intermediate_size.to_string();
-        let expert_count = experts_per_token.to_string();
+        let num_experts = num_experts.to_string();
+        let experts_per_token = experts_per_token.to_string();
         for (pattern, value) in [
             ("{{HIDDEN_SIZE}}", hidden_size.as_str()),
             ("{{INTERMEDIATE_SIZE}}", intermediate_size.as_str()),
-            ("{{NUM_EXPERTS}}", expert_count.as_str()),
-            ("{{EXPERTS_PER_TOKEN}}", expert_count.as_str()),
+            ("{{NUM_EXPERTS}}", num_experts.as_str()),
+            ("{{EXPERTS_PER_TOKEN}}", experts_per_token.as_str()),
             (
                 "{{PREQUANTIZED_INPUT}}",
                 if prequantized { "1" } else { "0" },
@@ -677,6 +938,12 @@ mod mxfp4_tests {
         .chain(stage_replacements.iter().copied())
         {
             source = source.replace(pattern, value);
+        }
+        if template_name.contains("_batch1_") {
+            source = source.replace(
+                "layout(push_constant) uniform BatchControl",
+                "layout(set = 0, binding = 31) readonly buffer BatchControl",
+            );
         }
         let source_path = std::env::temp_dir().join(format!(
             "nerve-test-{}-{}.comp",
@@ -736,6 +1003,101 @@ mod mxfp4_tests {
         }
         table.write_bytes(&u32_bytes(&words)).unwrap();
         table
+    }
+
+    fn stable_resource_table(
+        device: &VulkanComputeDevice,
+        groups: &[Vec<(usize, u8)>],
+        alignment: usize,
+    ) -> (VulkanStableResourceArena, VulkanStableResourceAddressTable) {
+        let mut next_slot = 0usize;
+        let layouts = groups
+            .iter()
+            .map(|group| {
+                let resource_slots = (next_slot..next_slot + group.len()).collect::<Vec<_>>();
+                next_slot += group.len();
+                VulkanStableResourceGroupLayout::Explicit {
+                    resource_slots,
+                    resource_byte_counts: group.iter().map(|(bytes, _)| *bytes).collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let payload_bytes = groups
+            .iter()
+            .flatten()
+            .map(|(bytes, _)| *bytes)
+            .sum::<usize>();
+        let arena = VulkanStableResourceArena::new(
+            device,
+            VulkanStableResourceArenaConfig::new(
+                payload_bytes + groups.len() * alignment,
+                alignment,
+            )
+            .unwrap(),
+            &layouts,
+        )
+        .unwrap();
+        let resource_slots = layouts
+            .iter()
+            .map(|layout| match layout {
+                VulkanStableResourceGroupLayout::Explicit { resource_slots, .. } => {
+                    resource_slots.clone()
+                }
+                VulkanStableResourceGroupLayout::Partitioned { .. } => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let resource_byte_counts = groups
+            .iter()
+            .map(|group| group.iter().map(|(bytes, _)| *bytes).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let requests = resource_slots
+            .iter()
+            .zip(&resource_byte_counts)
+            .map(|(slots, byte_counts)| (slots.as_slice(), byte_counts.as_slice()))
+            .collect::<Vec<_>>();
+        let allocations = arena.allocate_groups(device, &requests, alignment).unwrap();
+        let staging_byte_capacity = groups
+            .iter()
+            .flatten()
+            .map(|(bytes, _)| *bytes)
+            .max()
+            .unwrap()
+            .max(64 * 1024);
+        let mut transfer = device
+            .create_resident_transfer_stream(2, staging_byte_capacity)
+            .unwrap();
+        for (group, allocation_group) in groups.iter().zip(&allocations) {
+            for ((byte_count, fill), allocation) in group.iter().zip(allocation_group) {
+                let bytes = vec![*fill; *byte_count];
+                let write = VulkanResidentBufferWriteRange::new(
+                    allocation.buffer(),
+                        allocation.buffer_byte_offset(),
+                    &bytes,
+                )
+                .unwrap();
+                let ticket = transfer.submit(&[write]).unwrap();
+                transfer.wait(&ticket).unwrap();
+            }
+        }
+        let mut table = VulkanStableResourceAddressTable::new(
+            device,
+            &mut transfer,
+            resource_slots.iter().map(Vec::len).sum(),
+        )
+        .unwrap();
+        for (slots, allocation_group) in resource_slots.iter().zip(&allocations) {
+            table
+                .publish_group(
+                    &mut transfer,
+                    &slots
+                        .iter()
+                        .copied()
+                        .zip(allocation_group.iter().cloned())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+        }
+        (arena, table)
     }
 
     fn read_binding<'a>(
