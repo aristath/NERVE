@@ -100,6 +100,11 @@ pub enum VulkanMountedPlacedResidentKernelDispatchError {
         dispatch_index: usize,
         binding: usize,
     },
+    StreamControlBindingMismatch {
+        dispatch_index: usize,
+        compiled_binding: u32,
+        runtime_descriptor_count: usize,
+    },
     MissingMountedBuffer {
         dispatch_index: usize,
         binding: usize,
@@ -260,6 +265,14 @@ impl Display for VulkanMountedPlacedResidentKernelDispatchError {
             } => write!(
                 f,
                 "dispatch {dispatch_index} descriptor binding {binding} cannot fit in u32"
+            ),
+            Self::StreamControlBindingMismatch {
+                dispatch_index,
+                compiled_binding,
+                runtime_descriptor_count,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} compiled stream-control binding {compiled_binding} disagrees with runtime descriptor count {runtime_descriptor_count}"
             ),
             Self::MissingMountedBuffer {
                 dispatch_index,

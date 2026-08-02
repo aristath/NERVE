@@ -315,11 +315,3 @@ impl Drop for VulkanResidentBuffer {
         }
     }
 }
-
-impl Drop for VulkanSparseResidentMemoryBlock {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.free_memory(self.memory, None);
-        }
-    }
-}

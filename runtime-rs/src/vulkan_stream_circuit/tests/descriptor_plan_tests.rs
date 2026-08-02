@@ -22,7 +22,7 @@ fn descriptor_resource_plan_resolves_fixture_model_dispatch_patch_bay() {
 
     assert_eq!(descriptor_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
     assert_eq!(descriptor_plan.dynamic_state_capacity_activations, 4);
-    assert_eq!(descriptor_plan.dispatches.len(), 17);
+    assert_eq!(descriptor_plan.dispatches.len(), 10);
     assert_eq!(
         descriptor_plan.total_descriptor_count,
         descriptor_plan
@@ -49,7 +49,7 @@ fn descriptor_resource_plan_resolves_fixture_model_dispatch_patch_bay() {
             component_id: "layer_00".to_string(),
             signal_id: "operator_norm_out".to_string(),
             slot: 0,
-            byte_capacity: 64,
+            byte_capacity: 32,
             signal_byte_capacity: 32,
         }
     );
@@ -63,16 +63,16 @@ fn descriptor_resource_plan_resolves_fixture_model_dispatch_patch_bay() {
     );
 
     let kv_append = descriptor_plan
-        .dispatch("layer_00", "kv_memory_append")
+        .dispatch("layer_00", "kv_memory_append__attention_read")
         .unwrap();
-    assert_eq!(kv_append.descriptors.len(), 9);
+    assert_eq!(kv_append.descriptors.len(), 7);
     let state = resident_plan
         .stream_state_buffers
         .iter()
         .find(|state| state.component_id == "layer_00" && state.state_id == "kv_memory")
         .unwrap();
     let expected_state_bytes = descriptor_state_byte_capacity(state, 4).unwrap();
-    for descriptor_index in [2, 6] {
+    for descriptor_index in [3, 5, 6] {
         assert!(matches!(
             kv_append.descriptors[descriptor_index].resource,
             VulkanDescriptorResourceAddress::StateBuffer {
@@ -86,24 +86,16 @@ fn descriptor_resource_plan_resolves_fixture_model_dispatch_patch_bay() {
                 && byte_capacity == expected_state_bytes
         ));
     }
-    assert!(matches!(
-        kv_append.descriptors[7].resource,
-        VulkanDescriptorResourceAddress::StateView {
-            ref component_id,
-            ref state_id,
-            byte_capacity,
-            bytes_per_activation: Some(32),
-            ..
-        } if component_id == "layer_00"
-            && state_id == "kv_memory"
-            && byte_capacity == expected_state_bytes
-    ));
-
     let last = descriptor_plan
-        .dispatch("layer_00", "ffn_residual")
+        .dispatch("layer_00", "ffn_down_projection__ffn_residual")
+        .unwrap();
+    let output = last
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.usage == VulkanKernelDescriptorUsage::OutputSignal)
         .unwrap();
     assert_eq!(
-        last.descriptors.last().unwrap().resource,
+        output.resource,
         VulkanDescriptorResourceAddress::BoundaryOutput {
             signal_id: "output_frame".to_string(),
         }

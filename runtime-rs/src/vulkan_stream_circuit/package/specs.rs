@@ -126,6 +126,7 @@ pub struct VulkanResidentComponentKernelSpec {
     pub source_node_ids: Vec<String>,
     pub semantic_module_ids: Vec<String>,
     pub execution_domain: VulkanResidentComponentKernelExecutionDomain,
+    pub stream_control_binding: Option<u32>,
     pub shader_path: String,
     pub local_size_x: u32,
     pub workgroup_count_x: u32,

@@ -6,6 +6,88 @@
   "runtime_role": "signal_processor",
   "component_class": "gqa_attention_layer_h16_q2_kv1_d8_ffn32_v1",
   "operator_type": "full_attention",
+  "operator": {
+    "id": "operator",
+    "type": "gqa_attention_operator",
+    "circuit_template": "gqa_attention_h16_q2_kv1_d8_v1",
+    "input": "operator_norm.output",
+    "output": "operator.output",
+    "heads": {
+      "query_heads": 2,
+      "key_value_heads": 1,
+      "head_width": 8,
+      "query_groups_per_kv_head": 2
+    },
+    "rotary_width": 8,
+    "rope_type": "default",
+    "output_gate": false,
+    "attention_gate": null,
+    "window_size": null,
+    "shared_kv_source_layer": null,
+    "state_ports": [
+      {
+        "id": "kv_memory",
+        "type": "append_only_attention_memory",
+        "query_heads": 2,
+        "key_shape_per_token": [
+          1,
+          8
+        ],
+        "value_shape_per_token": [
+          1,
+          8
+        ],
+        "dtype": "BF16",
+        "growth": "per_activation",
+        "max_dynamic_activations": null,
+        "sharing": "per_stream_per_node_instance"
+      }
+    ],
+    "params": {
+      "q_projection": {
+        "tensor": "model.layers.0.self_attn.q_proj.weight"
+      },
+      "out_projection": {
+        "tensor": "model.layers.0.self_attn.o_proj.weight"
+      },
+      "k_projection": {
+        "tensor": "model.layers.0.self_attn.k_proj.weight"
+      },
+      "v_projection": {
+        "tensor": "model.layers.0.self_attn.v_proj.weight"
+      }
+    },
+    "internal_components": [
+      {
+        "id": "q_projection",
+        "type": "linear"
+      },
+      {
+        "id": "k_projection",
+        "type": "linear"
+      },
+      {
+        "id": "v_projection",
+        "type": "linear"
+      },
+      {
+        "id": "rope",
+        "type": "rotary_position_embedding"
+      },
+      {
+        "id": "kv_memory",
+        "type": "stateful_append_memory"
+      },
+      {
+        "id": "attention_read",
+        "type": "scaled_dot_product_attention"
+      },
+      {
+        "id": "out_projection",
+        "type": "linear"
+      }
+    ]
+  },
   "feed_forward": {
     "type": "dense_swiglu",
     "hidden_size": 16,
@@ -27,6 +109,7 @@
     "residual_scale": 1.0,
     "attention_scale": 0.3535533905932738,
     "attention_window_size": null,
+    "max_position_embeddings": 64,
     "value_head_norm": false,
     "per_layer_input_width": null,
     "per_layer_input_layer_index": 0,
@@ -59,6 +142,8 @@
     ],
     "controls": []
   },
+  "residual_mixer": null,
+  "execution_contract": null,
   "state_ports": [
     {
       "id": "kv_memory",

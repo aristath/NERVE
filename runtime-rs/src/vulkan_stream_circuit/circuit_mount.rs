@@ -158,6 +158,53 @@ pub struct VulkanMountedPlacedStreamCircuit {
     pub dynamic_resource_buffers: Option<Arc<VulkanDynamicResourceBuffers>>,
 }
 
+fn boundary_input_passthrough_edge_overrides(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
+    boundary_io: &VulkanModelBoundaryBuffers,
+) -> (
+    Vec<VulkanPlacedLocalEdgeBufferOverride>,
+    Vec<VulkanPlacedEdgeEndpointBufferOverride>,
+) {
+    let mut local = Vec::new();
+    let mut outgoing = Vec::new();
+    for circuit in &placed_plan.binding_plan.circuits {
+        for output in &circuit.output_ports {
+            let Some(source_signal_id) = output.source.as_deref() else {
+                continue;
+            };
+            let Some(input) = boundary_io.input_buffers.iter().find(|input| {
+                input.boundary.component_id == circuit.component_id
+                    && input.boundary.signal_id == source_signal_id
+                    && input.boundary.shape == output.shape
+            }) else {
+                continue;
+            };
+            for edge in &placed_plan.placed_resident_plan.local_edges {
+                if edge.source_component_id == circuit.component_id
+                    && edge.source_port_id == output.id
+                {
+                    local.push(VulkanPlacedLocalEdgeBufferOverride {
+                        edge_index: edge.edge_index,
+                        buffer: Arc::clone(&input.buffer),
+                    });
+                }
+            }
+            for edge in &placed_plan.placed_resident_plan.outgoing_edges {
+                if edge.source_component_id == circuit.component_id
+                    && edge.source_port_id == output.id
+                {
+                    outgoing.push(VulkanPlacedEdgeEndpointBufferOverride {
+                        direction: VulkanPlacedEdgeDirection::Outgoing,
+                        edge_index: edge.edge_index,
+                        buffer: Arc::clone(&input.buffer),
+                    });
+                }
+            }
+        }
+    }
+    (local, outgoing)
+}
+
 impl VulkanMountedPlacedStreamCircuit {
     pub fn from_placed_plan(
         device: &VulkanComputeDevice,
@@ -257,10 +304,41 @@ impl VulkanMountedPlacedStreamCircuit {
         let boundary_io = boundary_io_plan.allocate_buffers(device)?;
         let edge_io_plan =
             VulkanPlacedEdgeIoPlan::from_placed_resident_plan(&placed_plan.placed_resident_plan)?;
+        let (passthrough_local_overrides, passthrough_endpoint_overrides) =
+            boundary_input_passthrough_edge_overrides(&placed_plan, &boundary_io);
+        let passthrough_local_edge_ids = passthrough_local_overrides
+            .iter()
+            .map(|override_| override_.edge_index)
+            .collect::<BTreeSet<_>>();
+        let passthrough_endpoint_keys = passthrough_endpoint_overrides
+            .iter()
+            .map(|override_| (override_.direction, override_.edge_index))
+            .collect::<BTreeSet<_>>();
+        let effective_local_overrides = local_edge_overrides
+            .iter()
+            .filter(|override_| !passthrough_local_edge_ids.contains(&override_.edge_index))
+            .map(|override_| VulkanPlacedLocalEdgeBufferOverride {
+                edge_index: override_.edge_index,
+                buffer: Arc::clone(&override_.buffer),
+            })
+            .chain(passthrough_local_overrides)
+            .collect::<Vec<_>>();
+        let effective_endpoint_overrides = edge_endpoint_overrides
+            .iter()
+            .filter(|override_| {
+                !passthrough_endpoint_keys.contains(&(override_.direction, override_.edge_index))
+            })
+            .map(|override_| VulkanPlacedEdgeEndpointBufferOverride {
+                direction: override_.direction,
+                edge_index: override_.edge_index,
+                buffer: Arc::clone(&override_.buffer),
+            })
+            .chain(passthrough_endpoint_overrides)
+            .collect::<Vec<_>>();
         let edge_io = edge_io_plan.allocate_buffers_with_overrides(
             device,
-            local_edge_overrides,
-            edge_endpoint_overrides,
+            &effective_local_overrides,
+            &effective_endpoint_overrides,
         )?;
         let stream_control_buffer = if let Some(stream_control_buffer) = stream_control_override {
             if !device.owns_resident_buffer(&stream_control_buffer) {
@@ -447,13 +525,16 @@ impl VulkanMountedPlacedStreamCircuit {
             .iter()
             .map(|descriptor| self.resident_kernel_buffer_binding(dispatch, descriptor))
             .collect::<Result<Vec<_>, _>>()?;
-        if dispatch.uses_stream_tick {
-            let binding = u32::try_from(dispatch.descriptors.len()).map_err(|_| {
-                VulkanMountedPlacedResidentKernelDispatchError::DescriptorBindingOverflow {
-                    dispatch_index: dispatch.dispatch_index,
-                    binding: dispatch.descriptors.len(),
-                }
-            })?;
+        if let Some(binding) = dispatch.stream_control_binding {
+            if usize::try_from(binding).ok() != Some(dispatch.descriptors.len()) {
+                return Err(
+                    VulkanMountedPlacedResidentKernelDispatchError::StreamControlBindingMismatch {
+                        dispatch_index: dispatch.dispatch_index,
+                        compiled_binding: binding,
+                        runtime_descriptor_count: dispatch.descriptors.len(),
+                    },
+                );
+            }
             bindings.push(
                 VulkanResidentKernelBufferBinding::new(
                     binding,
@@ -560,7 +641,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         signal_id: signal_id.clone(),
                     }
                 })?;
-                (&allocation.buffer, allocation.byte_capacity)
+                (allocation.buffer.as_ref(), allocation.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { signal_id } => {
                 let allocation = self.boundary_io.output_buffer(signal_id).ok_or_else(|| {
@@ -571,7 +652,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         signal_id: signal_id.clone(),
                     }
                 })?;
-                (&allocation.buffer, allocation.byte_capacity)
+                (allocation.buffer.as_ref(), allocation.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge }
             | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => {

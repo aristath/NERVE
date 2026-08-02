@@ -139,6 +139,27 @@ fn physical_device_supports_conditional_rendering(
     Ok(conditional.conditional_rendering == vk::TRUE)
 }
 
+fn physical_device_supports_device_coherent_memory(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<bool, VulkanError> {
+    if !physical_device_supports_extension(
+        instance,
+        physical_device,
+        ash::amd::device_coherent_memory::NAME,
+    )? {
+        return Ok(false);
+    }
+    let mut coherent_memory =
+        vk::PhysicalDeviceCoherentMemoryFeaturesAMD::default();
+    let mut features =
+        vk::PhysicalDeviceFeatures2::default().push_next(&mut coherent_memory);
+    unsafe {
+        instance.get_physical_device_features2(physical_device, &mut features);
+    }
+    Ok(coherent_memory.device_coherent_memory == vk::TRUE)
+}
+
 fn resident_buffer_usage() -> vk::BufferUsageFlags {
     vk::BufferUsageFlags::STORAGE_BUFFER
         | vk::BufferUsageFlags::TRANSFER_SRC
@@ -912,11 +933,29 @@ unsafe fn find_memory_type(
 ) -> Option<u32> {
     let memory_properties =
         unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    select_memory_type_index(
+        &memory_properties,
+        memory_type_bits,
+        required_flags,
+        preferred_flags,
+    )
+}
+
+fn select_memory_type_index(
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    memory_type_bits: u32,
+    required_flags: vk::MemoryPropertyFlags,
+    preferred_flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    let opt_in_memory_flags = vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+        | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD;
     (0..memory_properties.memory_type_count)
         .filter(|index| {
             let supported = (memory_type_bits & (1 << index)) != 0;
             let properties = memory_properties.memory_types[*index as usize].property_flags;
-            supported && properties.contains(required_flags)
+            supported
+                && properties.contains(required_flags)
+                && !(properties & opt_in_memory_flags).intersects(opt_in_memory_flags)
         })
         .max_by_key(|index| {
             let memory_type = memory_properties.memory_types[*index as usize];

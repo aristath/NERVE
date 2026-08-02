@@ -431,7 +431,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     where
         F: FnMut(
             usize,
-            u32,
+            VulkanResidentSampledToken,
             usize,
             usize,
             bool,
@@ -496,14 +496,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
                 })?)
                 .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-            let sampled_token_id = self
+            let sampled_token = self
                 .sampler
                 .completed_run_at(stream_tick)
-                .map(|run| run.token_id)
+                .map(|run| VulkanResidentSampledToken::from(&run))
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
             on_sampled_token(
                 tick_index,
-                sampled_token_id,
+                sampled_token,
                 feedback_loop.scheduler_turn_count_per_tick,
                 feedback_loop.completed_stage_count_per_tick,
                 completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_CANCELLED

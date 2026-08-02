@@ -555,6 +555,99 @@ fn runtime_graph_duplicates_package_components_in_memory() {
 }
 
 #[test]
+fn resolved_package_graph_applies_the_compiled_kernel_stream_control_contract() {
+    let mut manifest = fixture_model_package_manifest();
+    let execution = manifest
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    let kernel = execution
+        .kernels
+        .iter_mut()
+        .find(|kernel| kernel.node_id == "operator_norm")
+        .unwrap();
+    assert_eq!(kernel.op, "rms_norm");
+    kernel.stream_control_binding = Some(3);
+
+    let graph = manifest.resolved_source_graph(tiny_model_dir()).unwrap();
+    let node = graph
+        .circuits
+        .iter()
+        .find(|component| component.component.id == "layer_00")
+        .unwrap()
+        .circuit
+        .nodes
+        .iter()
+        .find(|node| node.id == "operator_norm")
+        .unwrap();
+
+    assert_eq!(
+        node.attrs.get("stream_control_binding"),
+        Some(&serde_json::json!(3))
+    );
+}
+
+#[test]
+fn mounted_runtime_graph_persists_the_compiled_kernel_stream_control_contract() {
+    let mut manifest = fixture_model_package_manifest();
+    let execution = manifest
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    let kernel = execution
+        .kernels
+        .iter_mut()
+        .find(|kernel| kernel.node_id == "operator_norm")
+        .unwrap();
+    kernel.stream_control_binding = Some(3);
+
+    let source_graph = manifest.resolved_source_graph(tiny_model_dir()).unwrap();
+    let runtime_graph =
+        StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0").unwrap();
+    let runtime_model = manifest.mount_runtime_graph(&runtime_graph).unwrap();
+    let node = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .circuit
+        .nodes
+        .iter()
+        .find(|node| node.id == "operator_norm")
+        .unwrap();
+
+    assert_eq!(
+        node.attrs.get("stream_control_binding"),
+        Some(&serde_json::json!(3))
+    );
+}
+
+#[test]
+fn resolved_package_graph_rejects_a_missing_kernel_runtime_contract() {
+    let mut manifest = fixture_model_package_manifest();
+    let execution = manifest
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    execution
+        .kernels
+        .retain(|kernel| kernel.node_id != "operator_norm");
+
+    let error = manifest
+        .resolved_source_graph(tiny_model_dir())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("node operator_norm has no matching compiled kernel contract")
+    );
+}
+
+#[test]
 fn runtime_model_coalesces_execution_placement_without_rewriting_the_patch() {
     let manifest = fixture_model_package_manifest();
     let source_graph = manifest

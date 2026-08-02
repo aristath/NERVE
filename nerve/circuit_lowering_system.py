@@ -817,10 +817,19 @@ def _system_port(
     *,
     source: str | None = None,
 ) -> Json:
+    dtype = {
+        "token_id": "U32",
+        "token_id_block": "U32",
+        "scalar": "F32",
+        "scalar_block": "F32",
+        "logits": "F32",
+        "logits_block": "F32",
+    }.get(signal, "BF16")
     port = {
         "id": port_id,
         "signal": signal,
         "shape": shape,
+        "dtype": dtype,
         "component_port": component_port,
     }
     if source is not None:

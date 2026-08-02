@@ -227,6 +227,7 @@ impl VulkanResidentTokenStream {
                     .unwrap_or_else(|| "feedback_loop".to_string()),
                 output_index,
                 token_id: output.token_id,
+                selected_logit_bits: output.sampler_run.selected_logit_bits,
                 source_stream_tick: output.source_stream_tick,
             }
         });
@@ -411,6 +412,7 @@ pub struct VulkanResidentTokenOutputEvent {
     pub input_event_id: String,
     pub output_index: usize,
     pub token_id: u32,
+    pub selected_logit_bits: u32,
     pub source_stream_tick: u64,
 }
 
@@ -467,4 +469,3 @@ pub struct VulkanResidentTokenStreamSnapshot {
     pub total_ticks: usize,
     pub last_stop_reason: Option<String>,
 }
-

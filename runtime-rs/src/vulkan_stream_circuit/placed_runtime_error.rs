@@ -5,6 +5,10 @@ pub enum VulkanResidentInProcessPlacedRuntimeError {
     PromptStreamBusy,
     MissingPrivateFeedback,
     MissingFusedSamplerRun,
+    NonFiniteSelectedLogit {
+        token_id: u32,
+        selected_logit_bits: u32,
+    },
     MissingBoundDevice { device_id: String },
     StreamTickOverflow,
     FeedbackDepthOverflow,
@@ -37,6 +41,13 @@ impl Display for VulkanResidentInProcessPlacedRuntimeError {
             Self::MissingFusedSamplerRun => {
                 f.write_str("placed token tick completed without its fused sampler result")
             }
+            Self::NonFiniteSelectedLogit {
+                token_id,
+                selected_logit_bits,
+            } => write!(
+                f,
+                "sampler selected token {token_id} with non-finite logit bits 0x{selected_logit_bits:08x}"
+            ),
             Self::MissingBoundDevice { device_id } => write!(
                 f,
                 "placed model package has no runtime device bound for logical device {device_id:?}"
@@ -102,4 +113,3 @@ impl From<VulkanResidentSamplerRunnerError> for VulkanResidentInProcessPlacedRun
         Self::Sampler(error)
     }
 }
-

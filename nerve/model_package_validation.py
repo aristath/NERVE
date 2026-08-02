@@ -608,6 +608,7 @@ def validate_compiled_component_executions(
                 raise ModelCompileError(
                     f"compiled package component {component_id!r} kernel {index} does not match its circuit node"
                 )
+            validate_kernel_stream_control_contract(circuit, node, kernel)
             batch_mode = kernel.get("batch_mode")
             batch_implementations = kernel.get("batch_implementations")
             if batch_mode == "serial_lanes" and batch_implementations == []:
@@ -633,6 +634,39 @@ def validate_compiled_component_executions(
                 continue
             raise ModelCompileError(
                 f"compiled package component {component_id!r} kernel {index} has an invalid batch execution contract"
+            )
+
+
+def validate_kernel_stream_control_contract(
+    circuit: Json,
+    node: Json,
+    kernel: Json,
+) -> None:
+    shader_path = kernel["shader_path"]
+    stream_control_binding = stream_control_binding_from_artifact_path(shader_path)
+    if "stream_control_binding" not in kernel:
+        raise ModelCompileError(
+            f"compiled kernel {kernel['node_id']!r} has no explicit stream-control binding contract"
+        )
+    declared_binding = kernel["stream_control_binding"]
+    if declared_binding is not None and (
+        not isinstance(declared_binding, int)
+        or isinstance(declared_binding, bool)
+        or declared_binding < 0
+    ):
+        raise ModelCompileError(
+            f"compiled kernel {kernel['node_id']!r} has an invalid stream-control binding contract"
+        )
+    if declared_binding != stream_control_binding:
+        raise ModelCompileError(
+            f"compiled kernel {kernel['node_id']!r} stream-control contract disagrees with shader {shader_path!r}"
+        )
+    if stream_control_binding is not None:
+        actual_binding = stream_control_binding
+        expected_binding = stream_control_binding_for_node(circuit, node)
+        if actual_binding != expected_binding:
+            raise ModelCompileError(
+                f"compiled kernel {kernel['node_id']!r} stream control uses binding {actual_binding}, expected {expected_binding}"
             )
 
 

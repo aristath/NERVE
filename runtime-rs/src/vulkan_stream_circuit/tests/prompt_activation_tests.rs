@@ -292,12 +292,13 @@ fn placed_active_prompt_event_advances_one_activation_at_a_time() {
             3,
             7,
             &VulkanPlacedEdgeTransportStats::default(),
-            Some(30),
+            Some(sampled_token(30)),
         )
         .unwrap()
         .unwrap();
     assert_eq!(first_output.id, "event.0");
     assert_eq!(first_output.token_id, 30);
+    assert_eq!(first_output.selected_logit_bits, 30.0f32.to_bits());
     assert_eq!(first_output.source_stream_tick, 6);
 
     let third = active.next_activation().unwrap();
@@ -313,7 +314,7 @@ fn placed_active_prompt_event_advances_one_activation_at_a_time() {
             3,
             7,
             &VulkanPlacedEdgeTransportStats::default(),
-            Some(99),
+            Some(sampled_token(99)),
         )
         .unwrap()
         .unwrap();
@@ -354,6 +355,37 @@ fn placed_active_prompt_event_advances_one_activation_at_a_time() {
 }
 
 #[test]
+fn placed_active_prompt_event_rejects_a_non_finite_selected_logit() {
+    let mut active = VulkanResidentInProcessPlacedActivePromptEvent::new(
+        VulkanResidentTokenInputEvent::new("event", vec![10], 1),
+        0,
+    )
+    .unwrap();
+    let activation = active.next_activation().unwrap();
+    let error = active
+        .complete_activation(
+            &activation,
+            0,
+            1,
+            1,
+            &VulkanPlacedEdgeTransportStats::default(),
+            Some(VulkanResidentSampledToken {
+                token_id: 0,
+                selected_logit_bits: f32::NAN.to_bits(),
+            }),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        VulkanResidentInProcessPlacedRuntimeError::NonFiniteSelectedLogit {
+            token_id: 0,
+            selected_logit_bits,
+        } if selected_logit_bits == f32::NAN.to_bits()
+    ));
+}
+
+#[test]
 fn placed_active_prompt_event_windows_only_open_private_feedback() {
     let mut active = VulkanResidentInProcessPlacedActivePromptEvent::new(
         VulkanResidentTokenInputEvent::new("event", vec![10, 11], 4),
@@ -383,7 +415,7 @@ fn placed_active_prompt_event_windows_only_open_private_feedback() {
             1,
             1,
             &VulkanPlacedEdgeTransportStats::default(),
-            Some(20),
+            Some(sampled_token(20)),
         )
         .unwrap();
     assert_eq!(active.resident_feedback_window_tick_count(64), 3);
@@ -404,7 +436,7 @@ fn placed_active_prompt_event_windows_only_open_private_feedback() {
         1,
         1,
         &VulkanPlacedEdgeTransportStats::default(),
-        Some(20),
+        Some(sampled_token(20)),
     )
     .unwrap();
     assert_eq!(eos.resident_feedback_window_tick_count(64), 0);
@@ -425,7 +457,7 @@ fn placed_active_prompt_event_exposes_repeated_full_feedback_windows() {
             1,
             1,
             &VulkanPlacedEdgeTransportStats::default(),
-            Some(20),
+            Some(sampled_token(20)),
         )
         .unwrap();
     assert_eq!(active.resident_feedback_window_tick_count(64), 64);
@@ -439,7 +471,7 @@ fn placed_active_prompt_event_exposes_repeated_full_feedback_windows() {
                 1,
                 1,
                 &VulkanPlacedEdgeTransportStats::default(),
-                Some(20),
+                Some(sampled_token(20)),
             )
             .unwrap();
     }
@@ -454,7 +486,7 @@ fn placed_active_prompt_event_exposes_repeated_full_feedback_windows() {
                 1,
                 1,
                 &VulkanPlacedEdgeTransportStats::default(),
-                Some(20),
+                Some(sampled_token(20)),
             )
             .unwrap();
     }
@@ -508,7 +540,7 @@ fn placed_active_prompt_event_interrupt_closes_feedback_without_losing_state() {
             2,
             5,
             &VulkanPlacedEdgeTransportStats::default(),
-            Some(20),
+            Some(sampled_token(20)),
         )
         .unwrap()
         .unwrap();
@@ -576,7 +608,7 @@ fn placed_active_prompt_event_stop_after_current_processes_closing_feedback() {
             2,
             5,
             &VulkanPlacedEdgeTransportStats::default(),
-            Some(20),
+            Some(sampled_token(20)),
         )
         .unwrap();
 

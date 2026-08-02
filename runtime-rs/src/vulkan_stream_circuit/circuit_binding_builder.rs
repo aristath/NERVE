@@ -408,6 +408,7 @@ fn bind_node(
         node_id: node.id.clone(),
         op: node.op.clone(),
         specialization: node.specialization.clone(),
+        stream_control_binding: node.stream_control_binding,
         inputs,
         outputs,
         parameters,
@@ -473,10 +474,13 @@ fn bind_signal(
         ))
     })?;
 
-    let resource = if signal.is_boundary_output {
-        VulkanSignalResource::BoundaryOutput
-    } else {
-        match signal.storage {
+    let resource = match (&signal.producer, &signal.storage) {
+        (SignalProducer::BoundaryInput, SignalStorage::Boundary) => {
+            VulkanSignalResource::BoundaryInput
+        }
+        _ if signal.is_boundary_output => VulkanSignalResource::BoundaryOutput,
+        _ => {
+            match &signal.storage {
             SignalStorage::Boundary => VulkanSignalResource::BoundaryInput,
             SignalStorage::RuntimeControl => {
                 let SignalProducer::RuntimeControl { runtime_source } = &signal.producer else {
@@ -569,6 +573,7 @@ fn bind_signal(
                     static_bytes: state.static_bytes,
                     bytes_per_activation: state.bytes_per_activation,
                 }
+            }
             }
         }
     };

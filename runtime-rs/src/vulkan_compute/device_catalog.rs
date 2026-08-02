@@ -285,6 +285,11 @@ impl VulkanComputeDeviceCatalog {
                 physical_device,
                 ash::ext::memory_budget::NAME,
             )?;
+            let device_coherent_memory_supported =
+                physical_device_supports_device_coherent_memory(
+                    instance,
+                    physical_device,
+                )?;
             let conditional_rendering_supported =
                 physical_device_supports_conditional_rendering(
                     instance,
@@ -380,14 +385,6 @@ impl VulkanComputeDeviceCatalog {
                 physical_device_supports_modern_submission(instance, physical_device);
             let buffer_device_address_supported = enabled_shader_features
                 .contains(&VulkanShaderFeature::BufferDeviceAddress);
-            let core_features =
-                instance.get_physical_device_features(physical_device);
-            let sparse_buffer_residency_supported =
-                core_features.sparse_binding == vk::TRUE
-                    && core_features.sparse_residency_buffer == vk::TRUE
-                    && queue_family
-                        .queue_flags
-                        .contains(vk::QueueFlags::SPARSE_BINDING);
             if !timeline_semaphore_supported || !synchronization2_supported {
                 return Err(VulkanError(format!(
                     "Vulkan device {device_name:?} does not support the required timeline-semaphore and synchronization2 execution contract"
@@ -405,10 +402,6 @@ impl VulkanComputeDeviceCatalog {
                 ),
                 shader_int64: bool32(
                     enabled_shader_features.contains(&VulkanShaderFeature::ShaderInt64),
-                ),
-                sparse_binding: bool32(sparse_buffer_residency_supported),
-                sparse_residency_buffer: bool32(
-                    sparse_buffer_residency_supported,
                 ),
                 ..Default::default()
             };
@@ -479,6 +472,9 @@ impl VulkanComputeDeviceCatalog {
             let mut conditional_rendering_features =
                 vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default()
                     .conditional_rendering(conditional_rendering_supported);
+            let mut device_coherent_memory_features =
+                vk::PhysicalDeviceCoherentMemoryFeaturesAMD::default()
+                    .device_coherent_memory(device_coherent_memory_supported);
             let mut extension_names = Vec::new();
             let mut enabled_device_extensions = BTreeSet::new();
             let mut device_info = vk::DeviceCreateInfo::default()
@@ -590,6 +586,17 @@ impl VulkanComputeDeviceCatalog {
                 device_info =
                     device_info.push_next(&mut conditional_rendering_features);
             }
+            if device_coherent_memory_supported {
+                extension_names
+                    .push(ash::amd::device_coherent_memory::NAME.as_ptr());
+                enabled_device_extensions.insert(
+                    ash::amd::device_coherent_memory::NAME
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                device_info =
+                    device_info.push_next(&mut device_coherent_memory_features);
+            }
             if shader_float8_support.shader_float8
                 || shader_float8_support.shader_float8_cooperative_matrix
             {
@@ -651,7 +658,6 @@ impl VulkanComputeDeviceCatalog {
                 transfer_queue,
                 transfer_queue_is_distinct,
                 buffer_device_address_supported,
-                sparse_buffer_residency_supported,
                 api_version: physical_device_properties.api_version,
                 physical_device_id: permitted_device.physical_device_id.clone(),
                 device_name,

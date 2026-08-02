@@ -1,6 +1,6 @@
 {
   "schema": "nerve.optimizer.optimization_scope_catalog.v1",
-  "catalog_id": "scope_catalog_0593f134d537d59d53958514d4b04177",
+  "catalog_id": "scope_catalog_9a1e8ec1330bd3f432348ff4b7e67c1d",
   "package_id": "model_d119caf1_vulkan_resident",
   "scopes": [
     {
@@ -253,6 +253,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame"
             },
             "upstream": {
@@ -306,7 +307,7 @@
         "randomness": [],
         "dependencies": []
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:a2ad33237118245b8de10a2b7f0bd27e634ba14d91a5f3f3aff006e1e490047a",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:182e8a3a9d49d2bdc94f6ae4277ca65b97c00e37c28d3d1a07ba9027e4632ee3",
       "extensions": {
         "classifications": [
           "operator"
@@ -357,6 +358,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token",
               "source": "sampled_token"
             },
@@ -407,6 +409,7 @@
               "shape": [
                 1
               ],
+              "dtype": "BF16",
               "component_port": "randomness"
             },
             "upstream": null,
@@ -439,7 +442,7 @@
           }
         ]
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:21c5351ef79a2c159617584d3a2c0f630a3004ceabd2ca6f3ebb8d768eeb577e",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:80f5b61b5d41163f25e3ce2e4c8a1f2dd1e807cf08a8f0d845294ff1cfbf4583",
       "extensions": {
         "classifications": [
           "adjacent_producer_consumer",
@@ -863,6 +866,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits"
             },
             "upstream": {
@@ -896,6 +900,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token",
               "source": "sampled_token"
             },
@@ -936,6 +941,7 @@
               "shape": [
                 1
               ],
+              "dtype": "BF16",
               "component_port": "randomness"
             },
             "upstream": null,
@@ -950,7 +956,7 @@
         ],
         "dependencies": []
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:fb59d4229f2bab63631c831cb9ef9ee080c0458ff16bcc7483c0cec46f9ac77e",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:85dfafef4385fd31789cbe8a9c7378abf180e1320465a2f2ec9a49864829bc8d",
       "extensions": {
         "classifications": [
           "operator",
@@ -1462,6 +1468,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token"
             },
             "upstream": {
@@ -1570,7 +1577,7 @@
           }
         ]
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:ec302aef17dfc703e2f1ba6e5d0b412b285975e427c17c4b9cba364405327dca",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:e3f433d1a4375ea6e339861983e19efd0f1a710f2e6eb20da91eb8f244baaced",
       "extensions": {
         "classifications": [
           "adjacent_producer_consumer",
@@ -1609,6 +1616,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame"
             },
             "upstream": {
@@ -1642,6 +1650,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits",
               "source": "output_logits"
             },
@@ -1692,7 +1701,7 @@
         "randomness": [],
         "dependencies": []
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:74bcd7387dfa995ef68f01bb57b2fb76ed8adb1859f1a22fa0bf9e55f988eab1",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:adaea0813a48488f8af2eee6723312215534ea8e476158ad37fff65bc9f3b941",
       "extensions": {
         "classifications": [
           "output_transducer",
@@ -3602,6 +3611,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits",
               "source": "output_logits"
             },
@@ -3643,7 +3653,7 @@
         "randomness": [],
         "dependencies": []
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:6ec08b5cc6fb7ca34489b2746d58ea4db8ca306ab36411e0bc1e562742e3f704",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:be32887fa149429ca4b0a9ce14f8bcbf8f0242ec58625d834fffff62c07a4e3f",
       "extensions": {
         "classifications": [
           "operator"
@@ -3680,6 +3690,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token"
             },
             "upstream": {
@@ -3714,6 +3725,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame",
               "source": "output_frame"
             },
@@ -3756,7 +3768,7 @@
         "randomness": [],
         "dependencies": []
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:de224cecc2748ee023d4f5722ab99be8b46597affd349306269a6bc3f250ea0a",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:b67f838a7828c1d53b8c101e9db974a81f16a19bca80d3bd42dd4372a4cf5b45",
       "extensions": {
         "classifications": [
           "input_transducer",
@@ -3867,6 +3879,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits"
             },
             "upstream": {
@@ -3900,6 +3913,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame",
               "source": "output_frame"
             },
@@ -3935,6 +3949,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token",
               "source": "sampled_token"
             },
@@ -3983,6 +3998,7 @@
               "shape": [
                 1
               ],
+              "dtype": "BF16",
               "component_port": "randomness"
             },
             "upstream": null,
@@ -4016,7 +4032,7 @@
           }
         ]
       },
-      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:ccec0417b20573faa2d349e2a73412b9ddc51965e1e42784c171087caa57fa10",
+      "source_contract_digest": "nerve.optimizer.canonical_json_sha256.v1:5169aedfb4d4b9ba7d1ee6e870dbca1a4cb045f248bf2405d2652737ea5497ad",
       "extensions": {
         "classifications": [
           "feedback_transducer"
@@ -5501,6 +5517,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame"
             },
             "upstream": {
@@ -5561,7 +5578,7 @@
           "lowered/output_transducer/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:a2ad33237118245b8de10a2b7f0bd27e634ba14d91a5f3f3aff006e1e490047a"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:182e8a3a9d49d2bdc94f6ae4277ca65b97c00e37c28d3d1a07ba9027e4632ee3"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -5591,6 +5608,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token",
               "source": "sampled_token"
             },
@@ -5641,6 +5659,7 @@
               "shape": [
                 1
               ],
+              "dtype": "BF16",
               "component_port": "randomness"
             },
             "upstream": null,
@@ -5681,7 +5700,7 @@
           "lowered/sampler/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:21c5351ef79a2c159617584d3a2c0f630a3004ceabd2ca6f3ebb8d768eeb577e"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:80f5b61b5d41163f25e3ce2e4c8a1f2dd1e807cf08a8f0d845294ff1cfbf4583"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -6016,6 +6035,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits"
             },
             "upstream": {
@@ -6049,6 +6069,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token",
               "source": "sampled_token"
             },
@@ -6089,6 +6110,7 @@
               "shape": [
                 1
               ],
+              "dtype": "BF16",
               "component_port": "randomness"
             },
             "upstream": null,
@@ -6110,7 +6132,7 @@
           "lowered/sampler/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:fb59d4229f2bab63631c831cb9ef9ee080c0458ff16bcc7483c0cec46f9ac77e"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:85dfafef4385fd31789cbe8a9c7378abf180e1320465a2f2ec9a49864829bc8d"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -6520,6 +6542,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token"
             },
             "upstream": {
@@ -6636,7 +6659,7 @@
           "lowered/layer_00/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:ec302aef17dfc703e2f1ba6e5d0b412b285975e427c17c4b9cba364405327dca"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:e3f433d1a4375ea6e339861983e19efd0f1a710f2e6eb20da91eb8f244baaced"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -6654,6 +6677,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame"
             },
             "upstream": {
@@ -6687,6 +6711,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits",
               "source": "output_logits"
             },
@@ -6744,7 +6769,7 @@
           "lowered/output_transducer/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:74bcd7387dfa995ef68f01bb57b2fb76ed8adb1859f1a22fa0bf9e55f988eab1"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:adaea0813a48488f8af2eee6723312215534ea8e476158ad37fff65bc9f3b941"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -8329,6 +8354,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits",
               "source": "output_logits"
             },
@@ -8377,7 +8403,7 @@
           "lowered/output_transducer/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:6ec08b5cc6fb7ca34489b2746d58ea4db8ca306ab36411e0bc1e562742e3f704"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:be32887fa149429ca4b0a9ce14f8bcbf8f0242ec58625d834fffff62c07a4e3f"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -8395,6 +8421,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token"
             },
             "upstream": {
@@ -8429,6 +8456,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame",
               "source": "output_frame"
             },
@@ -8478,7 +8506,7 @@
           "lowered/input_transducer/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:de224cecc2748ee023d4f5722ab99be8b46597affd349306269a6bc3f250ea0a"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:b67f838a7828c1d53b8c101e9db974a81f16a19bca80d3bd42dd4372a4cf5b45"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",
@@ -8553,6 +8581,7 @@
               "shape": [
                 32
               ],
+              "dtype": "F32",
               "component_port": "logits"
             },
             "upstream": {
@@ -8586,6 +8615,7 @@
               "shape": [
                 16
               ],
+              "dtype": "BF16",
               "component_port": "frame",
               "source": "output_frame"
             },
@@ -8621,6 +8651,7 @@
               "shape": [
                 1
               ],
+              "dtype": "U32",
               "component_port": "token",
               "source": "sampled_token"
             },
@@ -8669,6 +8700,7 @@
               "shape": [
                 1
               ],
+              "dtype": "BF16",
               "component_port": "randomness"
             },
             "upstream": null,
@@ -8710,7 +8742,7 @@
           "lowered/sampler/circuit.json"
         ]
       },
-      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:ccec0417b20573faa2d349e2a73412b9ddc51965e1e42784c171087caa57fa10"
+      "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:5169aedfb4d4b9ba7d1ee6e870dbca1a4cb045f248bf2405d2652737ea5497ad"
     },
     {
       "schema": "nerve.optimizer.source_behavior_contract.v1",

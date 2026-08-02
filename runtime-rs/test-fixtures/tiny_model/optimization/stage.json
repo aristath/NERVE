@@ -8,25 +8,25 @@
   "status": "exact_baseline_retained",
   "exact_baseline": {
     "artifact_ref": "lowered/execution_graph.circuits.json",
-    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:14da5baf80fde6adb806ffea252169ce40e48c61e81dfc4ae117db7775c47465",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:62529abe6d1b1ccd2deb31912658ed34fe37d6628b0937c7c2cc5306c0b92eda",
     "mutable": false
   },
   "scope_catalog": {
     "artifact_ref": "optimization/scopes.json",
-    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:d20de6d2d7312663a4076e422739c250c3b5c20123422beee604be99ec1bb5b9",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:d7c1de225bf14e7d338eae0bc16f1e59394ac8705c9a65e36e1db6dad2ded9f5",
     "scope_count": 52,
     "rejected_scope_count": 0
   },
   "session": {
     "schema": "nerve.optimizer.session.v1",
-    "session_id": "optimization_session_b27eeebb0c361f970e378da893f2356a",
+    "session_id": "optimization_session_afb53114c86586be2df2237ca8690867",
     "package_id": "model_d119caf1_vulkan_resident",
-    "exact_baseline_digest": "nerve.optimizer.canonical_json_sha256.v1:14da5baf80fde6adb806ffea252169ce40e48c61e81dfc4ae117db7775c47465",
+    "exact_baseline_digest": "nerve.optimizer.canonical_json_sha256.v1:62529abe6d1b1ccd2deb31912658ed34fe37d6628b0937c7c2cc5306c0b92eda",
     "candidates": []
   },
   "implementation_registry": {
     "artifact_ref": "optimization/implementations.json",
-    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:c89888896e43a293f801c14f3e616392765cdac609fa80bf41cb559489955a27",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:3ff482b3c996f68bf9e23b1557065da9f82fac400744a0ed15b4473edd9b8993",
     "implementation_count": 0
   },
   "contract_schemas": [

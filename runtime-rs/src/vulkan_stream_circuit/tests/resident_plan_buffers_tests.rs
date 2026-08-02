@@ -186,7 +186,7 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
 
     assert_eq!(binding_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
     assert_eq!(binding_plan.circuits.len(), 1);
-    assert_eq!(binding_plan.total_node_count(), 17);
+    assert_eq!(binding_plan.total_node_count(), 10);
 
     let layer_00 = binding_plan.circuit("layer_00").unwrap();
     let operator_norm = layer_00.node("operator_norm").unwrap();
@@ -199,7 +199,9 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
         "model.layers.0.input_layernorm.weight"
     );
 
-    let q_projection = layer_00.node("q_projection").unwrap();
+    let q_projection = layer_00
+        .node("q_projection__k_projection__v_projection")
+        .unwrap();
     assert_eq!(
         q_projection.parameter("q_projection").unwrap().tensor,
         "model.layers.0.self_attn.q_proj.weight"
@@ -213,7 +215,9 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
         } if component_id == "layer_00"
     ));
 
-    let kv_append = layer_00.node("kv_memory_append").unwrap();
+    let kv_append = layer_00
+        .node("kv_memory_append__attention_read")
+        .unwrap();
     assert_eq!(
         kv_append.input("kv_memory").unwrap().resource,
         VulkanSignalResource::StateBuffer {
@@ -223,26 +227,18 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
             bytes_per_activation: Some(32),
         }
     );
-    assert_eq!(
-        kv_append.output("k_memory").unwrap().resource,
-        VulkanSignalResource::StateView {
-            component_id: "layer_00".to_string(),
-            state_id: "kv_memory".to_string(),
-            static_bytes: None,
-            bytes_per_activation: Some(32),
-        }
-    );
-    assert_eq!(
-        kv_append.output("v_memory").unwrap().resource,
-        VulkanSignalResource::StateView {
-            component_id: "layer_00".to_string(),
-            state_id: "kv_memory".to_string(),
-            static_bytes: None,
-            bytes_per_activation: Some(32),
-        }
-    );
+    assert!(matches!(
+        kv_append.output("attention_out").unwrap().resource,
+        VulkanSignalResource::ActivationSlot {
+            ref component_id,
+            signal_bytes: Some(32),
+            ..
+        } if component_id == "layer_00"
+    ));
 
-    let attention = layer_00.node("attention_read").unwrap();
+    let attention = layer_00
+        .node("kv_memory_append__attention_read__partition_partials")
+        .unwrap();
     assert!(matches!(
         attention.input("q_positioned").unwrap().resource,
         VulkanSignalResource::ActivationSlot {
@@ -253,16 +249,12 @@ fn binds_fixture_model_nodes_to_vulkan_resident_resources() {
         if component_id == "layer_00"
     ));
     assert!(matches!(
-        attention.input("k_memory").unwrap().resource,
-        VulkanSignalResource::StateView { .. }
-    ));
-    assert!(matches!(
-        attention.output("attention_out").unwrap().resource,
+        attention.output("kv_memory_append__attention_read__attention_partials_f32").unwrap().resource,
         VulkanSignalResource::ActivationSlot {
             ref component_id,
-            signal_bytes: Some(32),
+            signal_bytes: Some(bytes),
             ..
         }
-        if component_id == "layer_00"
+        if component_id == "layer_00" && bytes > 0
     ));
 }

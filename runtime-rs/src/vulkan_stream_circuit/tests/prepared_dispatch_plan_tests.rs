@@ -45,7 +45,7 @@ fn prepared_dispatch_plan_links_artifacts_to_descriptor_resources() {
         prepared.reusable_family_count,
         reusable_plan.total_family_count()
     );
-    assert_eq!(prepared.dispatches.len(), 17);
+    assert_eq!(prepared.dispatches.len(), 10);
     assert_eq!(
         prepared.total_descriptor_count,
         prepared
@@ -64,25 +64,36 @@ fn prepared_dispatch_plan_links_artifacts_to_descriptor_resources() {
     assert_eq!(first.local_size_x, DEFAULT_COMPUTE_LOCAL_SIZE_X);
     assert_eq!(first.descriptors.len(), 3);
 
-    let q_projection = prepared.dispatch("layer_00", "q_projection").unwrap();
-    let q_family = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection");
+    let q_projection = prepared
+        .dispatch("layer_00", "q_projection__k_projection__v_projection")
+        .unwrap();
+    let q_family = reusable_family_with_kernel(
+        &reusable_plan,
+        "layer_00.q_projection__k_projection__v_projection",
+    );
     assert_eq!(q_projection.dispatch_index, 1);
     assert_eq!(q_projection.reusable_family_id, q_family.family_id);
     assert_eq!(q_projection.artifact_path, artifact_path_for_family(q_family));
 
-    let kv_append = prepared.dispatch("layer_00", "kv_memory_append").unwrap();
-    let kv_family = reusable_family_with_kernel(&reusable_plan, "layer_00.kv_memory_append");
-    assert_eq!(kv_append.dispatch_index, 6);
+    let kv_append = prepared
+        .dispatch("layer_00", "kv_memory_append__attention_read")
+        .unwrap();
+    let kv_family = reusable_family_with_kernel(
+        &reusable_plan,
+        "layer_00.kv_memory_append__attention_read",
+    );
+    assert_eq!(kv_append.dispatch_index, 5);
     assert_eq!(kv_append.reusable_family_id, kv_family.family_id);
-    assert!(kv_append.uses_stream_tick);
-    assert_eq!(kv_append.descriptors.len(), 9);
+    assert!(kv_append.stream_control_binding.is_some());
+    assert_eq!(kv_append.stream_control_binding, Some(7));
+    assert_eq!(kv_append.descriptors.len(), 7);
     let state = resident_plan
         .stream_state_buffers
         .iter()
         .find(|state| state.component_id == "layer_00" && state.state_id == "kv_memory")
         .unwrap();
     let state_bytes = descriptor_state_byte_capacity(state, 4).unwrap();
-    for descriptor_index in [2, 6] {
+    for descriptor_index in [3, 5, 6] {
         assert!(matches!(
             kv_append.descriptors[descriptor_index].resource,
             VulkanDescriptorResourceAddress::StateBuffer {
@@ -95,6 +106,20 @@ fn prepared_dispatch_plan_links_artifacts_to_descriptor_resources() {
                 && byte_capacity == state_bytes
         ));
     }
+}
+
+#[test]
+fn prepared_dispatch_plan_rejects_a_compiled_stream_control_binding_mismatch() {
+    let error = validate_stream_control_binding(19, Some(6), 5).unwrap_err();
+
+    assert_eq!(
+        error,
+        VulkanPreparedDispatchPlanError::StreamControlBindingMismatch {
+            dispatch_index: 19,
+            compiled_binding: 6,
+            runtime_descriptor_count: 5,
+        }
+    );
 }
 
 #[test]
@@ -118,8 +143,8 @@ fn prepared_dispatch_plan_rejects_unlinked_reusable_kernels() {
     let dispatch_plan = VulkanKernelDispatchPlan::from_binding_plan(&binding_plan);
     let descriptor_plan =
         VulkanDescriptorResourcePlan::from_plans(&dispatch_plan, &resident_plan, 4).unwrap();
-    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection");
-    let missing = reusable_family_with_kernel(&reusable_plan, "layer_00.kv_memory_append");
+    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection__k_projection__v_projection");
+    let missing = reusable_family_with_kernel(&reusable_plan, "layer_00.kv_memory_append__attention_read");
     let partial_manifest = VulkanReusableKernelArtifactManifest::empty().with_artifact(
         VulkanReusableKernelArtifact::from_family(selected, artifact_path_for_family(selected)),
     );
@@ -201,7 +226,7 @@ fn bound_dispatch_plan_maps_prepared_descriptors_to_mounted_stream_buffers() {
     let bound = VulkanBoundDispatchPlan::from_prepared_plan(&prepared, &buffers).unwrap();
 
     assert_eq!(bound.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
-    assert_eq!(bound.dispatches.len(), 17);
+    assert_eq!(bound.dispatches.len(), 10);
     assert_eq!(
         bound.boundary_descriptor_count
             + bound.permanent_parameter_descriptor_count
@@ -223,7 +248,7 @@ fn bound_dispatch_plan_maps_prepared_descriptors_to_mounted_stream_buffers() {
         VulkanBoundDescriptorTarget::ActivationSlot {
             ref component_id,
             ref signal_id,
-            byte_capacity: 64,
+            byte_capacity: 32,
             signal_byte_capacity: 32,
             ..
         } if component_id == "layer_00" && signal_id == "operator_norm_out"
@@ -237,12 +262,14 @@ fn bound_dispatch_plan_maps_prepared_descriptors_to_mounted_stream_buffers() {
         }
     );
 
-    let kv_append = bound.dispatch("layer_00", "kv_memory_append").unwrap();
+    let kv_append = bound
+        .dispatch("layer_00", "kv_memory_append__attention_read")
+        .unwrap();
     let expected_state_bytes = buffers
         .state_buffer("layer_00", "kv_memory")
         .unwrap()
         .byte_capacity;
-    for descriptor_index in [2, 6] {
+    for descriptor_index in [3, 5, 6] {
         assert!(matches!(
             kv_append.descriptors[descriptor_index].target,
             VulkanBoundDescriptorTarget::StreamStateBuffer {
@@ -255,17 +282,6 @@ fn bound_dispatch_plan_maps_prepared_descriptors_to_mounted_stream_buffers() {
                 && byte_capacity == expected_state_bytes
         ));
     }
-    assert!(matches!(
-        kv_append.descriptors[7].target,
-        VulkanBoundDescriptorTarget::StreamStateView {
-            ref component_id,
-            ref state_id,
-            byte_capacity,
-            ..
-        } if component_id == "layer_00"
-            && state_id == "kv_memory"
-            && byte_capacity == expected_state_bytes
-    ));
 }
 
 #[test]
@@ -295,9 +311,9 @@ fn mounts_fixture_model_stream_circuit_resources_without_claiming_execution() {
 
     assert!(!mounted.can_execute());
     assert_eq!(mounted.resident_plan.permanent_parameters.len(), 9);
-    assert_eq!(mounted.binding_plan.total_node_count(), 17);
-    assert_eq!(mounted.kernel_interface_plan.total_kernel_count(), 17);
-    assert_eq!(mounted.dispatch_plan.total_dispatch_count(), 17);
+    assert_eq!(mounted.binding_plan.total_node_count(), 10);
+    assert_eq!(mounted.kernel_interface_plan.total_kernel_count(), 10);
+    assert_eq!(mounted.dispatch_plan.total_dispatch_count(), 10);
     assert_eq!(
         mounted.reusable_kernel_plan.total_command_count,
         mounted.dispatch_plan.total_dispatch_count()
@@ -308,7 +324,7 @@ fn mounts_fixture_model_stream_circuit_resources_without_claiming_execution() {
         empty_coverage.missing_family_count,
         mounted.reusable_kernel_plan.total_family_count()
     );
-    assert_eq!(empty_coverage.missing_command_count, 17);
+    assert_eq!(empty_coverage.missing_command_count, 10);
     let descriptor_plan = mounted.descriptor_resource_plan().unwrap();
     assert_eq!(
         descriptor_plan.total_descriptor_count,
@@ -333,9 +349,9 @@ fn mounts_fixture_model_stream_circuit_resources_without_claiming_execution() {
             .collect(),
     );
     let prepared = mounted.prepared_dispatch_plan(&manifest).unwrap();
-    assert_eq!(prepared.dispatches.len(), 17);
+    assert_eq!(prepared.dispatches.len(), 10);
     let bound = mounted.bound_dispatch_plan(&manifest).unwrap();
-    assert_eq!(bound.dispatches.len(), 17);
+    assert_eq!(bound.dispatches.len(), 10);
     assert_eq!(mounted.buffers.state_buffers.len(), 1);
     assert_eq!(mounted.buffers.activation_slot_buffers.len(), 4);
     assert_eq!(
@@ -359,24 +375,24 @@ fn mounts_fixture_model_stream_circuit_resources_without_claiming_execution() {
         .binding_plan
         .circuit("layer_00")
         .unwrap()
-        .node("attention_read")
+        .node("kv_memory_append__attention_read__partition_partials")
         .unwrap();
     assert!(matches!(
-        attention.input("k_memory").unwrap().resource,
-        VulkanSignalResource::StateView { .. }
+        attention.input("kv_memory").unwrap().resource,
+        VulkanSignalResource::StateBuffer { .. }
     ));
     assert_eq!(
         mounted
             .buffers
             .activation_slot_buffer("layer_00", 0)
             .map(|buffer| buffer.byte_capacity),
-        Some(64)
+        Some(32)
     );
     assert_eq!(
         mounted
             .dispatch_plan
-            .command("layer_00", "kv_memory_append")
+            .command("layer_00", "kv_memory_append__attention_read")
             .map(|command| command.dispatch_index),
-        Some(6)
+        Some(5)
     );
 }

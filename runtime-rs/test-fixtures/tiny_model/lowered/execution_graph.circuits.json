@@ -192,7 +192,11 @@
       "type": "embedding_lookup",
       "output": "stream_frame",
       "attrs": {
-        "scale": 1.0
+        "scale": 1.0,
+        "output_shape": [
+          16
+        ],
+        "stream_expansion": null
       },
       "params": {
         "weight": {

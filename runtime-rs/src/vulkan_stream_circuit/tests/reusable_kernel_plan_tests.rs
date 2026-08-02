@@ -13,7 +13,7 @@ fn reusable_kernel_plan_keeps_compile_time_specializations_distinct() {
             specialization: specialization.to_string(),
             descriptor_bindings: Vec::new(),
             push_constants: Vec::new(),
-            uses_stream_tick: true,
+            stream_control_binding: Some(0),
         };
     let dispatch_plan = VulkanKernelDispatchPlan {
         backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
@@ -65,7 +65,7 @@ fn parses_explicit_shared_state_sources() {
 }
 
 #[test]
-fn reusable_kernel_plan_collapses_fixture_model_dispatches_into_op_families() {
+fn reusable_kernel_plan_preserves_fixture_model_compiled_kernel_contracts() {
     let graph = fixture_model_execution_graph();
     let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
     let execution_plan =
@@ -86,9 +86,9 @@ fn reusable_kernel_plan_collapses_fixture_model_dispatches_into_op_families() {
     let reusable_plan = VulkanReusableKernelPlan::from_dispatch_plan(&dispatch_plan);
 
     assert_eq!(reusable_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
-    assert_eq!(reusable_plan.total_command_count, 17);
-    assert!(reusable_plan.total_family_count() < reusable_plan.total_command_count);
-    assert!(reusable_plan.reusable_family_count() > 0);
+    assert_eq!(reusable_plan.total_command_count, 10);
+    assert_eq!(reusable_plan.total_family_count(), reusable_plan.total_command_count);
+    assert_eq!(reusable_plan.reusable_family_count(), 0);
     assert_eq!(
         reusable_plan
             .families
@@ -98,16 +98,20 @@ fn reusable_kernel_plan_collapses_fixture_model_dispatches_into_op_families() {
         reusable_plan.total_command_count
     );
 
-    let q_projection = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection");
-    assert_eq!(q_projection.op, "linear");
-    assert!(!q_projection.uses_stream_tick);
+    let q_projection = reusable_family_with_kernel(
+        &reusable_plan,
+        "layer_00.q_projection__k_projection__v_projection",
+    );
+    assert_eq!(q_projection.op, "parallel_linear_3way");
+    assert_eq!(q_projection.stream_control_binding, None);
     assert!(q_projection.command_refs.iter().any(|command| {
-        command.kernel_id == "layer_00.q_projection" && command.dispatch_index == 1
+        command.kernel_id == "layer_00.q_projection__k_projection__v_projection"
+            && command.dispatch_index == 1
     }));
     assert_eq!(
-        q_projection.descriptor_signature[2],
+        q_projection.descriptor_signature[4],
         VulkanKernelDescriptorSlotSignature {
-            binding: 2,
+            binding: 4,
             usage: VulkanKernelDescriptorUsage::Parameter,
             resource_class: VulkanKernelDescriptorResourceClass::ParameterBuffer,
             byte_capacity: Some(512),
@@ -125,12 +129,15 @@ fn reusable_kernel_plan_collapses_fixture_model_dispatches_into_op_families() {
         reusable_plan
             .families_for_op("rotary_position_embedding")
             .iter()
-            .all(|family| family.uses_stream_tick && family.push_constants.is_empty())
+            .all(|family| family.stream_control_binding.is_some() && family.push_constants.is_empty())
     );
 
-    let append = reusable_family_with_kernel(&reusable_plan, "layer_00.kv_memory_append");
-    assert_eq!(append.op, "append_state_update");
-    assert!(append.uses_stream_tick);
+    let append = reusable_family_with_kernel(
+        &reusable_plan,
+        "layer_00.kv_memory_append__attention_read",
+    );
+    assert_eq!(append.op, "append_scaled_dot_product_attention");
+    assert_eq!(append.stream_control_binding, Some(7));
     assert_eq!(
         append
             .descriptor_signature
@@ -144,14 +151,24 @@ fn reusable_kernel_plan_collapses_fixture_model_dispatches_into_op_families() {
                 )
             })
             .count(),
-        4
+        2
+    );
+    assert_eq!(
+        append
+            .descriptor_signature
+            .iter()
+            .filter(|slot| {
+                slot.resource_class == VulkanKernelDescriptorResourceClass::StateBuffer
+            })
+            .count(),
+        2
     );
 }
 
 #[test]
 fn reusable_kernel_coverage_reports_missing_gpu_component_circuits() {
     let reusable_plan = fixture_model_reusable_kernel_plan();
-    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection");
+    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection__k_projection__v_projection");
     let selected_family_id = selected.family_id.as_str();
     let required_family_count = reusable_plan.total_family_count();
     let required_command_count = reusable_plan.total_command_count;
@@ -198,7 +215,7 @@ fn reusable_kernel_coverage_reports_missing_gpu_component_circuits() {
 #[test]
 fn reusable_kernel_artifact_manifest_links_fixture_model_kernel_families() {
     let reusable_plan = fixture_model_reusable_kernel_plan();
-    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection");
+    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection__k_projection__v_projection");
     let selected_family_id = selected.family_id.as_str();
     let selected_artifact_path = artifact_path_for_family(selected);
     let family_count = reusable_plan.total_family_count();
@@ -281,7 +298,7 @@ fn reusable_kernel_artifact_manifest_links_fixture_model_kernel_families() {
 #[test]
 fn reusable_kernel_link_plan_reports_partial_and_incompatible_artifacts() {
     let reusable_plan = fixture_model_reusable_kernel_plan();
-    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection");
+    let selected = reusable_family_with_kernel(&reusable_plan, "layer_00.q_projection__k_projection__v_projection");
     let selected_family_id = selected.family_id.as_str();
     let selected_command_count = selected.command_refs.len();
     let family_count = reusable_plan.total_family_count();
@@ -374,4 +391,3 @@ fn fixture_model_reusable_kernel_plan() -> VulkanReusableKernelPlan {
     let dispatch_plan = VulkanKernelDispatchPlan::from_binding_plan(&binding_plan);
     VulkanReusableKernelPlan::from_dispatch_plan(&dispatch_plan)
 }
-

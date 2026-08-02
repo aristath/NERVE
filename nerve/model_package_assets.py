@@ -33,6 +33,11 @@ def stream_control_binding_for_node(circuit: Json, node: Json) -> int:
     )
 
 
+def stream_control_binding_from_artifact_path(path: str) -> int | None:
+    match = re.search(r"__sc(\d+)\.(?:comp|spv)$", path)
+    return int(match.group(1)) if match is not None else None
+
+
 def copy_tokenizer_package(model_dir: Path, dest_dir: Path) -> Json:
     tokenizer_json = model_dir / "tokenizer.json"
     if not tokenizer_json.is_file():

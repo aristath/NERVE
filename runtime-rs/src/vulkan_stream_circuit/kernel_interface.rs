@@ -100,7 +100,10 @@ impl VulkanKernelInterface {
             state_views,
             selection_domain: node.selection_domain.clone(),
             selected_parameter_accesses: node.selected_parameter_accesses.clone(),
-            stream_metadata: VulkanKernelStreamMetadata::for_op(&node.op),
+            stream_metadata: VulkanKernelStreamMetadata::from_compiled_contract(
+                &node.op,
+                node.stream_control_binding,
+            ),
         }
     }
 }
@@ -110,12 +113,12 @@ pub struct VulkanKernelStreamMetadata {
     pub stream_tick: VulkanKernelScalarBinding,
     pub control_flags: VulkanKernelScalarBinding,
     pub dynamic_state_capacity_activations: VulkanKernelScalarBinding,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
     push_constants: Vec<VulkanKernelScalarBinding>,
 }
 
 impl VulkanKernelStreamMetadata {
-    fn for_op(op: &str) -> Self {
+    fn from_compiled_contract(op: &str, stream_control_binding: Option<u32>) -> Self {
         Self {
             stream_tick: VulkanKernelScalarBinding::push_constant("stream_tick", "u64"),
             control_flags: VulkanKernelScalarBinding::push_constant("control_flags", "u32"),
@@ -123,20 +126,7 @@ impl VulkanKernelStreamMetadata {
                 "dynamic_state_capacity_activations",
                 "u32",
             ),
-            uses_stream_tick: matches!(
-                op,
-                "rotary_position_embedding"
-                    | "inverse_rotary_position_embedding"
-                    | "parallel_head_norm_rope_2way"
-                    | "parallel_head_norm_rope_2way_codebook_u8"
-                    | "parallel_head_norm_rope_2way_embedded_parameters"
-                    | "append_state_update"
-                    | "scaled_dot_product_attention"
-                    | "append_scaled_dot_product_attention"
-                    | "attention_partition_partials"
-                    | "per_layer_embedding"
-                    | "rg_lru_step"
-            ),
+            stream_control_binding,
             push_constants: if matches!(op, "sparse_moe_gate_up" | "sparse_moe_down") {
                 vec![VulkanKernelScalarBinding::push_constant(
                     "expert_start",
@@ -242,7 +232,7 @@ pub struct VulkanKernelDispatchCommand {
     pub specialization: String,
     pub descriptor_bindings: Vec<VulkanKernelDescriptorBinding>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
 }
 
 impl VulkanKernelDispatchCommand {
@@ -264,7 +254,7 @@ impl VulkanKernelDispatchCommand {
             specialization: kernel.specialization.clone(),
             descriptor_bindings: descriptor_bindings_for_kernel(kernel),
             push_constants: kernel.stream_metadata.push_constants(),
-            uses_stream_tick: kernel.stream_metadata.uses_stream_tick,
+            stream_control_binding: kernel.stream_metadata.stream_control_binding,
         }
     }
 }

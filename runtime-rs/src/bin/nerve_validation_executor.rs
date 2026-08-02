@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nerve_runtime::{
-    RuntimeChatSession, RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanPlacedPromptEngineShutdownReport, VulkanResidentBufferPool,
+    ResourceResidencyPolicy, RuntimeChatSession, RuntimeStagedCandidate, VulkanComputeDevice,
+    VulkanComputeDeviceCatalog, VulkanPlacedPromptEngineShutdownReport, VulkanResidentBufferPool,
     VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v6";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v7";
 const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v6";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const AMD_VENDOR_ID: u32 = 0x1002;
@@ -46,6 +46,7 @@ enum ExecutorCommand {
         speculative_draft_tokens: usize,
         random_seed: u32,
         sampler_config: VulkanResidentSamplerRuntimeConfig,
+        residency_policy: ResourceResidencyPolicy,
         enable_thinking: bool,
         graph_operation: String,
         graph_target_component_id: Option<String>,
@@ -109,6 +110,7 @@ struct ValidationPackageKey {
     context_capacity: usize,
     speculative_draft_tokens: usize,
     sampler_config: VulkanResidentSamplerRuntimeConfig,
+    residency_policy: ResourceResidencyPolicy,
     graph_operation: String,
     graph_target_component_id: Option<String>,
 }
@@ -404,6 +406,7 @@ fn mount(
         speculative_draft_tokens,
         random_seed,
         sampler_config,
+        residency_policy,
         enable_thinking,
         graph_operation,
         graph_target_component_id,
@@ -504,6 +507,7 @@ fn mount(
         context_capacity,
         speculative_draft_tokens,
         sampler_config,
+        residency_policy,
         graph_operation,
         graph_target_component_id,
     };
@@ -544,6 +548,7 @@ fn mount(
                 runtime_model,
                 Some(context_capacity),
                 speculative_draft_tokens > 0,
+                residency_policy,
                 parameter_pool,
             )?,
     );
@@ -884,6 +889,8 @@ impl MountedValidation {
                             "phase": "generation",
                             "turn_index": turn_index,
                             "generated_tokens": generated_tokens,
+                            "token_id": event.output_event.token_id,
+                            "selected_logit_bits": event.output_event.selected_logit_bits,
                             "elapsed_ns": nonzero_elapsed_ns(turn_started),
                         })) {
                             progress_error = Some(error);
@@ -1961,6 +1968,7 @@ mod tests {
             context_capacity: 131_072,
             speculative_draft_tokens: 3,
             sampler_config: VulkanResidentSamplerRuntimeConfig::default(),
+            residency_policy: ResourceResidencyPolicy::DemandRetained,
             graph_operation: "none".to_string(),
             graph_target_component_id: None,
         };
@@ -1989,6 +1997,13 @@ mod tests {
         assert_ne!(
             key,
             ValidationPackageKey {
+                residency_policy: ResourceResidencyPolicy::Eager,
+                ..key.clone()
+            }
+        );
+        assert_ne!(
+            key,
+            ValidationPackageKey {
                 sampler_config: VulkanResidentSamplerRuntimeConfig {
                     top_k: Some(1),
                     ..VulkanResidentSamplerRuntimeConfig::default()
@@ -2011,6 +2026,7 @@ mod tests {
             context_capacity: 131_072,
             speculative_draft_tokens: 3,
             sampler_config: VulkanResidentSamplerRuntimeConfig::default(),
+            residency_policy: ResourceResidencyPolicy::DemandRetained,
             graph_operation: "none".to_string(),
             graph_target_component_id: None,
         };

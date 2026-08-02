@@ -48,7 +48,7 @@ struct VulkanReusableKernelKey {
     specialization: String,
     descriptor_signature: Vec<VulkanKernelDescriptorSlotSignature>,
     push_constants: Vec<VulkanKernelScalarBinding>,
-    uses_stream_tick: bool,
+    stream_control_binding: Option<u32>,
 }
 
 impl VulkanReusableKernelKey {
@@ -62,7 +62,7 @@ impl VulkanReusableKernelKey {
                 .map(VulkanKernelDescriptorSlotSignature::from_binding)
                 .collect(),
             push_constants: command.push_constants.clone(),
-            uses_stream_tick: command.uses_stream_tick,
+            stream_control_binding: command.stream_control_binding,
         }
     }
 

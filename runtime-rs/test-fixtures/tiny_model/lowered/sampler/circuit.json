@@ -17,6 +17,7 @@
         "shape": [
           32
         ],
+        "dtype": "F32",
         "component_port": "logits"
       },
       {
@@ -25,6 +26,7 @@
         "shape": [
           1
         ],
+        "dtype": "BF16",
         "component_port": "randomness"
       }
     ],
@@ -35,6 +37,7 @@
         "shape": [
           1
         ],
+        "dtype": "U32",
         "component_port": "token",
         "source": "sampled_token"
       }

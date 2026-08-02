@@ -15,7 +15,7 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
 
 
 VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v6"
+    "nerve.optimizer.validation_executor_command.v7"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
     "nerve.optimizer.validation_executor_response.v6"
@@ -26,6 +26,8 @@ _PROGRESS_FIELDS = {
         "phase",
         "turn_index",
         "generated_tokens",
+        "token_id",
+        "selected_logit_bits",
         "elapsed_ns",
     },
     "turn_completed": {
@@ -96,6 +98,16 @@ def validate_validation_progress(
         raise ModelCompileError(
             "validation progress generated token count is invalid"
         )
+    for field in ("token_id", "selected_logit_bits"):
+        if field in payload:
+            value = nonnegative_integer(
+                payload[field],
+                f"validation progress {field}",
+            )
+            if value > 0xFFFF_FFFF:
+                raise ModelCompileError(
+                    f"validation progress {field} exceeds u32"
+                )
     turn_index = payload.get("turn_index")
     if turn_index is not None and (
         isinstance(turn_index, bool)

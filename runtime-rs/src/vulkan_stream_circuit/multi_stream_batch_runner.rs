@@ -9,7 +9,7 @@ struct VulkanResidentPlacedMultiStreamBatchRunner {
 }
 
 struct VulkanResidentPlacedMultiStreamBatchRun {
-    sampled_token_ids: Vec<u32>,
+    sampled_tokens: Vec<VulkanResidentSampledToken>,
     scheduler_turn_count_per_tick: usize,
     completed_stage_count_per_tick: usize,
 }
@@ -248,19 +248,19 @@ impl VulkanResidentPlacedMultiStreamBatchRunner {
             stream_ticks,
             &capacities,
         )?;
-        let sampled_token_ids = processors
+        let sampled_tokens = processors
             .iter()
             .zip(stream_ticks)
             .map(|(processor, stream_tick)| {
                 processor
                     .sampler
                     .completed_run_at(*stream_tick)
-                    .map(|run| run.token_id)
+                    .map(|run| VulkanResidentSampledToken::from(&run))
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VulkanResidentPlacedMultiStreamBatchRun {
-            sampled_token_ids,
+            sampled_tokens,
             scheduler_turn_count_per_tick: self.scheduler_turn_count_per_tick,
             completed_stage_count_per_tick: self.completed_stage_count_per_tick,
         })

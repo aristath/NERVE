@@ -212,6 +212,7 @@ pub struct VulkanNodeBinding {
     pub node_id: String,
     pub op: String,
     pub specialization: String,
+    pub stream_control_binding: Option<u32>,
     pub inputs: Vec<VulkanSignalBinding>,
     pub outputs: Vec<VulkanSignalBinding>,
     pub parameters: Vec<VulkanParameterBinding>,

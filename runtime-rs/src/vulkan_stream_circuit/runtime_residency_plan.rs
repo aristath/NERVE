@@ -491,13 +491,9 @@ fn speculative_decoder_runtime_model(
 ) -> VulkanResidentRuntimeModel {
     let mut circuit_graph = decoder.circuit_graph.clone();
     for component in &mut circuit_graph.components {
-        if matches!(
-            component.runtime_role,
-            CircuitRuntimeRole::DraftInputAdapter | CircuitRuntimeRole::DraftProcessor
-        ) {
-            component.runtime_role = CircuitRuntimeRole::SignalProcessor;
-            component.circuit.runtime_role = CircuitRuntimeRole::SignalProcessor;
-        }
+        component.runtime_role = speculative_decoder_planning_role(component.runtime_role);
+        component.circuit.runtime_role =
+            speculative_decoder_planning_role(component.circuit.runtime_role);
     }
     let mut package = target.package.clone();
     package.package_id = format!("{}::{}", package.package_id, decoder.id);
@@ -513,6 +509,15 @@ fn speculative_decoder_runtime_model(
         component_executions: decoder.component_executions.clone(),
         tensor_index_fragments: Vec::new(),
         implementation_selection: None,
+    }
+}
+
+fn speculative_decoder_planning_role(role: CircuitRuntimeRole) -> CircuitRuntimeRole {
+    match role {
+        CircuitRuntimeRole::DraftInputAdapter
+        | CircuitRuntimeRole::DraftProcessor
+        | CircuitRuntimeRole::DraftOutputTransducer => CircuitRuntimeRole::SignalProcessor,
+        role => role,
     }
 }
 

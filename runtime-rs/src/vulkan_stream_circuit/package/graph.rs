@@ -16,6 +16,55 @@ pub struct VulkanResidentPackageCircuitGraph {
 }
 
 impl VulkanResidentPackageCircuitGraph {
+    fn with_kernel_runtime_contracts(
+        &self,
+        executions: &[VulkanResidentComponentExecutionSpec],
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        let execution_by_component = executions
+            .iter()
+            .map(|execution| (execution.component_id.as_str(), execution))
+            .collect::<BTreeMap<_, _>>();
+        let mut graph = self.clone();
+        for component in &mut graph.components {
+            if !component.runtime_role.is_signal_processor() {
+                continue;
+            }
+            let execution = execution_by_component
+                .get(component.component_id.as_str())
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "signal processor {:?} has no compiled kernel execution contract",
+                        component.component_id
+                    ))
+                })?;
+            for node in &mut component.circuit.nodes {
+                let kernel = execution
+                    .kernels
+                    .iter()
+                    .find(|kernel| kernel.node_id == node.id && kernel.op == node.op)
+                    .ok_or_else(|| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "signal processor {} node {} has no matching compiled kernel contract",
+                            component.component_id, node.id
+                        ))
+                    })?;
+                let attrs = node.attrs.as_object_mut().ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "signal processor {} node {} attributes are not an object",
+                        component.component_id, node.id
+                    ))
+                })?;
+                attrs.insert(
+                    "stream_control_binding".to_string(),
+                    kernel
+                        .stream_control_binding
+                        .map_or(Value::Null, |binding| Value::Number(binding.into())),
+                );
+            }
+        }
+        Ok(graph)
+    }
+
     pub(crate) fn to_resolved_lowered_execution_graph(
         &self,
         package_root: impl Into<PathBuf>,

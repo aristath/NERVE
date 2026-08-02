@@ -86,7 +86,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
     fn complete_runtime_scheduler_batch_lane<F>(
         &mut self,
         prepared: VulkanResidentInProcessPlacedPreparedBatchLane,
-        sampled_token_id: u32,
+        sampled_token: VulkanResidentSampledToken,
         scheduler_turn_count: usize,
         completed_stage_count: usize,
         mut on_output_event: F,
@@ -125,7 +125,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 scheduler_turn_count,
                 completed_stage_count,
                 &VulkanPlacedEdgeTransportStats::default(),
-                prepared.should_sample.then_some(sampled_token_id),
+                prepared.should_sample.then_some(sampled_token),
             )?;
         self.session.next_stream_tick = stream_tick
             .checked_add(1)

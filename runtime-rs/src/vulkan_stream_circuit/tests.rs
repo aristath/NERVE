@@ -1,3 +1,10 @@
+fn sampled_token(token_id: u32) -> VulkanResidentSampledToken {
+    VulkanResidentSampledToken {
+        token_id,
+        selected_logit_bits: (token_id as f32).to_bits(),
+    }
+}
+
 include!("tests/package_batch.rs");
 include!("tests/speculative_catch_up.rs");
 include!("tests/feedback_control.rs");

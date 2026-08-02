@@ -13,7 +13,7 @@ pub struct VulkanPlacedBoundDispatch {
     pub local_size_x: u32,
     pub descriptors: Vec<VulkanPlacedBoundDescriptor>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +126,7 @@ pub struct VulkanBoundDispatch {
     pub local_size_x: u32,
     pub descriptors: Vec<VulkanBoundDescriptor>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

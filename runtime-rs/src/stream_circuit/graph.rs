@@ -49,6 +49,8 @@ pub struct CircuitPort {
     pub signal: String,
     pub shape: Vec<usize>,
     #[serde(default)]
+    pub dtype: Option<String>,
+    #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
     pub component_port: Option<String>,
@@ -880,6 +882,17 @@ fn validate_boundary_port(port: &CircuitPort, direction: &str, issues: &mut Vec<
         issues.push(format!(
             "boundary {direction} port {:?} must map to a non-empty component_port",
             port.id
+        ));
+    }
+    if let Some(dtype) = port.dtype.as_deref()
+        && !matches!(
+            dtype,
+            "BF16" | "F16" | "F32" | "U32" | "I32" | "U8" | "I8" | "FP8_E4M3" | "FP8_E5M2"
+        )
+    {
+        issues.push(format!(
+            "boundary {direction} port {:?} has unsupported dtype {:?}",
+            port.id, dtype
         ));
     }
 }

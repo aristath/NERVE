@@ -159,7 +159,7 @@ mod tests {
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
                 }],
-                uses_stream_tick: false,
+                stream_control_binding: None,
             }],
             total_descriptor_count: 5,
         };
@@ -210,7 +210,7 @@ mod tests {
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
                 }],
-                uses_stream_tick: false,
+                stream_control_binding: None,
             }]);
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
@@ -844,7 +844,7 @@ mod tests {
                     parameter(5, "weight_scale", 6),
                 ],
                 push_constants: Vec::new(),
-                uses_stream_tick: false,
+                stream_control_binding: None,
             }],
             total_descriptor_count: 6,
         };
@@ -887,7 +887,7 @@ mod tests {
                 workgroup_count_x: 6,
                 descriptor_signature: Vec::new(),
                 push_constants: Vec::new(),
-                uses_stream_tick: false,
+                stream_control_binding: None,
             }]);
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
@@ -1140,7 +1140,7 @@ mod tests {
                     parameter(3, "up"),
                 ],
                 push_constants: Vec::new(),
-                uses_stream_tick: false,
+                stream_control_binding: None,
             }],
             total_descriptor_count: 4,
         }
@@ -1156,7 +1156,7 @@ mod tests {
             workgroup_count_x: 6,
             descriptor_signature: Vec::new(),
             push_constants: Vec::new(),
-            uses_stream_tick: false,
+            stream_control_binding: None,
         }])
     }
 

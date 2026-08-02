@@ -1,0 +1,8 @@
+{
+  "schema": "nerve.chat_codec.v1",
+  "kind": "jinja_template",
+  "template_file": "chat_template.jinja",
+  "response_parser": {
+    "kind": "raw_assistant_text"
+  }
+}

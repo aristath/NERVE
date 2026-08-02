@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v8",
+  "schema": "nerve.vulkan_resident_model_package.v9",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
@@ -252,7 +252,11 @@
       "type": "embedding_lookup",
       "output": "stream_frame",
       "attrs": {
-        "scale": 1.0
+        "scale": 1.0,
+        "output_shape": [
+          16
+        ],
+        "stream_expansion": null
       },
       "params": {
         "weight": {
@@ -317,6 +321,7 @@
                 "shape": [
                   1
                 ],
+                "dtype": "U32",
                 "component_port": "token"
               }
             ],
@@ -327,6 +332,7 @@
                 "shape": [
                   16
                 ],
+                "dtype": "BF16",
                 "component_port": "frame",
                 "source": "output_frame"
               }
@@ -361,6 +367,10 @@
               "state_writes": [],
               "attrs": {
                 "scale": 1.0,
+                "output_shape": [
+                  16
+                ],
+                "stream_expansion": null,
                 "output_element_bytes": [
                   2
                 ]
@@ -1181,10 +1191,48 @@
               }
             },
             {
+              "id": "kv_memory_append__attention_read__partition_partials",
+              "op": "attention_partition_partials",
+              "inputs": [
+                "q_positioned",
+                "k_positioned",
+                "v_projected",
+                "kv_memory"
+              ],
+              "outputs": [
+                "kv_memory_append__attention_read__attention_partials_f32"
+              ],
+              "params": [],
+              "state_reads": [
+                "kv_memory"
+              ],
+              "state_writes": [],
+              "attrs": {
+                "physical_representation_contract": "bf16_attention_partition_partials_f32.v1",
+                "consumer_node_ids": [
+                  "kv_memory_append__attention_read"
+                ],
+                "semantic_source_node_ids": [
+                  "kv_memory_append",
+                  "attention_read"
+                ],
+                "query_heads": 2,
+                "key_value_heads": 1,
+                "head_width": 8,
+                "partition_count": 8,
+                "scale": 0.3535533905932738,
+                "window_size": null,
+                "attention_sinks": false,
+                "output_element_bytes": [
+                  4
+                ]
+              }
+            },
+            {
               "id": "kv_memory_append__attention_read",
               "op": "append_scaled_dot_product_attention",
               "inputs": [
-                "q_positioned",
+                "kv_memory_append__attention_read__attention_partials_f32",
                 "k_positioned",
                 "v_projected",
                 "kv_memory"
@@ -1222,6 +1270,20 @@
                   "query_groups_per_kv_head": 2
                 },
                 "current_kv_source": "direct_bf16_input",
+                "physical_input_contract": "bf16_attention_partition_partials_f32.v1",
+                "physical_input_provider_id": "kv_memory_append__attention_read__partition_partials",
+                "physical_logical_inputs": [
+                  "q_positioned",
+                  "k_positioned",
+                  "v_projected",
+                  "kv_memory"
+                ],
+                "physical_passthrough_inputs": [
+                  "k_positioned",
+                  "v_projected",
+                  "kv_memory"
+                ],
+                "attention_partition_count": 8,
                 "output_element_bytes": [
                   2
                 ]
@@ -1438,6 +1500,7 @@
                 "shape": [
                   16
                 ],
+                "dtype": "BF16",
                 "component_port": "frame"
               }
             ],
@@ -1448,6 +1511,7 @@
                 "shape": [
                   32
                 ],
+                "dtype": "F32",
                 "component_port": "logits",
                 "source": "output_logits"
               }
@@ -1571,6 +1635,7 @@
                 "shape": [
                   32
                 ],
+                "dtype": "F32",
                 "component_port": "logits"
               },
               {
@@ -1579,6 +1644,7 @@
                 "shape": [
                   1
                 ],
+                "dtype": "BF16",
                 "component_port": "randomness"
               }
             ],
@@ -1589,6 +1655,7 @@
                 "shape": [
                   1
                 ],
+                "dtype": "U32",
                 "component_port": "token",
                 "source": "sampled_token"
               }
@@ -1662,8 +1729,10 @@
     "files": [
       "tokenizer.json",
       "tokenizer_config.json",
-      "chat_template.jinja"
-    ]
+      "chat_template.jinja",
+      "chat_codec.json"
+    ],
+    "chat_codec": "chat_codec.json"
   },
   "activation_element_bytes": 2,
   "max_context_activations": 64,
@@ -1814,6 +1883,7 @@
             "layer.token_mixer.normalization"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": null,
           "shader_path": "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv",
           "local_size_x": 64,
           "workgroup_count_x": 1,
@@ -1844,7 +1914,8 @@
                     "byte_count": 4,
                     "binding": 31,
                     "payload": "width"
-                  }
+                  },
+                  "dispatch_y_from_batch_width": true
                 }
               ]
             },
@@ -1975,6 +2046,7 @@
             "layer.token_mixer.input_projections"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": null,
           "shader_path": "shaders/parallel_linear_3way_bf16_16x16_8_8.spv",
           "local_size_x": 64,
           "workgroup_count_x": 16,
@@ -2148,6 +2220,7 @@
             "layer.token_mixer.position"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": 2,
           "shader_path": "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv",
           "local_size_x": 64,
           "workgroup_count_x": 2,
@@ -2191,6 +2264,7 @@
             "layer.token_mixer.position"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": 2,
           "shader_path": "shaders/rotary_bf16_1x8_r8_theta10000_half__sc2.spv",
           "local_size_x": 64,
           "workgroup_count_x": 1,
@@ -2225,8 +2299,8 @@
         },
         {
           "execution_index": 4,
-          "node_id": "kv_memory_append__attention_read",
-          "op": "append_scaled_dot_product_attention",
+          "node_id": "kv_memory_append__attention_read__partition_partials",
+          "op": "attention_partition_partials",
           "source_node_ids": [
             "kv_memory_append",
             "attention_read"
@@ -2235,9 +2309,10 @@
             "layer.token_mixer.attention_state"
           ],
           "execution_domain": "decode",
-          "shader_path": "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv",
+          "stream_control_binding": 6,
+          "shader_path": "shaders/attention_partition_partials_bf16_q2_kv1_d8_s8_scale0.353553391__sc6.spv",
           "local_size_x": 1024,
-          "workgroup_count_x": 2,
+          "workgroup_count_x": 16,
           "batch_mode": "causal_scan",
           "batch_implementations": [
             {
@@ -2256,15 +2331,62 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/append_gqa_attention_temporal_read_bf16_q2_kv1_d8_scale0.353553391__pbc7.spv",
+                  "shader_path": "shaders/attention_partition_partials_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc6.spv",
                   "local_size_x": 1024,
-                  "workgroup_count_x": 128,
+                  "workgroup_count_x": 16,
+                  "control": {
+                    "kind": "storage_buffer",
+                    "byte_count": 16,
+                    "binding": 6,
+                    "payload": "temporal"
+                  },
+                  "dispatch_y_from_batch_width": true
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "execution_index": 5,
+          "node_id": "kv_memory_append__attention_read",
+          "op": "append_scaled_dot_product_attention",
+          "source_node_ids": [
+            "kv_memory_append",
+            "attention_read"
+          ],
+          "semantic_module_ids": [
+            "layer.token_mixer.attention_state"
+          ],
+          "execution_domain": "decode",
+          "stream_control_binding": 7,
+          "shader_path": "shaders/append_gqa_attention_partition_reduce_bf16_q2_kv1_d8_s8_scale0.353553391__sc7.spv",
+          "local_size_x": 8,
+          "workgroup_count_x": 2,
+          "batch_mode": "causal_scan",
+          "batch_implementations": [
+            {
+              "execution_domain": "prefill",
+              "lane_tile_width": 64,
+              "independent_candidate_compatible": false,
+              "causal_sequence_compatible": true,
+              "parallel_block_compatible": false,
+              "device_requirements": {
+                "vulkan_device_extensions": [],
+                "vulkan_features": [],
+                "subgroup_operations": []
+              },
+              "stages": [
+                {
+                  "shader_path": "shaders/append_gqa_attention_partition_reduce_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc7.spv",
+                  "local_size_x": 8,
+                  "workgroup_count_x": 2,
                   "control": {
                     "kind": "storage_buffer",
                     "byte_count": 16,
                     "binding": 7,
                     "payload": "temporal"
-                  }
+                  },
+                  "dispatch_y_from_batch_width": true
                 },
                 {
                   "shader_path": "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0__pbc7.spv",
@@ -2282,7 +2404,7 @@
           ]
         },
         {
-          "execution_index": 5,
+          "execution_index": 6,
           "node_id": "attention_out_projection__operator_residual",
           "op": "linear_residual",
           "source_node_ids": [
@@ -2294,6 +2416,7 @@
             "layer.token_mixer.residual"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": null,
           "shader_path": "shaders/linear_residual_bf16_16x16.spv",
           "local_size_x": 64,
           "workgroup_count_x": 8,
@@ -2457,7 +2580,7 @@
           ]
         },
         {
-          "execution_index": 6,
+          "execution_index": 7,
           "node_id": "ffn_norm",
           "op": "rms_norm",
           "source_node_ids": [
@@ -2467,6 +2590,7 @@
             "layer.feature_transform.normalization"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": null,
           "shader_path": "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv",
           "local_size_x": 64,
           "workgroup_count_x": 1,
@@ -2497,7 +2621,8 @@
                     "byte_count": 4,
                     "binding": 31,
                     "payload": "width"
-                  }
+                  },
+                  "dispatch_y_from_batch_width": true
                 }
               ]
             },
@@ -2616,7 +2741,7 @@
           ]
         },
         {
-          "execution_index": 7,
+          "execution_index": 8,
           "node_id": "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
           "op": "parallel_linear_silu_multiply",
           "source_node_ids": [
@@ -2630,6 +2755,7 @@
             "layer.feature_transform.gate"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": null,
           "shader_path": "shaders/parallel_linear_silu_multiply_bf16_16x32.spv",
           "local_size_x": 64,
           "workgroup_count_x": 16,
@@ -2794,7 +2920,7 @@
           ]
         },
         {
-          "execution_index": 8,
+          "execution_index": 9,
           "node_id": "ffn_down_projection__ffn_residual",
           "op": "linear_residual",
           "source_node_ids": [
@@ -2806,6 +2932,7 @@
             "layer.feature_transform.projections"
           ],
           "execution_domain": "decode",
+          "stream_control_binding": null,
           "shader_path": "shaders/linear_residual_bf16_32x16.spv",
           "local_size_x": 64,
           "workgroup_count_x": 8,
@@ -3375,8 +3502,8 @@
     "algorithm": "sha256",
     "files": {
       "behavioral_validation.json": {
-        "byte_count": 4594,
-        "sha256": "96723c949cf71070a2ab741fbfab5119868dc656249b76357b38611258a4319a"
+        "byte_count": 4595,
+        "sha256": "1c6458557265b4508196a8190a7833570e6f71b052d9b2f8086e4a0967806e77"
       },
       "compiler_target.json": {
         "byte_count": 3588,
@@ -3387,12 +3514,12 @@
         "sha256": "74dce23747cf262fe673693d0d0eace143d3f917f4b8261e45565c1eaabe2896"
       },
       "lowered/execution_graph.circuits.json": {
-        "byte_count": 6579,
-        "sha256": "98862988b354fc0bdf10c82250511f0c0d376cec3d8b4beaf1c7e9ca690049e9"
+        "byte_count": 6663,
+        "sha256": "ad759df2080fec2f04db0cd303ad846b6ad1a3bdb71ceb6c34e1d79771a462d9"
       },
       "lowered/input_transducer/circuit.json": {
-        "byte_count": 1667,
-        "sha256": "1832cea821546866470d73225af13c972e58281e7a9ddc439225ef170317771b"
+        "byte_count": 1800,
+        "sha256": "a1cb8223334239184c18322d8ae9f7afc3598bf7b4a1cc2f9999ece796a34e10"
       },
       "lowered/input_transducer/params.json": {
         "byte_count": 272,
@@ -3415,8 +3542,8 @@
         "sha256": "c98fbbc3759ece54da0782982d5bcb52ad0f42c24a2df32a14ff166876deb0a5"
       },
       "lowered/output_transducer/circuit.json": {
-        "byte_count": 2253,
-        "sha256": "a493d327ce28a8c0f15e401e54991fb8d0838e0d531015378aa2380a001a6510"
+        "byte_count": 2302,
+        "sha256": "25f1d5c463f1c36ce47919e487fa94e415dc2a4e662b1ef7a24d61398af76cac"
       },
       "lowered/output_transducer/params.json": {
         "byte_count": 435,
@@ -3427,8 +3554,8 @@
         "sha256": "d91196e93887fa57dbf56737d06063c14794ec0eb30ec5989b722fdea807c7b4"
       },
       "lowered/sampler/circuit.json": {
-        "byte_count": 1858,
-        "sha256": "971a321ff078c75dc869aa95c17606fd27b835b4b3283bf8288ff5f508ca1907"
+        "byte_count": 1931,
+        "sha256": "41ca5bf2d7f2537b89bb64a2bbce1b801c5d25f2e53c115d573621f10285da77"
       },
       "lowered/sampler/params.json": {
         "byte_count": 153,
@@ -3440,27 +3567,35 @@
       },
       "optimization/implementations.json": {
         "byte_count": 454,
-        "sha256": "1cc017ea90268705c744b3349d9ed08efd3288e442ab4da650d53fa0401711d9"
+        "sha256": "ec14874f7ccbc6cbab5dbd2c068363f4d8bb2d212fd036f91f93f327785e81ee"
       },
       "optimization/scopes.json": {
-        "byte_count": 304832,
-        "sha256": "6a1bdec19f2645e74e3b44d819e9caf1229241a5d3924bdf27c794406b821322"
+        "byte_count": 305806,
+        "sha256": "823a1147d738193188bb723c17f81fa566b9e315dec432e71f2c476a3b045b14"
       },
       "optimization/stage.json": {
         "byte_count": 3017,
-        "sha256": "a70aa64a45ae0786e6c2c81662dd5e9f5c6951979d5949f4b4549f4e48077b59"
+        "sha256": "df635082ffb68cdea4b279ca6ff77c6703ff6fce5c9163d673792793548a4583"
       },
-      "shaders/append_gqa_attention_bf16_q2_kv1_d8_scale0.353553391__sc7.spv": {
-        "byte_count": 23748,
-        "sha256": "955345b4633547268c831ed291dba13d5d7cf3706a2f168a10d32f74380a2ff4"
+      "shaders/append_gqa_attention_partition_reduce_bf16_q2_kv1_d8_s8_scale0.353553391__sc7.spv": {
+        "byte_count": 9976,
+        "sha256": "3ed9ff9c9e35aa98cc84f6283d6b46894927c86aff47af15028959f125a4965e"
       },
-      "shaders/append_gqa_attention_temporal_read_bf16_q2_kv1_d8_scale0.353553391__pbc7.spv": {
-        "byte_count": 21268,
-        "sha256": "35bc76ebb6998d3bc32302bc9b64381897b56b7a9a7d8e9ff7b4fe07c870ebc4"
+      "shaders/append_gqa_attention_partition_reduce_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc7.spv": {
+        "byte_count": 7436,
+        "sha256": "6823e0e3aeb2610605665e691e7473d74461946dfa60f83dc6690b763bb2b704"
       },
       "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0__pbc7.spv": {
         "byte_count": 4892,
         "sha256": "cec62f75e93ab9d993d1851118dcd2dab86cc7458e39fb7e30257ad8c8882d7d"
+      },
+      "shaders/attention_partition_partials_bf16_q2_kv1_d8_s8_scale0.353553391__sc6.spv": {
+        "byte_count": 20380,
+        "sha256": "22cda283c06984a1ce6e53a3941841d0549847ef7e6081f3c506cd3c0a0b284c"
+      },
+      "shaders/attention_partition_partials_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc6.spv": {
+        "byte_count": 20572,
+        "sha256": "3c7672a853bb47dbbe2f2b18c8534b2c6e7219a5f6f3e6aa62cad576043019bf"
       },
       "shaders/embedding_lookup_batch_bf16_32x16_scale1__pbc3.spv": {
         "byte_count": 3404,
@@ -3615,12 +3750,12 @@
         "sha256": "a4fe854f416cff773cdf5e41cd5092c047434e70ef649098a1081d051c863914"
       },
       "shaders/rotary_bf16_1x8_r8_theta10000_half__sc2.spv": {
-        "byte_count": 9172,
-        "sha256": "70548b1e44db8bf6100b4da93b1f1a6d3e02cf22da0937d123c6e12dbedd9421"
+        "byte_count": 9252,
+        "sha256": "9ef0fb8c2e6f67954c98b41a7972972edc3c244f185cff7f7f53fb922f874ddb"
       },
       "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv": {
-        "byte_count": 9172,
-        "sha256": "c9d8f1249cca4e34629cea23cf06cb8d5441e0363775e4ed7c996664cd2cad55"
+        "byte_count": 9252,
+        "sha256": "e5841b402d3d30eecacd315e6af1fa3beebef6df93f9b049fb6d297fc8ccaf8b"
       },
       "shaders/rotary_temporal_bf16_1x8_r8_theta10000_half__pbc2.spv": {
         "byte_count": 10832,
@@ -3650,6 +3785,10 @@
         "byte_count": 7701,
         "sha256": "d12d289a6b1bef01f6d4f5090d1dc132838603644a949ddba17a83b7e29cb0a4"
       },
+      "tokenizer/chat_codec.json": {
+        "byte_count": 169,
+        "sha256": "ac0eb0f9c10986b7f90070faf7d19b19e2048cd58376f76a54b5b45587b28450"
+      },
       "tokenizer/chat_template.jinja": {
         "byte_count": 145,
         "sha256": "70da5304d7b88532c7caba95fa0fd5dfc92a8bed38cafb659f58944fb252af0b"
@@ -3663,12 +3802,12 @@
         "sha256": "fdd1575e8bd811652f3708f5d70495fd581ca5b59111e6edaa903e43783ce944"
       },
       "transpiled/layers/layer_00.json": {
-        "byte_count": 8308,
-        "sha256": "eff6079e74481f7d8b9697a70e2090d74969ecdcf90b9c284ab2d82ad32c7477"
+        "byte_count": 10324,
+        "sha256": "21f4b57e33ecdca600573a3bb30607e052d79b49d89b4dc37794ed0cf36f545e"
       },
       "transpiled/model.json": {
-        "byte_count": 3667,
-        "sha256": "d38fd405a80035658cbc12bc1ea96d4f905576e0998e8de390f1cf277af13346"
+        "byte_count": 3751,
+        "sha256": "fe11668c59c43ae8107f4fa192c51b53d37f534fb94d564d59ae57c3bbf95d14"
       },
       "transpiled/tensors.json": {
         "byte_count": 7701,

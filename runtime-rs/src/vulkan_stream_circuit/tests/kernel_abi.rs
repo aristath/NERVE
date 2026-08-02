@@ -20,15 +20,20 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
 
     assert_eq!(kernel_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
     assert_eq!(kernel_plan.circuits.len(), 1);
-    assert_eq!(kernel_plan.total_kernel_count(), 17);
+    assert_eq!(kernel_plan.total_kernel_count(), 10);
 
-    let q_projection = kernel_plan.kernel("layer_00", "q_projection").unwrap();
-    assert_eq!(q_projection.kernel_id, "layer_00.q_projection");
-    assert_eq!(q_projection.op, "linear");
+    let q_projection = kernel_plan
+        .kernel("layer_00", "q_projection__k_projection__v_projection")
+        .unwrap();
+    assert_eq!(
+        q_projection.kernel_id,
+        "layer_00.q_projection__k_projection__v_projection"
+    );
+    assert_eq!(q_projection.op, "parallel_linear_3way");
     assert_eq!(q_projection.inputs.len(), 1);
-    assert_eq!(q_projection.outputs.len(), 1);
-    assert_eq!(q_projection.parameters.len(), 1);
-    assert!(!q_projection.stream_metadata.uses_stream_tick);
+    assert_eq!(q_projection.outputs.len(), 3);
+    assert_eq!(q_projection.parameters.len(), 3);
+    assert_eq!(q_projection.stream_metadata.stream_control_binding, None);
     assert_eq!(
         q_projection.parameters[0],
         VulkanParameterBinding {
@@ -38,18 +43,18 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
             shape: Some(vec![16, 16]),
         }
     );
-    assert!(matches!(
-        q_projection.outputs[0].resource,
+    assert!(q_projection.outputs.iter().all(|output| matches!(
+        output.resource,
         VulkanSignalResource::ActivationSlot {
             ref component_id,
-            signal_bytes: Some(32),
+            signal_bytes: Some(32) | Some(16),
             ..
         } if component_id == "layer_00"
-    ));
+    )));
 
     let q_rope = kernel_plan.kernel("layer_00", "q_rope").unwrap();
     assert_eq!(q_rope.op, "rotary_position_embedding");
-    assert!(q_rope.stream_metadata.uses_stream_tick);
+    assert_eq!(q_rope.stream_metadata.stream_control_binding, Some(2));
     assert_eq!(
         q_rope.stream_metadata.stream_tick,
         VulkanKernelScalarBinding {
@@ -68,16 +73,18 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
         } if component_id == "layer_00"
     ));
 
-    let kv_append = kernel_plan.kernel("layer_00", "kv_memory_append").unwrap();
-    assert_eq!(kv_append.op, "append_state_update");
-    assert!(kv_append.stream_metadata.uses_stream_tick);
-    assert_eq!(kv_append.inputs.len(), 3);
-    assert_eq!(kv_append.outputs.len(), 2);
+    let kv_append = kernel_plan
+        .kernel("layer_00", "kv_memory_append__attention_read")
+        .unwrap();
+    assert_eq!(kv_append.op, "append_scaled_dot_product_attention");
+    assert_eq!(kv_append.stream_metadata.stream_control_binding, Some(7));
+    assert_eq!(kv_append.inputs.len(), 4);
+    assert_eq!(kv_append.outputs.len(), 1);
     assert_eq!(kv_append.state_reads.len(), 1);
     assert_eq!(kv_append.state_writes.len(), 1);
-    assert_eq!(kv_append.state_views.len(), 2);
+    assert!(kv_append.state_views.is_empty());
     assert!(matches!(
-        kv_append.inputs[2].resource,
+        kv_append.inputs[3].resource,
         VulkanSignalResource::StateBuffer {
             ref component_id,
             ref state_id,
@@ -85,18 +92,62 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
             ..
         } if component_id == "layer_00" && state_id == "kv_memory"
     ));
-    assert!(
-        kv_append
-            .state_views
-            .iter()
-            .all(|view| matches!(view.resource, VulkanSignalResource::StateView { .. }))
-    );
     assert_eq!(
         kv_append
             .stream_metadata
             .dynamic_state_capacity_activations
             .name,
         "dynamic_state_capacity_activations"
+    );
+}
+
+#[test]
+fn kernel_stream_control_is_driven_only_by_the_compiled_node_contract() {
+    let mut graph = fixture_model_execution_graph();
+    let circuit = &mut graph.circuits[0].circuit;
+    let operator_norm = circuit
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "operator_norm")
+        .unwrap();
+    operator_norm.attrs["stream_control_binding"] = serde_json::json!(3);
+    let q_rope = circuit
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "q_rope")
+        .unwrap();
+    q_rope.attrs["stream_control_binding"] = serde_json::Value::Null;
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let execution_plan =
+        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
+    let resource_plan =
+        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    let resident_plan = VulkanStreamCircuitResidentPlan::from_resource_plan(
+        &resource_plan,
+        Some(&tensor_index),
+        Some(2),
+    )
+    .unwrap();
+    let binding_plan =
+        VulkanStreamCircuitBindingPlan::from_plans(&execution_plan, &resource_plan, &resident_plan)
+            .unwrap();
+    let kernels = VulkanKernelInterfacePlan::from_binding_plan(&binding_plan);
+
+    assert_eq!(
+        kernels
+            .kernel("layer_00", "operator_norm")
+            .unwrap()
+            .stream_metadata
+            .stream_control_binding,
+        Some(3)
+    );
+    assert_eq!(
+        kernels
+            .kernel("layer_00", "q_rope")
+            .unwrap()
+            .stream_metadata
+            .stream_control_binding,
+        None
     );
 }
 
@@ -118,7 +169,7 @@ fn kernel_interfaces_keep_runtime_controls_out_of_graph_boundary_buffers() {
         .circuit
         .nodes
         .iter_mut()
-        .find(|node| node.id == "q_projection")
+        .find(|node| node.id == "q_projection__k_projection__v_projection")
         .unwrap()
         .inputs
         .push("token_id".to_string());
@@ -139,7 +190,9 @@ fn kernel_interfaces_keep_runtime_controls_out_of_graph_boundary_buffers() {
         VulkanStreamCircuitBindingPlan::from_plans(&execution_plan, &resource_plan, &resident_plan)
             .unwrap();
     let kernel_plan = VulkanKernelInterfacePlan::from_binding_plan(&binding_plan);
-    let projection = kernel_plan.kernel("layer_00", "q_projection").unwrap();
+    let projection = kernel_plan
+        .kernel("layer_00", "q_projection__k_projection__v_projection")
+        .unwrap();
     let token_id = projection
         .inputs
         .iter()
@@ -160,10 +213,56 @@ fn kernel_interfaces_keep_runtime_controls_out_of_graph_boundary_buffers() {
             .any(|port| port.id == "token_id")
     );
 }
+
+#[test]
+fn boundary_input_passthrough_remains_a_readable_input_resource() {
+    let mut graph = fixture_model_execution_graph();
+    let component = &mut graph.circuits[0];
+    component.circuit.boundary.outputs.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "input_passthrough",
+            "signal": "frame",
+            "shape": [16],
+            "source": "input_frame",
+            "component_port": "input_passthrough"
+        }))
+        .unwrap(),
+    );
+    component.circuit.validate_contract().unwrap();
+
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let execution_plan =
+        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
+    let resource_plan =
+        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    let resident_plan = VulkanStreamCircuitResidentPlan::from_resource_plan(
+        &resource_plan,
+        Some(&tensor_index),
+        Some(2),
+    )
+    .unwrap();
+    let binding_plan =
+        VulkanStreamCircuitBindingPlan::from_plans(&execution_plan, &resource_plan, &resident_plan)
+            .unwrap();
+    let kernel_plan = VulkanKernelInterfacePlan::from_binding_plan(&binding_plan);
+    let projection = kernel_plan.kernel("layer_00", "operator_norm").unwrap();
+
+    assert!(matches!(
+        projection.inputs[0].resource,
+        VulkanSignalResource::BoundaryInput
+    ));
+    let planned_input = execution_plan.circuits[0].signal("input_frame").unwrap();
+    assert!(planned_input.is_boundary_output);
+    assert_eq!(planned_input.producer, SignalProducer::BoundaryInput);
+}
 #[test]
 fn stream_control_buffer_bytes_follow_kernel_abi_order() {
     let push_constants =
-        VulkanKernelStreamMetadata::for_op("rotary_position_embedding").push_constants();
+        VulkanKernelStreamMetadata::from_compiled_contract(
+            "rotary_position_embedding",
+            Some(2),
+        )
+        .push_constants();
     assert!(push_constants.is_empty());
     let control = VulkanMountedPlacedStreamControl {
         stream_tick: 42,
@@ -217,26 +316,31 @@ fn independent_stream_batch_controls_preserve_nonconsecutive_stream_ticks() {
 }
 
 #[test]
-fn recurrent_gate_kernel_receives_stream_control_metadata() {
-    let metadata = VulkanKernelStreamMetadata::for_op("rg_lru_step");
+fn compiled_contract_can_require_stream_control_for_any_operation() {
+    let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
+        "architecture_defined_temporal_operation",
+        Some(6),
+    );
 
-    assert!(metadata.uses_stream_tick);
+    assert_eq!(metadata.stream_control_binding, Some(6));
     assert!(metadata.push_constants().is_empty());
 }
 
 #[test]
-fn inverse_rotary_kernel_receives_stream_control_metadata() {
-    let metadata =
-        VulkanKernelStreamMetadata::for_op("inverse_rotary_position_embedding");
+fn operation_name_does_not_implicitly_require_stream_control() {
+    let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
+        "inverse_rotary_position_embedding",
+        None,
+    );
 
-    assert!(metadata.uses_stream_tick);
+    assert_eq!(metadata.stream_control_binding, None);
     assert!(metadata.push_constants().is_empty());
 }
 
 #[test]
 fn sparse_moe_kernels_receive_an_explicit_expert_start() {
     for op in ["sparse_moe_gate_up", "sparse_moe_down"] {
-        let metadata = VulkanKernelStreamMetadata::for_op(op);
+        let metadata = VulkanKernelStreamMetadata::from_compiled_contract(op, None);
         let push_constants = metadata.push_constants();
 
         assert_eq!(
@@ -269,6 +373,7 @@ fn selected_parameters_lower_to_generic_dynamic_resource_descriptors() {
         node_id: "selected_compute".to_string(),
         op: "generic_compute".to_string(),
         specialization: String::new(),
+        stream_control_binding: None,
         inputs: Vec::new(),
         outputs: Vec::new(),
         parameters: ["bank", "scale"]
@@ -337,6 +442,7 @@ fn selected_parameter_tensors_cannot_alias_permanent_parameters() {
             node_id: node_id.to_string(),
             op: "compute".to_string(),
             specialization: "generic".to_string(),
+            stream_control_binding: None,
             inputs: Vec::new(),
             outputs: Vec::new(),
             parameters,
@@ -384,30 +490,38 @@ fn selected_parameter_tensors_cannot_alias_permanent_parameters() {
 }
 
 #[test]
-fn fused_head_norm_rope_kernel_receives_stream_control_metadata() {
-    let metadata = VulkanKernelStreamMetadata::for_op("parallel_head_norm_rope_2way");
+fn fused_head_norm_rope_kernel_receives_compiled_stream_control_metadata() {
+    let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
+        "parallel_head_norm_rope_2way",
+        Some(5),
+    );
 
-    assert!(metadata.uses_stream_tick);
+    assert_eq!(metadata.stream_control_binding, Some(5));
     assert!(metadata.push_constants().is_empty());
 
-    let codebook_metadata =
-        VulkanKernelStreamMetadata::for_op("parallel_head_norm_rope_2way_codebook_u8");
-    assert!(codebook_metadata.uses_stream_tick);
+    let codebook_metadata = VulkanKernelStreamMetadata::from_compiled_contract(
+        "parallel_head_norm_rope_2way_codebook_u8",
+        Some(5),
+    );
+    assert_eq!(codebook_metadata.stream_control_binding, Some(5));
     assert!(codebook_metadata.push_constants().is_empty());
 
-    let embedded_metadata =
-        VulkanKernelStreamMetadata::for_op(
-            "parallel_head_norm_rope_2way_embedded_parameters",
-        );
-    assert!(embedded_metadata.uses_stream_tick);
+    let embedded_metadata = VulkanKernelStreamMetadata::from_compiled_contract(
+        "parallel_head_norm_rope_2way_embedded_parameters",
+        Some(5),
+    );
+    assert_eq!(embedded_metadata.stream_control_binding, Some(5));
     assert!(embedded_metadata.push_constants().is_empty());
 }
 
 #[test]
 fn fused_append_attention_kernel_receives_stream_control_metadata() {
-    let metadata = VulkanKernelStreamMetadata::for_op("append_scaled_dot_product_attention");
+    let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
+        "append_scaled_dot_product_attention",
+        Some(7),
+    );
 
-    assert!(metadata.uses_stream_tick);
+    assert_eq!(metadata.stream_control_binding, Some(7));
     assert!(metadata.push_constants().is_empty());
 }
 
@@ -432,8 +546,12 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
     let dispatch_plan = VulkanKernelDispatchPlan::from_binding_plan(&binding_plan);
 
     assert_eq!(dispatch_plan.backend_id, VULKAN_STREAM_CIRCUIT_BACKEND_ID);
-    assert_eq!(dispatch_plan.total_dispatch_count(), 17);
-    assert_eq!(dispatch_plan.op_counts().get("linear"), Some(&7));
+    assert_eq!(dispatch_plan.total_dispatch_count(), 10);
+    assert_eq!(dispatch_plan.op_counts().get("rms_norm"), Some(&2));
+    assert_eq!(
+        dispatch_plan.op_counts().get("rotary_position_embedding"),
+        Some(&2)
+    );
 
     let first = &dispatch_plan.commands[0];
     assert_eq!(first.dispatch_index, 0);
@@ -456,16 +574,16 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
         ]
     );
     assert!(first.push_constants.is_empty());
-    assert!(!first.uses_stream_tick);
+    assert_eq!(first.stream_control_binding, None);
 
     let kv_append = dispatch_plan
-        .command("layer_00", "kv_memory_append")
+        .command("layer_00", "kv_memory_append__attention_read")
         .unwrap();
-    assert_eq!(kv_append.dispatch_index, 6);
+    assert_eq!(kv_append.dispatch_index, 5);
     assert_eq!(kv_append.circuit_index, 0);
-    assert_eq!(kv_append.node_index, 6);
-    assert_eq!(kv_append.op, "append_state_update");
-    assert!(kv_append.uses_stream_tick);
+    assert_eq!(kv_append.node_index, 5);
+    assert_eq!(kv_append.op, "append_scaled_dot_product_attention");
+    assert_eq!(kv_append.stream_control_binding, Some(7));
     assert_eq!(
         kv_append
             .descriptor_bindings
@@ -477,19 +595,21 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, VulkanKernelDescriptorUsage::InputSignal, "k_positioned"),
-            (1, VulkanKernelDescriptorUsage::InputSignal, "v_projected"),
-            (2, VulkanKernelDescriptorUsage::InputSignal, "kv_memory"),
-            (3, VulkanKernelDescriptorUsage::OutputSignal, "k_memory"),
-            (4, VulkanKernelDescriptorUsage::OutputSignal, "v_memory"),
+            (
+                0,
+                VulkanKernelDescriptorUsage::InputSignal,
+                "kv_memory_append__attention_read__attention_partials_f32",
+            ),
+            (1, VulkanKernelDescriptorUsage::InputSignal, "k_positioned"),
+            (2, VulkanKernelDescriptorUsage::InputSignal, "v_projected"),
+            (3, VulkanKernelDescriptorUsage::InputSignal, "kv_memory"),
+            (4, VulkanKernelDescriptorUsage::OutputSignal, "attention_out"),
             (5, VulkanKernelDescriptorUsage::StateRead, "kv_memory"),
             (6, VulkanKernelDescriptorUsage::StateWrite, "kv_memory"),
-            (7, VulkanKernelDescriptorUsage::StateView, "k_memory"),
-            (8, VulkanKernelDescriptorUsage::StateView, "v_memory"),
         ]
     );
     assert!(matches!(
-        kv_append.descriptor_bindings[2].resource,
+        kv_append.descriptor_bindings[3].resource,
         VulkanKernelDescriptorResource::Signal(VulkanSignalBinding {
             resource: VulkanSignalResource::StateBuffer {
                 ref component_id,
@@ -513,12 +633,17 @@ fn dispatch_plan_orders_fixture_model_kernel_commands_for_stream_ticks() {
     ));
 
     let last = dispatch_plan.commands.last().unwrap();
-    assert_eq!(last.dispatch_index, 16);
+    assert_eq!(last.dispatch_index, 9);
     assert_eq!(last.circuit_index, 0);
-    assert_eq!(last.kernel_id, "layer_00.ffn_residual");
-    assert_eq!(last.node_index, 16);
+    assert_eq!(last.kernel_id, "layer_00.ffn_down_projection__ffn_residual");
+    assert_eq!(last.node_index, 9);
+    let output = last
+        .descriptor_bindings
+        .iter()
+        .find(|binding| binding.usage == VulkanKernelDescriptorUsage::OutputSignal)
+        .unwrap();
     assert_eq!(
-        last.descriptor_bindings.last().unwrap().resource,
+        output.resource,
         VulkanKernelDescriptorResource::Signal(VulkanSignalBinding {
             signal_id: "output_frame".to_string(),
             resource: VulkanSignalResource::BoundaryOutput,

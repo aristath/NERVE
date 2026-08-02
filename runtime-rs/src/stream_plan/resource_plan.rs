@@ -41,12 +41,13 @@ pub struct PlannedSelectionDomain {
     pub resource_count: usize,
 }
 
-fn state_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {
+fn circuit_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {
     match dtype {
+        "U8" | "I8" | "FP8_E4M3" | "FP8_E5M2" => Ok(1),
         "BF16" | "F16" => Ok(2),
-        "F32" => Ok(4),
+        "F32" | "U32" | "I32" => Ok(4),
         unsupported => Err(CircuitPlanError(format!(
-            "unsupported circuit state dtype {unsupported:?}"
+            "unsupported circuit dtype {unsupported:?}"
         ))),
     }
 }
@@ -184,7 +185,11 @@ impl CircuitActivationPlan {
                     producer: SignalProducer::BoundaryInput,
                     consumers: Vec::new(),
                     shape: Some(input.shape.clone()),
-                    element_bytes: None,
+                    element_bytes: input
+                        .dtype
+                        .as_deref()
+                        .map(circuit_dtype_bytes)
+                        .transpose()?,
                     storage: SignalStorage::Boundary,
                     is_boundary_output: false,
                 },
@@ -320,13 +325,13 @@ impl CircuitActivationPlan {
                 .inputs
                 .iter()
                 .map(PlannedPort::from_port)
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
             output_ports: circuit
                 .boundary
                 .outputs
                 .iter()
                 .map(PlannedPort::from_port)
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
             state_ports: circuit
                 .state_ports
                 .iter()
@@ -435,17 +440,25 @@ pub struct PlannedPort {
     pub id: String,
     pub signal: String,
     pub shape: Vec<usize>,
+    pub dtype: Option<String>,
+    pub element_bytes: Option<usize>,
     pub source: Option<String>,
 }
 
 impl PlannedPort {
-    fn from_port(port: &CircuitPort) -> Self {
-        Self {
+    fn from_port(port: &CircuitPort) -> Result<Self, CircuitPlanError> {
+        Ok(Self {
             id: port.id.clone(),
             signal: port.signal.clone(),
             shape: port.shape.clone(),
+            dtype: port.dtype.clone(),
+            element_bytes: port
+                .dtype
+                .as_deref()
+                .map(circuit_dtype_bytes)
+                .transpose()?,
             source: port.source.clone(),
-        }
+        })
     }
 }
 
@@ -476,6 +489,7 @@ pub struct PlannedNode {
     pub id: String,
     pub op: String,
     pub specialization: String,
+    pub stream_control_binding: Option<u32>,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub params: Vec<String>,
@@ -543,6 +557,10 @@ impl PlannedNode {
                 serde_json::to_string(&node.attrs)
                     .expect("circuit node attributes must serialize as JSON")
             },
+            stream_control_binding: planned_node_stream_control_binding(
+                component_id,
+                node,
+            )?,
             inputs: node.inputs.clone(),
             outputs: node.outputs.clone(),
             params: node.params.clone(),
@@ -553,6 +571,34 @@ impl PlannedNode {
                 planned_node_selected_parameter_accesses(component_id, node)?,
         })
     }
+}
+
+fn planned_node_stream_control_binding(
+    component_id: &str,
+    node: &CircuitNode,
+) -> Result<Option<u32>, CircuitPlanError> {
+    let Some(value) = node
+        .attrs
+        .as_object()
+        .and_then(|attrs| attrs.get("stream_control_binding"))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let binding = value.as_u64().ok_or_else(|| {
+        CircuitPlanError(format!(
+            "{component_id} node {} stream_control_binding must be a non-negative integer or null",
+            node.id
+        ))
+    })?;
+    u32::try_from(binding).map(Some).map_err(|_| {
+        CircuitPlanError(format!(
+            "{component_id} node {} stream_control_binding exceeds u32",
+            node.id
+        ))
+    })
 }
 
 fn planned_node_selection_domain(

@@ -17,6 +17,7 @@
         "shape": [
           16
         ],
+        "dtype": "BF16",
         "component_port": "frame"
       }
     ],
@@ -27,6 +28,7 @@
         "shape": [
           32
         ],
+        "dtype": "F32",
         "component_port": "logits",
         "source": "output_logits"
       }

@@ -24,7 +24,7 @@ impl VulkanReusableKernelPlan {
                 op: key.op,
                 descriptor_signature: key.descriptor_signature,
                 push_constants: key.push_constants,
-                uses_stream_tick: key.uses_stream_tick,
+                stream_control_binding: key.stream_control_binding,
                 command_refs,
             })
             .collect();
@@ -116,7 +116,7 @@ pub struct VulkanReusableKernelFamily {
     pub op: String,
     pub descriptor_signature: Vec<VulkanKernelDescriptorSlotSignature>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
     pub command_refs: Vec<VulkanKernelDispatchRef>,
 }
 
@@ -225,7 +225,7 @@ pub struct VulkanReusableKernelArtifact {
     pub workgroup_count_x: u32,
     pub descriptor_signature: Vec<VulkanKernelDescriptorSlotSignature>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
 }
 
 impl VulkanReusableKernelArtifact {
@@ -239,7 +239,7 @@ impl VulkanReusableKernelArtifact {
             workgroup_count_x: 1,
             descriptor_signature: family.descriptor_signature.clone(),
             push_constants: family.push_constants.clone(),
-            uses_stream_tick: family.uses_stream_tick,
+            stream_control_binding: family.stream_control_binding,
         }
     }
 
@@ -515,7 +515,7 @@ pub enum VulkanReusableKernelLinkProblem {
     OpMismatch { found: String },
     DescriptorSignatureMismatch,
     PushConstantSignatureMismatch,
-    StreamTickUsageMismatch { found: bool },
+    StreamControlBindingMismatch { found: Option<u32> },
     EmptySpirvPath,
     UnsupportedEntryPoint { found: String },
     InvalidLocalSizeX { found: u32 },
@@ -552,12 +552,12 @@ fn link_compatibility_issues(
             problem: VulkanReusableKernelLinkProblem::PushConstantSignatureMismatch,
         });
     }
-    if artifact.uses_stream_tick != family.uses_stream_tick {
+    if artifact.stream_control_binding != family.stream_control_binding {
         issues.push(VulkanReusableKernelLinkIssue {
             family_id: family_id.clone(),
             op: op.clone(),
-            problem: VulkanReusableKernelLinkProblem::StreamTickUsageMismatch {
-                found: artifact.uses_stream_tick,
+            problem: VulkanReusableKernelLinkProblem::StreamControlBindingMismatch {
+                found: artifact.stream_control_binding,
             },
         });
     }
@@ -589,4 +589,3 @@ fn link_compatibility_issues(
 
     issues
 }
-

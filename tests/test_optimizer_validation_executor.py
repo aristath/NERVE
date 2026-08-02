@@ -31,6 +31,7 @@ from nerve.representation_optimizer.validation.conversation_semantics import (
 from nerve.representation_optimizer.validation.executor_protocol import (
     VALIDATION_EXECUTOR_RESPONSE_SCHEMA,
     validate_validation_execution_payload,
+    validate_validation_progress,
     validate_validation_shutdown_payload,
 )
 from nerve.representation_optimizer.validation.planning import (
@@ -230,6 +231,44 @@ class FixtureWholeModelExecutor:
 
     def abort(self) -> None:
         self.aborted = True
+
+
+def test_generation_progress_identifies_the_observed_token() -> None:
+    event = {
+        "schema": EXECUTOR_PROGRESS_SCHEMA,
+        "request_id": "execute",
+        "sequence": 0,
+        "payload": {
+            "phase": "generation",
+            "turn_index": 0,
+            "generated_tokens": 1,
+            "token_id": 128_799,
+            "selected_logit_bits": 0x4120_0000,
+            "elapsed_ns": 1,
+        },
+    }
+
+    validate_validation_progress(
+        event,
+        expected_request_id="execute",
+        turn_count=1,
+    )
+    del event["payload"]["token_id"]
+    with pytest.raises(ModelCompileError, match="progress payload is invalid"):
+        validate_validation_progress(
+            event,
+            expected_request_id="execute",
+            turn_count=1,
+        )
+
+    event["payload"]["token_id"] = 128_799
+    del event["payload"]["selected_logit_bits"]
+    with pytest.raises(ModelCompileError, match="progress payload is invalid"):
+        validate_validation_progress(
+            event,
+            expected_request_id="execute",
+            turn_count=1,
+        )
 
 
 def test_validation_execution_requires_every_requested_turn() -> None:
@@ -550,6 +589,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     assert mount_command["execution_mode"] == "teacher_forced"
     assert mount_command["speculative_draft_tokens"] == 0
     assert mount_command["sampler_config"] == {"top_k": 1}
+    assert mount_command["residency_policy"] == "eager"
     assert executor.commands[1]["max_output_tokens"] is None
     assert executor.commands[1]["execution_mode"] == "teacher_forced"
     assert executor.commands[1]["step_unit"] == "component_activations"

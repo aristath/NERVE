@@ -890,11 +890,11 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             u64::try_from(batch_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let mut input_runs = Vec::new();
         let mut output_events = Vec::new();
-        for ((activation, prepared), sampled_token_id) in batch
+        for ((activation, prepared), sampled_token) in batch
             .activations
             .iter()
             .zip(prepared_lanes)
-            .zip(device_run.sampled_token_ids)
+            .zip(device_run.sampled_tokens)
         {
             let stream_id = activation.stream_id.clone();
             let callback_stream_id = stream_id.clone();
@@ -908,7 +908,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 })?
                 .complete_runtime_scheduler_batch_lane(
                     prepared,
-                    sampled_token_id,
+                    sampled_token,
                     device_run.scheduler_turn_count_per_tick,
                     device_run.completed_stage_count_per_tick,
                     |output_event| {

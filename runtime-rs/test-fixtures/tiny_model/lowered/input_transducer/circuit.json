@@ -17,6 +17,7 @@
         "shape": [
           1
         ],
+        "dtype": "U32",
         "component_port": "token"
       }
     ],
@@ -27,6 +28,7 @@
         "shape": [
           16
         ],
+        "dtype": "BF16",
         "component_port": "frame",
         "source": "output_frame"
       }
@@ -60,7 +62,11 @@
       "state_reads": [],
       "state_writes": [],
       "attrs": {
-        "scale": 1.0
+        "scale": 1.0,
+        "output_shape": [
+          16
+        ],
+        "stream_expansion": null
       }
     }
   ],

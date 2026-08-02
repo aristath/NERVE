@@ -53,6 +53,11 @@ impl VulkanPreparedDispatchPlan {
                 .ok_or_else(|| VulkanPreparedDispatchPlanError::MissingLinkedArtifact {
                     family_id: family.family_id.clone(),
                 })?;
+            validate_stream_control_binding(
+                command.dispatch_index,
+                command.stream_control_binding,
+                descriptor_dispatch.descriptors.len(),
+            )?;
 
             dispatches.push(VulkanPreparedDispatch {
                 dispatch_index: command.dispatch_index,
@@ -68,7 +73,7 @@ impl VulkanPreparedDispatchPlan {
                 local_size_x: artifact.local_size_x,
                 descriptors: descriptor_dispatch.descriptors.clone(),
                 push_constants: command.push_constants.clone(),
-                uses_stream_tick: command.uses_stream_tick,
+                stream_control_binding: command.stream_control_binding,
             });
         }
         let total_descriptor_count = dispatches
@@ -91,6 +96,23 @@ impl VulkanPreparedDispatchPlan {
     }
 }
 
+fn validate_stream_control_binding(
+    dispatch_index: usize,
+    compiled_binding: Option<u32>,
+    runtime_descriptor_count: usize,
+) -> Result<(), VulkanPreparedDispatchPlanError> {
+    if let Some(compiled_binding) = compiled_binding
+        && usize::try_from(compiled_binding).ok() != Some(runtime_descriptor_count)
+    {
+        return Err(VulkanPreparedDispatchPlanError::StreamControlBindingMismatch {
+            dispatch_index,
+            compiled_binding,
+            runtime_descriptor_count,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanPreparedDispatch {
     pub dispatch_index: usize,
@@ -106,7 +128,7 @@ pub struct VulkanPreparedDispatch {
     pub local_size_x: u32,
     pub descriptors: Vec<VulkanResolvedDescriptorBinding>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +138,11 @@ pub enum VulkanPreparedDispatchPlanError {
     MissingDescriptorResources { dispatch_index: usize },
     MissingReusableFamily { dispatch_index: usize },
     MissingLinkedArtifact { family_id: String },
+    StreamControlBindingMismatch {
+        dispatch_index: usize,
+        compiled_binding: u32,
+        runtime_descriptor_count: usize,
+    },
 }
 
 impl Display for VulkanPreparedDispatchPlanError {
@@ -137,6 +164,14 @@ impl Display for VulkanPreparedDispatchPlanError {
             Self::MissingLinkedArtifact { family_id } => {
                 write!(f, "reusable family {family_id:?} has no linked artifact")
             }
+            Self::StreamControlBindingMismatch {
+                dispatch_index,
+                compiled_binding,
+                runtime_descriptor_count,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} compiled stream-control binding {compiled_binding} disagrees with runtime descriptor count {runtime_descriptor_count}"
+            ),
         }
     }
 }
@@ -224,7 +259,7 @@ impl VulkanBoundDispatchPlan {
                 local_size_x: prepared.local_size_x,
                 descriptors,
                 push_constants: prepared.push_constants.clone(),
-                uses_stream_tick: prepared.uses_stream_tick,
+                stream_control_binding: prepared.stream_control_binding,
             });
         }
 
@@ -328,7 +363,7 @@ impl VulkanPlacedBoundDispatchPlan {
                 local_size_x: dispatch.local_size_x,
                 descriptors,
                 push_constants: dispatch.push_constants.clone(),
-                uses_stream_tick: dispatch.uses_stream_tick,
+                stream_control_binding: dispatch.stream_control_binding,
             });
         }
 
@@ -441,7 +476,7 @@ impl VulkanMountedPlacedBoundDispatchPlan {
                 local_size_x: dispatch.local_size_x,
                 descriptors,
                 push_constants: dispatch.push_constants.clone(),
-                uses_stream_tick: dispatch.uses_stream_tick,
+                stream_control_binding: dispatch.stream_control_binding,
             });
         }
 
@@ -490,7 +525,7 @@ pub struct VulkanMountedPlacedBoundDispatch {
     pub local_size_x: u32,
     pub descriptors: Vec<VulkanMountedPlacedBoundDescriptor>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
-    pub uses_stream_tick: bool,
+    pub stream_control_binding: Option<u32>,
 }
 
 fn vulkan_dispatch_semantic_label(

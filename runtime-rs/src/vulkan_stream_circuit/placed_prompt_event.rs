@@ -225,7 +225,7 @@ impl VulkanResidentInProcessPlacedActivePromptEvent {
         scheduler_turn_count: usize,
         completed_stage_count: usize,
         transport_stats: &VulkanPlacedEdgeTransportStats,
-        sampled_token_id: Option<u32>,
+        sampled_token: Option<VulkanResidentSampledToken>,
     ) -> Result<Option<VulkanResidentTokenOutputEvent>, VulkanResidentInProcessPlacedRuntimeError>
     {
         if activation.input_is_feedback {
@@ -246,14 +246,24 @@ impl VulkanResidentInProcessPlacedActivePromptEvent {
         self.transport_stats.accumulate(transport_stats);
 
         let output_event = if activation.should_emit_public_output {
-            let sampled_token_id = sampled_token_id
+            let sampled_token = sampled_token
                 .ok_or(VulkanResidentInProcessPlacedRuntimeError::MissingFusedSamplerRun)?;
+            if !f32::from_bits(sampled_token.selected_logit_bits).is_finite() {
+                return Err(
+                    VulkanResidentInProcessPlacedRuntimeError::NonFiniteSelectedLogit {
+                        token_id: sampled_token.token_id,
+                        selected_logit_bits: sampled_token.selected_logit_bits,
+                    },
+                );
+            }
+            let sampled_token_id = sampled_token.token_id;
             let output_index = self.generated_token_ids.len();
             let output_event = VulkanResidentTokenOutputEvent {
                 id: format!("{}.{}", self.input_event.id, output_index),
                 input_event_id: self.input_event.id.clone(),
                 output_index,
                 token_id: sampled_token_id,
+                selected_logit_bits: sampled_token.selected_logit_bits,
                 source_stream_tick: stream_tick,
             };
             self.generated_token_ids.push(sampled_token_id);

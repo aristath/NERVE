@@ -215,6 +215,7 @@ fn placed_package_pool_reuses_immutable_parameters_across_graph_variants() {
                 exact_model,
                 Some(64),
                 false,
+                ResourceResidencyPolicy::Eager,
                 &pool,
             )
             .unwrap();
@@ -244,6 +245,7 @@ fn placed_package_pool_reuses_immutable_parameters_across_graph_variants() {
                 duplicated_model,
                 Some(64),
                 false,
+                ResourceResidencyPolicy::Eager,
                 &pool,
             )
             .unwrap();

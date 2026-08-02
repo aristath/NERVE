@@ -69,8 +69,16 @@ impl VulkanModelBoundaryBufferPlan {
                     output,
                     signal_element_bytes,
                 )?;
-                total_byte_capacity =
-                    add_optional_boundary_bytes(total_byte_capacity, boundary.byte_capacity)?;
+                let aliases_input = boundary.source_signal_id.is_some()
+                    && inputs.iter().any(|input: &VulkanModelBoundaryBuffer| {
+                        input.component_id == boundary.component_id
+                            && input.signal_id == boundary.signal_id
+                            && input.shape == boundary.shape
+                    });
+                if !aliases_input {
+                    total_byte_capacity =
+                        add_optional_boundary_bytes(total_byte_capacity, boundary.byte_capacity)?;
+                }
                 if boundary.byte_capacity.is_none() {
                     unresolved_byte_signals.push(boundary.signal_id.clone());
                 }
@@ -117,7 +125,7 @@ impl VulkanModelBoundaryBufferPlan {
             input_buffers.push(VulkanModelBoundaryBufferAllocation {
                 boundary: boundary.clone(),
                 byte_capacity,
-                buffer: device.create_resident_buffer(byte_capacity)?,
+                buffer: Arc::new(device.create_resident_buffer(byte_capacity)?),
             });
         }
 
@@ -128,15 +136,33 @@ impl VulkanModelBoundaryBufferPlan {
                     self.device_id, boundary.signal_id
                 ))
             })?;
-            total_byte_capacity = checked_add_bytes(
-                total_byte_capacity,
-                byte_capacity,
-                "model output boundary buffer allocation",
-            )?;
+            let input_alias = boundary.source_signal_id.as_ref().and_then(|_| {
+                input_buffers.iter().find(|input| {
+                    input.boundary.component_id == boundary.component_id
+                        && input.boundary.signal_id == boundary.signal_id
+                        && input.boundary.shape == boundary.shape
+                })
+            });
+            let buffer = if let Some(input) = input_alias {
+                if input.byte_capacity != byte_capacity {
+                    return Err(VulkanError(format!(
+                        "{} boundary output {:?} aliases input storage with {} bytes but requires {byte_capacity}",
+                        self.device_id, boundary.port_id, input.byte_capacity
+                    )));
+                }
+                Arc::clone(&input.buffer)
+            } else {
+                total_byte_capacity = checked_add_bytes(
+                    total_byte_capacity,
+                    byte_capacity,
+                    "model output boundary buffer allocation",
+                )?;
+                Arc::new(device.create_resident_buffer(byte_capacity)?)
+            };
             output_buffers.push(VulkanModelBoundaryBufferAllocation {
                 boundary: boundary.clone(),
                 byte_capacity,
-                buffer: device.create_resident_buffer(byte_capacity)?,
+                buffer,
             });
         }
 
@@ -181,7 +207,9 @@ impl VulkanModelBoundaryBuffer {
                 component_id, port.id, port.shape
             )));
         }
-        let byte_capacity = signal_element_bytes
+        let byte_capacity = port
+            .element_bytes
+            .or(signal_element_bytes)
             .map(|bytes| {
                 element_count.checked_mul(bytes).ok_or_else(|| {
                     VulkanModelBoundaryBufferPlanError(format!(
@@ -244,7 +272,7 @@ impl VulkanModelBoundaryBuffers {
 pub struct VulkanModelBoundaryBufferAllocation {
     pub boundary: VulkanModelBoundaryBuffer,
     pub byte_capacity: usize,
-    pub buffer: VulkanResidentBuffer,
+    pub buffer: Arc<VulkanResidentBuffer>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

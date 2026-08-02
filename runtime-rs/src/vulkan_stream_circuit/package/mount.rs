@@ -101,9 +101,7 @@ impl VulkanResidentModelPackageManifest {
         duplicate_after: &[(String, String)],
         source_chain: Option<&[(String, String)]>,
     ) -> Result<StreamCircuitRuntimeGraph, VulkanResidentTokenModelPackageError> {
-        let source_graph = self
-            .circuit_graph
-            .to_resolved_lowered_execution_graph(PathBuf::from("."))?;
+        let source_graph = self.resolved_source_graph(PathBuf::from("."))?;
         let default_device_id = default_device_id
             .unwrap_or(RUNTIME_DEFAULT_LOGICAL_DEVICE_ID)
             .to_string();
@@ -157,6 +155,7 @@ impl VulkanResidentModelPackageManifest {
         package_root: impl Into<PathBuf>,
     ) -> Result<ResolvedLoweredExecutionGraph, VulkanResidentTokenModelPackageError> {
         self.circuit_graph
+            .with_kernel_runtime_contracts(&self.component_executions)?
             .to_resolved_lowered_execution_graph(package_root)
     }
 
@@ -164,8 +163,10 @@ impl VulkanResidentModelPackageManifest {
         self,
         runtime_graph: &StreamCircuitRuntimeGraph,
     ) -> Result<VulkanResidentRuntimeModel, VulkanResidentTokenModelPackageError> {
-        let source_graph = self
+        let executable_circuit_graph = self
             .circuit_graph
+            .with_kernel_runtime_contracts(&self.component_executions)?;
+        let source_graph = executable_circuit_graph
             .to_resolved_lowered_execution_graph(PathBuf::from("."))?;
         let runtime_graph = attach_generation_node_devices_for_vulkan(runtime_graph.clone(), &source_graph)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
@@ -173,12 +174,6 @@ impl VulkanResidentModelPackageManifest {
             .validate_against_graph(&source_graph)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
 
-        let source_components = self
-            .circuit_graph
-            .components
-            .iter()
-            .map(|component| (component.component_id.as_str(), component))
-            .collect::<BTreeMap<_, _>>();
         let source_executions = self
             .component_executions
             .iter()
@@ -189,6 +184,11 @@ impl VulkanResidentModelPackageManifest {
             .topological_instance_ids(&source_graph)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
         let enabled_instance_count = ordered_instance_ids.len();
+        let executable_components = executable_circuit_graph
+            .components
+            .iter()
+            .map(|component| (component.component_id.as_str(), component))
+            .collect::<BTreeMap<_, _>>();
         let mut components = Vec::with_capacity(enabled_instance_count);
         let mut component_executions = Vec::with_capacity(enabled_instance_count);
         let mut placement = StreamCircuitPlacementSpec::new(runtime_graph.default_device_id.clone());
@@ -199,7 +199,7 @@ impl VulkanResidentModelPackageManifest {
                 .iter()
                 .find(|instance| instance.instance_id == instance_id)
                 .expect("validated topological instance id must exist");
-            let source_component = source_components
+            let source_component = executable_components
                 .get(instance.source_component_id.as_str())
                 .ok_or_else(|| {
                     VulkanResidentTokenModelPackageError::new(format!(
@@ -232,7 +232,7 @@ impl VulkanResidentModelPackageManifest {
             }
         }
 
-        let mut circuit_graph = self.circuit_graph.clone();
+        let mut circuit_graph = executable_circuit_graph;
         circuit_graph.topology = runtime_graph.topology.clone();
         circuit_graph.edges = runtime_graph
             .effective_edges()
@@ -276,6 +276,7 @@ impl VulkanResidentRuntimeModel {
         package_root: impl Into<PathBuf>,
     ) -> Result<ResolvedLoweredExecutionGraph, VulkanResidentTokenModelPackageError> {
         self.circuit_graph
+            .with_kernel_runtime_contracts(&self.component_executions)?
             .to_resolved_lowered_execution_graph(package_root)
     }
 

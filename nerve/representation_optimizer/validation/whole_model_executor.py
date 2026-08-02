@@ -115,6 +115,32 @@ class _ProgressJournal:
         return dict(reference)
 
 
+def _validation_residency_policy(matched_conditions: Json) -> str:
+    environment = matched_conditions.get("environment", {})
+    if not isinstance(environment, dict):
+        raise ModelCompileError(
+            "whole-model validation environment must be an object"
+        )
+    admission = environment.get("residency_admission")
+    if admission is None:
+        return "eager"
+    if not isinstance(admission, dict):
+        raise ModelCompileError(
+            "whole-model validation residency admission must be an object"
+        )
+    plan = admission.get("plan")
+    if not isinstance(plan, dict):
+        raise ModelCompileError(
+            "whole-model validation residency admission requires a plan"
+        )
+    policy = plan.get("residency_policy")
+    if policy not in {"eager", "demand_retained"}:
+        raise ModelCompileError(
+            "whole-model validation residency plan has an unsupported policy"
+        )
+    return policy
+
+
 class ResidentWholeModelValidationBackend:
     """Whole-model validation through normal resident chat transactions."""
 
@@ -260,6 +286,9 @@ class ResidentWholeModelValidationBackend:
             "random_seed": request.seed,
             "sampler_config": dict(
                 check["controls"].get("sampler", {})
+            ),
+            "residency_policy": _validation_residency_policy(
+                request.matched_conditions
             ),
             "enable_thinking": (
                 check["controls"].get("enable_thinking") is True

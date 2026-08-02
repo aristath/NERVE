@@ -198,7 +198,7 @@ impl StreamCircuitResourcePlan {
                     element_bytes: state
                         .dtype
                         .as_deref()
-                        .map(state_dtype_bytes)
+                        .map(circuit_dtype_bytes)
                         .transpose()?,
                 });
             }
