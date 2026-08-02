@@ -98,10 +98,7 @@ impl VulkanComputeDevice {
         &self,
         allocation: Arc<VulkanSharedHostAllocation>,
     ) -> Result<VulkanResidentBuffer, VulkanError> {
-        self.import_shared_host_buffer_with_usage(
-            allocation,
-            resident_buffer_usage(),
-        )
+        self.import_shared_host_buffer_with_usage(allocation, resident_buffer_usage())
     }
 
     fn import_shared_host_buffer_with_usage(
@@ -255,8 +252,7 @@ impl VulkanComputeDevice {
         self.create_shared_resident_buffers_with_usage(
             peer_devices,
             byte_capacity,
-            resident_buffer_usage()
-                | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
+            resident_buffer_usage() | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
         )
     }
 
@@ -267,11 +263,7 @@ impl VulkanComputeDevice {
         usage: vk::BufferUsageFlags,
     ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
         let external_device_local_error =
-            match self.create_shared_device_resident_buffers(
-                peer_devices,
-                byte_capacity,
-                usage,
-            ) {
+            match self.create_shared_device_resident_buffers(peer_devices, byte_capacity, usage) {
                 Ok(buffers) => {
                     return Ok(VulkanSharedResidentBufferSet {
                         route: VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
@@ -296,10 +288,7 @@ impl VulkanComputeDevice {
             .chain(peer_devices.iter().copied())
             .map(|device| {
                 device
-                    .import_shared_host_buffer_with_usage(
-                        Arc::clone(&allocation),
-                        usage,
-                    )
+                    .import_shared_host_buffer_with_usage(Arc::clone(&allocation), usage)
                     .map(Arc::new)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -367,18 +356,17 @@ impl VulkanComputeDevice {
                         .usage(usage)
                         .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .push_next(&mut external);
-                    let buffer = device
-                        .device
-                        .create_buffer(&buffer_info, None)
-                        .map_err(|error| {
+                    let buffer = device.device.create_buffer(&buffer_info, None).map_err(
+                        |error| {
                             VulkanError(format!(
                                 "failed to create external device-local buffer on {:?}: {error:?}",
                                 device.device_name
                             ))
-                        })?;
+                        },
+                    )?;
                     let mut dedicated = vk::MemoryDedicatedRequirements::default();
-                    let mut requirements = vk::MemoryRequirements2::default()
-                        .push_next(&mut dedicated);
+                    let mut requirements =
+                        vk::MemoryRequirements2::default().push_next(&mut dedicated);
                     let requirements_info =
                         vk::BufferMemoryRequirementsInfo2::default().buffer(buffer);
                     device
@@ -596,7 +584,11 @@ impl VulkanComputeDevice {
         let identity = Arc::new(VulkanSharedDeviceMemoryIdentity);
         Ok(raw_buffers
             .into_iter()
-            .zip(allocated_memories.into_iter().zip(allocated_memory_type_indices))
+            .zip(
+                allocated_memories
+                    .into_iter()
+                    .zip(allocated_memory_type_indices),
+            )
             .map(|(raw, (memory, memory_type_index))| {
                 let memory = memory.expect("every external buffer was allocated");
                 let memory_type_index =
@@ -912,14 +904,12 @@ impl VulkanComputeDevice {
                 self.device_name
             )));
         }
-        let (buffer, memory, byte_capacity, memory_access) =
-            self.create_resident_storage_buffer_with_usage(
+        let (buffer, memory, byte_capacity, memory_access) = self
+            .create_resident_storage_buffer_with_usage(
                 byte_capacity,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-                resident_buffer_usage()
-                    | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                resident_buffer_usage() | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
                 false,
             )?;
         Ok(VulkanResidentBuffer {
@@ -951,18 +941,16 @@ impl VulkanComputeDevice {
                 self.device_name
             )));
         }
-        let (buffer, memory, byte_capacity, memory_access) =
-            self.create_resident_storage_buffer_with_addressability(
+        let (buffer, memory, byte_capacity, memory_access) = self
+            .create_resident_storage_buffer_with_addressability(
                 byte_capacity,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 true,
             )?;
         let device_address = unsafe {
-            self.device.get_buffer_device_address(
-                &vk::BufferDeviceAddressInfo::default().buffer(buffer),
-            )
+            self.device
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
         };
         if device_address == 0 {
             unsafe {
@@ -970,8 +958,7 @@ impl VulkanComputeDevice {
                 self.device.free_memory(memory, None);
             }
             return Err(VulkanError(
-                "Vulkan returned a null device address for an addressable buffer"
-                    .to_string(),
+                "Vulkan returned a null device address for an addressable buffer".to_string(),
             ));
         }
         Ok(VulkanResidentBuffer {
@@ -988,221 +975,54 @@ impl VulkanComputeDevice {
         })
     }
 
-    pub fn create_sparse_addressable_resident_buffer(
+    pub fn create_host_visible_addressable_resident_buffer(
         &self,
         byte_capacity: usize,
-    ) -> Result<
-        (
-            VulkanResidentBuffer,
-            VulkanSparseResidentBufferRequirements,
-        ),
-        VulkanError,
-    > {
+    ) -> Result<VulkanResidentBuffer, VulkanError> {
         if byte_capacity == 0 {
             return Err(VulkanError(
-                "sparse addressable buffer capacity must not be zero".to_string(),
+                "host-visible addressable buffer capacity must not be zero".to_string(),
             ));
         }
-        if !self.buffer_device_address_supported
-            || !self.sparse_buffer_residency_supported
-        {
+        if !self.buffer_device_address_supported {
             return Err(VulkanError(format!(
-                "Vulkan device {:?} does not support sparse addressable buffers",
+                "Vulkan device {:?} does not support buffer device addresses",
                 self.device_name
             )));
         }
-        unsafe {
-            let buffer_info = vk::BufferCreateInfo::default()
-                .flags(
-                    vk::BufferCreateFlags::SPARSE_BINDING
-                        | vk::BufferCreateFlags::SPARSE_RESIDENCY,
-                )
-                .size(byte_capacity as vk::DeviceSize)
-                .usage(
-                    resident_buffer_usage()
-                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                )
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
-            let buffer =
-                self.device.create_buffer(&buffer_info, None).map_err(|error| {
-                    VulkanError(format!(
-                        "failed to create sparse addressable buffer: {error:?}"
-                    ))
-                })?;
-            let requirements = self.device.get_buffer_memory_requirements(buffer);
-            let byte_alignment =
-                usize::try_from(requirements.alignment).map_err(|_| {
-                    self.device.destroy_buffer(buffer, None);
-                    VulkanError(
-                        "sparse buffer memory alignment exceeds usize".to_string(),
-                    )
-                })?;
-            if byte_alignment == 0 || !byte_alignment.is_power_of_two() {
-                self.device.destroy_buffer(buffer, None);
-                return Err(VulkanError(format!(
-                    "sparse buffer memory alignment {byte_alignment} is invalid"
-                )));
-            }
-            let memory_type_index = find_memory_type(
-                &self.context.instance,
-                self.physical_device,
-                requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                vk::MemoryPropertyFlags::empty(),
-            )
-            .ok_or_else(|| {
-                self.device.destroy_buffer(buffer, None);
-                VulkanError(
-                    "no device-local memory type can back sparse addressable buffers"
-                        .to_string(),
-                )
-            })?;
-            let memory_access =
-                self.resident_memory_access(memory_type_index).map_err(|error| {
-                    self.device.destroy_buffer(buffer, None);
-                    error
-                })?;
-            let device_address = self.device.get_buffer_device_address(
-                &vk::BufferDeviceAddressInfo::default().buffer(buffer),
-            );
-            if device_address == 0 {
-                self.device.destroy_buffer(buffer, None);
-                return Err(VulkanError(
-                    "Vulkan returned a null address for a sparse buffer".to_string(),
-                ));
-            }
-            Ok((
-                VulkanResidentBuffer {
-                    device: self.device.clone(),
-                    buffer,
-                    memory: None,
-                    memory_access,
-                    byte_capacity: byte_capacity as vk::DeviceSize,
-                    device_address: Some(device_address),
-                    persistent_mapping: None,
-                    persistent_mapping_requires_unmap: false,
-                    _shared_host_allocation: None,
-                    _shared_device_memory_identity: None,
-                },
-                VulkanSparseResidentBufferRequirements {
-                    byte_alignment,
-                    memory_type_index,
-                },
-            ))
-        }
-    }
-
-    pub fn allocate_sparse_addressable_memory(
-        &self,
-        byte_capacity: usize,
-        requirements: VulkanSparseResidentBufferRequirements,
-    ) -> Result<VulkanSparseResidentMemoryBlock, VulkanError> {
-        if byte_capacity == 0
-            || byte_capacity % requirements.byte_alignment != 0
-        {
-            return Err(VulkanError(format!(
-                "sparse backing allocation {byte_capacity} is not a nonzero multiple of {}",
-                requirements.byte_alignment
-            )));
-        }
-        let mut address_flags = vk::MemoryAllocateFlagsInfo::default()
-            .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-        let memory_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(byte_capacity as vk::DeviceSize)
-            .memory_type_index(requirements.memory_type_index)
-            .push_next(&mut address_flags);
-        let memory = unsafe {
+        let (buffer, memory, byte_capacity, memory_access) = self
+            .create_resident_storage_buffer_with_addressability(
+                byte_capacity,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_CACHED,
+                true,
+            )?;
+        let device_address = unsafe {
             self.device
-                .allocate_memory(&memory_info, None)
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to allocate {byte_capacity} bytes of sparse buffer backing: {error:?}"
-                    ))
-                })?
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
         };
-        Ok(VulkanSparseResidentMemoryBlock {
-            device: self.device.clone(),
-            memory,
-            byte_capacity,
-        })
-    }
-
-    pub fn bind_sparse_resident_buffer_ranges(
-        &self,
-        buffer: &VulkanResidentBuffer,
-        binds: &[VulkanSparseResidentBufferBind<'_>],
-    ) -> Result<(), VulkanError> {
-        if binds.is_empty() {
+        if device_address == 0 {
+            unsafe {
+                self.device.destroy_buffer(buffer, None);
+                self.device.free_memory(memory, None);
+            }
             return Err(VulkanError(
-                "sparse resident buffer bind batch must not be empty".to_string(),
-            ));
-        }
-        if !self.owns_resident_buffer(buffer) || buffer.memory.is_some() {
-            return Err(VulkanError(
-                "sparse bind target is not an unbound buffer on this device"
+                "Vulkan returned a null device address for a host-visible addressable buffer"
                     .to_string(),
             ));
         }
-        let raw_binds = binds
-            .iter()
-            .map(|binding| {
-                if binding.memory.device.handle() != self.device.handle()
-                    || binding.byte_count == 0
-                    || binding
-                        .resource_byte_offset
-                        .checked_add(binding.byte_count)
-                        .is_none_or(|end| end > buffer.byte_capacity())
-                    || binding
-                        .memory_byte_offset
-                        .checked_add(binding.byte_count)
-                        .is_none_or(|end| end > binding.memory.byte_capacity)
-                {
-                    return Err(VulkanError(
-                        "sparse resident buffer binding is out of bounds or belongs to another device"
-                            .to_string(),
-                    ));
-                }
-                Ok(vk::SparseMemoryBind::default()
-                    .resource_offset(binding.resource_byte_offset as vk::DeviceSize)
-                    .size(binding.byte_count as vk::DeviceSize)
-                    .memory(binding.memory.memory)
-                    .memory_offset(binding.memory_byte_offset as vk::DeviceSize))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let buffer_binds = [vk::SparseBufferMemoryBindInfo::default()
-            .buffer(buffer.buffer)
-            .binds(&raw_binds)];
-        let bind_infos =
-            [vk::BindSparseInfo::default().buffer_binds(&buffer_binds)];
-        unsafe {
-            let fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to create sparse binding fence: {error:?}"
-                    ))
-                })?;
-            let result = self
-                .device
-                .queue_bind_sparse(self.queue, &bind_infos, fence)
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to submit sparse buffer bindings: {error:?}"
-                    ))
-                })
-                .and_then(|()| {
-                    self.device
-                        .wait_for_fences(&[fence], true, u64::MAX)
-                        .map_err(|error| {
-                            VulkanError(format!(
-                                "failed to wait for sparse buffer bindings: {error:?}"
-                            ))
-                        })
-                });
-            self.device.destroy_fence(fence, None);
-            result
-        }
+        Ok(VulkanResidentBuffer {
+            device: self.device.clone(),
+            buffer,
+            memory: Some(memory),
+            memory_access,
+            byte_capacity,
+            device_address: Some(device_address),
+            persistent_mapping: None,
+            persistent_mapping_requires_unmap: false,
+            _shared_host_allocation: None,
+            _shared_device_memory_identity: None,
+        })
     }
 
     pub fn create_host_visible_resident_buffer(
@@ -1242,13 +1062,11 @@ impl VulkanComputeDevice {
                 "resident readback buffer capacity must not be zero".to_string(),
             ));
         }
-        let (buffer, memory, byte_capacity, memory_access) =
-            self.create_resident_storage_buffer(
-                byte_capacity,
-                vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-                vk::MemoryPropertyFlags::HOST_CACHED,
-            )?;
+        let (buffer, memory, byte_capacity, memory_access) = self.create_resident_storage_buffer(
+            byte_capacity,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_CACHED,
+        )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
             buffer,
@@ -1301,8 +1119,7 @@ impl VulkanComputeDevice {
         VulkanError,
     > {
         let usage = if addressable {
-            resident_buffer_usage()
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            resident_buffer_usage() | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
         } else {
             resident_buffer_usage()
         };
@@ -1375,8 +1192,7 @@ impl VulkanComputeDevice {
                     &self.context.instance,
                     self.physical_device,
                     u32::MAX,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE
-                        | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                     vk::MemoryPropertyFlags::empty(),
                 ) {
                     Some(memory_type_index) => Some(memory_type_index),

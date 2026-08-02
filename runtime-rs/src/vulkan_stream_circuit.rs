@@ -89,9 +89,9 @@ pub use package::*;
 
 pub const VULKAN_STREAM_CIRCUIT_BACKEND_ID: &str = "vulkan_stream_circuit_ir";
 pub const VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA: &str =
-    "nerve.vulkan_reusable_kernel_artifacts.v1";
+    "nerve.vulkan_reusable_kernel_artifacts.v2";
 pub const VULKAN_RESIDENT_MODEL_PACKAGE_MANIFEST_SCHEMA: &str =
-    "nerve.vulkan_resident_model_package.v8";
+    "nerve.vulkan_resident_model_package.v9";
 const CONTRACT_DIGEST_ALGORITHM: &str = "nerve.json_tree_sha256.v1";
 const VULKAN_STREAM_CONTROL_BYTE_CAPACITY: usize = 5 * std::mem::size_of::<u32>();
 const VULKAN_STREAM_CONTROL_TOKEN_BYTE_CAPACITY: usize = std::mem::size_of::<u32>();
@@ -145,6 +145,7 @@ include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
 include!("vulkan_stream_circuit/runtime_resource_contract.rs");
 include!("vulkan_stream_circuit/sparse_moe_execution.rs");
 include!("vulkan_stream_circuit/selection_telemetry.rs");
+include!("vulkan_stream_circuit/host_memory_capacity.rs");
 include!("vulkan_stream_circuit/placed_model_package_loader.rs");
 include!("vulkan_stream_circuit/placed_stream_processor.rs");
 include!("vulkan_stream_circuit/placed_prompt_event.rs");
@@ -169,7 +170,9 @@ include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");
 include!("vulkan_stream_circuit/compiled_resource_residency_report.rs");
+include!("vulkan_stream_circuit/compiled_resource_memory_plan.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_store.rs");
+include!("vulkan_stream_circuit/compiled_resource_retiering.rs");
 include!("vulkan_stream_circuit/compiled_resource_teardown.rs");
 include!("vulkan_stream_circuit/demand_residency_dispatch_chain.rs");
 include!("vulkan_stream_circuit/demand_residency_batch_chain.rs");

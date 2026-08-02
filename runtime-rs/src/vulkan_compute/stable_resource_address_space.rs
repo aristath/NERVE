@@ -4,6 +4,14 @@ const VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT: usize = 32;
 pub struct VulkanStableResourceArenaConfig {
     pub committed_byte_capacity: usize,
     pub minimum_alignment: usize,
+    pub memory_domain: VulkanStableResourceMemoryDomain,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VulkanStableResourceMemoryDomain {
+    #[default]
+    Device,
+    HostVisible,
 }
 
 impl VulkanStableResourceArenaConfig {
@@ -20,7 +28,13 @@ impl VulkanStableResourceArenaConfig {
         Ok(Self {
             committed_byte_capacity,
             minimum_alignment,
+            memory_domain: VulkanStableResourceMemoryDomain::Device,
         })
+    }
+
+    pub fn host_visible(mut self) -> Self {
+        self.memory_domain = VulkanStableResourceMemoryDomain::HostVisible;
+        self
     }
 }
 
@@ -34,7 +48,9 @@ pub struct VulkanStableResourceArenaStats {
 
 pub struct VulkanStableResourceArena {
     config: VulkanStableResourceArenaConfig,
-    sparse: Arc<VulkanSparseStableResourceBacking>,
+    device_handle: vk::Device,
+    layouts: Arc<VulkanStableResourceArenaLayouts>,
+    state: Arc<std::sync::Mutex<VulkanStableResourceArenaState>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,48 +67,54 @@ pub enum VulkanStableResourceGroupLayout {
 }
 
 #[derive(Clone)]
-struct VulkanSparseStableResourcePlacement {
+struct VulkanStableResourcePlacement {
     resource_slots: Vec<usize>,
     resource_byte_offsets: Vec<usize>,
     resource_byte_counts: Vec<usize>,
-    group_byte_offset: usize,
     group_byte_capacity: usize,
 }
 
-struct VulkanSparseStableResourceBacking {
-    device_handle: vk::Device,
-    requirements: VulkanSparseResidentBufferRequirements,
-    state: std::sync::Mutex<VulkanSparseStableResourceState>,
+struct VulkanStableResourceArenaLayouts {
+    explicit: BTreeMap<Vec<usize>, VulkanStableResourcePlacement>,
+    partitioned: Vec<VulkanPartitionedStableResourcePlacement>,
+    maximum_byte_capacity: usize,
 }
 
-struct VulkanSparseStableResourceState {
-    buffer: Option<Arc<VulkanResidentBuffer>>,
-    placements: BTreeMap<Vec<usize>, VulkanSparseStableResourcePlacement>,
-    partitioned_placements: Vec<VulkanSparsePartitionedResourcePlacement>,
-    resident_groups: BTreeSet<Vec<usize>>,
+struct VulkanStableResourceArenaState {
     active_groups: BTreeMap<Vec<usize>, usize>,
-    blocks: Vec<Arc<VulkanSparseResidentMemoryBlock>>,
-    allocations: BTreeMap<u64, usize>,
+    chunks: BTreeMap<u64, VulkanStableResourceChunk>,
+    allocations: BTreeMap<u64, VulkanStableResourceAllocationRecord>,
+    next_chunk_id: u64,
     next_allocation_id: u64,
     committed_byte_capacity: usize,
     allocated_byte_count: usize,
 }
 
 #[derive(Clone)]
-struct VulkanSparsePartitionedResourcePlacement {
+struct VulkanPartitionedStableResourcePlacement {
     member_slot_bases: Vec<usize>,
     resource_byte_offsets: Vec<usize>,
     resource_byte_counts: Vec<usize>,
     partition_count: usize,
-    groups_byte_offset: usize,
     group_byte_capacity: usize,
+}
+
+struct VulkanStableResourceChunk {
+    byte_capacity: usize,
+    active_allocation_count: usize,
+}
+
+struct VulkanStableResourceAllocationRecord {
+    byte_count: usize,
+    chunk_id: u64,
 }
 
 pub struct VulkanStableResourceAllocation {
     allocation_id: u64,
+    chunk_id: u64,
     group_key: Arc<[usize]>,
     buffer: Arc<VulkanResidentBuffer>,
-    sparse_backing: Arc<VulkanSparseStableResourceBacking>,
+    arena_state: Arc<std::sync::Mutex<VulkanStableResourceArenaState>>,
     byte_offset: usize,
     byte_count: usize,
     device_address: vk::DeviceAddress,
@@ -106,30 +128,19 @@ impl VulkanStableResourceArena {
     ) -> Result<Self, VulkanError> {
         if groups.is_empty() {
             return Err(VulkanError(
-                "sparse stable resource arena has no addressable groups"
-                    .to_string(),
+                "stable resource arena has no addressable groups".to_string(),
             ));
         }
-        if !device.supports_buffer_device_address()
-            || !device.supports_sparse_buffer_residency()
-        {
+        if !device.supports_buffer_device_address() {
             return Err(VulkanError(format!(
-                "Vulkan device {:?} cannot host demand-backed stable resources",
+                "Vulkan device {:?} cannot host addressable demand-backed resources",
                 device.device_name()
             )));
         }
-        let (probe, requirements) = device
-            .create_sparse_addressable_resident_buffer(
-                config.minimum_alignment,
-            )?;
-        drop(probe);
-        let page_alignment = requirements
-            .byte_alignment
-            .max(config.minimum_alignment);
         let mut placements = BTreeMap::new();
         let mut partitioned_placements = Vec::new();
         let mut claimed_slot_ranges = Vec::new();
-        let mut virtual_byte_capacity = 0usize;
+        let mut maximum_byte_capacity = 0usize;
         for group in groups {
             match group {
                 VulkanStableResourceGroupLayout::Explicit {
@@ -137,60 +148,40 @@ impl VulkanStableResourceArena {
                     resource_byte_counts,
                 } => {
                     let (member_offsets, group_byte_capacity) =
-                        sparse_group_member_layout(
-                            resource_byte_counts,
-                            config.minimum_alignment,
-                            page_alignment,
-                        )?;
+                        stable_group_member_layout(resource_byte_counts, config.minimum_alignment)?;
                     if resource_slots.is_empty()
                         || resource_slots.len() != resource_byte_counts.len()
                     {
                         return Err(VulkanError(
-                            "explicit sparse stable resource group layout is invalid"
-                                .to_string(),
+                            "explicit stable resource group layout is invalid".to_string(),
                         ));
                     }
-                    virtual_byte_capacity = align_stable_resource_offset(
-                        virtual_byte_capacity,
-                        page_alignment,
-                    )?;
-                    let group_byte_offset = virtual_byte_capacity;
-                    virtual_byte_capacity = virtual_byte_capacity
+                    maximum_byte_capacity = maximum_byte_capacity
                         .checked_add(group_byte_capacity)
                         .ok_or_else(|| {
-                            VulkanError(
-                                "sparse stable resource virtual capacity overflowed"
-                                    .to_string(),
-                            )
+                            VulkanError("stable resource maximum capacity overflowed".to_string())
                         })?;
-                    let resource_byte_offsets = member_offsets
-                        .into_iter()
-                        .map(|offset| group_byte_offset + offset)
-                        .collect();
                     for slot in resource_slots {
                         claimed_slot_ranges.push((
                             *slot,
                             slot.checked_add(1).ok_or_else(|| {
                                 VulkanError(
-                                    "explicit sparse address slot range overflowed"
-                                        .to_string(),
+                                    "explicit stable address slot range overflowed".to_string(),
                                 )
                             })?,
                         ));
                     }
-                    let placement = VulkanSparseStableResourcePlacement {
+                    let placement = VulkanStableResourcePlacement {
                         resource_slots: resource_slots.clone(),
-                        resource_byte_offsets,
+                        resource_byte_offsets: member_offsets,
                         resource_byte_counts: resource_byte_counts.clone(),
-                        group_byte_offset,
                         group_byte_capacity,
                     };
                     let mut group_key = resource_slots.clone();
                     group_key.sort_unstable();
                     if placements.insert(group_key, placement).is_some() {
                         return Err(VulkanError(
-                            "explicit sparse stable resource group layout is duplicated"
-                                .to_string(),
+                            "explicit stable resource group layout is duplicated".to_string(),
                         ));
                     }
                 }
@@ -200,61 +191,41 @@ impl VulkanStableResourceArena {
                     partition_count,
                 } => {
                     let (resource_byte_offsets, group_byte_capacity) =
-                        sparse_group_member_layout(
-                            resource_byte_counts,
-                            config.minimum_alignment,
-                            page_alignment,
-                        )?;
+                        stable_group_member_layout(resource_byte_counts, config.minimum_alignment)?;
                     if member_slot_bases.is_empty()
-                        || member_slot_bases.len()
-                            != resource_byte_counts.len()
+                        || member_slot_bases.len() != resource_byte_counts.len()
                         || *partition_count == 0
                     {
                         return Err(VulkanError(
-                            "partitioned sparse stable resource group layout is invalid"
-                                .to_string(),
+                            "partitioned stable resource group layout is invalid".to_string(),
                         ));
                     }
-                    virtual_byte_capacity = align_stable_resource_offset(
-                        virtual_byte_capacity,
-                        page_alignment,
-                    )?;
-                    let groups_byte_offset = virtual_byte_capacity;
-                    virtual_byte_capacity = group_byte_capacity
+                    maximum_byte_capacity = group_byte_capacity
                         .checked_mul(*partition_count)
-                        .and_then(|bytes| {
-                            virtual_byte_capacity.checked_add(bytes)
-                        })
+                        .and_then(|bytes| maximum_byte_capacity.checked_add(bytes))
                         .ok_or_else(|| {
                             VulkanError(
-                                "partitioned sparse resource virtual capacity overflowed"
+                                "partitioned stable resource maximum capacity overflowed"
                                     .to_string(),
                             )
                         })?;
                     for base in member_slot_bases {
                         claimed_slot_ranges.push((
                             *base,
-                            base.checked_add(*partition_count).ok_or_else(
-                                || {
-                                    VulkanError(
-                                        "partitioned sparse address slot range overflowed"
-                                            .to_string(),
-                                    )
-                                },
-                            )?,
+                            base.checked_add(*partition_count).ok_or_else(|| {
+                                VulkanError(
+                                    "partitioned stable address slot range overflowed".to_string(),
+                                )
+                            })?,
                         ));
                     }
-                    partitioned_placements.push(
-                        VulkanSparsePartitionedResourcePlacement {
-                            member_slot_bases: member_slot_bases.clone(),
-                            resource_byte_offsets,
-                            resource_byte_counts:
-                                resource_byte_counts.clone(),
-                            partition_count: *partition_count,
-                            groups_byte_offset,
-                            group_byte_capacity,
-                        },
-                    );
+                    partitioned_placements.push(VulkanPartitionedStableResourcePlacement {
+                        member_slot_bases: member_slot_bases.clone(),
+                        resource_byte_offsets,
+                        resource_byte_counts: resource_byte_counts.clone(),
+                        partition_count: *partition_count,
+                        group_byte_capacity,
+                    });
                 }
             }
         }
@@ -264,40 +235,26 @@ impl VulkanStableResourceArena {
             .any(|ranges| ranges[0].1 > ranges[1].0)
         {
             return Err(VulkanError(
-                "sparse stable resource layouts assign one address slot to multiple groups"
-                    .to_string(),
+                "stable resource layouts assign one address slot to multiple groups".to_string(),
             ));
         }
-        let (buffer, final_requirements) = device
-            .create_sparse_addressable_resident_buffer(
-                virtual_byte_capacity,
-            )?;
-        if final_requirements != requirements {
-            return Err(VulkanError(format!(
-                "sparse stable resource requirements changed with capacity: probe={requirements:?}, final={final_requirements:?}"
-            )));
-        }
-        let sparse = Arc::new(VulkanSparseStableResourceBacking {
-            device_handle: device.device.handle(),
-            requirements,
-            state: std::sync::Mutex::new(
-                VulkanSparseStableResourceState {
-                    buffer: Some(Arc::new(buffer)),
-                    placements,
-                    partitioned_placements,
-                    resident_groups: BTreeSet::new(),
-                    active_groups: BTreeMap::new(),
-                    blocks: Vec::new(),
-                    allocations: BTreeMap::new(),
-                    next_allocation_id: 0,
-                    committed_byte_capacity: 0,
-                    allocated_byte_count: 0,
-                },
-            ),
-        });
         Ok(Self {
             config,
-            sparse,
+            device_handle: device.device.handle(),
+            layouts: Arc::new(VulkanStableResourceArenaLayouts {
+                explicit: placements,
+                partitioned: partitioned_placements,
+                maximum_byte_capacity,
+            }),
+            state: Arc::new(std::sync::Mutex::new(VulkanStableResourceArenaState {
+                active_groups: BTreeMap::new(),
+                chunks: BTreeMap::new(),
+                allocations: BTreeMap::new(),
+                next_chunk_id: 0,
+                next_allocation_id: 0,
+                committed_byte_capacity: 0,
+                allocated_byte_count: 0,
+            })),
         })
     }
 
@@ -306,57 +263,19 @@ impl VulkanStableResourceArena {
     }
 
     pub fn stats(&self) -> Result<VulkanStableResourceArenaStats, VulkanError> {
-        let state = self.sparse.state.lock().map_err(|_| {
-            VulkanError(
-                "sparse stable resource arena state lock was poisoned"
-                    .to_string(),
-            )
+        let state = self.state.lock().map_err(|_| {
+            VulkanError("stable resource arena state lock was poisoned".to_string())
         })?;
         Ok(VulkanStableResourceArenaStats {
             committed_byte_capacity: state.committed_byte_capacity,
             allocated_byte_count: state.allocated_byte_count,
             active_allocation_count: state.allocations.len(),
-            chunk_count: state.blocks.len(),
+            chunk_count: state.chunks.len(),
         })
     }
 
-    pub fn maximum_backed_byte_capacity(
-        &self,
-    ) -> Result<usize, VulkanError> {
-        let state = self.sparse.state.lock().map_err(|_| {
-            VulkanError(
-                "sparse stable resource arena state lock was poisoned"
-                    .to_string(),
-            )
-        })?;
-        let explicit = state.placements.values().try_fold(
-            0usize,
-            |total, placement| {
-                total
-                    .checked_add(placement.group_byte_capacity)
-                    .ok_or_else(|| {
-                        VulkanError(
-                            "sparse stable resource maximum capacity overflowed"
-                                .to_string(),
-                        )
-                    })
-            },
-        )?;
-        state.partitioned_placements.iter().try_fold(
-            explicit,
-            |total, placement| {
-                placement
-                    .group_byte_capacity
-                    .checked_mul(placement.partition_count)
-                    .and_then(|bytes| total.checked_add(bytes))
-                    .ok_or_else(|| {
-                        VulkanError(
-                            "partitioned sparse resource maximum capacity overflowed"
-                                .to_string(),
-                        )
-                    })
-            },
-        )
+    pub fn maximum_backed_byte_capacity(&self) -> Result<usize, VulkanError> {
+        Ok(self.layouts.maximum_byte_capacity)
     }
 
     pub fn allocate_groups(
@@ -370,8 +289,10 @@ impl VulkanStableResourceArena {
                 "stable resource group allocation batch is empty".to_string(),
             ));
         }
-        allocate_sparse_stable_resource_groups(
-            &self.sparse,
+        allocate_stable_resource_groups(
+            self.device_handle,
+            &self.layouts,
+            &self.state,
             device,
             &self.config,
             groups,
@@ -379,35 +300,27 @@ impl VulkanStableResourceArena {
         )
     }
 
-    pub fn release_backing(
-        &self,
-    ) -> Result<(), VulkanError> {
-        let (buffer, blocks) = {
-            let mut state = self.sparse.state.lock().map_err(|_| {
-                VulkanError(
-                    "sparse stable resource arena state lock was poisoned"
-                        .to_string(),
-                )
+    pub fn release_backing(&self) -> Result<(), VulkanError> {
+        {
+            let state = self.state.lock().map_err(|_| {
+                VulkanError("stable resource arena state lock was poisoned".to_string())
             })?;
             if !state.allocations.is_empty()
                 || !state.active_groups.is_empty()
                 || state.allocated_byte_count != 0
             {
                 return Err(VulkanError(format!(
-                    "sparse stable resource arena still owns {} allocations and {} payload bytes",
+                    "stable resource arena still owns {} allocations and {} payload bytes",
                     state.allocations.len(),
                     state.allocated_byte_count
                 )));
             }
-            state.resident_groups.clear();
-            state.committed_byte_capacity = 0;
-            (
-                state.buffer.take(),
-                std::mem::take(&mut state.blocks),
-            )
-        };
-        drop(buffer);
-        drop(blocks);
+            if !state.chunks.is_empty() || state.committed_byte_capacity != 0 {
+                return Err(VulkanError(
+                    "stable resource arena retained chunks without allocations".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -420,17 +333,12 @@ fn align_stable_resource_offset(
     byte_offset
         .checked_add(alignment - 1)
         .map(|offset| offset & !(alignment - 1))
-        .ok_or_else(|| {
-            VulkanError(
-                "stable resource aligned offset overflowed".to_string(),
-            )
-        })
+        .ok_or_else(|| VulkanError("stable resource aligned offset overflowed".to_string()))
 }
 
-fn sparse_group_member_layout(
+fn stable_group_member_layout(
     resource_byte_counts: &[usize],
     minimum_alignment: usize,
-    page_alignment: usize,
 ) -> Result<(Vec<usize>, usize), VulkanError> {
     if resource_byte_counts.is_empty()
         || resource_byte_counts
@@ -438,152 +346,104 @@ fn sparse_group_member_layout(
             .any(|byte_count| *byte_count == 0)
     {
         return Err(VulkanError(
-            "sparse stable resource group byte layout is empty".to_string(),
+            "stable resource group byte layout is empty".to_string(),
         ));
     }
     let mut byte_capacity = 0usize;
     let mut offsets = Vec::with_capacity(resource_byte_counts.len());
     for byte_count in resource_byte_counts {
-        byte_capacity =
-            align_stable_resource_offset(byte_capacity, minimum_alignment)?;
+        byte_capacity = align_stable_resource_offset(byte_capacity, minimum_alignment)?;
         offsets.push(byte_capacity);
-        byte_capacity = byte_capacity.checked_add(*byte_count).ok_or_else(|| {
-            VulkanError(
-                "sparse stable resource group capacity overflowed".to_string(),
-            )
-        })?;
+        byte_capacity = byte_capacity
+            .checked_add(*byte_count)
+            .ok_or_else(|| VulkanError("stable resource group capacity overflowed".to_string()))?;
     }
-    byte_capacity =
-        align_stable_resource_offset(byte_capacity, page_alignment)?;
+    byte_capacity = align_stable_resource_offset(byte_capacity, minimum_alignment)?;
     Ok((offsets, byte_capacity))
 }
 
-fn sparse_stable_resource_placement_for_slots(
-    state: &VulkanSparseStableResourceState,
+fn stable_resource_placement_for_slots(
+    layouts: &VulkanStableResourceArenaLayouts,
     requested_slots: &[usize],
     sorted_slots: &[usize],
-) -> Result<VulkanSparseStableResourcePlacement, VulkanError> {
-    if let Some(placement) = state.placements.get(sorted_slots) {
+) -> Result<VulkanStableResourcePlacement, VulkanError> {
+    if let Some(placement) = layouts.explicit.get(sorted_slots) {
         return Ok(placement.clone());
     }
-    'partitioned_layout: for partitioned in
-        &state.partitioned_placements
-    {
+    'partitioned_layout: for partitioned in &layouts.partitioned {
         if requested_slots.len() != partitioned.member_slot_bases.len() {
             continue;
         }
         let mut partition_index = None;
-        let mut requested_member_indices =
-            Vec::with_capacity(requested_slots.len());
+        let mut requested_member_indices = Vec::with_capacity(requested_slots.len());
         let mut seen_member_indices = BTreeSet::new();
         for slot in requested_slots {
             let Some((member_index, selected_partition_index)) =
-                partitioned
-                    .member_slot_bases
-                    .iter()
-                    .enumerate()
-                    .find_map(|(member_index, base)| {
+                partitioned.member_slot_bases.iter().enumerate().find_map(
+                    |(member_index, base)| {
                         slot.checked_sub(*base)
-                            .filter(|index| {
-                                *index < partitioned.partition_count
-                            })
+                            .filter(|index| *index < partitioned.partition_count)
                             .map(|index| (member_index, index))
-                    })
+                    },
+                )
             else {
                 continue 'partitioned_layout;
             };
             if !seen_member_indices.insert(member_index)
-                || partition_index
-                    .is_some_and(|index| {
-                        index != selected_partition_index
-                    })
+                || partition_index.is_some_and(|index| index != selected_partition_index)
             {
                 continue 'partitioned_layout;
             }
             partition_index = Some(selected_partition_index);
             requested_member_indices.push(member_index);
         }
-        let partition_index =
-            partition_index.expect("partition layout has requested members");
-        let group_byte_offset = partitioned
-            .group_byte_capacity
-            .checked_mul(partition_index)
-            .and_then(|offset| {
-                partitioned.groups_byte_offset.checked_add(offset)
-            })
-            .ok_or_else(|| {
-                VulkanError(
-                    "partitioned sparse resource placement overflowed".to_string(),
-                )
-            })?;
+        partition_index.expect("partition layout has requested members");
         let resource_byte_offsets = requested_member_indices
             .iter()
-            .map(|member_index| {
-                group_byte_offset
-                    .checked_add(
-                        partitioned.resource_byte_offsets[*member_index],
-                    )
-                    .ok_or_else(|| {
-                        VulkanError(
-                            "partitioned sparse member offset overflowed"
-                                .to_string(),
-                        )
-                    })
-            })
+            .map(|member_index| Ok(partitioned.resource_byte_offsets[*member_index]))
             .collect::<Result<Vec<_>, _>>()?;
         let resource_byte_counts = requested_member_indices
             .iter()
-            .map(|member_index| {
-                partitioned.resource_byte_counts[*member_index]
-            })
+            .map(|member_index| partitioned.resource_byte_counts[*member_index])
             .collect();
-        return Ok(VulkanSparseStableResourcePlacement {
+        return Ok(VulkanStableResourcePlacement {
             resource_slots: requested_slots.to_vec(),
             resource_byte_offsets,
             resource_byte_counts,
-            group_byte_offset,
             group_byte_capacity: partitioned.group_byte_capacity,
         });
     }
     Err(VulkanError(
-        "sparse stable resource group has no compiled virtual placement"
-            .to_string(),
+        "stable resource group has no compiled placement".to_string(),
     ))
 }
 
-fn allocate_sparse_stable_resource_groups(
-    sparse: &Arc<VulkanSparseStableResourceBacking>,
+fn allocate_stable_resource_groups(
+    device_handle: vk::Device,
+    layouts: &Arc<VulkanStableResourceArenaLayouts>,
+    arena_state: &Arc<std::sync::Mutex<VulkanStableResourceArenaState>>,
     device: &VulkanComputeDevice,
     config: &VulkanStableResourceArenaConfig,
     groups: &[(&[usize], &[usize])],
     alignment: usize,
 ) -> Result<Vec<Vec<Arc<VulkanStableResourceAllocation>>>, VulkanError> {
-    if device.device.handle() != sparse.device_handle {
+    if device.device.handle() != device_handle {
         return Err(VulkanError(
-            "sparse stable resources were requested from another logical device"
-                .to_string(),
+            "stable resources were requested from another logical device".to_string(),
         ));
     }
     if alignment != config.minimum_alignment {
         return Err(VulkanError(format!(
-            "sparse stable resource allocation alignment {alignment} differs from its compiled layout alignment {}",
+            "stable resource allocation alignment {alignment} differs from its compiled layout alignment {}",
             config.minimum_alignment
         )));
     }
-    let mut state = sparse.state.lock().map_err(|_| {
-        VulkanError(
-            "sparse stable resource arena state lock was poisoned".to_string(),
-        )
-    })?;
-    let buffer = state.buffer.as_ref().cloned().ok_or_else(|| {
-        VulkanError(
-            "sparse stable resource arena backing was already released"
-                .to_string(),
-        )
-    })?;
+    let mut state = arena_state
+        .lock()
+        .map_err(|_| VulkanError("stable resource arena state lock was poisoned".to_string()))?;
     let mut requested_keys = BTreeSet::new();
     let mut placements = Vec::with_capacity(groups.len());
-    let mut physical_byte_count = 0usize;
+    let mut chunk_byte_capacity = 0usize;
     let mut payload_byte_count = 0usize;
     let mut resource_count = 0usize;
     for (slots, byte_counts) in groups {
@@ -595,17 +455,10 @@ fn allocate_sparse_stable_resource_groups(
             || state.active_groups.contains_key(&group_key)
         {
             return Err(VulkanError(
-                "sparse stable resource group allocation is duplicated or invalid"
-                    .to_string(),
+                "stable resource group allocation is duplicated or invalid".to_string(),
             ));
         }
-        let already_backed = state.resident_groups.contains(&group_key);
-        let placement =
-            sparse_stable_resource_placement_for_slots(
-                &state,
-                slots,
-                &group_key,
-            )?;
+        let placement = stable_resource_placement_for_slots(layouts, slots, &group_key)?;
         for (slot, byte_count) in slots.iter().zip(*byte_counts) {
             let placement_index = placement
                 .resource_slots
@@ -613,188 +466,132 @@ fn allocate_sparse_stable_resource_groups(
                 .position(|candidate| candidate == slot)
                 .ok_or_else(|| {
                     VulkanError(
-                        "sparse stable resource request contains an unknown group member"
-                            .to_string(),
+                        "stable resource request contains an unknown group member".to_string(),
                     )
                 })?;
-            if placement.resource_byte_counts[placement_index]
-                != *byte_count
-            {
+            if placement.resource_byte_counts[placement_index] != *byte_count {
                 return Err(VulkanError(
-                    "sparse stable resource request differs from its compiled virtual placement"
-                        .to_string(),
+                    "stable resource request differs from its compiled placement".to_string(),
                 ));
             }
-            payload_byte_count = payload_byte_count
-                .checked_add(*byte_count)
-                .ok_or_else(|| {
-                    VulkanError(
-                        "sparse stable resource payload capacity overflowed"
-                            .to_string(),
-                    )
-                })?;
+            payload_byte_count = payload_byte_count.checked_add(*byte_count).ok_or_else(|| {
+                VulkanError("stable resource payload capacity overflowed".to_string())
+            })?;
         }
-        if !already_backed {
-            physical_byte_count = physical_byte_count
+        chunk_byte_capacity =
+            align_stable_resource_offset(chunk_byte_capacity, config.minimum_alignment)?
                 .checked_add(placement.group_byte_capacity)
                 .ok_or_else(|| {
-                    VulkanError(
-                        "sparse stable resource backing capacity overflowed"
-                            .to_string(),
-                    )
+                    VulkanError("stable resource chunk capacity overflowed".to_string())
                 })?;
-        }
-        resource_count =
-            resource_count.checked_add(slots.len()).ok_or_else(|| {
-                VulkanError(
-                    "sparse stable resource allocation count overflowed"
-                        .to_string(),
-                )
-            })?;
-        placements.push((
-            placement,
-            group_key,
-            slots.to_vec(),
-            already_backed,
-        ));
+        resource_count = resource_count.checked_add(slots.len()).ok_or_else(|| {
+            VulkanError("stable resource allocation count overflowed".to_string())
+        })?;
+        placements.push((placement, group_key, slots.to_vec()));
     }
     let committed_byte_capacity = state
         .committed_byte_capacity
-        .checked_add(physical_byte_count)
-        .ok_or_else(|| {
-            VulkanError(
-                "sparse stable resource committed capacity overflowed"
-                    .to_string(),
-            )
-        })?;
+        .checked_add(chunk_byte_capacity)
+        .ok_or_else(|| VulkanError("stable resource committed capacity overflowed".to_string()))?;
     if committed_byte_capacity > config.committed_byte_capacity {
         return Err(VulkanError(format!(
-            "sparse stable resources need {physical_byte_count} additional physical bytes, but {} of {} bytes are already committed",
-            state.committed_byte_capacity,
-            config.committed_byte_capacity
+            "stable resources need {chunk_byte_capacity} additional physical bytes, but {} of {} bytes are already committed",
+            state.committed_byte_capacity, config.committed_byte_capacity
         )));
     }
     state
         .next_allocation_id
-        .checked_add(u64::try_from(resource_count).map_err(|_| {
-            VulkanError(
-                "sparse stable resource allocation count exceeds u64".to_string(),
-            )
-        })?)
-        .ok_or_else(|| {
-            VulkanError(
-                "sparse stable resource allocation ids exhausted".to_string(),
-            )
-        })?;
+        .checked_add(
+            u64::try_from(resource_count).map_err(|_| {
+                VulkanError("stable resource allocation count exceeds u64".to_string())
+            })?,
+        )
+        .ok_or_else(|| VulkanError("stable resource allocation ids exhausted".to_string()))?;
     let allocated_byte_count = state
         .allocated_byte_count
         .checked_add(payload_byte_count)
-        .ok_or_else(|| {
-            VulkanError(
-                "sparse stable resource allocated payload overflowed"
-                    .to_string(),
-            )
-        })?;
-    let base_address = buffer.device_address()?;
-    for (placement, _, _, _) in &placements {
-        for byte_offset in &placement.resource_byte_offsets {
-            base_address
-                .checked_add(u64::try_from(*byte_offset).map_err(|_| {
-                    VulkanError(
-                        "sparse stable resource offset exceeds u64".to_string(),
-                    )
-                })?)
-                .ok_or_else(|| {
-                    VulkanError(
-                        "sparse stable resource address overflowed".to_string(),
-                    )
-                })?;
+        .ok_or_else(|| VulkanError("stable resource allocated payload overflowed".to_string()))?;
+    let chunk_id = state.next_chunk_id;
+    state.next_chunk_id = state
+        .next_chunk_id
+        .checked_add(1)
+        .ok_or_else(|| VulkanError("stable resource chunk ids exhausted".to_string()))?;
+    let mut buffer = match config.memory_domain {
+        VulkanStableResourceMemoryDomain::Device => {
+            device.create_addressable_resident_buffer(chunk_byte_capacity)?
         }
-    }
-    let block = if physical_byte_count == 0 {
-        None
-    } else {
-        let block = Arc::new(device.allocate_sparse_addressable_memory(
-            physical_byte_count,
-            sparse.requirements,
-        )?);
-        let mut block_byte_offset = 0usize;
-        let binds = placements
-            .iter()
-            .filter(|(_, _, _, already_backed)| !already_backed)
-            .map(|(placement, _, _, _)| {
-                let binding = VulkanSparseResidentBufferBind {
-                    resource_byte_offset: placement.group_byte_offset,
-                    byte_count: placement.group_byte_capacity,
-                    memory: block.as_ref(),
-                    memory_byte_offset: block_byte_offset,
-                };
-                block_byte_offset += placement.group_byte_capacity;
-                binding
-            })
-            .collect::<Vec<_>>();
-        device.bind_sparse_resident_buffer_ranges(&buffer, &binds)?;
-        Some(block)
+        VulkanStableResourceMemoryDomain::HostVisible => {
+            device.create_host_visible_addressable_resident_buffer(chunk_byte_capacity)?
+        }
     };
+    if config.memory_domain == VulkanStableResourceMemoryDomain::HostVisible {
+        buffer.persistently_map()?;
+    }
+    let buffer = Arc::new(buffer);
+    let base_address = buffer.device_address()?;
 
     let mut allocation_groups = Vec::with_capacity(placements.len());
-    for (placement, group_key, requested_slots, _) in placements {
-        let mut allocations =
-            Vec::with_capacity(placement.resource_slots.len());
+    let mut group_byte_offset = 0usize;
+    for (placement, group_key, requested_slots) in placements {
+        group_byte_offset =
+            align_stable_resource_offset(group_byte_offset, config.minimum_alignment)?;
+        let mut allocations = Vec::with_capacity(placement.resource_slots.len());
         let allocation_group_key = Arc::<[usize]>::from(group_key.clone());
         for slot in requested_slots {
             let placement_index = placement
                 .resource_slots
                 .iter()
                 .position(|candidate| *candidate == slot)
-                .expect("sparse group member was prevalidated");
-            let byte_offset =
-                placement.resource_byte_offsets[placement_index];
-            let byte_count =
-                placement.resource_byte_counts[placement_index];
+                .expect("stable group member was prevalidated");
+            let byte_offset = group_byte_offset
+                .checked_add(placement.resource_byte_offsets[placement_index])
+                .ok_or_else(|| {
+                    VulkanError("stable resource member offset overflowed".to_string())
+                })?;
+            let byte_count = placement.resource_byte_counts[placement_index];
             let allocation_id = state.next_allocation_id;
             state.next_allocation_id += 1;
-            state.allocations.insert(allocation_id, byte_count);
+            state.allocations.insert(
+                allocation_id,
+                VulkanStableResourceAllocationRecord {
+                    byte_count,
+                    chunk_id,
+                },
+            );
             allocations.push(Arc::new(VulkanStableResourceAllocation {
                 allocation_id,
+                chunk_id,
                 group_key: Arc::clone(&allocation_group_key),
                 buffer: Arc::clone(&buffer),
-                sparse_backing: Arc::clone(sparse),
+                arena_state: Arc::clone(arena_state),
                 byte_offset,
                 byte_count,
                 device_address: base_address
                     .checked_add(
                         u64::try_from(byte_offset)
-                            .expect("sparse resource offset was prevalidated"),
+                            .expect("stable resource offset was prevalidated"),
                     )
-                    .expect("sparse resource address was prevalidated"),
+                    .expect("stable resource address was prevalidated"),
             }));
         }
         state
             .active_groups
             .insert(group_key.clone(), allocations.len());
-        state.resident_groups.insert(group_key);
         allocation_groups.push(allocations);
+        group_byte_offset = group_byte_offset
+            .checked_add(placement.group_byte_capacity)
+            .expect("stable chunk capacity was prevalidated");
     }
+    state.chunks.insert(
+        chunk_id,
+        VulkanStableResourceChunk {
+            byte_capacity: chunk_byte_capacity,
+            active_allocation_count: resource_count,
+        },
+    );
     state.allocated_byte_count = allocated_byte_count;
     state.committed_byte_capacity = committed_byte_capacity;
-    if let Some(block) = block {
-        state.blocks.push(block);
-    }
     Ok(allocation_groups)
-}
-
-impl Drop for VulkanSparseStableResourceBacking {
-    fn drop(&mut self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        let buffer = state.buffer.take();
-        let blocks = std::mem::take(&mut state.blocks);
-        drop(state);
-        drop(buffer);
-        drop(blocks);
-    }
 }
 
 impl VulkanStableResourceAllocation {
@@ -825,36 +622,40 @@ impl VulkanStableResourceAllocation {
 
 impl Drop for VulkanStableResourceAllocation {
     fn drop(&mut self) {
-        let Ok(mut state) = self.sparse_backing.state.lock() else {
+        let Ok(mut state) = self.arena_state.lock() else {
             return;
         };
-        let Some(byte_count) =
-            state.allocations.remove(&self.allocation_id)
-        else {
-            debug_assert!(
-                false,
-                "sparse stable resource allocation was released twice"
-            );
+        let Some(record) = state.allocations.remove(&self.allocation_id) else {
+            debug_assert!(false, "stable resource allocation was released twice");
             return;
         };
-        debug_assert_eq!(byte_count, self.byte_count);
-        state.allocated_byte_count =
-            state.allocated_byte_count.saturating_sub(byte_count);
+        debug_assert_eq!(record.byte_count, self.byte_count);
+        debug_assert_eq!(record.chunk_id, self.chunk_id);
+        state.allocated_byte_count = state.allocated_byte_count.saturating_sub(record.byte_count);
         let mut remove_active_group = false;
-        if let Some(active_allocation_count) =
-            state.active_groups.get_mut(self.group_key.as_ref())
+        if let Some(active_allocation_count) = state.active_groups.get_mut(self.group_key.as_ref())
         {
-            *active_allocation_count =
-                active_allocation_count.saturating_sub(1);
+            *active_allocation_count = active_allocation_count.saturating_sub(1);
             remove_active_group = *active_allocation_count == 0;
         } else {
-            debug_assert!(
-                false,
-                "sparse stable resource allocation lost its active group"
-            );
+            debug_assert!(false, "stable resource allocation lost its active group");
         }
         if remove_active_group {
             state.active_groups.remove(self.group_key.as_ref());
+        }
+        let mut remove_chunk = false;
+        if let Some(chunk) = state.chunks.get_mut(&self.chunk_id) {
+            chunk.active_allocation_count = chunk.active_allocation_count.saturating_sub(1);
+            remove_chunk = chunk.active_allocation_count == 0;
+        } else {
+            debug_assert!(false, "stable resource allocation lost its chunk");
+        }
+        if remove_chunk {
+            if let Some(chunk) = state.chunks.remove(&self.chunk_id) {
+                state.committed_byte_capacity = state
+                    .committed_byte_capacity
+                    .saturating_sub(chunk.byte_capacity);
+            }
         }
     }
 }
@@ -871,8 +672,7 @@ pub struct VulkanStableResourceAddressRecord {
 
 impl VulkanStableResourceAddressRecord {
     fn bytes(self) -> [u8; VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT] {
-        let mut bytes =
-            [0u8; VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT];
+        let mut bytes = [0u8; VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT];
         bytes[0..8].copy_from_slice(&self.device_address.to_le_bytes());
         bytes[8..16].copy_from_slice(&self.byte_count.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.generation.to_le_bytes());
@@ -918,16 +718,13 @@ impl VulkanStableResourceAddressTable {
     ) -> Result<Self, VulkanError> {
         if slot_count == 0 {
             return Err(VulkanError(
-                "stable resource address table must have at least one slot"
-                    .to_string(),
+                "stable resource address table must have at least one slot".to_string(),
             ));
         }
         let byte_capacity = slot_count
             .checked_mul(VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT)
             .ok_or_else(|| {
-                VulkanError(
-                    "stable resource address table capacity overflowed".to_string(),
-                )
+                VulkanError("stable resource address table capacity overflowed".to_string())
             })?;
         if byte_capacity > transfer.staging_byte_capacity() {
             return Err(VulkanError(format!(
@@ -964,10 +761,7 @@ impl VulkanStableResourceAddressTable {
         self.records.len()
     }
 
-    pub fn record(
-        &self,
-        slot: usize,
-    ) -> Result<VulkanStableResourceAddressRecord, VulkanError> {
+    pub fn record(&self, slot: usize) -> Result<VulkanStableResourceAddressRecord, VulkanError> {
         self.records.get(slot).copied().ok_or_else(|| {
             VulkanError(format!(
                 "stable resource address table slot {slot} is out of bounds for {} slots",
@@ -1001,16 +795,12 @@ impl VulkanStableResourceAddressTable {
                     self.records.len()
                 ))
             })?;
-            if previous.resident != 0
-                || self.resident_allocations[*slot].is_some()
-            {
+            if previous.resident != 0 || self.resident_allocations[*slot].is_some() {
                 return Err(VulkanError(format!(
                     "stable resource address table slot {slot} is already resident"
                 )));
             }
-            if allocation.buffer.device.handle()
-                != self.buffer.device.handle()
-            {
+            if allocation.buffer.device.handle() != self.buffer.device.handle() {
                 return Err(VulkanError(format!(
                     "stable resource address table slot {slot} cannot publish an allocation from another logical device"
                 )));
@@ -1020,12 +810,8 @@ impl VulkanStableResourceAddressTable {
                     "stable resource address table slot {slot} exhausted its generations"
                 ))
             })?;
-            let byte_count =
-                u64::try_from(allocation.byte_count()).map_err(|_| {
-                    VulkanError(
-                        "stable resource byte count exceeds u64".to_string(),
-                    )
-                })?;
+            let byte_count = u64::try_from(allocation.byte_count())
+                .map_err(|_| VulkanError("stable resource byte count exceeds u64".to_string()))?;
             let record = VulkanStableResourceAddressRecord {
                 device_address: allocation.device_address(),
                 byte_count,
@@ -1043,6 +829,138 @@ impl VulkanStableResourceAddressTable {
         }
         self.submit_updates(transfer, &updates)?;
         Ok(publications)
+    }
+
+    pub fn allocations_for_publications(
+        &self,
+        publications: &[VulkanStableResourceAddressPublication],
+    ) -> Result<Vec<Arc<VulkanStableResourceAllocation>>, VulkanError> {
+        if publications.is_empty() {
+            return Err(VulkanError(
+                "stable resource publication group must not be empty".to_string(),
+            ));
+        }
+        let mut slots = BTreeSet::new();
+        publications
+            .iter()
+            .map(|publication| {
+                if !slots.insert(publication.slot) {
+                    return Err(VulkanError(format!(
+                        "stable resource publication group repeats slot {}",
+                        publication.slot
+                    )));
+                }
+                self.allocation_for_publication(publication)
+            })
+            .collect()
+    }
+
+    pub fn swap_groups(
+        &mut self,
+        transfer: &mut VulkanResidentTransferStream,
+        left: &[VulkanStableResourceAddressPublication],
+        right: &[VulkanStableResourceAddressPublication],
+    ) -> Result<
+        (
+            Vec<VulkanStableResourceAddressPublication>,
+            Vec<VulkanStableResourceAddressPublication>,
+        ),
+        VulkanError,
+    > {
+        if left.is_empty() || left.len() != right.len() {
+            return Err(VulkanError(format!(
+                "stable resource exchange needs two non-empty groups of equal length, got {} and {}",
+                left.len(),
+                right.len()
+            )));
+        }
+        let mut slots = BTreeSet::new();
+        for publication in left.iter().chain(right) {
+            if !slots.insert(publication.slot) {
+                return Err(VulkanError(format!(
+                    "stable resource exchange repeats slot {}",
+                    publication.slot
+                )));
+            }
+        }
+        let left_allocations = left
+            .iter()
+            .map(|publication| self.allocation_for_publication(publication))
+            .collect::<Result<Vec<_>, _>>()?;
+        let right_allocations = right
+            .iter()
+            .map(|publication| self.allocation_for_publication(publication))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut updates = Vec::with_capacity(left.len() * 2);
+        let mut exchanged_left = Vec::with_capacity(left.len());
+        let mut exchanged_right = Vec::with_capacity(right.len());
+        for (((left_publication, left_allocation), right_publication), right_allocation) in left
+            .iter()
+            .zip(&left_allocations)
+            .zip(right)
+            .zip(&right_allocations)
+        {
+            if left_allocation.byte_count() != right_allocation.byte_count() {
+                return Err(VulkanError(format!(
+                    "stable resource exchange slots {} and {} have incompatible byte counts {} and {}",
+                    left_publication.slot,
+                    right_publication.slot,
+                    left_allocation.byte_count(),
+                    right_allocation.byte_count()
+                )));
+            }
+            let left_generation = left_publication.generation.checked_add(1).ok_or_else(|| {
+                VulkanError(format!(
+                    "stable resource address table slot {} exhausted its generations",
+                    left_publication.slot
+                ))
+            })?;
+            let right_generation =
+                right_publication.generation.checked_add(1).ok_or_else(|| {
+                    VulkanError(format!(
+                        "stable resource address table slot {} exhausted its generations",
+                        right_publication.slot
+                    ))
+                })?;
+            let byte_count = u64::try_from(left_allocation.byte_count())
+                .map_err(|_| VulkanError("stable resource byte count exceeds u64".to_string()))?;
+            updates.push((
+                left_publication.slot,
+                VulkanStableResourceAddressRecord {
+                    device_address: right_allocation.device_address(),
+                    byte_count,
+                    generation: left_generation,
+                    resident: 1,
+                    reserved: 0,
+                },
+                Some(Arc::clone(right_allocation)),
+            ));
+            updates.push((
+                right_publication.slot,
+                VulkanStableResourceAddressRecord {
+                    device_address: left_allocation.device_address(),
+                    byte_count,
+                    generation: right_generation,
+                    resident: 1,
+                    reserved: 0,
+                },
+                Some(Arc::clone(left_allocation)),
+            ));
+            exchanged_left.push(VulkanStableResourceAddressPublication {
+                slot: left_publication.slot,
+                generation: left_generation,
+                allocation_id: right_allocation.allocation_id(),
+                device_address: right_allocation.device_address(),
+            });
+            exchanged_right.push(VulkanStableResourceAddressPublication {
+                slot: right_publication.slot,
+                generation: right_generation,
+                allocation_id: left_allocation.allocation_id(),
+                device_address: left_allocation.device_address(),
+            });
+        }
+        self.submit_updates(transfer, &updates)?;
+        Ok((exchanged_left, exchanged_right))
     }
 
     pub fn clear_group(
@@ -1064,17 +982,13 @@ impl VulkanStableResourceAddressTable {
                     publication.slot
                 )));
             }
-            let record = self
-                .records
-                .get(publication.slot)
-                .copied()
-                .ok_or_else(|| {
-                    VulkanError(format!(
-                        "stable resource address table slot {} is out of bounds for {} slots",
-                        publication.slot,
-                        self.records.len()
-                    ))
-                })?;
+            let record = self.records.get(publication.slot).copied().ok_or_else(|| {
+                VulkanError(format!(
+                    "stable resource address table slot {} is out of bounds for {} slots",
+                    publication.slot,
+                    self.records.len()
+                ))
+            })?;
             if record.resident != 1
                 || record.generation != publication.generation
                 || record.device_address != publication.device_address
@@ -1091,14 +1005,12 @@ impl VulkanStableResourceAddressTable {
             updates.push((
                 publication.slot,
                 VulkanStableResourceAddressRecord {
-                    generation: record.generation.checked_add(1).ok_or_else(
-                        || {
-                            VulkanError(format!(
-                                "stable resource address table slot {} exhausted its generations",
-                                publication.slot
-                            ))
-                        },
-                    )?,
+                    generation: record.generation.checked_add(1).ok_or_else(|| {
+                        VulkanError(format!(
+                            "stable resource address table slot {} exhausted its generations",
+                            publication.slot
+                        ))
+                    })?,
                     ..VulkanStableResourceAddressRecord::default()
                 },
                 None,
@@ -1110,13 +1022,11 @@ impl VulkanStableResourceAddressTable {
     fn submit_updates(
         &mut self,
         transfer: &mut VulkanResidentTransferStream,
-        updates: &[
-            (
-                usize,
-                VulkanStableResourceAddressRecord,
-                Option<Arc<VulkanStableResourceAllocation>>,
-            )
-        ],
+        updates: &[(
+            usize,
+            VulkanStableResourceAddressRecord,
+            Option<Arc<VulkanStableResourceAllocation>>,
+        )],
     ) -> Result<(), VulkanError> {
         let encoded = updates
             .iter()
@@ -1128,33 +1038,31 @@ impl VulkanStableResourceAddressTable {
             .map(|((slot, _, _), bytes)| {
                 VulkanResidentBufferWriteRange::new(
                     &self.buffer,
-                    slot.checked_mul(
-                        VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT,
-                    )
-                    .ok_or_else(|| {
-                        VulkanError(
-                            "stable resource address table byte offset overflowed"
-                                .to_string(),
-                        )
-                    })?,
+                    slot.checked_mul(VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT)
+                        .ok_or_else(|| {
+                            VulkanError(
+                                "stable resource address table byte offset overflowed".to_string(),
+                            )
+                        })?,
                     bytes,
                 )
             })
             .collect::<Result<Vec<_>, VulkanError>>()?;
-        let provisional_slots = updates
+        let previous_allocations = updates
             .iter()
-            .filter_map(|(slot, _, allocation)| {
-                allocation.as_ref().map(|allocation| {
-                    self.resident_allocations[*slot] =
-                        Some(Arc::clone(allocation));
-                    *slot
-                })
-            })
+            .map(|(slot, _, _)| (*slot, self.resident_allocations[*slot].clone()))
             .collect::<Vec<_>>();
+        updates
+            .iter()
+            .for_each(|(slot, _, allocation)| {
+                if let Some(allocation) = allocation {
+                    self.resident_allocations[*slot] = Some(Arc::clone(allocation));
+                }
+            });
         if let Err(failure) = transfer.submit_consumer_serialized(&writes) {
             if !failure.submission_accepted {
-                for slot in provisional_slots {
-                    self.resident_allocations[slot] = None;
+                for (slot, allocation) in previous_allocations {
+                    self.resident_allocations[slot] = allocation;
                 }
             }
             return Err(failure.error);
@@ -1165,11 +1073,41 @@ impl VulkanStableResourceAddressTable {
         }
         Ok(())
     }
+
+    fn allocation_for_publication(
+        &self,
+        publication: &VulkanStableResourceAddressPublication,
+    ) -> Result<Arc<VulkanStableResourceAllocation>, VulkanError> {
+        let record = self.records.get(publication.slot).copied().ok_or_else(|| {
+            VulkanError(format!(
+                "stable resource address table slot {} is out of bounds for {} slots",
+                publication.slot,
+                self.records.len()
+            ))
+        })?;
+        let allocation = self.resident_allocations[publication.slot]
+            .as_ref()
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "stable resource address table slot {} is not resident",
+                    publication.slot
+                ))
+            })?;
+        if record.resident != 1
+            || record.generation != publication.generation
+            || record.device_address != publication.device_address
+            || allocation.allocation_id() != publication.allocation_id
+        {
+            return Err(VulkanError(format!(
+                "stable resource address table slot {} no longer matches its publication",
+                publication.slot
+            )));
+        }
+        Ok(Arc::clone(allocation))
+    }
 }
 
-fn validate_stable_resource_alignment(
-    alignment: usize,
-) -> Result<(), VulkanError> {
+fn validate_stable_resource_alignment(alignment: usize) -> Result<(), VulkanError> {
     if alignment < std::mem::align_of::<u64>() || !alignment.is_power_of_two() {
         return Err(VulkanError(format!(
             "stable resource alignment {alignment} must be a power of two at least {}",

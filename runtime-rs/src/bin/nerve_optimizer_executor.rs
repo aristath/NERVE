@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 use nerve_runtime::{
     RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
     VulkanResidentBufferPool, VulkanResidentModelPackageManifest,
-    VulkanResidentTargetedExecutionSession,
-    VulkanResidentTargetedModelPackageDeviceSlice,
+    VulkanResidentTargetedExecutionSession, VulkanResidentTargetedModelPackageDeviceSlice,
     VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
 };
 use serde::Deserialize;

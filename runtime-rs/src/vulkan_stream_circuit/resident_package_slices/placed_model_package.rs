@@ -69,6 +69,18 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .map(Arc::as_ref)
     }
 
+    fn adaptive_retiering_stores(&self) -> Vec<Arc<VulkanCompiledResourceDeviceStore>> {
+        let mut stores = BTreeMap::new();
+        for store in self.compiled_resource_device_stores.values() {
+            if store.supports_adaptive_retiering() {
+                stores
+                    .entry(store.device_id().to_string())
+                    .or_insert_with(|| Arc::clone(store));
+            }
+        }
+        stores.into_values().collect()
+    }
+
     pub fn compiled_resource_physical_placements(
         &self,
     ) -> &[VulkanCompiledResourcePhysicalPlacement] {

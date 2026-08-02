@@ -462,8 +462,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
             } else {
                 &VulkanPlacedEdgeTransportStats::default()
             };
-            let sampled_token_id = (block_index + 1 == block_width)
-                .then_some(block_run.sampled_token_id)
+            let sampled_token = (block_index + 1 == block_width)
+                .then_some(block_run.sampled_token)
                 .flatten();
             let output_event = self
                 .active_input_event
@@ -475,7 +475,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                     block_run.scheduler_turn_count_per_tick,
                     block_run.completed_stage_count_per_tick,
                     transport_stats,
-                    sampled_token_id,
+                    sampled_token,
                 )?;
             self.session.next_stream_tick = stream_tick
                 .checked_add(1)
@@ -538,12 +538,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 stream_tick,
                 tail,
             )?;
-        let sampled_token_id = if activation.should_emit_public_output {
+        let sampled_token = if activation.should_emit_public_output {
             Some(
-                self.processor
+                VulkanResidentSampledToken::from(&self.processor
                     .sampler
-                    .completed_token_id()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?,
+                    .completed_run()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?),
             )
         } else {
             None
@@ -564,7 +564,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 placed_run.scheduler_turn_count,
                 placed_run.completed_stage_delta,
                 &placed_run.transport_stats,
-                sampled_token_id,
+                sampled_token,
             )?;
         self.session.next_stream_tick = stream_tick
             .checked_add(1)
@@ -767,7 +767,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .expect("speculative feedback cycle requires an active input event")
             .speculative_decode
             .record_cycle(&cycle);
-        for sampled_token_id in cycle.verification.emitted_token_ids {
+        for sampled_token in cycle.verification.emitted_tokens {
             let stream_tick = self.session.next_stream_tick;
             let output_event = {
                 let active = self
@@ -783,7 +783,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                     0,
                     0,
                     &VulkanPlacedEdgeTransportStats::default(),
-                    Some(sampled_token_id),
+                    Some(sampled_token),
                 )?
             };
             self.session.next_stream_tick = stream_tick
@@ -970,7 +970,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let completion = processor.complete_resident_feedback_window(
             pending.window,
             | _tick_index,
-              sampled_token_id,
+              sampled_token,
               scheduler_turn_count,
               completed_stage_count,
               closes_after_device_cancel,
@@ -992,7 +992,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                         transport_stats,
                         activation
                             .should_emit_public_output
-                            .then_some(sampled_token_id),
+                            .then_some(sampled_token),
                     )?;
                     if closes_after_device_cancel {
                         active_input_event.stop_after_current("cancelled");
@@ -1136,6 +1136,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let session_run = self
             .session
             .complete_prompt_event(start_stream_tick, event_run)?;
+        self.retier_compiled_resources_at_prompt_boundary()?;
         Ok(VulkanResidentInProcessPlacedSubmittedInputRun {
             input_event,
             pending_input_event_count: self.pending_input_event_count(),
@@ -1143,6 +1144,38 @@ impl VulkanResidentInProcessPlacedPromptStream {
             output_events,
             generated_token_ids,
         })
+    }
+
+    fn retier_compiled_resources_at_prompt_boundary(
+        &self,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let stores = self.package.adaptive_retiering_stores();
+        if stores.is_empty() {
+            return Ok(());
+        }
+        let telemetry = self.processor.selection_telemetry_snapshot(&self.devices)?;
+        for store in stores {
+            let logical_device_id = store.logical_device_ids().first().ok_or_else(|| {
+                selection_telemetry_error(format!(
+                    "adaptive resource store {:?} has no logical execution device",
+                    store.device_id()
+                ))
+            })?;
+            let device = self.devices.get(logical_device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: logical_device_id.clone(),
+                }
+            })?;
+            store
+                .retier_from_selection_telemetry(device, &telemetry)
+                .map_err(|error| {
+                    selection_telemetry_error(format!(
+                        "adaptive compiled-resource retiering failed for {:?}: {error}",
+                        store.device_id()
+                    ))
+                })?;
+        }
+        Ok(())
     }
 }
 

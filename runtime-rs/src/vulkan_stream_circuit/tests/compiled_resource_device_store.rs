@@ -32,7 +32,81 @@ fn compiled_resource_backing_workers_follow_wave_width_without_oversubscribing_c
 }
 
 #[test]
+fn exact_tiered_resource_plan_never_exceeds_either_memory_budget() {
+    let groups = BTreeMap::from([
+        ("identity-0".to_string(), 40usize),
+        ("identity-1".to_string(), 40usize),
+        ("identity-2".to_string(), 40usize),
+        ("identity-3".to_string(), 40usize),
+    ]);
+    let plan = VulkanCompiledResourceMemoryPlan::exact_tiered(&groups, 100, 80).unwrap();
+    assert_eq!(plan.device_payload_bytes, 80);
+    assert_eq!(plan.host_visible_payload_bytes, 80);
+    assert!(plan.device_payload_bytes <= 100);
+    assert!(plan.host_visible_payload_bytes <= 80);
+    assert_eq!(
+        plan.tier_for_group("identity-0").unwrap(),
+        VulkanCompiledResourceMemoryTier::Device
+    );
+    assert_eq!(
+        plan.tier_for_group("identity-3").unwrap(),
+        VulkanCompiledResourceMemoryTier::HostVisible
+    );
+}
+
+#[test]
+fn exact_tiered_resource_plan_rejects_host_overcommit_instead_of_falling_back() {
+    let groups = BTreeMap::from([
+        ("identity-0".to_string(), 60usize),
+        ("identity-1".to_string(), 60usize),
+        ("identity-2".to_string(), 60usize),
+    ]);
+    let error = VulkanCompiledResourceMemoryPlan::exact_tiered(&groups, 100, 60).unwrap_err();
+    assert!(error.to_string().contains("need 120 host-visible"));
+}
+
+#[test]
+fn exact_tiered_resource_plan_rejects_unknown_groups() {
+    let plan = VulkanCompiledResourceMemoryPlan::exact_tiered(
+        &BTreeMap::from([("known".to_string(), 8usize)]),
+        8,
+        8,
+    )
+    .unwrap();
+    assert!(plan.tier_for_group("unknown").is_err());
+}
+
+#[test]
+fn tiered_host_memory_budget_preserves_explicit_system_headroom() {
+    let capacity = parse_vulkan_host_memory_capacity(
+        "MemTotal:       67108864 kB\nMemAvailable:   41943040 kB\n",
+    )
+    .unwrap();
+    assert_eq!(capacity.total_bytes, 64 * 1024 * 1024 * 1024);
+    assert_eq!(capacity.available_bytes, 40 * 1024 * 1024 * 1024);
+    assert_eq!(
+        capacity.safe_tiered_payload_bytes(),
+        39 * 1024 * 1024 * 1024
+    );
+}
+
+#[test]
+fn tiered_host_memory_budget_rejects_missing_or_inconsistent_kernel_data() {
+    assert!(parse_vulkan_host_memory_capacity("MemTotal: 1024 kB\n").is_err());
+    assert!(
+        parse_vulkan_host_memory_capacity("MemTotal: 1024 kB\nMemAvailable: 2048 kB\n").is_err()
+    );
+    assert!(
+        parse_vulkan_host_memory_capacity("MemTotal: 1024 bytes\nMemAvailable: 512 kB\n").is_err()
+    );
+}
+
+#[test]
 fn compiled_resource_eviction_reclaims_complete_unprotected_allocation_cohorts() {
+    let cohort = |chunk_id| VulkanCompiledResourceAllocationCohort {
+        tier: VulkanCompiledResourceMemoryTier::Device,
+        chunk_id,
+    };
     let candidates = vec![
         DeviceResourceResidencyEvictionCandidate {
             group_id: "old-protected-sibling".to_string(),
@@ -53,26 +127,20 @@ fn compiled_resource_eviction_reclaims_complete_unprotected_allocation_cohorts()
     let group_chunks = BTreeMap::from([
         (
             "old-protected-sibling".to_string(),
-            BTreeSet::from([10]),
+            BTreeSet::from([cohort(10)]),
         ),
-        ("protected".to_string(), BTreeSet::from([10])),
-        ("next-a".to_string(), BTreeSet::from([20])),
-        ("next-b".to_string(), BTreeSet::from([20])),
+        ("protected".to_string(), BTreeSet::from([cohort(10)])),
+        ("next-a".to_string(), BTreeSet::from([cohort(20)])),
+        ("next-b".to_string(), BTreeSet::from([cohort(20)])),
     ]);
     let chunk_groups = BTreeMap::from([
         (
-            10,
-            BTreeSet::from([
-                "old-protected-sibling".to_string(),
-                "protected".to_string(),
-            ]),
+            cohort(10),
+            BTreeSet::from(["old-protected-sibling".to_string(), "protected".to_string()]),
         ),
         (
-            20,
-            BTreeSet::from([
-                "next-a".to_string(),
-                "next-b".to_string(),
-            ]),
+            cohort(20),
+            BTreeSet::from(["next-a".to_string(), "next-b".to_string()]),
         ),
     ]);
 
@@ -92,11 +160,162 @@ fn compiled_resource_eviction_reclaims_complete_unprotected_allocation_cohorts()
 }
 
 #[test]
+fn compiled_resource_eviction_preserves_selector_working_sets_across_a_cyclic_scan() {
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "layer-a-hot".to_string(),
+            byte_count: 40,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "layer-b-cold".to_string(),
+            byte_count: 40,
+            last_access_epoch: 20,
+        },
+    ];
+    let directory = vec![
+        DeviceResourceResidencyDirectoryEntry {
+            group_id: "layer-a-hot".to_string(),
+            state: ResourceResidencyState::Resident,
+            location: DeviceResourceResidencyLocation::Local {
+                device_id: "gpu0".to_string(),
+            },
+            byte_count: 100,
+            owner_count: 1,
+            active_lease_count: 0,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyDirectoryEntry {
+            group_id: "layer-b-cold".to_string(),
+            state: ResourceResidencyState::Resident,
+            location: DeviceResourceResidencyLocation::Local {
+                device_id: "gpu0".to_string(),
+            },
+            byte_count: 100,
+            owner_count: 1,
+            active_lease_count: 0,
+            last_access_epoch: 20,
+        },
+    ];
+    let group_selector_ids = BTreeMap::from([
+        ("layer-a-hot".to_string(), "layer-a".to_string()),
+        ("layer-b-cold".to_string(), "layer-b".to_string()),
+    ]);
+    let selector_payload_budgets =
+        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
+
+    let ordered = compiled_resource_selector_fair_eviction_candidates(
+        &candidates,
+        &directory,
+        &group_selector_ids,
+        &selector_payload_budgets,
+        "layer-b",
+        40,
+    )
+    .unwrap();
+
+    assert_eq!(ordered[0].group_id, "layer-b-cold");
+    assert_eq!(ordered[1].group_id, "layer-a-hot");
+}
+
+#[test]
+fn compiled_resource_eviction_reclaims_borrowed_capacity_before_an_under_budget_selector() {
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "under-budget-old".to_string(),
+            byte_count: 40,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "borrowed-newer".to_string(),
+            byte_count: 140,
+            last_access_epoch: 20,
+        },
+    ];
+    let directory = vec![
+        DeviceResourceResidencyDirectoryEntry {
+            group_id: "under-budget-old".to_string(),
+            state: ResourceResidencyState::Resident,
+            location: DeviceResourceResidencyLocation::Local {
+                device_id: "gpu0".to_string(),
+            },
+            byte_count: 40,
+            owner_count: 1,
+            active_lease_count: 0,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyDirectoryEntry {
+            group_id: "borrowed-newer".to_string(),
+            state: ResourceResidencyState::Resident,
+            location: DeviceResourceResidencyLocation::Local {
+                device_id: "gpu0".to_string(),
+            },
+            byte_count: 140,
+            owner_count: 1,
+            active_lease_count: 0,
+            last_access_epoch: 20,
+        },
+    ];
+    let group_selector_ids = BTreeMap::from([
+        ("under-budget-old".to_string(), "layer-a".to_string()),
+        ("borrowed-newer".to_string(), "layer-b".to_string()),
+    ]);
+    let selector_payload_budgets =
+        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
+
+    let ordered = compiled_resource_selector_fair_eviction_candidates(
+        &candidates,
+        &directory,
+        &group_selector_ids,
+        &selector_payload_budgets,
+        "layer-a",
+        40,
+    )
+    .unwrap();
+
+    assert_eq!(ordered[0].group_id, "borrowed-newer");
+    assert_eq!(ordered[1].group_id, "under-budget-old");
+}
+
+#[test]
+fn compiled_resource_eviction_falls_back_when_a_selector_has_no_evictable_group() {
+    let candidates = vec![DeviceResourceResidencyEvictionCandidate {
+        group_id: "fallback".to_string(),
+        byte_count: 40,
+        last_access_epoch: 1,
+    }];
+    let directory = vec![DeviceResourceResidencyDirectoryEntry {
+        group_id: "fallback".to_string(),
+        state: ResourceResidencyState::Resident,
+        location: DeviceResourceResidencyLocation::Local {
+            device_id: "gpu0".to_string(),
+        },
+        byte_count: 40,
+        owner_count: 1,
+        active_lease_count: 0,
+        last_access_epoch: 1,
+    }];
+    let group_selector_ids = BTreeMap::from([("fallback".to_string(), "layer-a".to_string())]);
+    let selector_payload_budgets =
+        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
+
+    let ordered = compiled_resource_selector_fair_eviction_candidates(
+        &candidates,
+        &directory,
+        &group_selector_ids,
+        &selector_payload_budgets,
+        "layer-b",
+        140,
+    )
+    .unwrap();
+
+    assert_eq!(ordered[0].group_id, "fallback");
+}
+
+#[test]
 fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
-    let device =
-        selected_test_vulkan_device().expect("selected Vulkan test device must open");
-    let root =
-        crate::test_support::TempDir::new("compiled_resource_device_store");
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let root = crate::test_support::TempDir::new("compiled_resource_device_store");
     let weight_bytes = b"abcdefghABCDEFGH";
     fs::write(root.path().join("weights.bin"), weight_bytes).unwrap();
     let mut digest_table = Vec::new();
@@ -104,17 +323,14 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     digest_table.extend_from_slice(&Sha256::digest(&weight_bytes[8..]));
     fs::write(root.path().join("digests.bin"), &digest_table).unwrap();
 
-    let content_id = |byte: char| {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    };
+    let content_id = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
     let template_id = content_id('1');
     let member_seed = content_id('2');
     let selector_id = content_id('3');
     let mut contract = CompiledResourceResidencyContract {
         schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
         identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
-        state_machine_schema:
-            RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
+        state_machine_schema: RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
         supported_policies: vec![
             ResourceResidencyPolicy::DemandRetained,
             ResourceResidencyPolicy::Eager,
@@ -149,9 +365,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
                     device_api: "vulkan".to_string(),
                     storage_class: "storage_buffer".to_string(),
                     read_only: true,
-                    required_features: vec![
-                        "buffer_device_address".to_string(),
-                    ],
+                    required_features: vec!["buffer_device_address".to_string()],
                 },
             }],
             dependencies: Vec::new(),
@@ -197,32 +411,17 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     unowned_selector.component_id = "other_component".to_string();
     contract.selectors.push(unowned_selector);
     let inspection = contract.inspection_report().unwrap();
-    assert_eq!(
-        inspection.supported_policies,
-        ["demand-retained", "eager"]
-    );
+    assert_eq!(inspection.supported_policies, ["demand-retained", "eager"]);
     assert_eq!(inspection.always_resident.unit_count, 0);
-    assert_eq!(
-        inspection.dynamically_addressable.unit_count,
-        2
-    );
-    assert_eq!(
-        inspection.dynamically_addressable.resource_count,
-        2
-    );
-    assert_eq!(
-        inspection.dynamically_addressable.maximum_payload_bytes,
-        16
-    );
+    assert_eq!(inspection.dynamically_addressable.unit_count, 2);
+    assert_eq!(inspection.dynamically_addressable.resource_count, 2);
+    assert_eq!(inspection.dynamically_addressable.maximum_payload_bytes, 16);
     assert_eq!(inspection.scopes.len(), 1);
     assert_eq!(inspection.scopes[0].component_count, 3);
     assert_eq!(inspection.scopes[0].selector_count, 3);
     assert_eq!(inspection.scopes[0].addressable_unit_count, 2);
     let contract = Arc::new(contract);
-    let layout = Arc::new(
-        VulkanCompiledResourceAddressLayout::from_contract(&contract)
-            .unwrap(),
-    );
+    let layout = Arc::new(VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap());
     let capacity_error = match VulkanCompiledResourceDeviceStore::new(
         &device,
         "amd-test",
@@ -231,10 +430,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         root.path(),
         Arc::clone(&contract),
         Arc::clone(&layout),
-        BTreeSet::from([
-            selector_id.clone(),
-            alias_selector_id.clone(),
-        ]),
+        BTreeSet::from([selector_id.clone(), alias_selector_id.clone()]),
         4096,
         4096,
         1024,
@@ -270,29 +466,17 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     )
     .unwrap();
     over_capacity_store.mark_mount_complete().unwrap();
-    let over_capacity_owner =
-        DeviceResourceResidencyOwnerId::new("over-capacity-graph").unwrap();
+    let over_capacity_owner = DeviceResourceResidencyOwnerId::new("over-capacity-graph").unwrap();
     over_capacity_store
-        .load_selector_resource(
-            &device,
-            &selector_id,
-            0,
-            over_capacity_owner.clone(),
-        )
+        .load_selector_resource(&device, &selector_id, 0, over_capacity_owner.clone())
         .unwrap();
-    let fitting_working_set =
-        over_capacity_store.residency_report().unwrap();
+    let fitting_working_set = over_capacity_store.residency_report().unwrap();
     assert_eq!(fitting_working_set.maximum_payload_bytes, 8);
     assert_eq!(fitting_working_set.current_payload_bytes, 8);
     assert_eq!(fitting_working_set.resident_unit_count, 1);
     assert_eq!(fitting_working_set.addressable_unit_count, 2);
     over_capacity_store
-        .load_selector_resource(
-            &device,
-            &selector_id,
-            1,
-            over_capacity_owner.clone(),
-        )
+        .load_selector_resource(&device, &selector_id, 1, over_capacity_owner.clone())
         .unwrap();
     let bounded_growth = over_capacity_store.residency_report().unwrap();
     assert_eq!(bounded_growth.current_payload_bytes, 8);
@@ -304,12 +488,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert!(bounded_growth.released_device_bytes >= 8);
 
     over_capacity_store
-        .load_selector_resource(
-            &device,
-            &selector_id,
-            0,
-            over_capacity_owner,
-        )
+        .load_selector_resource(&device, &selector_id, 0, over_capacity_owner)
         .unwrap();
     let reloaded = over_capacity_store.residency_report().unwrap();
     assert_eq!(reloaded.eviction_count, 2);
@@ -324,6 +503,268 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     );
     drop(over_capacity_store);
 
+    let tiered_store = VulkanCompiledResourceDeviceStore::new_tiered(
+        &device,
+        "amd-tiered-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
+        root.path(),
+        Arc::clone(&contract),
+        Arc::clone(&layout),
+        BTreeSet::from([selector_id.clone()]),
+        16,
+        8,
+        16,
+        256 * 1024,
+        8,
+        1,
+        128,
+        64,
+        layout.address_table_byte_count().unwrap(),
+    )
+    .unwrap();
+    let tiered_buffers = tiered_store
+        .dynamic_buffers_for_components(
+            &device,
+            "target",
+            &BTreeSet::from(["component".to_string()]),
+        )
+        .unwrap();
+    assert_eq!(
+        tiered_store
+            .load_all_allowed(
+                &device,
+                DeviceResourceResidencyOwnerId::new("tiered-eager").unwrap(),
+            )
+            .unwrap(),
+        2
+    );
+    tiered_store.mark_mount_complete().unwrap();
+    assert_eq!(
+        tiered_store.statistics().unwrap().dynamic_resident_bytes,
+        16
+    );
+    let tiered_plan = tiered_store.memory_plan.as_ref().unwrap().lock().unwrap();
+    assert_eq!(tiered_plan.device_payload_bytes, 8);
+    assert_eq!(tiered_plan.host_visible_payload_bytes, 8);
+    let tiered_groups = (0..2)
+        .map(|resource_index| {
+            tiered_store
+                .resolve_selector_resource(&selector_id, resource_index)
+                .unwrap()
+                .id()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let device_resource_index = tiered_groups
+        .iter()
+        .position(|group_id| {
+            tiered_plan.tier_for_group(group_id).unwrap()
+                == VulkanCompiledResourceMemoryTier::Device
+        })
+        .unwrap();
+    let host_resource_index = 1 - device_resource_index;
+    drop(tiered_plan);
+    assert_eq!(
+        tiered_store
+            .device_arena
+            .stats()
+            .unwrap()
+            .allocated_byte_count,
+        8
+    );
+    assert_eq!(
+        tiered_store
+            .host_visible_arena
+            .as_ref()
+            .unwrap()
+            .stats()
+            .unwrap()
+            .allocated_byte_count,
+        8
+    );
+    let tiered_address_words = tiered_buffers
+        .address_table()
+        .read_bytes(layout.slot_count() * 32)
+        .unwrap()
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    for resource_index in 0..2 {
+        let slot = layout.selectors[0]
+            .mapping
+            .resource_slots(resource_index)
+            .unwrap()[0];
+        assert_ne!(
+            tiered_address_words[slot * 8] | tiered_address_words[slot * 8 + 1],
+            0
+        );
+        assert_eq!(tiered_address_words[slot * 8 + 6], 1);
+    }
+    let malformed_telemetry = VulkanSelectionTelemetrySnapshot {
+        domains: vec![VulkanSelectionTelemetryDomainSnapshot {
+            execution_scope: "target".to_string(),
+            component_id: "component".to_string(),
+            node_id: "choose".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 2,
+            selection_counts: vec![1],
+        }],
+    };
+    assert!(tiered_store
+        .retier_from_selection_telemetry(&device, &malformed_telemetry)
+        .is_err());
+    let mut selection_counts = vec![1, 1];
+    selection_counts[host_resource_index] = 100;
+    let telemetry = VulkanSelectionTelemetrySnapshot {
+        domains: vec![VulkanSelectionTelemetryDomainSnapshot {
+            execution_scope: "target".to_string(),
+            component_id: "component".to_string(),
+            node_id: "choose".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 2,
+            selection_counts,
+        }],
+    };
+    let (publications_before_failure, group_chunks_before_failure, chunk_groups_before_failure) = {
+        let state = tiered_store.address_state.lock().unwrap();
+        (
+            state.publications.clone(),
+            state.group_chunks.clone(),
+            state.chunk_groups.clone(),
+        )
+    };
+    let tiers_before_failure = tiered_store
+        .memory_plan
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .group_tiers
+        .clone();
+    tiered_store.inject_retiering_failure_after_payload_exchange();
+    let injected_failure = tiered_store
+        .retier_from_selection_telemetry(&device, &telemetry)
+        .unwrap_err();
+    assert!(
+        injected_failure
+            .to_string()
+            .contains("injected compiled resource retiering failure")
+    );
+    {
+        let state = tiered_store.address_state.lock().unwrap();
+        assert_eq!(state.publications, publications_before_failure);
+        assert_eq!(state.group_chunks, group_chunks_before_failure);
+        assert_eq!(state.chunk_groups, chunk_groups_before_failure);
+    }
+    assert_eq!(
+        tiered_store
+            .memory_plan
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .group_tiers,
+        tiers_before_failure
+    );
+    for (resource_index, group_id) in tiered_groups.iter().enumerate() {
+        let allocation = {
+            let state = tiered_store.address_state.lock().unwrap();
+            let publications = state.publications.get(group_id).unwrap();
+            state
+                .address_table
+                .allocations_for_publications(publications)
+                .unwrap()
+                .remove(0)
+        };
+        let readback = device
+            .read_resident_buffer_ranges(&[VulkanResidentBufferReadRange::new(
+                allocation.buffer(),
+                allocation.buffer_byte_offset(),
+                allocation.byte_count(),
+            )
+            .unwrap()])
+            .unwrap();
+        assert_eq!(
+            readback.range_bytes(0).unwrap(),
+            &weight_bytes[resource_index * 8..(resource_index + 1) * 8],
+            "failed retiering must restore each logical resource's exact payload"
+        );
+    }
+    let retiering = tiered_store
+        .retier_from_selection_telemetry(&device, &telemetry)
+        .unwrap();
+    assert_eq!(retiering.promoted_group_count, 1);
+    assert_eq!(retiering.demoted_group_count, 1);
+    assert_eq!(retiering.promoted_payload_bytes, 8);
+    assert_eq!(retiering.copied_payload_bytes, 16);
+    let tiered_plan = tiered_store.memory_plan.as_ref().unwrap().lock().unwrap();
+    assert_eq!(
+        tiered_plan
+            .tier_for_group(&tiered_groups[host_resource_index])
+            .unwrap(),
+        VulkanCompiledResourceMemoryTier::Device
+    );
+    assert_eq!(
+        tiered_plan
+            .tier_for_group(&tiered_groups[device_resource_index])
+            .unwrap(),
+        VulkanCompiledResourceMemoryTier::HostVisible
+    );
+    drop(tiered_plan);
+    for (resource_index, group_id) in tiered_groups.iter().enumerate() {
+        let allocation = {
+            let state = tiered_store.address_state.lock().unwrap();
+            let publications = state.publications.get(group_id).unwrap();
+            state
+                .address_table
+                .allocations_for_publications(publications)
+                .unwrap()
+                .remove(0)
+        };
+        let readback = device
+            .read_resident_buffer_ranges(&[
+                VulkanResidentBufferReadRange::new(
+                    allocation.buffer(),
+                    allocation.buffer_byte_offset(),
+                    allocation.byte_count(),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(
+            readback.range_bytes(0).unwrap(),
+            &weight_bytes[resource_index * 8..(resource_index + 1) * 8],
+            "retiering must preserve each logical resource's exact payload"
+        );
+    }
+    assert_eq!(
+        tiered_store
+            .retier_from_selection_telemetry(&device, &telemetry)
+            .unwrap()
+            .promoted_group_count,
+        0,
+        "a stable hot set must not churn tiers"
+    );
+    let retiering_report = tiered_store.residency_report().unwrap();
+    assert_eq!(retiering_report.retiering_event_count, 2);
+    assert_eq!(retiering_report.retiering_promoted_group_count, 1);
+    assert_eq!(retiering_report.retiering_promoted_payload_bytes, 8);
+    assert_eq!(retiering_report.retiering_copied_payload_bytes, 16);
+    assert_eq!(retiering_report.retiering_device_selection_count, 100);
+    assert_eq!(retiering_report.retiering_host_visible_selection_count, 1);
+    assert!(retiering_report.retiering_time_ns > 0);
+    assert_eq!(
+        tiered_store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 2,
+            byte_count: 16,
+            cancelled_load_count: 0,
+        }
+    );
+    drop(tiered_buffers);
+    drop(tiered_store);
+
     let store = VulkanCompiledResourceDeviceStore::new(
         &device,
         "amd-test",
@@ -332,10 +773,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         root.path(),
         Arc::clone(&contract),
         Arc::clone(&layout),
-        BTreeSet::from([
-            selector_id.clone(),
-            alias_selector_id.clone(),
-        ]),
+        BTreeSet::from([selector_id.clone(), alias_selector_id.clone()]),
         4096,
         256 * 1024,
         1024,
@@ -362,65 +800,37 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(initial.addressable_unit_count, 2);
     assert_eq!(initial.always_resident_parameter_bytes, 128);
     assert_eq!(initial.runtime_working_set_device_bytes, 64);
-    assert!(
-        initial.initial_device_bytes
-            >= 128 + 64 + initial.metadata_device_bytes
-    );
+    assert!(initial.initial_device_bytes >= 128 + 64 + initial.metadata_device_bytes);
     assert_eq!(initial.scopes.len(), 1);
     assert_eq!(initial.scopes[0].execution_scope, "target");
     assert_eq!(initial.scopes[0].component_count, 2);
     assert_eq!(initial.scopes[0].addressable_unit_count, 2);
 
     let unowned_error = store
-        .load_selector_resource(
-            &device,
-            &unowned_selector_id,
-            0,
-            owner.clone(),
-        )
+        .load_selector_resource(&device, &unowned_selector_id, 0, owner.clone())
         .unwrap_err();
     assert!(unowned_error.to_string().contains("is unknown"));
 
     let mut corrupt_weight_bytes = weight_bytes.to_vec();
     corrupt_weight_bytes[8] ^= 0xff;
-    fs::write(
-        root.path().join("weights.bin"),
-        &corrupt_weight_bytes,
-    )
-    .unwrap();
+    fs::write(root.path().join("weights.bin"), &corrupt_weight_bytes).unwrap();
     let corrupt_error = store
-        .load_selector_resource(
-            &device,
-            &selector_id,
-            1,
-            owner.clone(),
-        )
+        .load_selector_resource(&device, &selector_id, 1, owner.clone())
         .unwrap_err();
     assert!(
-        corrupt_error
-            .to_string()
-            .contains("failed SHA-256"),
+        corrupt_error.to_string().contains("failed SHA-256"),
         "unexpected corrupt-resource error: {corrupt_error}"
     );
     fs::write(root.path().join("weights.bin"), weight_bytes).unwrap();
 
     store
-        .load_selector_resource(
-            &device,
-            &selector_id,
-            0,
-            owner.clone(),
-        )
+        .load_selector_resource(&device, &selector_id, 0, owner.clone())
         .unwrap();
     store
         .load_selector_resource(&device, &alias_selector_id, 0, owner)
         .unwrap();
-    store
-        .record_gpu_gate_misses(&selector_id, 2)
-        .unwrap();
-    store
-        .record_gpu_gate_misses(&alias_selector_id, 3)
-        .unwrap();
+    store.record_gpu_gate_misses(&selector_id, 2).unwrap();
+    store.record_gpu_gate_misses(&alias_selector_id, 3).unwrap();
 
     let stats = store.statistics().unwrap();
     assert_eq!(stats.miss_count, 2);
@@ -449,13 +859,9 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(report.physical_bytes_read, 8);
     assert_eq!(report.uploaded_bytes, 8);
     assert_eq!(report.components.len(), 2);
-    assert!(
-        report
-            .components
-            .iter()
-            .all(|component| component.addressable_unit_count == 2
-                && component.resident_unit_count == 1)
-    );
+    assert!(report.components.iter().all(
+        |component| component.addressable_unit_count == 2 && component.resident_unit_count == 1
+    ));
     assert_eq!(
         report
             .components
@@ -471,14 +877,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
         .collect::<Vec<_>>();
-    let selected_slot = layout.selectors[0]
-        .mapping
-        .resource_slots(0)
-        .unwrap()[0];
+    let selected_slot = layout.selectors[0].mapping.resource_slots(0).unwrap()[0];
     assert_eq!(address_words[selected_slot * 8 + 6], 1);
     assert_ne!(
-        address_words[selected_slot * 8]
-            | address_words[selected_slot * 8 + 1],
+        address_words[selected_slot * 8] | address_words[selected_slot * 8 + 1],
         0
     );
 
@@ -498,10 +900,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         )
         .unwrap_err();
     assert!(quiescing_error.to_string().contains("Quiescing"));
-    assert_eq!(
-        store.statistics().unwrap().dynamic_resident_bytes,
-        0
-    );
+    assert_eq!(store.statistics().unwrap().dynamic_resident_bytes, 0);
     let retained_words = buffers
         .address_table()
         .read_bytes(layout.slot_count() * 32)
@@ -515,10 +914,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
 
     assert_eq!(release.group_count, 1);
     assert_eq!(release.byte_count, 8);
-    assert_eq!(
-        store.statistics().unwrap().dynamic_resident_bytes,
-        0
-    );
+    assert_eq!(store.statistics().unwrap().dynamic_resident_bytes, 0);
     let unloaded = store.residency_report().unwrap();
     assert_eq!(unloaded.current_payload_bytes, 0);
     assert_eq!(unloaded.resident_unit_count, 0);
@@ -551,8 +947,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     drop(buffers);
     drop(store);
 
-    let baseline_file_descriptors =
-        compiled_store_process_file_descriptor_count();
+    let baseline_file_descriptors = compiled_store_process_file_descriptor_count();
     let baseline_workers = compiled_store_worker_thread_count();
     for cycle_index in 0..3 {
         let cycle_store = VulkanCompiledResourceDeviceStore::new(
@@ -563,10 +958,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             root.path(),
             Arc::clone(&contract),
             Arc::clone(&layout),
-            BTreeSet::from([
-                selector_id.clone(),
-                alias_selector_id.clone(),
-            ]),
+            BTreeSet::from([selector_id.clone(), alias_selector_id.clone()]),
             4096,
             256 * 1024,
             1024,
@@ -584,10 +976,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
                     &device,
                     &selector_id,
                     0,
-                    DeviceResourceResidencyOwnerId::new(
-                        "device-loss-owner",
-                    )
-                    .unwrap(),
+                    DeviceResourceResidencyOwnerId::new("device-loss-owner").unwrap(),
                 )
                 .unwrap_err();
             assert!(device_loss.to_string().contains("ERROR_DEVICE_LOST"));
@@ -596,24 +985,15 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
                     &device,
                     &selector_id,
                     1,
-                    DeviceResourceResidencyOwnerId::new(
-                        "post-device-loss-owner",
-                    )
-                    .unwrap(),
+                    DeviceResourceResidencyOwnerId::new("post-device-loss-owner").unwrap(),
                 )
                 .unwrap_err();
             assert!(terminal.to_string().contains("Failed"));
             assert!(terminal.to_string().contains("ERROR_DEVICE_LOST"));
             let cycle_release = cycle_store.unload().unwrap();
-            assert_eq!(
-                cycle_release,
-                DeviceResourceResidencyRelease::default()
-            );
+            assert_eq!(cycle_release, DeviceResourceResidencyRelease::default());
             drop(cycle_store);
-            assert_eq!(
-                compiled_store_worker_thread_count(),
-                baseline_workers
-            );
+            assert_eq!(compiled_store_worker_thread_count(), baseline_workers);
             assert_eq!(
                 compiled_store_process_file_descriptor_count(),
                 baseline_file_descriptors
@@ -628,10 +1008,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
                         &device,
                         &selector_id,
                         &[0, 1],
-                        DeviceResourceResidencyOwnerId::new(
-                            "batched-cycle",
-                        )
-                        .unwrap(),
+                        DeviceResourceResidencyOwnerId::new("batched-cycle",).unwrap(),
                     )
                     .unwrap(),
                 2
@@ -645,15 +1022,11 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
                     &device,
                     &selector_id,
                     0,
-                    DeviceResourceResidencyOwnerId::new(format!(
-                        "cycle-{cycle_index}"
-                    ))
-                    .unwrap(),
+                    DeviceResourceResidencyOwnerId::new(format!("cycle-{cycle_index}")).unwrap(),
                 )
                 .unwrap();
         }
-        let expected_payload_bytes =
-            if cycle_index == 1 { 16 } else { 8 };
+        let expected_payload_bytes = if cycle_index == 1 { 16 } else { 8 };
         assert_eq!(
             cycle_store
                 .residency_report()
@@ -669,10 +1042,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         );
         assert_eq!(cycle_release.byte_count, expected_payload_bytes);
         drop(cycle_store);
-        assert_eq!(
-            compiled_store_worker_thread_count(),
-            baseline_workers
-        );
+        assert_eq!(compiled_store_worker_thread_count(), baseline_workers);
         assert_eq!(
             compiled_store_process_file_descriptor_count(),
             baseline_file_descriptors
@@ -682,10 +1052,8 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
 
 #[test]
 fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
-    let device =
-        selected_test_vulkan_device().expect("selected Vulkan test device must open");
-    let root =
-        crate::test_support::TempDir::new("optional_output_head_residency");
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let root = crate::test_support::TempDir::new("optional_output_head_residency");
     let payloads = [
         &b"head0-w0"[..],
         &b"head0-b0"[..],
@@ -693,11 +1061,8 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         &b"head1-b1"[..],
     ];
     let artifact_bytes = payloads.concat();
-    fs::write(root.path().join("optional_heads.bin"), &artifact_bytes)
-        .unwrap();
-    let content_id = |byte: char| {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    };
+    fs::write(root.path().join("optional_heads.bin"), &artifact_bytes).unwrap();
+    let content_id = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
     let compatibility = CompiledResourceCompatibility {
         device_api: "vulkan".to_string(),
         storage_class: "storage_buffer".to_string(),
@@ -736,8 +1101,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
     let contract = Arc::new(CompiledResourceResidencyContract {
         schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
         identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
-        state_machine_schema:
-            RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
+        state_machine_schema: RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
         supported_policies: vec![
             ResourceResidencyPolicy::DemandRetained,
             ResourceResidencyPolicy::Eager,
@@ -782,14 +1146,8 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
     let inspection = contract.inspection_report().unwrap();
     assert_eq!(inspection.dynamically_addressable.unit_count, 2);
     assert_eq!(inspection.dynamically_addressable.resource_count, 4);
-    assert_eq!(
-        inspection.dynamically_addressable.maximum_payload_bytes,
-        32
-    );
-    let layout = Arc::new(
-        VulkanCompiledResourceAddressLayout::from_contract(&contract)
-            .unwrap(),
-    );
+    assert_eq!(inspection.dynamically_addressable.maximum_payload_bytes, 32);
+    let layout = Arc::new(VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap());
     let VulkanCompiledSelectorAddressMapping::GroupTable {
         resource_address_slots,
         resource_address_slot_offsets,
@@ -830,11 +1188,9 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
     assert_eq!(initial.initial_payload_bytes, 0);
     assert_eq!(initial.resident_unit_count, 0);
 
-    let selection =
-        Arc::new(device.create_resident_buffer(size_of::<u32>()).unwrap());
+    let selection = Arc::new(device.create_resident_buffer(size_of::<u32>()).unwrap());
     selection.write_bytes(&1u32.to_le_bytes()).unwrap();
-    let continuation =
-        Arc::new(device.create_conditional_resident_buffer(4).unwrap());
+    let continuation = Arc::new(device.create_conditional_resident_buffer(4).unwrap());
     continuation.write_bytes(&1u32.to_le_bytes()).unwrap();
     let gate = VulkanGpuResidencyGate::new(
         &device,
@@ -850,13 +1206,10 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
             selection_lane_stride_words: 1,
             selection_index_shift: 0,
             selection_index_mask: 0xffff,
-            address_mapping:
-                VulkanGpuResidencyAddressMapping::GroupTable {
-                    resource_address_slots:
-                        resource_address_slots.clone(),
-                    resource_address_slot_offsets:
-                        resource_address_slot_offsets.clone(),
-                },
+            address_mapping: VulkanGpuResidencyAddressMapping::GroupTable {
+                resource_address_slots: resource_address_slots.clone(),
+                resource_address_slot_offsets: resource_address_slot_offsets.clone(),
+            },
         },
     )
     .unwrap();
@@ -880,8 +1233,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
             &device,
             &selector_id,
             1,
-            DeviceResourceResidencyOwnerId::new("optional-head-graph")
-                .unwrap(),
+            DeviceResourceResidencyOwnerId::new("optional-head-graph").unwrap(),
         )
         .unwrap();
     gate.acknowledge_missing_through(missing.published_count)
@@ -903,9 +1255,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         .read_bytes(layout.address_table_byte_count().unwrap())
         .unwrap()
         .chunks_exact(32)
-        .map(|record| {
-            u32::from_le_bytes(record[24..28].try_into().unwrap())
-        })
+        .map(|record| u32::from_le_bytes(record[24..28].try_into().unwrap()))
         .collect::<Vec<_>>();
     assert_eq!(records, [0, 0, 1, 1]);
 

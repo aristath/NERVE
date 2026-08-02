@@ -350,6 +350,16 @@ fn print_runtime_resource_residency(
         nanos_to_millis(totals.blocking_time_ns)
     );
     println!(
+        "  adaptive_retiering(events/promotions/promoted_bytes/copied_bytes/device_selections/host_selections/time_ms)={}/{}/{}/{}/{}/{}/{:.3}",
+        totals.retiering_event_count,
+        totals.retiering_promoted_group_count,
+        totals.retiering_promoted_payload_bytes,
+        totals.retiering_copied_payload_bytes,
+        totals.retiering_device_selection_count,
+        totals.retiering_host_visible_selection_count,
+        nanos_to_millis(totals.retiering_time_ns),
+    );
+    println!(
         "  target components={} units={}/{} gpu_accesses={}/{}/{}",
         report.target.component_count,
         report.target.resident_unit_count,

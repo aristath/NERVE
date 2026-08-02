@@ -1,16 +1,15 @@
 #[test]
 fn stable_resource_address_contract_validates_alignment_and_layout() {
-    assert!(
-        VulkanStableResourceArenaConfig::new(8192, 8).is_ok()
-    );
-    assert!(
-        VulkanStableResourceArenaConfig::new(0, 8).is_err()
-    );
-    assert!(
-        VulkanStableResourceArenaConfig::new(8192, 4).is_err()
-    );
-    assert!(
-        VulkanStableResourceArenaConfig::new(8192, 24).is_err()
+    assert!(VulkanStableResourceArenaConfig::new(8192, 8).is_ok());
+    assert!(VulkanStableResourceArenaConfig::new(0, 8).is_err());
+    assert!(VulkanStableResourceArenaConfig::new(8192, 4).is_err());
+    assert!(VulkanStableResourceArenaConfig::new(8192, 24).is_err());
+    assert_eq!(
+        VulkanStableResourceArenaConfig::new(8192, 8)
+            .unwrap()
+            .host_visible()
+            .memory_domain,
+        VulkanStableResourceMemoryDomain::HostVisible
     );
     assert_eq!(
         std::mem::size_of::<VulkanStableResourceAddressRecord>(),
@@ -30,33 +29,290 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
     assert_eq!(
         record.bytes(),
         [
-            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x18, 0x17,
-            0x16, 0x15, 0x14, 0x13, 0x12, 0x11, 0x28, 0x27, 0x26, 0x25,
-            0x24, 0x23, 0x22, 0x21, 0x34, 0x33, 0x32, 0x31, 0x44, 0x43,
-            0x42, 0x41,
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13,
+            0x12, 0x11, 0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21, 0x34, 0x33, 0x32, 0x31,
+            0x44, 0x43, 0x42, 0x41,
         ]
     );
 }
 
 #[test]
-fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
+fn host_visible_stable_resource_is_directly_gpu_addressable() {
     let Some(device_index) = stable_resource_test_device_index() else {
-        eprintln!(
-            "skipping sparse stable resource test: explicit Vulkan device unset"
-        );
+        eprintln!("skipping host-visible stable resource test: explicit Vulkan device unset");
         return;
     };
     let Some(shader) = compile_stable_resource_shader(
-        "sparse_visibility",
+        "host_visible_visibility",
         STABLE_RESOURCE_VISIBILITY_SHADER,
     ) else {
-        eprintln!("skipping sparse stable resource test: no GLSL compiler");
+        eprintln!("skipping host-visible stable resource test: no GLSL compiler");
         return;
     };
-    let device =
-        VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .unwrap();
-    assert!(device.supports_sparse_buffer_residency());
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(64 * 1024, 256)
+            .unwrap()
+            .host_visible(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0],
+            resource_byte_counts: vec![1024],
+        }],
+    )
+    .unwrap();
+    let allocation = Arc::clone(
+        &arena
+            .allocate_groups(&device, &[(&[0], &[1024])], 256)
+            .unwrap()[0][0],
+    );
+    assert!(allocation.buffer().memory_access.is_directly_mappable());
+    let values = (0..256u32)
+        .map(|value| value.wrapping_mul(7).wrapping_add(23))
+        .collect::<Vec<_>>();
+    let value_bytes = stable_resource_u32_bytes(&values);
+    allocation
+        .buffer()
+        .write_bytes_at(allocation.buffer_byte_offset(), &value_bytes)
+        .unwrap();
+    let mut transfer = device
+        .create_resident_transfer_stream(2, 64 * 1024)
+        .unwrap();
+    let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 1).unwrap();
+    let publications = table
+        .publish_group(&mut transfer, &[(0, Arc::clone(&allocation))])
+        .unwrap();
+    let output = device.create_resident_buffer(16).unwrap();
+    output.write_bytes(&[0; 16]).unwrap();
+    let dispatch = device
+        .create_resident_kernel_dispatch(
+            &shader,
+            &[
+                VulkanResidentKernelBufferBinding::new(0, table.buffer(), table.byte_capacity())
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(1, &output, 16)
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+            ],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    device
+        .run_resident_kernel_dispatch(&dispatch, &0u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
+        vec![23, values[255], 1, 1]
+    );
+    table.clear_group(&mut transfer, &publications).unwrap();
+    drop(allocation);
+    arena.release_backing().unwrap();
+}
+
+#[test]
+fn stable_resource_groups_atomically_exchange_physical_backing() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping stable resource exchange test: explicit Vulkan device unset");
+        return;
+    };
+    let Some(shader) = compile_stable_resource_shader(
+        "atomic_backing_exchange",
+        STABLE_RESOURCE_VISIBILITY_SHADER,
+    ) else {
+        eprintln!("skipping stable resource exchange test: no GLSL compiler");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let layouts = [VulkanStableResourceGroupLayout::Explicit {
+        resource_slots: vec![0],
+        resource_byte_counts: vec![1024],
+    }];
+    let device_arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(64 * 1024, 256).unwrap(),
+        &layouts,
+    )
+    .unwrap();
+    let host_arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(64 * 1024, 256)
+            .unwrap()
+            .host_visible(),
+        &layouts,
+    )
+    .unwrap();
+    let device_allocation = Arc::clone(
+        &device_arena
+            .allocate_groups(&device, &[(&[0], &[1024])], 256)
+            .unwrap()[0][0],
+    );
+    let host_allocation = Arc::clone(
+        &host_arena
+            .allocate_groups(&device, &[(&[0], &[1024])], 256)
+            .unwrap()[0][0],
+    );
+    let device_values = (0..256u32)
+        .map(|value| value.wrapping_mul(3).wrapping_add(11))
+        .collect::<Vec<_>>();
+    let host_values = (0..256u32)
+        .map(|value| value.wrapping_mul(5).wrapping_add(17))
+        .collect::<Vec<_>>();
+    let device_bytes = stable_resource_u32_bytes(&device_values);
+    let host_bytes = stable_resource_u32_bytes(&host_values);
+    let mut transfer = device
+        .create_resident_transfer_stream(2, 64 * 1024)
+        .unwrap();
+    let writes = [
+        VulkanResidentBufferWriteRange::new(
+            device_allocation.buffer(),
+            device_allocation.buffer_byte_offset(),
+            &device_bytes,
+        )
+        .unwrap(),
+        VulkanResidentBufferWriteRange::new(
+            host_allocation.buffer(),
+            host_allocation.buffer_byte_offset(),
+            &host_bytes,
+        )
+        .unwrap(),
+    ];
+    let ticket = transfer.submit(&writes).unwrap();
+    transfer.wait(&ticket).unwrap();
+
+    let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 2).unwrap();
+    let device_publications = table
+        .publish_group(&mut transfer, &[(0, Arc::clone(&device_allocation))])
+        .unwrap();
+    let host_publications = table
+        .publish_group(&mut transfer, &[(1, Arc::clone(&host_allocation))])
+        .unwrap();
+    let output = device.create_resident_buffer(16).unwrap();
+    output.write_bytes(&[0; 16]).unwrap();
+    let dispatch = device
+        .create_resident_kernel_dispatch(
+            &shader,
+            &[
+                VulkanResidentKernelBufferBinding::new(0, table.buffer(), table.byte_capacity())
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(1, &output, 16)
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
+            ],
+            1,
+            1,
+            4,
+        )
+        .unwrap();
+    device
+        .run_resident_kernel_dispatch(&dispatch, &0u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
+        vec![11, device_values[255], 1, 1]
+    );
+    device
+        .run_resident_kernel_dispatch(&dispatch, &1u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
+        vec![17, host_values[255], 1, 1]
+    );
+
+    let resolved = table
+        .allocations_for_publications(&device_publications)
+        .unwrap();
+    assert_eq!(resolved[0].allocation_id(), device_allocation.allocation_id());
+    drop(resolved);
+    let (exchanged_device_publications, exchanged_host_publications) = table
+        .swap_groups(&mut transfer, &device_publications, &host_publications)
+        .unwrap();
+    assert_eq!(exchanged_device_publications[0].generation(), 2);
+    assert_eq!(
+        exchanged_device_publications[0].device_address(),
+        host_allocation.device_address()
+    );
+    assert_eq!(exchanged_host_publications[0].generation(), 2);
+    assert_eq!(
+        exchanged_host_publications[0].device_address(),
+        device_allocation.device_address()
+    );
+    assert!(table
+        .swap_groups(
+            &mut transfer,
+            &device_publications,
+            &exchanged_host_publications,
+        )
+        .is_err());
+    assert!(table.clear_group(&mut transfer, &device_publications).is_err());
+
+    device
+        .run_resident_kernel_dispatch(&dispatch, &0u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
+        vec![17, host_values[255], 1, 2]
+    );
+    device
+        .run_resident_kernel_dispatch(&dispatch, &1u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
+        vec![11, device_values[255], 1, 2]
+    );
+
+    table
+        .clear_group(&mut transfer, &exchanged_device_publications)
+        .unwrap();
+    table
+        .clear_group(&mut transfer, &exchanged_host_publications)
+        .unwrap();
+    drop(device_allocation);
+    drop(host_allocation);
+    device_arena.release_backing().unwrap();
+    host_arena.release_backing().unwrap();
+}
+
+#[test]
+fn dense_stable_resource_layout_packs_members_without_sparse_page_padding() {
+    let (offsets, byte_capacity) = stable_group_member_layout(&[1024, 257, 2048], 256).unwrap();
+    assert_eq!(offsets, vec![0, 1024, 1536]);
+    assert_eq!(byte_capacity, 3584);
+}
+
+#[test]
+fn partitioned_stable_resource_layout_resolves_member_order_per_request() {
+    let layouts = VulkanStableResourceArenaLayouts {
+        explicit: BTreeMap::new(),
+        partitioned: vec![VulkanPartitionedStableResourcePlacement {
+            member_slot_bases: vec![0, 10],
+            resource_byte_offsets: vec![0, 256],
+            resource_byte_counts: vec![8, 16],
+            partition_count: 10,
+            group_byte_capacity: 512,
+        }],
+        maximum_byte_capacity: 5120,
+    };
+    let placement = stable_resource_placement_for_slots(&layouts, &[17, 7], &[7, 17]).unwrap();
+    assert_eq!(placement.resource_slots, vec![17, 7]);
+    assert_eq!(placement.resource_byte_offsets, vec![256, 0]);
+    assert_eq!(placement.resource_byte_counts, vec![16, 8]);
+    assert_eq!(placement.group_byte_capacity, 512);
+}
+
+#[test]
+fn dense_stable_resource_groups_allocate_on_demand_in_load_wave_chunks() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping dense stable resource test: explicit Vulkan device unset");
+        return;
+    };
+    let Some(shader) =
+        compile_stable_resource_shader("dense_visibility", STABLE_RESOURCE_VISIBILITY_SHADER)
+    else {
+        eprintln!("skipping dense stable resource test: no GLSL compiler");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    assert!(device.supports_buffer_device_address());
     let layouts = [
         VulkanStableResourceGroupLayout::Explicit {
             resource_slots: vec![0, 1],
@@ -69,15 +325,14 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
     ];
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(
-            512 * 1024,
-            256,
-        )
-        .unwrap(),
+        VulkanStableResourceArenaConfig::new(512 * 1024, 256).unwrap(),
         &layouts,
     )
     .unwrap();
-    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
+    );
 
     let later_group = arena
         .allocate_groups(&device, &[(&[2], &[4096])], 256)
@@ -85,17 +340,13 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
         .pop()
         .unwrap();
     let earlier_group = arena
-        .allocate_groups(
-            &device,
-            &[(&[0, 1], &[1024, 2048])],
-            256,
-        )
+        .allocate_groups(&device, &[(&[0, 1], &[1024, 2048])], 256)
         .unwrap()
         .pop()
         .unwrap();
-    assert!(
-        earlier_group[0].buffer_byte_offset()
-            < later_group[0].buffer_byte_offset()
+    assert_ne!(
+        earlier_group[0].device_address(),
+        later_group[0].device_address()
     );
     assert_eq!(earlier_group[0].device_address() % 256, 0);
     assert_eq!(earlier_group[1].device_address() % 256, 0);
@@ -114,25 +365,18 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
         .create_resident_transfer_stream(2, 64 * 1024)
         .unwrap();
     let ticket = transfer
-        .submit(&[
-            VulkanResidentBufferWriteRange::new(
-                earlier_group[0].buffer(),
-                earlier_group[0].buffer_byte_offset(),
-                &first_bytes,
-            )
-            .unwrap(),
-        ])
+        .submit(&[VulkanResidentBufferWriteRange::new(
+            earlier_group[0].buffer(),
+            earlier_group[0].buffer_byte_offset(),
+            &first_bytes,
+        )
+        .unwrap()])
         .unwrap();
     transfer.wait(&ticket).unwrap();
 
-    let mut table =
-        VulkanStableResourceAddressTable::new(&device, &mut transfer, 3)
-            .unwrap();
+    let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 3).unwrap();
     let publications = table
-        .publish_group(
-            &mut transfer,
-            &[(0, Arc::clone(&earlier_group[0]))],
-        )
+        .publish_group(&mut transfer, &[(0, Arc::clone(&earlier_group[0]))])
         .unwrap();
     let output = device.create_resident_buffer(16).unwrap();
     output.write_bytes(&[0; 16]).unwrap();
@@ -140,12 +384,8 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
         .create_resident_kernel_dispatch(
             &shader,
             &[
-                VulkanResidentKernelBufferBinding::new(
-                    0,
-                    table.buffer(),
-                    table.byte_capacity(),
-                )
-                .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(0, table.buffer(), table.byte_capacity())
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
                 VulkanResidentKernelBufferBinding::new(1, &output, 16)
                     .with_access(VulkanResidentKernelBufferAccess::Write),
             ],
@@ -166,46 +406,34 @@ fn sparse_stable_resource_groups_bind_on_demand_at_compiled_offsets() {
     drop(later_group);
     assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
     let retry_group = arena
-        .allocate_groups(
-            &device,
-            &[(&[0, 1], &[1024, 2048])],
-            256,
-        )
+        .allocate_groups(&device, &[(&[0, 1], &[1024, 2048])], 256)
         .unwrap()
         .pop()
         .unwrap();
     let retry_stats = arena.stats().unwrap();
-    assert_eq!(
-        retry_stats.committed_byte_capacity,
-        stats.committed_byte_capacity
-    );
-    assert_eq!(retry_stats.chunk_count, stats.chunk_count);
+    assert_eq!(retry_stats.committed_byte_capacity, 3072);
+    assert_eq!(retry_stats.chunk_count, 1);
     assert_eq!(retry_stats.allocated_byte_count, 3072);
     assert_eq!(retry_stats.active_allocation_count, 2);
     drop(retry_group);
     arena.release_backing().unwrap();
-    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
+    );
 }
 
 #[test]
-fn sparse_partition_layout_scales_to_one_million_addressable_groups() {
+fn partition_layout_scales_without_reserving_one_million_gpu_ranges() {
     const PARTITION_COUNT: usize = 1_000_000;
     let Some(device_index) = stable_resource_test_device_index() else {
-        eprintln!(
-            "skipping sparse partition scale test: explicit Vulkan device unset"
-        );
+        eprintln!("skipping partition scale test: explicit Vulkan device unset");
         return;
     };
-    let device =
-        VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .unwrap();
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(
-            256 * 1024,
-            256,
-        )
-        .unwrap(),
+        VulkanStableResourceArenaConfig::new(256 * 1024, 256).unwrap(),
         &[VulkanStableResourceGroupLayout::Partitioned {
             member_slot_bases: vec![0, PARTITION_COUNT],
             resource_byte_counts: vec![8, 16],
@@ -233,55 +461,45 @@ fn sparse_partition_layout_scales_to_one_million_addressable_groups() {
     assert_eq!(groups[1].len(), 2);
     assert_eq!(groups[0][0].byte_count(), 16);
     assert_eq!(groups[0][1].byte_count(), 8);
-    assert!(
-        groups[1][0].buffer_byte_offset()
-            > groups[0][1].buffer_byte_offset()
-    );
+    assert!(groups[1][0].buffer_byte_offset() > groups[0][1].buffer_byte_offset());
     let stats = arena.stats().unwrap();
     assert_eq!(stats.active_allocation_count, 4);
     assert_eq!(stats.allocated_byte_count, 48);
     assert_eq!(stats.chunk_count, 1);
     let maximum_backed = arena.maximum_backed_byte_capacity().unwrap();
     assert_eq!(maximum_backed % PARTITION_COUNT, 0);
-    let sparse_page_bytes = maximum_backed / PARTITION_COUNT;
-    assert!(sparse_page_bytes >= 256);
-    assert!(sparse_page_bytes.is_power_of_two());
-    assert_eq!(stats.committed_byte_capacity, 2 * sparse_page_bytes);
+    assert_eq!(maximum_backed, PARTITION_COUNT * 512);
+    assert_eq!(stats.committed_byte_capacity, 1024);
 
     drop(groups);
     arena.release_backing().unwrap();
-    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
+    );
 }
 
 #[test]
 fn stable_resource_address_space_is_visible_stable_and_transactional() {
     let Some(device_index) = stable_resource_test_device_index() else {
-        eprintln!(
-            "skipping stable resource address-space test: explicit Vulkan device unset"
-        );
+        eprintln!("skipping stable resource address-space test: explicit Vulkan device unset");
         return;
     };
-    let Some(shader) = compile_stable_resource_shader(
-        "visibility",
-        STABLE_RESOURCE_VISIBILITY_SHADER,
-    ) else {
-        eprintln!(
-            "skipping stable resource address-space test: no GLSL compiler"
-        );
+    let Some(shader) =
+        compile_stable_resource_shader("visibility", STABLE_RESOURCE_VISIBILITY_SHADER)
+    else {
+        eprintln!("skipping stable resource address-space test: no GLSL compiler");
         return;
     };
 
-    let device =
-        VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .unwrap();
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
     assert!(device.supports_buffer_device_address());
     let mut transfer = device
         .create_resident_transfer_stream(2, 64 * 1024)
         .unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(32 * 1024, 8)
-            .unwrap(),
+        VulkanStableResourceArenaConfig::new(32 * 1024, 8).unwrap(),
         &[
             VulkanStableResourceGroupLayout::Explicit {
                 resource_slots: vec![1],
@@ -302,17 +520,12 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
         ],
     )
     .unwrap();
-    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
-    let mut undersized_transfer =
-        device.create_resident_transfer_stream(1, 16).unwrap();
-    assert!(
-        VulkanStableResourceAddressTable::new(
-            &device,
-            &mut undersized_transfer,
-            1,
-        )
-        .is_err()
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
     );
+    let mut undersized_transfer = device.create_resident_transfer_stream(1, 16).unwrap();
+    assert!(VulkanStableResourceAddressTable::new(&device, &mut undersized_transfer, 1,).is_err());
     drop(undersized_transfer);
     let first = Arc::clone(
         &arena
@@ -324,17 +537,14 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
             .allocate_groups(&device, &[(&[3], &[2048])], 8)
             .unwrap()[0][0],
     );
-    assert_eq!(first.device_address() % 256, 0);
-    assert_eq!(second.device_address() % 512, 0);
+    assert_eq!(first.device_address() % 8, 0);
+    assert_eq!(second.device_address() % 8, 0);
     assert_ne!(first.device_address(), second.device_address());
     let initial_stats = arena.stats().unwrap();
     assert_eq!(initial_stats.allocated_byte_count, 3072);
     assert_eq!(initial_stats.active_allocation_count, 2);
     assert_eq!(initial_stats.chunk_count, 2);
-    assert!(
-        initial_stats.committed_byte_capacity
-            >= initial_stats.allocated_byte_count
-    );
+    assert!(initial_stats.committed_byte_capacity >= initial_stats.allocated_byte_count);
 
     let first_values = (0..256u32)
         .map(|value| value.wrapping_mul(3).wrapping_add(11))
@@ -361,9 +571,7 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
     let ticket = transfer.submit(&writes).unwrap();
     transfer.wait(&ticket).unwrap();
 
-    let mut table =
-        VulkanStableResourceAddressTable::new(&device, &mut transfer, 4)
-            .unwrap();
+    let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 4).unwrap();
     assert!(
         table
             .publish_group(&mut transfer, &[(4, Arc::clone(&first))])
@@ -381,8 +589,7 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
         table
             .records
             .iter()
-            .all(|record| *record
-                == VulkanStableResourceAddressRecord::default())
+            .all(|record| *record == VulkanStableResourceAddressRecord::default())
     );
     let publications = table
         .publish_group(
@@ -428,12 +635,8 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
         .create_resident_kernel_dispatch(
             &shader,
             &[
-                VulkanResidentKernelBufferBinding::new(
-                    0,
-                    table.buffer(),
-                    table.byte_capacity(),
-                )
-                .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(0, table.buffer(), table.byte_capacity())
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
                 VulkanResidentKernelBufferBinding::new(1, &output, 16)
                     .with_access(VulkanResidentKernelBufferAccess::Write),
             ],
@@ -480,10 +683,7 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
             .unwrap()[0][0],
     );
     let retained_publication = table
-        .publish_group(
-            &mut transfer,
-            &[(0, Arc::clone(&table_retained))],
-        )
+        .publish_group(&mut transfer, &[(0, Arc::clone(&table_retained))])
         .unwrap();
     let retained_stats = arena.stats().unwrap();
     drop(table_retained);
@@ -507,50 +707,36 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
     drop(second);
     drop(first);
     arena.release_backing().unwrap();
-    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
+    );
 }
 
 #[test]
-fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
-{
+fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding() {
     let started = std::time::Instant::now();
     let Some(device_index) = stable_resource_test_device_index() else {
-        eprintln!(
-            "skipping stable resource lookup microbenchmark: explicit Vulkan device unset"
-        );
+        eprintln!("skipping stable resource lookup microbenchmark: explicit Vulkan device unset");
         return;
     };
     let (Some(direct_shader), Some(table_shader)) = (
-        compile_stable_resource_shader(
-            "direct_benchmark",
-            STABLE_RESOURCE_DIRECT_BENCHMARK_SHADER,
-        ),
-        compile_stable_resource_shader(
-            "table_benchmark",
-            STABLE_RESOURCE_TABLE_BENCHMARK_SHADER,
-        ),
+        compile_stable_resource_shader("direct_benchmark", STABLE_RESOURCE_DIRECT_BENCHMARK_SHADER),
+        compile_stable_resource_shader("table_benchmark", STABLE_RESOURCE_TABLE_BENCHMARK_SHADER),
     ) else {
-        eprintln!(
-            "skipping stable resource lookup microbenchmark: no GLSL compiler"
-        );
+        eprintln!("skipping stable resource lookup microbenchmark: no GLSL compiler");
         return;
     };
 
     const ELEMENT_COUNT: usize = 256 * 1024;
     const BYTE_COUNT: usize = ELEMENT_COUNT * std::mem::size_of::<u32>();
-    let device =
-        VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .unwrap();
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
     let mut transfer = device
         .create_resident_transfer_stream(2, BYTE_COUNT)
         .unwrap();
     let arena = VulkanStableResourceArena::new(
         &device,
-        VulkanStableResourceArenaConfig::new(
-            2 * BYTE_COUNT,
-            256,
-        )
-        .unwrap(),
+        VulkanStableResourceArenaConfig::new(2 * BYTE_COUNT, 256).unwrap(),
         &[VulkanStableResourceGroupLayout::Explicit {
             resource_slots: vec![0],
             resource_byte_counts: vec![BYTE_COUNT],
@@ -567,19 +753,15 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
         .collect::<Vec<_>>();
     let source_bytes = stable_resource_u32_bytes(&source_values);
     let ticket = transfer
-        .submit(&[
-            VulkanResidentBufferWriteRange::new(
-                source.buffer(),
-                source.buffer_byte_offset(),
-                &source_bytes,
-            )
-            .unwrap(),
-        ])
+        .submit(&[VulkanResidentBufferWriteRange::new(
+            source.buffer(),
+            source.buffer_byte_offset(),
+            &source_bytes,
+        )
+        .unwrap()])
         .unwrap();
     transfer.wait(&ticket).unwrap();
-    let mut table =
-        VulkanStableResourceAddressTable::new(&device, &mut transfer, 1)
-            .unwrap();
+    let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 1).unwrap();
     let publications = table
         .publish_group(&mut transfer, &[(0, Arc::clone(&source))])
         .unwrap();
@@ -593,19 +775,11 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
         .create_resident_kernel_dispatch(
             &direct_shader,
             &[
-                VulkanResidentKernelBufferBinding::new(
-                    0,
-                    source.buffer(),
-                    BYTE_COUNT,
-                )
-                .with_byte_offset(source.buffer_byte_offset())
-                .with_access(VulkanResidentKernelBufferAccess::Read),
-                VulkanResidentKernelBufferBinding::new(
-                    1,
-                    &direct_output,
-                    BYTE_COUNT,
-                )
-                .with_access(VulkanResidentKernelBufferAccess::Write),
+                VulkanResidentKernelBufferBinding::new(0, source.buffer(), BYTE_COUNT)
+                    .with_byte_offset(source.buffer_byte_offset())
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(1, &direct_output, BYTE_COUNT)
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
             ],
             workgroup_count,
             256,
@@ -616,18 +790,10 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
         .create_resident_kernel_dispatch(
             &table_shader,
             &[
-                VulkanResidentKernelBufferBinding::new(
-                    0,
-                    table.buffer(),
-                    table.byte_capacity(),
-                )
-                .with_access(VulkanResidentKernelBufferAccess::Read),
-                VulkanResidentKernelBufferBinding::new(
-                    1,
-                    &table_output,
-                    BYTE_COUNT,
-                )
-                .with_access(VulkanResidentKernelBufferAccess::Write),
+                VulkanResidentKernelBufferBinding::new(0, table.buffer(), table.byte_capacity())
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(1, &table_output, BYTE_COUNT)
+                    .with_access(VulkanResidentKernelBufferAccess::Write),
             ],
             workgroup_count,
             256,
@@ -662,34 +828,22 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
 
     let timeout = std::time::Duration::from_secs(5);
     device
-        .run_timestamped_recorded_resident_kernel_sequence_for(
-            &direct_sequence,
-            timeout,
-        )
+        .run_timestamped_recorded_resident_kernel_sequence_for(&direct_sequence, timeout)
         .unwrap();
     device
-        .run_timestamped_recorded_resident_kernel_sequence_for(
-            &table_sequence,
-            timeout,
-        )
+        .run_timestamped_recorded_resident_kernel_sequence_for(&table_sequence, timeout)
         .unwrap();
     let mut direct_ns = Vec::with_capacity(2);
     let mut table_ns = Vec::with_capacity(2);
     for _ in 0..2 {
         direct_ns.push(
             device
-                .run_timestamped_recorded_resident_kernel_sequence_for(
-                    &direct_sequence,
-                    timeout,
-                )
+                .run_timestamped_recorded_resident_kernel_sequence_for(&direct_sequence, timeout)
                 .unwrap(),
         );
         table_ns.push(
             device
-                .run_timestamped_recorded_resident_kernel_sequence_for(
-                    &table_sequence,
-                    timeout,
-                )
+                .run_timestamped_recorded_resident_kernel_sequence_for(&table_sequence, timeout)
                 .unwrap(),
         );
     }
@@ -712,7 +866,10 @@ fn stable_resource_address_lookup_hot_path_is_measured_against_direct_binding()
     drop(source);
     assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
     arena.release_backing().unwrap();
-    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+    assert_eq!(
+        arena.stats().unwrap(),
+        VulkanStableResourceArenaStats::default()
+    );
 }
 
 fn stable_resource_test_device_index() -> Option<usize> {
@@ -721,10 +878,7 @@ fn stable_resource_test_device_index() -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
-fn compile_stable_resource_shader(
-    label: &str,
-    source: &str,
-) -> Option<Vec<u32>> {
+fn compile_stable_resource_shader(label: &str, source: &str) -> Option<Vec<u32>> {
     let source_path = std::env::temp_dir().join(format!(
         "nerve-stable-resource-{label}-{}.comp",
         std::process::id()
@@ -751,9 +905,7 @@ fn stable_resource_bytes_to_u32(bytes: &[u8]) -> Vec<u32> {
 
 const STABLE_RESOURCE_VISIBILITY_SHADER: &str =
     include_str!("../../tests/fixtures/vulkan/stable_resource_visibility.comp");
-const STABLE_RESOURCE_DIRECT_BENCHMARK_SHADER: &str = include_str!(
-    "../../tests/fixtures/vulkan/stable_resource_direct_benchmark.comp"
-);
-const STABLE_RESOURCE_TABLE_BENCHMARK_SHADER: &str = include_str!(
-    "../../tests/fixtures/vulkan/stable_resource_table_benchmark.comp"
-);
+const STABLE_RESOURCE_DIRECT_BENCHMARK_SHADER: &str =
+    include_str!("../../tests/fixtures/vulkan/stable_resource_direct_benchmark.comp");
+const STABLE_RESOURCE_TABLE_BENCHMARK_SHADER: &str =
+    include_str!("../../tests/fixtures/vulkan/stable_resource_table_benchmark.comp");

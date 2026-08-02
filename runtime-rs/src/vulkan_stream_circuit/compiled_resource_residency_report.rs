@@ -1,5 +1,5 @@
 pub const VULKAN_COMPILED_RESOURCE_RESIDENCY_REPORT_SCHEMA: &str =
-    "nerve.vulkan_compiled_resource_residency_report.v1";
+    "nerve.vulkan_compiled_resource_residency_report.v2";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanCompiledResourceComponentCoverageReport {
@@ -68,6 +68,13 @@ pub struct VulkanCompiledResourceStoreReport {
     pub read_time_ns: u64,
     pub upload_time_ns: u64,
     pub blocking_time_ns: u64,
+    pub retiering_event_count: u64,
+    pub retiering_promoted_group_count: u64,
+    pub retiering_promoted_payload_bytes: u64,
+    pub retiering_copied_payload_bytes: u64,
+    pub retiering_device_selection_count: u64,
+    pub retiering_host_visible_selection_count: u64,
+    pub retiering_time_ns: u64,
     pub scopes: Vec<VulkanCompiledResourceScopeCoverageReport>,
     pub components: Vec<VulkanCompiledResourceComponentCoverageReport>,
 }
@@ -111,6 +118,13 @@ pub struct VulkanCompiledResourceResidencyTotalsReport {
     pub read_time_ns: u64,
     pub upload_time_ns: u64,
     pub blocking_time_ns: u64,
+    pub retiering_event_count: u64,
+    pub retiering_promoted_group_count: u64,
+    pub retiering_promoted_payload_bytes: u64,
+    pub retiering_copied_payload_bytes: u64,
+    pub retiering_device_selection_count: u64,
+    pub retiering_host_visible_selection_count: u64,
+    pub retiering_time_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +146,13 @@ struct VulkanCompiledResourceStoreInstrumentation {
     uploaded_bytes: std::sync::atomic::AtomicU64,
     upload_time_ns: std::sync::atomic::AtomicU64,
     blocking_time_ns: std::sync::atomic::AtomicU64,
+    retiering_event_count: std::sync::atomic::AtomicU64,
+    retiering_promoted_group_count: std::sync::atomic::AtomicU64,
+    retiering_promoted_payload_bytes: std::sync::atomic::AtomicU64,
+    retiering_copied_payload_bytes: std::sync::atomic::AtomicU64,
+    retiering_device_selection_count: std::sync::atomic::AtomicU64,
+    retiering_host_visible_selection_count: std::sync::atomic::AtomicU64,
+    retiering_time_ns: std::sync::atomic::AtomicU64,
     eviction_count: std::sync::atomic::AtomicU64,
     evicted_unit_count: std::sync::atomic::AtomicU64,
     evicted_payload_bytes: std::sync::atomic::AtomicU64,
@@ -192,6 +213,30 @@ impl VulkanCompiledResourceStoreInstrumentation {
             blocking_time_ns,
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    fn record_retiering(&self, report: &VulkanCompiledResourceRetieringReport) {
+        use std::sync::atomic::Ordering;
+
+        self.retiering_event_count.fetch_add(1, Ordering::Relaxed);
+        self.retiering_promoted_group_count.fetch_add(
+            u64::try_from(report.promoted_group_count).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.retiering_promoted_payload_bytes.fetch_add(
+            u64::try_from(report.promoted_payload_bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.retiering_copied_payload_bytes.fetch_add(
+            u64::try_from(report.copied_payload_bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.retiering_device_selection_count
+            .fetch_add(report.device_selection_count, Ordering::Relaxed);
+        self.retiering_host_visible_selection_count
+            .fetch_add(report.host_visible_selection_count, Ordering::Relaxed);
+        self.retiering_time_ns
+            .fetch_add(report.elapsed_ns, Ordering::Relaxed);
     }
 
     fn record_eviction(
@@ -616,6 +661,13 @@ impl VulkanCompiledResourceResidencyTotalsReport {
         add_u64!(read_time_ns);
         add_u64!(upload_time_ns);
         add_u64!(blocking_time_ns);
+        add_u64!(retiering_event_count);
+        add_u64!(retiering_promoted_group_count);
+        add_u64!(retiering_promoted_payload_bytes);
+        add_u64!(retiering_copied_payload_bytes);
+        add_u64!(retiering_device_selection_count);
+        add_u64!(retiering_host_visible_selection_count);
+        add_u64!(retiering_time_ns);
         Ok(())
     }
 }
@@ -783,6 +835,13 @@ mod compiled_resource_residency_report_tests {
             read_time_ns: 5,
             upload_time_ns: 6,
             blocking_time_ns: 7,
+            retiering_event_count: 1,
+            retiering_promoted_group_count: 3,
+            retiering_promoted_payload_bytes: 30,
+            retiering_copied_payload_bytes: 60,
+            retiering_device_selection_count: 90,
+            retiering_host_visible_selection_count: 10,
+            retiering_time_ns: 8,
             ..Default::default()
         };
         let mut totals =
@@ -808,6 +867,13 @@ mod compiled_resource_residency_report_tests {
         assert_eq!(totals.released_device_bytes, 96);
         assert_eq!(totals.reload_count, 2);
         assert_eq!(totals.blocking_time_ns, 14);
+        assert_eq!(totals.retiering_event_count, 2);
+        assert_eq!(totals.retiering_promoted_group_count, 6);
+        assert_eq!(totals.retiering_promoted_payload_bytes, 60);
+        assert_eq!(totals.retiering_copied_payload_bytes, 120);
+        assert_eq!(totals.retiering_device_selection_count, 180);
+        assert_eq!(totals.retiering_host_visible_selection_count, 20);
+        assert_eq!(totals.retiering_time_ns, 16);
     }
 
     #[test]
