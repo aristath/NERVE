@@ -282,6 +282,57 @@ mod tests {
     }
 
     #[test]
+    fn infers_grouped_linear_output_width_for_following_physical_conversion() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "grouped_output_projection".to_string(),
+            op: "grouped_linear".to_string(),
+            inputs: vec!["attention_heads".to_string()],
+            outputs: vec!["attention_ranked".to_string()],
+            params: vec!["projection".to_string(), "scale".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"groups": 8, "rank_per_group": 1024}),
+        };
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![8192])]
+        );
+    }
+
+    #[test]
+    fn rejects_zero_width_grouped_linear_geometry() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "grouped_output_projection".to_string(),
+            op: "grouped_linear".to_string(),
+            inputs: vec!["attention_heads".to_string()],
+            outputs: vec!["attention_ranked".to_string()],
+            params: vec!["projection".to_string(), "scale".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"groups": 8, "rank_per_group": 0}),
+        };
+
+        let error = infer_node_output_shapes(
+            "layer_00",
+            &node,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("invalid grouped-linear output geometry"));
+    }
+
+    #[test]
     fn conditional_append_output_is_a_state_view() {
         let node = crate::stream_circuit::CircuitNode {
             id: "compressed_memory_update".to_string(),

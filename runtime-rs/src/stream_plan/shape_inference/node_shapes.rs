@@ -177,6 +177,27 @@ fn infer_node_output_shapes(
         | "mixed_parallel_linear_4way" => {
             infer_parallel_linear_output_shapes(component_id, node, signals, params, tensor_index)
         }
+        "grouped_linear" => {
+            let groups = attr_usize(node, "groups").filter(|value| *value > 0);
+            let rank_per_group =
+                attr_usize(node, "rank_per_group").filter(|value| *value > 0);
+            let output_width = groups
+                .zip(rank_per_group)
+                .and_then(|(groups, rank)| groups.checked_mul(rank))
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{} node {} has invalid grouped-linear output geometry",
+                        component_id, node.id
+                    ))
+                })?;
+            if node.inputs.len() != 1 || node.outputs.len() != 1 {
+                return Err(CircuitPlanError(format!(
+                    "{} node {} grouped-linear requires one input and one output",
+                    component_id, node.id
+                )));
+            }
+            Ok(vec![Some(vec![output_width])])
+        }
         "linear_projection" if attr_usize(node, "block_width").is_some() => {
             let shape = attr_usize(node, "block_width")
                 .zip(attr_usize(node, "output_size"))
