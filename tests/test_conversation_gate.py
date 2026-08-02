@@ -128,6 +128,18 @@ def test_repeated_suffix_catches_text_token_and_unicode_loops(text: str) -> None
     assert repeated_suffix(text) is not None
 
 
+def test_repeated_suffix_catches_long_multiline_cycles() -> None:
+    cycle = "\n".join(
+        f"* There is a Corinth in region {index} with qualifier {index * 17}."
+        for index in range(24)
+    )
+
+    repeated = repeated_suffix("Reasoning begins.\n" + "\n".join([cycle] * 5))
+
+    assert repeated is not None
+    assert "Corinth" in repeated
+
+
 def test_repeated_suffix_allows_long_nonrepeating_reasoning() -> None:
     text = " ".join(f"distinct-step-{index}" for index in range(1_000))
     assert repeated_suffix(text) is None
@@ -311,3 +323,27 @@ for turn in range(7):
 
     assert return_code == 0
     assert len(parse_conversation_transcript(transcript)) == 6
+
+
+def test_resident_runner_terminates_a_long_multiline_response_cycle(tmp_path) -> None:
+    fake_runtime = tmp_path / "repeating_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+import time
+
+print("ready")
+print("you> ", end="", flush=True)
+sys.stdin.readline()
+print("llm> reasoning")
+cycle = "\\n".join(
+    f"* There is a Corinth in region {index} with qualifier {index * 17}."
+    for index in range(24)
+)
+print("\\n".join([cycle] * 20), flush=True)
+time.sleep(0.2)
+""".lstrip()
+    )
+
+    with pytest.raises(ConversationGateError, match="repeated suffix"):
+        run_resident_conversation([sys.executable, "-u", str(fake_runtime)])

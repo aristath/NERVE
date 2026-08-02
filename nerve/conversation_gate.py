@@ -127,6 +127,17 @@ def repeated_suffix(text: str, minimum_repeats: int = 4) -> str | None:
         if suffix.strip() and normalized.endswith(suffix * minimum_repeats):
             return suffix
 
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    maximum_line_width = min(len(lines) // minimum_repeats, 512)
+    for width in range(1, maximum_line_width + 1):
+        suffix = lines[-width:]
+        if all(
+            lines[-width * repeat : -width * (repeat - 1)] == suffix
+            for repeat in range(2, minimum_repeats + 1)
+        ):
+            return "\n".join(suffix)
+
     words = _WORD.findall(normalized)
     for width in (*range(4, 17), 24, 32, 48, 64):
         if len(words) < width * minimum_repeats:
