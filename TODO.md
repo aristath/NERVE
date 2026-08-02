@@ -13,13 +13,15 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
 
 1. Finish the identity-independent `parallel_backbone_markov` speculative
    decoder. The compiler and runtime already discover it from graph, tensor,
-   and state contracts without family-name dispatch. A real run completed one
-   speculative cycle before an SQC data-read GPUVM fault on the next cycle.
-   Add generic device-visible dynamic-resource contract-violation telemetry,
-   identify the invalid lifetime or address transition, and complete a
-   multi-cycle conversation before enabling the decoder by default. The current
-   MXFP4 route/address guards and numeric tests are defense in depth, not proof
-   that the real fault is fixed.
+   and state contracts without family-name dispatch. The rebuilt v20 package
+   still reached an SQC data-read GPUVM fault during its first real turn on a
+   previously healthy AMD GPU, despite the current MXFP4 route/address guards.
+   `VK_EXT_device_fault` reporting and live addressable-buffer attribution are
+   now capability-driven runtime facilities. Reproduce safely enough to capture
+   an attributed fault, identify and fix the invalid lifetime, range, or address
+   transition, and complete a multi-cycle conversation before enabling the
+   decoder by default. The guards and passing direct-buffer microtests are
+   defense in depth, not proof that the real execution path is correct.
 
 2. Complete runtime per-layer/per-component representation selection. Preserve
    a native source representation when it is optimal on the selected device;
@@ -44,11 +46,12 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
 5. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. Qwen3.6-35B-A3B currently passes the full five-turn gate at 74.51
-   mean decode tok/s and 209.70 mean prefill tok/s. Qwen3.5-9B remains near
-   50.4 decode tok/s for completed turns but entered a long fabricated loop on
-   the Corinth turn; investigate generic template, sampler, and source-model
-   parity until the full gate is coherent. The live gate now rejects long
-   multi-line repetition, so throughput alone cannot pass.
+   mean decode tok/s and 209.70 mean prefill tok/s. Qwen3.5-9B now passes the
+   complete sampled, thinking-enabled five-turn gate at 50.08 mean decode tok/s
+   and 123.79 mean prefill tok/s, including recall of the earlier Greece turn.
+   Keep the live gate's repetition and conversation checks active so throughput
+   alone cannot pass. Do not use faulted AMD devices merely to satisfy this
+   gate; defer a model when no verified-healthy placement exists.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
