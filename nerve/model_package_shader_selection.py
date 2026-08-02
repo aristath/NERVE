@@ -62,9 +62,11 @@ def shader_file_for_node(
     if op == "hyper_connection_post":
         attrs = node.get("attrs", {})
         multiplicity = int(attrs.get("multiplicity", 0))
+        node_hidden_size = int(attrs.get("hidden_size", 0))
         if (
             multiplicity <= 0
             or hidden_size <= 0
+            or node_hidden_size != hidden_size
             or hidden_size % 2
             or len(node.get("inputs", [])) != 4
             or len(node.get("outputs", [])) != 1
@@ -1777,9 +1779,14 @@ def workgroup_count_x_for_node(circuit: Json, node: Json, tensor_index: Json) ->
     if node["op"] in {
         "hyper_connection_pre",
         "hyper_connection_post_pre",
-        "hyper_connection_post",
     }:
         return 1
+    if node["op"] == "hyper_connection_post":
+        attrs = node["attrs"]
+        output_words = (
+            int(attrs["multiplicity"]) * int(attrs["hidden_size"]) // 2
+        )
+        return (output_words + 63) // 64
     if node["op"] == "anchor_noise_embedding_block":
         attrs = node["attrs"]
         output_words = (

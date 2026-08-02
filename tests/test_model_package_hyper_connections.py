@@ -71,6 +71,7 @@ def _circuit() -> tuple[dict[str, object], dict[str, object]]:
         "outputs": ["attention_residual"],
         "attrs": {
             "multiplicity": 4,
+            "hidden_size": 8,
             "sinkhorn_iterations": 20,
             "epsilon": 1e-6,
             "output_element_bytes": [2],
@@ -112,6 +113,7 @@ def _circuit() -> tuple[dict[str, object], dict[str, object]]:
         "outputs": ["output_frame"],
         "attrs": {
             "multiplicity": 4,
+            "hidden_size": 8,
             "sinkhorn_iterations": 20,
             "epsilon": 1e-6,
             "output_element_bytes": [2],
@@ -195,6 +197,26 @@ def test_compiles_fused_hyper_connection_kernels(tmp_path: Path) -> None:
     assert any("prior_combination.values" in source for source in sources)
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == 3
+
+
+def test_hyper_connection_post_dispatch_covers_every_output_stream_word() -> None:
+    circuit, tensor_index = _circuit()
+    optimized = optimize_circuit_for_vulkan(circuit)
+    pre = next(
+        node for node in optimized["nodes"] if node["op"] == "hyper_connection_pre"
+    )
+    post = next(
+        node for node in optimized["nodes"] if node["op"] == "hyper_connection_post"
+    )
+    post["attrs"]["hidden_size"] = 4096
+
+    # The pre kernel deliberately uses one cooperative workgroup and loops over
+    # the complete hyper-state internally. The post kernel maps one invocation
+    # to one packed BF16 output word, so its dispatch must cover M * H / 2
+    # words. A 4x4096 hyper-state therefore requires 8192 invocations, or 128
+    # workgroups at the kernel's fixed local size of 64.
+    assert workgroup_count_x_for_node(optimized, pre, tensor_index) == 1
+    assert workgroup_count_x_for_node(optimized, post, tensor_index) == 128
 
 
 @pytest.mark.parametrize(
