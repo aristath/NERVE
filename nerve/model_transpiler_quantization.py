@@ -425,43 +425,30 @@ def annotate_mxfp4_expert_tensors(config: Json, tensors: dict[str, Json]) -> Non
             "source contains conflicting expert_dtype declarations: "
             + ", ".join(sorted(configured_formats))
         )
-    if configured_formats != {"fp4"}:
-        return
+    declares_fp4 = configured_formats == {"fp4"}
 
     matched = 0
     for name, info in tensors.items():
         if parse_independent_expert_projection_weight(name) is None:
             continue
-        matched += 1
         shape = [int(value) for value in info.get("shape", [])]
         if info.get("dtype") != "I8" or len(shape) != 2:
-            raise ModelTranspileError(
-                f"MXFP4 expert tensor {name!r} must use packed I8 matrix storage; "
-                f"got dtype {info.get('dtype')!r} and shape {shape}"
-            )
+            if declares_fp4:
+                raise ModelTranspileError(
+                    f"MXFP4 expert tensor {name!r} must use packed I8 matrix storage; "
+                    f"got dtype {info.get('dtype')!r} and shape {shape}"
+                )
+            continue
         output_rows, packed_k = shape
         logical_k = packed_k * MXFP4_VALUES_PER_BYTE
         if output_rows <= 0 or logical_k <= 0 or logical_k % MXFP4_GROUP_SIZE:
-            raise ModelTranspileError(
-                f"MXFP4 expert tensor {name!r} has invalid packed shape {shape}; "
-                f"logical K must be aligned to {MXFP4_GROUP_SIZE} values"
-            )
-        expected_bytes = output_rows * packed_k
-        if "byte_count" in info and int(info["byte_count"]) != expected_bytes:
-            raise ModelTranspileError(
-                f"MXFP4 expert tensor {name!r} stores {info['byte_count']} bytes, "
-                f"expected {expected_bytes} for packed shape {shape}"
-            )
+            if declares_fp4:
+                raise ModelTranspileError(
+                    f"MXFP4 expert tensor {name!r} has invalid packed shape {shape}; "
+                    f"logical K must be aligned to {MXFP4_GROUP_SIZE} values"
+                )
+            continue
         logical_shape = [output_rows, logical_k]
-        existing_logical_shape = info.get("logical_shape")
-        if (
-            existing_logical_shape is not None
-            and [int(value) for value in existing_logical_shape] != logical_shape
-        ):
-            raise ModelTranspileError(
-                f"MXFP4 expert tensor {name!r} declares incompatible logical shape "
-                f"{existing_logical_shape}; expected {logical_shape}"
-            )
         scale_name = name.removesuffix(".weight") + ".scale"
         scale = tensors.get(scale_name)
         expected_scale_shape = [output_rows, logical_k // MXFP4_GROUP_SIZE]
@@ -475,12 +462,30 @@ def annotate_mxfp4_expert_tensors(config: Json, tensors: dict[str, Json]) -> Non
             or scale.get("dtype") != "F8_E8M0"
             or scale_shape != expected_scale_shape
         ):
+            if declares_fp4:
+                raise ModelTranspileError(
+                    f"MXFP4 expert tensor {name!r} requires F8_E8M0 scale "
+                    f"{scale_name!r} with shape {expected_scale_shape}; got "
+                    f"dtype {scale.get('dtype') if isinstance(scale, dict) else None!r} "
+                    f"and shape {scale_shape}"
+                )
+            continue
+        expected_bytes = output_rows * packed_k
+        if "byte_count" in info and int(info["byte_count"]) != expected_bytes:
             raise ModelTranspileError(
-                f"MXFP4 expert tensor {name!r} requires F8_E8M0 scale "
-                f"{scale_name!r} with shape {expected_scale_shape}; got "
-                f"dtype {scale.get('dtype') if isinstance(scale, dict) else None!r} "
-                f"and shape {scale_shape}"
+                f"MXFP4 expert tensor {name!r} stores {info['byte_count']} bytes, "
+                f"expected {expected_bytes} for packed shape {shape}"
             )
+        existing_logical_shape = info.get("logical_shape")
+        if (
+            existing_logical_shape is not None
+            and [int(value) for value in existing_logical_shape] != logical_shape
+        ):
+            raise ModelTranspileError(
+                f"MXFP4 expert tensor {name!r} declares incompatible logical shape "
+                f"{existing_logical_shape}; expected {logical_shape}"
+            )
+        matched += 1
         info["logical_shape"] = logical_shape
         info["parameter_count"] = output_rows * logical_k
         info["quantization"] = {
@@ -496,7 +501,12 @@ def annotate_mxfp4_expert_tensors(config: Json, tensors: dict[str, Json]) -> Non
             "scale_mode": "power_of_two_per_output_row_k_group",
         }
 
-    if matched == 0:
+    if matched and configured_formats and not declares_fp4:
+        raise ModelTranspileError(
+            "structurally discovered MXFP4 experts conflict with expert_dtype "
+            + ", ".join(sorted(configured_formats))
+        )
+    if declares_fp4 and matched == 0:
         raise ModelTranspileError(
             "source declares FP4 experts but exposes no structurally recognizable "
             "packed expert weights"

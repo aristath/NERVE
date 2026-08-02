@@ -211,6 +211,78 @@ def test_mxfp4_annotation_normalizes_unseen_equivalent_expert_tensor_roles() -> 
         assert info["quantization"]["format"] == "mxfp4_e2m1"
 
 
+def test_mxfp4_annotation_is_discovered_without_a_model_config_switch() -> None:
+    tensors: dict[str, dict[str, object]] = {}
+    for role, storage_shape in {
+        "gate_proj": [6, 16],
+        "down_proj": [8, 16],
+        "up_proj": [6, 16],
+    }.items():
+        name = f"future.blocks.0.sparse.experts.0.{role}.weight"
+        tensors[name] = {
+            "dtype": "I8",
+            "shape": storage_shape,
+            "byte_count": storage_shape[0] * storage_shape[1],
+        }
+        tensors[name.removesuffix(".weight") + ".scale"] = _tensor(
+            [storage_shape[0], 1], "F8_E8M0"
+        )
+
+    annotate_mxfp4_expert_tensors({}, tensors)
+
+    assert {
+        info.get("quantization", {}).get("format")
+        for name, info in tensors.items()
+        if name.endswith(".weight")
+    } == {"mxfp4_e2m1"}
+
+
+def test_structural_mxfp4_discovery_does_not_relabel_plain_int8_experts() -> None:
+    weight = "future.blocks.0.sparse.experts.0.gate_proj.weight"
+    tensors = {
+        weight: {
+            "dtype": "I8",
+            "shape": [6, 32],
+            "logical_shape": [6, 32],
+            "byte_count": 192,
+        },
+        weight.removesuffix(".weight") + ".scale": _tensor([6, 1], "F32"),
+    }
+
+    annotate_mxfp4_expert_tensors({}, tensors)
+
+    assert "quantization" not in tensors[weight]
+    assert tensors[weight]["logical_shape"] == [6, 32]
+
+
+def test_structural_mxfp4_discovery_rejects_conflicting_source_metadata() -> None:
+    weight = "future.blocks.0.sparse.experts.0.gate_proj.weight"
+    tensors = {
+        weight: {"dtype": "I8", "shape": [6, 16], "byte_count": 96},
+        weight.removesuffix(".weight") + ".scale": _tensor([6, 1], "F8_E8M0"),
+    }
+
+    with pytest.raises(ModelTranspileError, match="conflict with expert_dtype int8"):
+        annotate_mxfp4_expert_tensors(
+            {"future_quantization": {"expert_dtype": "int8"}},
+            tensors,
+        )
+
+
+def test_declared_mxfp4_rejects_missing_structural_scale_contract() -> None:
+    weight = "future.blocks.0.sparse.experts.0.gate_proj.weight"
+    tensors = {
+        weight: {"dtype": "I8", "shape": [6, 16], "byte_count": 96},
+        weight.removesuffix(".weight") + ".scale": _tensor([6, 1], "F16"),
+    }
+
+    with pytest.raises(ModelTranspileError, match="requires F8_E8M0 scale"):
+        annotate_mxfp4_expert_tensors(
+            {"future_quantization": {"expert_dtype": "fp4"}},
+            tensors,
+        )
+
+
 def test_aggregate_expert_representation_takes_precedence_by_structure() -> None:
     config, tensors = _source()
     del tensors["model.layers.0.ffn.gate.tid2eid"]
