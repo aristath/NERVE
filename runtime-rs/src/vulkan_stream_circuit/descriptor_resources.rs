@@ -407,8 +407,12 @@ fn resolve_signal_descriptor_resource(
                 })?;
             let byte_capacity = resident.bytes.ok_or_else(|| {
                 VulkanDescriptorResourcePlanError(format!(
-                    "{} descriptor {} activation slot {}.{} has unknown byte capacity",
-                    command.kernel_id, descriptor.binding, component_id, slot
+                    "{} descriptor {} activation slot {}.{} has unknown byte capacity for signals {:?}",
+                    command.kernel_id,
+                    descriptor.binding,
+                    component_id,
+                    slot,
+                    resident.signal_ids,
                 ))
             })?;
             if *bytes != Some(byte_capacity) {

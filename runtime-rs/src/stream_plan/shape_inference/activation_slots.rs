@@ -465,6 +465,154 @@ mod tests {
     }
 
     #[test]
+    fn bounded_silu_multiply_preserves_compatible_input_shape() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "bounded_activation".to_string(),
+            op: "bounded_silu_multiply".to_string(),
+            inputs: vec!["gate".to_string(), "up".to_string()],
+            outputs: vec!["hidden".to_string()],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"element_count": 2048, "limit": 10.0}),
+        };
+        let signal = |id: &str| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: vec!["bounded_activation".to_string()],
+            shape: Some(vec![2048]),
+            element_bytes: None,
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let signals = BTreeMap::from([
+            ("gate".to_string(), signal("gate")),
+            ("up".to_string(), signal("up")),
+        ]);
+
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &node,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![2048])]
+        );
+    }
+
+    #[test]
+    fn infers_fused_hyper_connection_shapes_from_stream_multiplicity() {
+        let signal = |id: &str, shape: Vec<usize>| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: Vec::new(),
+            shape: Some(shape),
+            element_bytes: None,
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let pre = crate::stream_circuit::CircuitNode {
+            id: "hyper_pre".to_string(),
+            op: "hyper_connection_pre".to_string(),
+            inputs: vec!["input_frame".to_string()],
+            outputs: vec![
+                "operator_input".to_string(),
+                "post_mix".to_string(),
+                "combination_mix".to_string(),
+            ],
+            params: vec!["function".to_string(), "scale".to_string(), "base".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"multiplicity": 4}),
+        };
+        let pre_signals = BTreeMap::from([(
+            "input_frame".to_string(),
+            signal("input_frame", vec![4, 4096]),
+        )]);
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &pre,
+                &pre_signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![4096]), Some(vec![4]), Some(vec![4, 4])]
+        );
+
+        let post_pre = crate::stream_circuit::CircuitNode {
+            id: "hyper_post_pre".to_string(),
+            op: "hyper_connection_post_pre".to_string(),
+            inputs: vec![
+                "operator_out".to_string(),
+                "input_frame".to_string(),
+                "post_mix".to_string(),
+                "combination_mix".to_string(),
+            ],
+            outputs: vec![
+                "residual".to_string(),
+                "ffn_input".to_string(),
+                "ffn_post_mix".to_string(),
+                "ffn_combination_mix".to_string(),
+            ],
+            params: vec!["function".to_string(), "scale".to_string(), "base".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"multiplicity": 4}),
+        };
+        let post_signals = BTreeMap::from([
+            (
+                "operator_out".to_string(),
+                signal("operator_out", vec![4096]),
+            ),
+            (
+                "input_frame".to_string(),
+                signal("input_frame", vec![4, 4096]),
+            ),
+            ("post_mix".to_string(), signal("post_mix", vec![4])),
+            (
+                "combination_mix".to_string(),
+                signal("combination_mix", vec![4, 4]),
+            ),
+        ]);
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &post_pre,
+                &post_signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![
+                Some(vec![4, 4096]),
+                Some(vec![4096]),
+                Some(vec![4]),
+                Some(vec![4, 4]),
+            ]
+        );
+
+        let mut invalid = post_signals;
+        invalid.insert(
+            "input_frame".to_string(),
+            signal("input_frame", vec![4, 2048]),
+        );
+        let error = infer_node_output_shapes(
+            "layer_00",
+            &post_pre,
+            &invalid,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("incompatible hyper-connection post geometry"));
+    }
+
+    #[test]
     fn infers_fp8_quantization_representation_shapes() {
         let node = crate::stream_circuit::CircuitNode {
             id: "quantize".to_string(),
@@ -854,6 +1002,84 @@ mod tests {
             infer_node_output_shapes("attention", &node, &signals, &BTreeMap::new(), None,)
                 .unwrap(),
             vec![Some(vec![1024])]
+        );
+    }
+
+    #[test]
+    fn indexed_sparse_attention_and_inverse_rope_preserve_query_geometry() {
+        let signal = |id: &str, shape: Vec<usize>| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: Vec::new(),
+            shape: Some(shape),
+            element_bytes: Some(2),
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let signals = BTreeMap::from([
+            (
+                "query_positioned".to_string(),
+                signal("query_positioned", vec![32768]),
+            ),
+            (
+                "local_kv_values".to_string(),
+                signal("local_kv_values", vec![128, 512]),
+            ),
+        ]);
+        let attention = crate::stream_circuit::CircuitNode {
+            id: "sparse_attention".to_string(),
+            op: "indexed_sparse_attention".to_string(),
+            inputs: vec![
+                "query_positioned".to_string(),
+                "local_kv_values".to_string(),
+            ],
+            outputs: vec!["attention_heads".to_string()],
+            params: vec!["attention_sinks".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "query_heads": 64,
+                "key_value_heads": 1,
+                "head_width": 512,
+                "window_size": 128
+            }),
+        };
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &attention,
+                &signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![32768])]
+        );
+
+        let inverse_rope = crate::stream_circuit::CircuitNode {
+            id: "inverse_rope".to_string(),
+            op: "inverse_rotary_position_embedding".to_string(),
+            inputs: vec!["attention_heads".to_string()],
+            outputs: vec!["attention_unpositioned".to_string()],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"rotary_width": 64}),
+        };
+        let inverse_signals = BTreeMap::from([(
+            "attention_heads".to_string(),
+            signal("attention_heads", vec![32768]),
+        )]);
+        assert_eq!(
+            infer_node_output_shapes(
+                "layer_00",
+                &inverse_rope,
+                &inverse_signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![32768])]
         );
     }
 

@@ -465,7 +465,7 @@ impl PlannedStatePort {
             state_type: state.state_type.clone(),
             shape: state.shape.clone(),
             elements_per_activation: state.elements_per_activation(),
-            max_dynamic_activations: state.max_dynamic_activations,
+            max_dynamic_activations: state.dynamic_activation_capacity(),
         }
     }
 }

@@ -93,6 +93,12 @@ pub struct StatePort {
     #[serde(default)]
     pub shape: Option<Vec<usize>>,
     #[serde(default)]
+    pub shape_per_token: Option<Vec<usize>>,
+    #[serde(default)]
+    pub capacity: Option<usize>,
+    #[serde(default)]
+    pub dtype: Option<String>,
+    #[serde(default)]
     pub update: Option<String>,
     #[serde(default)]
     pub key_shape_per_token: Option<Vec<usize>>,
@@ -120,11 +126,24 @@ impl StatePort {
     }
 
     pub fn elements_per_activation(&self) -> Option<usize> {
-        match (&self.key_shape_per_token, &self.value_shape_per_token) {
-            (Some(key), Some(value)) => Some(product(key)? + product(value)?),
+        let paired_elements = match (&self.key_shape_per_token, &self.value_shape_per_token) {
+            (Some(key), Some(value)) => product(key)?.checked_add(product(value)?),
             (Some(key), None) => product(key),
             (None, Some(value)) => product(value),
             (None, None) => None,
+        };
+        match (&self.shape_per_token, paired_elements) {
+            (Some(shape), None) => product(shape),
+            (None, paired) => paired,
+            (Some(_), Some(_)) => None,
+        }
+    }
+
+    pub fn dynamic_activation_capacity(&self) -> Option<usize> {
+        match (self.capacity, self.max_dynamic_activations) {
+            (Some(capacity), Some(maximum)) => Some(capacity.min(maximum)),
+            (Some(capacity), None) => Some(capacity),
+            (None, maximum) => maximum,
         }
     }
 }
@@ -300,13 +319,29 @@ impl StreamCircuit {
             issues.push(format!("{} has duplicate state port ids", self.id));
         }
         for state in &self.state_ports {
+            if state.capacity == Some(0) {
+                issues.push(format!(
+                    "state port {:?} capacity must be positive",
+                    state.id
+                ));
+            }
             if state.max_dynamic_activations == Some(0) {
                 issues.push(format!(
                     "state port {:?} max_dynamic_activations must be positive",
                     state.id
                 ));
             }
-            if state.max_dynamic_activations.is_some() && state.elements_per_activation().is_none()
+            if state.shape_per_token.is_some()
+                && (state.key_shape_per_token.is_some()
+                    || state.value_shape_per_token.is_some())
+            {
+                issues.push(format!(
+                    "state port {:?} cannot combine shape_per_token with key/value shapes",
+                    state.id
+                ));
+            }
+            if state.dynamic_activation_capacity().is_some()
+                && state.elements_per_activation().is_none()
             {
                 issues.push(format!(
                     "state port {:?} bounds dynamic activations but has no per-activation shape",

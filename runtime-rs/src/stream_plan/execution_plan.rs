@@ -188,7 +188,7 @@ impl StreamCircuitResourcePlan {
                     state_type: state.state_type.clone(),
                     shape: state.shape.clone(),
                     elements_per_activation: state.elements_per_activation(),
-                    max_dynamic_activations: state.max_dynamic_activations,
+                    max_dynamic_activations: state.dynamic_activation_capacity(),
                     update: state.update.clone(),
                     growth: state.growth.clone(),
                     sharing: state.sharing.clone(),
@@ -196,9 +196,8 @@ impl StreamCircuitResourcePlan {
                     layout: state.layout.clone(),
                     source_layout: state.source_layout.clone(),
                     element_bytes: state
-                        .extra
-                        .get("dtype")
-                        .and_then(serde_json::Value::as_str)
+                        .dtype
+                        .as_deref()
                         .map(state_dtype_bytes)
                         .transpose()?,
                 });

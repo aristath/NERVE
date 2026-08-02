@@ -156,6 +156,79 @@
     }
 
     #[test]
+    fn circuit_contract_types_single_vector_temporal_state_geometry() {
+        let mut circuit: StreamCircuit = serde_json::from_value(serde_json::json!({
+            "schema": STREAM_CIRCUIT_SCHEMA,
+            "id": "temporal_state_fixture",
+            "source": {
+                "component_id": "layer_00",
+                "source_layer_index": 0,
+                "source_operator_type": "latent_sparse_attention"
+            },
+            "runtime_role": "signal_processor",
+            "behavioral_role": "fixture",
+            "implementation": "fixture",
+            "boundary": {
+                "inputs": [{
+                    "id": "input_frame",
+                    "signal": "frame",
+                    "shape": [8],
+                    "component_port": "input"
+                }],
+                "outputs": [{
+                    "id": "output_frame",
+                    "signal": "frame",
+                    "shape": [8],
+                    "source": "output_frame",
+                    "component_port": "output"
+                }]
+            },
+            "state_ports": [{
+                "id": "temporal_memory",
+                "type": "rolling_attention_memory",
+                "shape_per_token": [2, 8],
+                "capacity": 128,
+                "max_dynamic_activations": 64,
+                "dtype": "BF16",
+                "update": "ring_append"
+            }],
+            "parameters": {
+                "layout": "row_major",
+                "storage": "safetensors",
+                "refs": {}
+            },
+            "nodes": [{
+                "id": "identity",
+                "op": "identity",
+                "inputs": ["input_frame"],
+                "outputs": ["output_frame"]
+            }]
+        }))
+        .unwrap();
+
+        circuit.validate_contract().unwrap();
+        let state = &circuit.state_ports[0];
+        assert_eq!(state.elements_per_activation(), Some(16));
+        assert_eq!(state.dynamic_activation_capacity(), Some(64));
+        assert_eq!(state.dtype.as_deref(), Some("BF16"));
+        assert!(!state.extra.contains_key("shape_per_token"));
+        assert!(!state.extra.contains_key("capacity"));
+        assert!(!state.extra.contains_key("dtype"));
+
+        circuit.state_ports[0].capacity = Some(0);
+        assert!(circuit
+            .validate_contract()
+            .unwrap_err()
+            .to_string()
+            .contains("capacity must be positive"));
+
+        circuit.state_ports[0].capacity = Some(128);
+        circuit.state_ports[0].key_shape_per_token = Some(vec![2, 8]);
+        let ambiguity = circuit.validate_contract().unwrap_err().to_string();
+        assert!(ambiguity.contains("cannot combine shape_per_token with key/value shapes"));
+    }
+
+    #[test]
     fn circuit_contract_requires_exact_semantic_module_ownership() {
         let circuit: StreamCircuit = serde_json::from_value(serde_json::json!({
             "schema": STREAM_CIRCUIT_SCHEMA,

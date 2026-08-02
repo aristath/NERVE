@@ -15,6 +15,17 @@ fn infer_node_output_shapes(
                 .map(|(block, hidden)| vec![block, hidden]);
             Ok(repeat_shape(shape, outputs))
         }
+        "hyper_connection_pre" => {
+            infer_hyper_connection_pre_output_shapes(component_id, node, signals)
+        }
+        "hyper_connection_post_pre" => infer_hyper_connection_post_pre_output_shapes(
+            component_id,
+            node,
+            signals,
+        ),
+        "hyper_connection_post" => {
+            infer_hyper_connection_post_output_shapes(component_id, node, signals)
+        }
         "markov_argmax_partials" => {
             let candidates = attr_usize(node, "vocabulary_size")
                 .zip(attr_usize(node, "vocabulary_tile_width"))
@@ -91,6 +102,7 @@ fn infer_node_output_shapes(
         | "rms_norm_per_head_unscaled"
         | "silu"
         | "gelu_tanh"
+        | "inverse_rotary_position_embedding"
         | "rotary_position_embedding"
         | "scalar_multiply"
         | "softplus_multiply" => Ok(repeat_shape(first_input_shape(node, signals), outputs)),
@@ -99,6 +111,7 @@ fn infer_node_output_shapes(
             Ok(repeat_shape(output_shape, outputs))
         }
         "multiply"
+        | "bounded_silu_multiply"
         | "residual_add"
         | "scaled_residual_add"
         | "silu_multiply"
@@ -365,7 +378,9 @@ fn infer_node_output_shapes(
                 });
             Ok(repeat_shape(output_shape, outputs))
         }
-        "scaled_dot_product_attention" | "append_scaled_dot_product_attention" => {
+        "indexed_sparse_attention"
+        | "scaled_dot_product_attention"
+        | "append_scaled_dot_product_attention" => {
             let logical_query = node
                 .attrs
                 .get("physical_logical_inputs")
@@ -609,6 +624,172 @@ fn infer_linear_output_shapes(
     };
 
     Ok(repeat_shape(output_shape, node.outputs.len()))
+}
+
+fn infer_hyper_connection_pre_output_shapes(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    let multiplicity = attr_usize(node, "multiplicity").filter(|value| *value > 0);
+    if node.inputs.len() != 1 || node.outputs.len() != 3 || multiplicity.is_none() {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid hyper-connection pre interface",
+            node.id
+        )));
+    }
+    let multiplicity = multiplicity.unwrap();
+    let hidden_width = first_input_shape(node, signals)
+        .map(|shape| {
+            match shape.as_slice() {
+                [streams, hidden] if *streams == multiplicity && *hidden > 0 => {
+                    Ok(*hidden)
+                }
+                [width] if *width > 0 && *width % multiplicity == 0 => {
+                    Ok(*width / multiplicity)
+                }
+                _ => Err(CircuitPlanError(format!(
+                    "{component_id} node {} hyper-connection input shape {shape:?} is incompatible with multiplicity {multiplicity}",
+                    node.id
+                ))),
+            }
+        })
+        .transpose()?;
+    multiplicity.checked_mul(multiplicity).ok_or_else(|| {
+        CircuitPlanError(format!(
+            "{component_id} node {} hyper-connection combination shape overflowed",
+            node.id
+        ))
+    })?;
+    Ok(vec![
+        hidden_width.map(|width| vec![width]),
+        Some(vec![multiplicity]),
+        Some(vec![multiplicity, multiplicity]),
+    ])
+}
+
+fn infer_hyper_connection_post_pre_output_shapes(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    if node.outputs.len() != 4 {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid hyper-connection post/pre interface",
+            node.id
+        )));
+    }
+    let (hidden_width, hyper_shape, multiplicity) =
+        validate_hyper_connection_post_inputs(component_id, node, signals)?;
+    Ok(vec![
+        hyper_shape,
+        hidden_width.map(|width| vec![width]),
+        Some(vec![multiplicity]),
+        Some(vec![multiplicity, multiplicity]),
+    ])
+}
+
+fn infer_hyper_connection_post_output_shapes(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    if node.outputs.len() != 1 {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid hyper-connection post interface",
+            node.id
+        )));
+    }
+    let (_hidden_width, hyper_shape, _multiplicity) =
+        validate_hyper_connection_post_inputs(component_id, node, signals)?;
+    Ok(vec![hyper_shape])
+}
+
+fn validate_hyper_connection_post_inputs(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+) -> Result<(Option<usize>, Option<Vec<usize>>, usize), CircuitPlanError> {
+    let multiplicity = attr_usize(node, "multiplicity").filter(|value| *value > 0);
+    if node.inputs.len() != 4 || multiplicity.is_none() {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid hyper-connection post input interface",
+            node.id
+        )));
+    }
+    let multiplicity = multiplicity.unwrap();
+    let combination_width = multiplicity.checked_mul(multiplicity).ok_or_else(|| {
+        CircuitPlanError(format!(
+            "{component_id} node {} hyper-connection combination shape overflowed",
+            node.id
+        ))
+    })?;
+    let shapes = node
+        .inputs
+        .iter()
+        .map(|input| {
+            signals
+                .get(input)
+                .and_then(|signal| signal.shape.clone())
+        })
+        .collect::<Vec<_>>();
+    let operator_width = shapes[0]
+        .as_ref()
+        .map(|shape| {
+            let [width] = shape.as_slice() else {
+                return Err(CircuitPlanError(format!(
+                    "{component_id} node {} hyper-connection operator shape {shape:?} must be rank one",
+                    node.id
+                )));
+            };
+            if *width == 0 {
+                return Err(CircuitPlanError(format!(
+                    "{component_id} node {} hyper-connection operator width must be positive",
+                    node.id
+                )));
+            }
+            Ok(*width)
+        })
+        .transpose()?;
+    let hidden_from_hyper = shapes[1]
+        .as_ref()
+        .map(|shape| match shape.as_slice() {
+            [streams, hidden] if *streams == multiplicity && *hidden > 0 => Ok(*hidden),
+            [width] if *width > 0 && *width % multiplicity == 0 => {
+                Ok(*width / multiplicity)
+            }
+            _ => Err(CircuitPlanError(format!(
+                "{component_id} node {} hyper-connection residual shape {shape:?} is incompatible with multiplicity {multiplicity}",
+                node.id
+            ))),
+        })
+        .transpose()?;
+    let post_shape_is_valid = shapes[2]
+        .as_ref()
+        .is_none_or(|shape| shape == &[multiplicity]);
+    let combination_shape_is_valid = shapes[3].as_ref().is_none_or(|shape| {
+        shape == &[multiplicity, multiplicity]
+            || shape == &[combination_width]
+    });
+    if operator_width
+        .zip(hidden_from_hyper)
+        .is_some_and(|(operator, residual)| operator != residual)
+        || !post_shape_is_valid
+        || !combination_shape_is_valid
+    {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has incompatible hyper-connection post geometry",
+            node.id
+        )));
+    }
+    let hidden_width = operator_width.or(hidden_from_hyper);
+    Ok((
+        hidden_width,
+        shapes[1]
+            .clone()
+            .or_else(|| hidden_width.map(|hidden| vec![multiplicity, hidden])),
+        multiplicity,
+    ))
 }
 
 fn infer_parallel_linear_output_shapes(
