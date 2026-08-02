@@ -190,6 +190,28 @@ impl CircuitActivationPlan {
                 },
             );
         }
+        for control in &circuit.boundary.controls {
+            if !available.insert(control.id.clone()) {
+                return Err(CircuitPlanError(format!(
+                    "{} runtime control {:?} collides with another boundary signal",
+                    component_id, control.id
+                )));
+            }
+            signals.insert(
+                control.id.clone(),
+                PlannedSignal {
+                    id: control.id.clone(),
+                    producer: SignalProducer::RuntimeControl {
+                        runtime_source: control.runtime_source.clone(),
+                    },
+                    consumers: Vec::new(),
+                    shape: Some(control.shape.clone()),
+                    element_bytes: Some(4),
+                    storage: SignalStorage::RuntimeControl,
+                    is_boundary_output: false,
+                },
+            );
+        }
         for state in &circuit.state_ports {
             available.insert(state.id.clone());
             signals.insert(
@@ -799,6 +821,7 @@ pub struct PlannedSignal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignalProducer {
     BoundaryInput,
+    RuntimeControl { runtime_source: String },
     StatePort,
     Node { node_id: String },
 }
@@ -806,6 +829,7 @@ pub enum SignalProducer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignalStorage {
     Boundary,
+    RuntimeControl,
     State,
     Activation,
     StateView,

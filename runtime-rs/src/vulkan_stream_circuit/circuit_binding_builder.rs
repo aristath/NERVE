@@ -478,6 +478,47 @@ fn bind_signal(
     } else {
         match signal.storage {
             SignalStorage::Boundary => VulkanSignalResource::BoundaryInput,
+            SignalStorage::RuntimeControl => {
+                let SignalProducer::RuntimeControl { runtime_source } = &signal.producer else {
+                    return Err(VulkanBindingPlanError(format!(
+                        "{} signal {:?} has runtime-control storage without a runtime source",
+                        circuit.component_id, signal_id
+                    )));
+                };
+                let element_bytes = signal.element_bytes.ok_or_else(|| {
+                    VulkanBindingPlanError(format!(
+                        "{} runtime control {:?} has no element byte width",
+                        circuit.component_id, signal_id
+                    ))
+                })?;
+                let element_count = signal
+                    .shape
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VulkanBindingPlanError(format!(
+                            "{} runtime control {:?} has no shape",
+                            circuit.component_id, signal_id
+                        ))
+                    })?
+                    .iter()
+                    .try_fold(1usize, |total, extent| total.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        VulkanBindingPlanError(format!(
+                            "{} runtime control {:?} shape overflows usize",
+                            circuit.component_id, signal_id
+                        ))
+                    })?;
+                let byte_capacity = element_count.checked_mul(element_bytes).ok_or_else(|| {
+                    VulkanBindingPlanError(format!(
+                        "{} runtime control {:?} byte capacity overflows usize",
+                        circuit.component_id, signal_id
+                    ))
+                })?;
+                VulkanSignalResource::RuntimeControl {
+                    runtime_source: runtime_source.clone(),
+                    byte_capacity,
+                }
+            }
             SignalStorage::State => {
                 let state = state_bindings
                     .get(&(circuit.component_id.clone(), signal_id.to_string()))

@@ -142,6 +142,12 @@ pub enum VulkanMountedPlacedResidentKernelDispatchError {
         binding: usize,
         signal_id: String,
     },
+    UnsupportedRuntimeControl {
+        dispatch_index: usize,
+        binding: usize,
+        runtime_source: String,
+        byte_capacity: usize,
+    },
     UnsupportedPushConstantScalar {
         scalar_type: String,
     },
@@ -317,6 +323,15 @@ impl Display for VulkanMountedPlacedResidentKernelDispatchError {
             } => write!(
                 f,
                 "dispatch {dispatch_index} descriptor {binding} references model boundary signal {signal_id:?}, but model boundary buffers are not mounted yet"
+            ),
+            Self::UnsupportedRuntimeControl {
+                dispatch_index,
+                binding,
+                runtime_source,
+                byte_capacity,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} requests unsupported runtime control {runtime_source:?} with {byte_capacity} bytes"
             ),
             Self::UnsupportedPushConstantScalar { scalar_type } => {
                 write!(f, "unsupported push-constant scalar type {scalar_type:?}")

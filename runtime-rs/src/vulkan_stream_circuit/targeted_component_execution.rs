@@ -105,6 +105,7 @@ struct VulkanTargetedPrefillExecution {
     signal_buffer_indices: BTreeMap<VulkanComponentBatchSignalKey, usize>,
     control_buffers:
         BTreeMap<VulkanResidentComponentBatchControlPayload, VulkanResidentBuffer>,
+    _runtime_token_ids_buffer: VulkanResidentBuffer,
     steps: Vec<VulkanTargetedPrefillStep>,
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
 }
@@ -1240,12 +1241,33 @@ impl VulkanTargetedPrefillExecution {
         .map_err(|_| targeted_component_error_value(
             "targeted prefill workgroup count exceeds u32",
         ))?;
+        let runtime_token_ids_byte_capacity = activation_batch_width
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| targeted_component_error_value(
+                "targeted prefill runtime token-id capacity overflowed",
+            ))?;
+        let mut runtime_token_ids_buffer = device
+            .create_host_visible_resident_buffer(runtime_token_ids_byte_capacity)
+            .map_err(|error| targeted_component_error_value(format!(
+                "failed to allocate targeted prefill runtime token ids: {error}"
+            )))?;
+        runtime_token_ids_buffer.persistently_map().map_err(|error| {
+            targeted_component_error_value(format!(
+                "failed to map targeted prefill runtime token ids: {error}"
+            ))
+        })?;
+        runtime_token_ids_buffer
+            .write_bytes(&vec![0u8; runtime_token_ids_byte_capacity])
+            .map_err(|error| targeted_component_error_value(format!(
+                "failed to initialize targeted prefill runtime token ids: {error}"
+            )))?;
         let parent_bindings = component_batch_bindings(
             mounted,
             dispatch,
             &signal_buffers,
             &signal_buffer_indices,
             None,
+            Some((&runtime_token_ids_buffer, runtime_token_ids_byte_capacity)),
             None,
         )
         .map_err(|error| targeted_component_error_value(format!(
@@ -1312,6 +1334,7 @@ impl VulkanTargetedPrefillExecution {
             signal_buffers,
             signal_buffer_indices,
             control_buffers,
+            _runtime_token_ids_buffer: runtime_token_ids_buffer,
             steps,
             sequence_catalog: RefCell::new(BTreeMap::new()),
         })

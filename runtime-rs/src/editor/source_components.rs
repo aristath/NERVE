@@ -87,14 +87,24 @@ fn source_components(
                 .iter()
                 .filter_map(|state| serde_json::to_value(state).ok())
                 .collect(),
-            controls: component.circuit.boundary.controls.clone(),
+            controls: component
+                .circuit
+                .boundary
+                .controls
+                .iter()
+                .filter_map(|control| serde_json::to_value(control).ok())
+                .collect(),
             control_schemas: component
                 .circuit
                 .boundary
                 .controls
                 .iter()
                 .enumerate()
-                .map(|(index, control)| runtime_editor_control_schema(index, control))
+                .filter_map(|(index, control)| {
+                    serde_json::to_value(control)
+                        .ok()
+                        .map(|value| runtime_editor_control_schema(index, &value))
+                })
                 .collect(),
             parameter_ref_count: component.params.refs.len(),
             node_count: component.circuit.nodes.len(),

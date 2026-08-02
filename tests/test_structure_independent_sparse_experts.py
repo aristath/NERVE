@@ -105,7 +105,13 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
     assert validate_circuit(circuit).ok
     nodes = {node["id"]: node for node in circuit["nodes"]}
     assert component["ports"]["controls"] == [
-        {"id": "token_id", "signal": "token_id", "shape": []}
+        {
+            "id": "token_id",
+            "signal": "token_id",
+            "shape": [],
+            "dtype": "U32",
+            "runtime_source": "input_token_id",
+        }
     ]
     assert nodes["moe_topk"]["inputs"] == ["moe_router_logits", "token_id"]
     selected = nodes["sparse_moe_gate_up"]["attrs"]["selected_parameter_accesses"][0]

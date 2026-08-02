@@ -112,6 +112,7 @@ fn descriptor_resource_byte_capacity(resource: &VulkanKernelDescriptorResource) 
     match resource {
         VulkanKernelDescriptorResource::Signal(signal) => match &signal.resource {
             VulkanSignalResource::BoundaryInput | VulkanSignalResource::BoundaryOutput => None,
+            VulkanSignalResource::RuntimeControl { byte_capacity, .. } => Some(*byte_capacity),
             VulkanSignalResource::StateBuffer {
                 static_bytes,
                 bytes_per_activation,

@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;

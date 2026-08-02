@@ -176,7 +176,8 @@ impl VulkanBoundDispatchPlan {
                     VulkanBoundDescriptorTarget::from_resource(prepared, descriptor, buffers)?;
                 match target {
                     VulkanBoundDescriptorTarget::BoundaryInput { .. }
-                    | VulkanBoundDescriptorTarget::BoundaryOutput { .. } => {
+                    | VulkanBoundDescriptorTarget::BoundaryOutput { .. }
+                    | VulkanBoundDescriptorTarget::RuntimeControl { .. } => {
                         boundary_descriptor_count += 1;
                     }
                     VulkanBoundDescriptorTarget::PermanentParameter { .. } => {

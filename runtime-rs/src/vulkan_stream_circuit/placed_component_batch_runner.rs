@@ -665,6 +665,7 @@ fn component_batch_bindings<'a>(
     signal_buffers: &'a [VulkanComponentBatchSignalBuffer],
     signal_buffer_indices: &BTreeMap<VulkanComponentBatchSignalKey, usize>,
     lane_index: Option<usize>,
+    runtime_control_buffer: Option<(&'a VulkanResidentBuffer, usize)>,
     stream_control_buffer: Option<&'a VulkanResidentBuffer>,
 ) -> Result<Vec<VulkanResidentKernelBufferBinding<'a>>, VulkanResidentInProcessPlacedRuntimeError> {
     let mut bindings = Vec::with_capacity(
@@ -690,6 +691,38 @@ fn component_batch_bindings<'a>(
                 VulkanResidentKernelBufferAccess::ReadWrite
             }
         };
+        if let VulkanMountedPlacedBoundDescriptorTarget::Resident {
+            target:
+                VulkanBoundDescriptorTarget::RuntimeControl {
+                    runtime_source,
+                    byte_capacity,
+                },
+        } = &descriptor.target
+        {
+            if runtime_source != "input_token_id" || *byte_capacity != size_of::<u32>() {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "component batch descriptor {}.{} requests unsupported runtime control {runtime_source:?} with {byte_capacity} bytes",
+                        dispatch.component_id, dispatch.node_id
+                    )),
+                ));
+            }
+            let (buffer, binding_byte_capacity) = runtime_control_buffer.ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch descriptor {}.{} has no runtime token-id buffer",
+                    dispatch.component_id, dispatch.node_id
+                )))
+            })?;
+            bindings.push(
+                VulkanResidentKernelBufferBinding::new(
+                    binding,
+                    buffer,
+                    binding_byte_capacity,
+                )
+                .with_access(access),
+            );
+            continue;
+        }
         if let Some((key, frame_byte_capacity)) =
             component_batch_signal_target_with_mounted(mounted, descriptor)?
         {
@@ -825,6 +858,7 @@ fn component_batch_bindings<'a>(
                 }
                 VulkanBoundDescriptorTarget::BoundaryInput { .. }
                 | VulkanBoundDescriptorTarget::BoundaryOutput { .. }
+                | VulkanBoundDescriptorTarget::RuntimeControl { .. }
                 | VulkanBoundDescriptorTarget::ActivationSlot { .. } => {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
@@ -855,6 +889,23 @@ fn component_batch_bindings<'a>(
         );
     }
     Ok(bindings)
+}
+
+fn component_batch_runtime_token_id_bytes(
+    token_ids: &[u32],
+) -> Result<Vec<u8>, VulkanError> {
+    let mut bytes = Vec::with_capacity(
+        token_ids
+            .len()
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| VulkanError(
+                "component batch runtime token-id payload overflowed".to_string(),
+            ))?,
+    );
+    for token_id in token_ids {
+        bytes.extend_from_slice(&token_id.to_le_bytes());
+    }
+    Ok(bytes)
 }
 
 fn component_batch_signal_target_with_mounted(

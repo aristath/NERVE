@@ -5,6 +5,7 @@ struct VulkanResidentComponentBatchSliceRunner {
     signal_buffers: Vec<VulkanComponentBatchSignalBuffer>,
     signal_buffer_indices: BTreeMap<VulkanComponentBatchSignalKey, usize>,
     stream_control_buffers: Vec<VulkanResidentBuffer>,
+    runtime_token_ids_buffer: VulkanResidentBuffer,
     batch_control_buffers:
         BTreeMap<VulkanResidentComponentBatchControlPayload, VulkanResidentBuffer>,
     steps: Vec<VulkanComponentBatchDispatchStep>,
@@ -392,6 +393,19 @@ impl VulkanResidentComponentBatchSliceRunner {
                 Ok::<_, VulkanResidentInProcessPlacedRuntimeError>(buffer)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let runtime_token_ids_byte_capacity = lane_capacity
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "component batch runtime token-id capacity overflowed".to_string(),
+                ))
+            })?;
+        let mut runtime_token_ids_buffer = device
+            .create_host_visible_resident_buffer(runtime_token_ids_byte_capacity)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        runtime_token_ids_buffer
+            .persistently_map()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let batch_control_buffers = [
             VulkanResidentComponentBatchControlPayload::Width,
             VulkanResidentComponentBatchControlPayload::WidthStateSnapshots,
@@ -513,6 +527,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                         &signal_buffers,
                         &signal_buffer_indices,
                         None,
+                        Some((&runtime_token_ids_buffer, runtime_token_ids_byte_capacity)),
                         None,
                     )?;
                     let (binding, byte_count, payload) = stage.control.storage_buffer();
@@ -635,6 +650,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     &signal_buffers,
                     &signal_buffer_indices,
                     Some(lane_index),
+                    Some((stream_control_buffer, size_of::<u32>())),
                     dispatch.uses_stream_tick.then_some(stream_control_buffer),
                 )?;
                 let resident = device
@@ -737,6 +753,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             signal_buffers,
             signal_buffer_indices,
             stream_control_buffers,
+            runtime_token_ids_buffer,
             batch_control_buffers,
             steps,
             execution_units,
@@ -972,6 +989,11 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .write_bytes(control_bytes)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
+        let runtime_token_ids = component_batch_runtime_token_id_bytes(input_token_ids)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        self.runtime_token_ids_buffer
+            .write_bytes(&runtime_token_ids)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
         let batch_width_u32 = u32::try_from(batch_width).map_err(|_| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(

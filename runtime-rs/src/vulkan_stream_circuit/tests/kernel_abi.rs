@@ -99,6 +99,67 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
         "dynamic_state_capacity_activations"
     );
 }
+
+#[test]
+fn kernel_interfaces_keep_runtime_controls_out_of_graph_boundary_buffers() {
+    let mut graph = fixture_model_execution_graph();
+    let component = &mut graph.circuits[0];
+    component.circuit.boundary.controls = vec![
+        serde_json::from_value(serde_json::json!({
+            "id": "token_id",
+            "signal": "token_id",
+            "shape": [],
+            "dtype": "U32",
+            "runtime_source": "input_token_id"
+        }))
+        .unwrap(),
+    ];
+    component
+        .circuit
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "q_projection")
+        .unwrap()
+        .inputs
+        .push("token_id".to_string());
+    component.circuit.validate_contract().unwrap();
+
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let execution_plan =
+        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
+    let resource_plan =
+        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    let resident_plan = VulkanStreamCircuitResidentPlan::from_resource_plan(
+        &resource_plan,
+        Some(&tensor_index),
+        Some(2),
+    )
+    .unwrap();
+    let binding_plan =
+        VulkanStreamCircuitBindingPlan::from_plans(&execution_plan, &resource_plan, &resident_plan)
+            .unwrap();
+    let kernel_plan = VulkanKernelInterfacePlan::from_binding_plan(&binding_plan);
+    let projection = kernel_plan.kernel("layer_00", "q_projection").unwrap();
+    let token_id = projection
+        .inputs
+        .iter()
+        .find(|input| input.signal_id == "token_id")
+        .unwrap();
+
+    assert!(matches!(
+        token_id.resource,
+        VulkanSignalResource::RuntimeControl {
+            ref runtime_source,
+            byte_capacity: 4,
+        } if runtime_source == "input_token_id"
+    ));
+    assert!(
+        !binding_plan.circuits[0]
+            .input_ports
+            .iter()
+            .any(|port| port.id == "token_id")
+    );
+}
 #[test]
 fn stream_control_buffer_bytes_follow_kernel_abi_order() {
     let push_constants =
@@ -130,6 +191,16 @@ fn component_batch_lane_controls_preserve_each_token_identity() {
     assert_eq!(&controls[1][4..12], &42u64.to_le_bytes());
     assert_eq!(&controls[0][16..20], &65_536u32.to_le_bytes());
     assert_eq!(&controls[1][16..20], &65_536u32.to_le_bytes());
+}
+
+#[test]
+fn component_batch_runtime_token_ids_are_a_contiguous_u32_vector() {
+    let bytes = component_batch_runtime_token_id_bytes(&[9259, 1902, u32::MAX]).unwrap();
+
+    assert_eq!(bytes.len(), 3 * size_of::<u32>());
+    assert_eq!(&bytes[0..4], &9259u32.to_le_bytes());
+    assert_eq!(&bytes[4..8], &1902u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &u32::MAX.to_le_bytes());
 }
 
 #[test]

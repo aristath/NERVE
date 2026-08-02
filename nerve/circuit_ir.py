@@ -804,6 +804,24 @@ def _control_has_id_signal_shape(
             )
         )
         ok = False
+    if not isinstance(port.get("dtype"), str) or not port["dtype"]:
+        issues.append(
+            CircuitIssue(
+                "error",
+                "control port dtype must be a non-empty string",
+                f"{path}.dtype",
+            )
+        )
+        ok = False
+    if not isinstance(port.get("runtime_source"), str) or not port["runtime_source"]:
+        issues.append(
+            CircuitIssue(
+                "error",
+                "control port runtime_source must be a non-empty string",
+                f"{path}.runtime_source",
+            )
+        )
+        ok = False
     if ok:
         checks.append(f"{path} has id/signal/shape")
     return ok

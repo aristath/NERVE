@@ -192,6 +192,10 @@ pub enum VulkanDescriptorResourceAddress {
     BoundaryOutput {
         signal_id: String,
     },
+    RuntimeControl {
+        runtime_source: String,
+        byte_capacity: usize,
+    },
     PermanentParameter {
         param_id: String,
         tensor: String,
@@ -380,6 +384,13 @@ fn resolve_signal_descriptor_resource(
                 signal_id: signal.signal_id.clone(),
             })
         }
+        VulkanSignalResource::RuntimeControl {
+            runtime_source,
+            byte_capacity,
+        } => Ok(VulkanDescriptorResourceAddress::RuntimeControl {
+            runtime_source: runtime_source.clone(),
+            byte_capacity: *byte_capacity,
+        }),
         VulkanSignalResource::ActivationSlot {
             component_id,
             slot,

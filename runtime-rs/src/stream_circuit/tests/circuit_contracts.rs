@@ -76,6 +76,86 @@
     }
 
     #[test]
+    fn circuit_contract_accepts_typed_runtime_controls_as_node_inputs() {
+        let circuit: StreamCircuit = serde_json::from_value(serde_json::json!({
+            "schema": STREAM_CIRCUIT_SCHEMA,
+            "id": "runtime_control_fixture",
+            "source": {
+                "component_id": "layer_00",
+                "source_layer_index": 0,
+                "source_operator_type": "latent_sparse_attention"
+            },
+            "runtime_role": "signal_processor",
+            "behavioral_role": "fixture",
+            "implementation": "fixture",
+            "boundary": {
+                "inputs": [{
+                    "id": "input_frame",
+                    "signal": "frame",
+                    "shape": [8],
+                    "component_port": "input"
+                }],
+                "outputs": [{
+                    "id": "output_frame",
+                    "signal": "frame",
+                    "shape": [8],
+                    "source": "output_frame",
+                    "component_port": "output"
+                }],
+                "controls": [{
+                    "id": "token_id",
+                    "signal": "token_id",
+                    "shape": [],
+                    "dtype": "U32",
+                    "runtime_source": "input_token_id"
+                }]
+            },
+            "parameters": {
+                "layout": "row_major",
+                "storage": "safetensors",
+                "refs": {}
+            },
+            "nodes": [{
+                "id": "route",
+                "op": "moe_route",
+                "inputs": ["input_frame", "token_id"],
+                "outputs": ["output_frame"]
+            }]
+        }))
+        .unwrap();
+
+        circuit.validate_contract().unwrap();
+        let plan = crate::stream_plan::CircuitActivationPlan::from_circuit(
+            "layer_00",
+            &circuit,
+        )
+        .unwrap();
+        let token_id = plan.signal("token_id").unwrap();
+        assert_eq!(token_id.shape, Some(Vec::new()));
+        assert_eq!(token_id.element_bytes, Some(4));
+        assert!(matches!(
+            token_id.producer,
+            crate::stream_plan::SignalProducer::RuntimeControl {
+                ref runtime_source
+            } if runtime_source == "input_token_id"
+        ));
+        assert_eq!(
+            token_id.storage,
+            crate::stream_plan::SignalStorage::RuntimeControl
+        );
+
+        let mut unsupported = circuit.clone();
+        unsupported.boundary.controls[0].runtime_source = "wall_clock".to_string();
+        assert!(
+            unsupported
+                .validate_contract()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported runtime source")
+        );
+    }
+
+    #[test]
     fn circuit_contract_requires_exact_semantic_module_ownership() {
         let circuit: StreamCircuit = serde_json::from_value(serde_json::json!({
             "schema": STREAM_CIRCUIT_SCHEMA,

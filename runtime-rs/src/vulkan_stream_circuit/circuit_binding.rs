@@ -270,6 +270,10 @@ pub struct VulkanSignalBinding {
 pub enum VulkanSignalResource {
     BoundaryInput,
     BoundaryOutput,
+    RuntimeControl {
+        runtime_source: String,
+        byte_capacity: usize,
+    },
     StateBuffer {
         component_id: String,
         state_id: String,

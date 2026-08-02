@@ -145,6 +145,10 @@ pub enum VulkanBoundDescriptorTarget {
     BoundaryOutput {
         signal_id: String,
     },
+    RuntimeControl {
+        runtime_source: String,
+        byte_capacity: usize,
+    },
     PermanentParameter {
         param_id: String,
         tensor: String,
@@ -215,6 +219,13 @@ impl VulkanBoundDescriptorTarget {
                     signal_id: signal_id.clone(),
                 })
             }
+            VulkanDescriptorResourceAddress::RuntimeControl {
+                runtime_source,
+                byte_capacity,
+            } => Ok(Self::RuntimeControl {
+                runtime_source: runtime_source.clone(),
+                byte_capacity: *byte_capacity,
+            }),
             VulkanDescriptorResourceAddress::PermanentParameter {
                 param_id,
                 tensor,

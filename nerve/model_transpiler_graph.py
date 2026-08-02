@@ -100,7 +100,15 @@ def make_layer(
                 {"id": "output", "signal": "frame", "shape": list(layer.boundary_shape)}
             ],
             "controls": (
-                [{"id": "token_id", "signal": "token_id", "shape": []}]
+                [
+                    {
+                        "id": "token_id",
+                        "signal": "token_id",
+                        "shape": [],
+                        "dtype": "U32",
+                        "runtime_source": "input_token_id",
+                    }
+                ]
                 if layer.feed_forward_attributes.get("routing", {}).get("selection")
                 == "token_id_table"
                 else []

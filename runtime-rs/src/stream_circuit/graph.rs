@@ -63,7 +63,18 @@ pub struct CircuitBoundary {
     #[serde(default)]
     pub outputs: Vec<CircuitPort>,
     #[serde(default)]
-    pub controls: Vec<Value>,
+    pub controls: Vec<CircuitRuntimeControlPort>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CircuitRuntimeControlPort {
+    pub id: String,
+    pub signal: String,
+    pub shape: Vec<usize>,
+    pub dtype: String,
+    pub runtime_source: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -269,6 +280,20 @@ impl StreamCircuit {
             produced.insert(port.id.clone());
             produced_by.insert(port.id.clone(), "boundary.input".to_string());
         }
+        let mut control_port_ids = BTreeSet::new();
+        for control in &self.boundary.controls {
+            validate_runtime_control_port(control, &mut issues);
+            if input_port_ids.contains(&control.id)
+                || !control_port_ids.insert(control.id.clone())
+            {
+                issues.push(format!(
+                    "duplicate boundary input/control port id {:?}",
+                    control.id
+                ));
+            }
+            produced.insert(control.id.clone());
+            produced_by.insert(control.id.clone(), "boundary.runtime_control".to_string());
+        }
 
         let state_ids: BTreeSet<_> = self.state_ports.iter().map(|state| &state.id).collect();
         if state_ids.len() != self.state_ports.len() {
@@ -389,6 +414,12 @@ impl StreamCircuit {
                 .iter()
                 .map(|port| port.id.clone())
                 .collect::<BTreeSet<_>>();
+            semantic_signals.extend(
+                self.boundary
+                    .controls
+                    .iter()
+                    .map(|control| control.id.clone()),
+            );
             semantic_signals.extend(
                 semantic_nodes
                     .iter()
@@ -814,6 +845,39 @@ fn validate_boundary_port(port: &CircuitPort, direction: &str, issues: &mut Vec<
         issues.push(format!(
             "boundary {direction} port {:?} must map to a non-empty component_port",
             port.id
+        ));
+    }
+}
+
+fn validate_runtime_control_port(
+    port: &CircuitRuntimeControlPort,
+    issues: &mut Vec<String>,
+) {
+    if port.id.is_empty() {
+        issues.push("boundary runtime control id must not be empty".to_string());
+    }
+    if port.signal.is_empty() {
+        issues.push(format!(
+            "boundary runtime control {:?} signal must not be empty",
+            port.id
+        ));
+    }
+    if port.shape.contains(&0) {
+        issues.push(format!(
+            "boundary runtime control {:?} shape must contain only positive dimensions",
+            port.id
+        ));
+    }
+    if port.dtype != "U32" {
+        issues.push(format!(
+            "boundary runtime control {:?} has unsupported dtype {:?}",
+            port.id, port.dtype
+        ));
+    }
+    if port.runtime_source != "input_token_id" {
+        issues.push(format!(
+            "boundary runtime control {:?} has unsupported runtime source {:?}",
+            port.id, port.runtime_source
         ));
     }
 }

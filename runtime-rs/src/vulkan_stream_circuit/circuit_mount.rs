@@ -647,6 +647,22 @@ impl VulkanMountedPlacedStreamCircuit {
     ) -> Result<(&'a VulkanResidentBuffer, usize), VulkanMountedPlacedResidentKernelDispatchError>
     {
         match target {
+            VulkanBoundDescriptorTarget::RuntimeControl {
+                runtime_source,
+                byte_capacity,
+            } => {
+                if runtime_source != "input_token_id" || *byte_capacity != size_of::<u32>() {
+                    return Err(
+                        VulkanMountedPlacedResidentKernelDispatchError::UnsupportedRuntimeControl {
+                            dispatch_index: dispatch.dispatch_index,
+                            binding: descriptor.binding,
+                            runtime_source: runtime_source.clone(),
+                            byte_capacity: *byte_capacity,
+                        },
+                    );
+                }
+                Ok((&self.stream_control_buffer, *byte_capacity))
+            }
             VulkanBoundDescriptorTarget::PermanentParameter {
                 param_id,
                 tensor,
