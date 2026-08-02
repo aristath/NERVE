@@ -67,6 +67,46 @@ uint dynamic_parameter_slot(uint expert, uint parameter) {
     ];
 }
 
+uint address_table_slot_count() {
+    return dynamic_resource_addresses.words.length() / ADDRESS_RECORD_WORDS;
+}
+
+uint64_t address_record_byte_count(uint record) {
+    return uint64_t(dynamic_resource_addresses.words[record + 2u])
+        | (uint64_t(dynamic_resource_addresses.words[record + 3u]) << 32u);
+}
+
+bool address_record_is_resident(uint record, uint64_t required_byte_count) {
+    uint64_t address = uint64_t(dynamic_resource_addresses.words[record])
+        | (uint64_t(dynamic_resource_addresses.words[record + 1u]) << 32u);
+    uint generation_nonzero = dynamic_resource_addresses.words[record + 4u]
+        | dynamic_resource_addresses.words[record + 5u];
+    return address != uint64_t(0)
+        && (address & uint64_t(3)) == uint64_t(0)
+        && address_record_byte_count(record) >= required_byte_count
+        && generation_nonzero != 0u
+        && dynamic_resource_addresses.words[record + 6u] == 1u;
+}
+
+bool dynamic_parameter_record_is_valid(
+    uint expert,
+    uint parameter,
+    uint64_t required_byte_count
+) {
+    uint parameter_index = expert * DYNAMIC_PARAMETER_COUNT + parameter;
+    if (parameter_index >= dynamic_parameter_slots.words.length()) return false;
+    uint slot = dynamic_parameter_slots.words[parameter_index];
+    if (slot == UNBOUND_PARAMETER_SLOT || slot >= address_table_slot_count()) return false;
+    return address_record_is_resident(slot * ADDRESS_RECORD_WORDS, required_byte_count);
+}
+
+bool dynamic_expert_is_valid(uint expert) {
+    uint64_t weight_bytes = uint64_t(HIDDEN_SIZE) * uint64_t(WEIGHT_ROW_BYTES);
+    uint64_t scale_bytes = uint64_t(HIDDEN_SIZE) * uint64_t(SCALE_ROW_BYTES);
+    return dynamic_parameter_record_is_valid(expert, 0u, weight_bytes)
+        && dynamic_parameter_record_is_valid(expert, 1u, scale_bytes);
+}
+
 DynamicU32Buffer dynamic_parameter(uint expert, uint parameter) {
     uint record = dynamic_parameter_slot(expert, parameter) * ADDRESS_RECORD_WORDS;
     uint64_t address = uint64_t(dynamic_resource_addresses.words[record])
@@ -141,10 +181,7 @@ void main() {
     if (route >= EXPERTS_PER_TOKEN) return;
     uint packed_route = expert_routes.words[route];
     uint expert = packed_route & 0xffffu;
-    if (expert >= NUM_EXPERTS) return;
-    for (uint parameter = 0u; parameter < DYNAMIC_PARAMETER_COUNT; parameter++) {
-        if (dynamic_parameter_slot(expert, parameter) == UNBOUND_PARAMETER_SLOT) return;
-    }
+    if (expert >= NUM_EXPERTS || !dynamic_expert_is_valid(expert)) return;
     DynamicU32Buffer down_weight = dynamic_parameter(expert, 0u);
     DynamicU32Buffer down_scale = dynamic_parameter(expert, 1u);
     float route_weight = bf16_to_f32(packed_route >> 16u);

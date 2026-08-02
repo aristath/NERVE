@@ -146,6 +146,112 @@ mod mxfp4_tests {
     }
 
     #[test]
+    fn native_mxfp4_batch_expert_fails_closed_on_invalid_dynamic_metadata() {
+        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+            eprintln!(
+                "skipping native MXFP4 metadata guard: explicit Vulkan device index unset"
+            );
+            return;
+        };
+        let device_index = raw_device_index
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let gate_shader = render_mxfp4_shader(
+            "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
+            &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
+            true,
+        );
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
+            .expect("explicit idle AMD Vulkan device must open");
+
+        let quantized_hidden = device.create_resident_buffer(WIDTH).unwrap();
+        quantized_hidden.write_bytes(&vec![0x38; WIDTH]).unwrap();
+        let hidden_scales = device.create_resident_buffer(4).unwrap();
+        hidden_scales.write_bytes(&1.0_f32.to_le_bytes()).unwrap();
+        let routes = device.create_resident_buffer(4).unwrap();
+        routes
+            .write_bytes(&u32_bytes(&[u32::from(f32_to_bf16_bits(1.0)) << 16]))
+            .unwrap();
+        let expert_frame_words = WIDTH / 2 + 1;
+        let intermediates = device
+            .create_resident_buffer(expert_frame_words * size_of::<u32>())
+            .unwrap();
+
+        let gate_weight = filled_addressable_buffer(&device, WEIGHT_BYTES, 0x22);
+        let gate_scale = filled_addressable_buffer(&device, SCALE_BYTES, 120);
+        let up_weight = filled_addressable_buffer(&device, WEIGHT_BYTES, 0x22);
+        let up_scale = filled_addressable_buffer(&device, SCALE_BYTES, 120);
+        let addresses = address_table(
+            &device,
+            &[&gate_weight, &gate_scale, &up_weight, &up_scale],
+        );
+        let slots = device.create_resident_buffer(16).unwrap();
+        slots.write_bytes(&u32_bytes(&[0, 1, 2, 3])).unwrap();
+        let batch_control = device.create_resident_buffer(28).unwrap();
+        batch_control
+            .write_bytes(&u32_bytes(&[1, 0, 0, 0, 0, 0, 0]))
+            .unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &gate_shader,
+                &[
+                    read_binding(0, &quantized_hidden, WIDTH),
+                    read_binding(1, &hidden_scales, 4),
+                    read_binding(2, &routes, 4),
+                    write_binding(
+                        3,
+                        &intermediates,
+                        expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(4, &addresses, 128),
+                    read_binding(5, &slots, 16),
+                    read_binding(31, &batch_control, 28),
+                ],
+                4,
+                1,
+                512,
+                0,
+            )
+            .unwrap();
+
+        let valid_metadata = {
+            let mut words = vec![0u32; expert_frame_words];
+            words[WIDTH / 2] = 0;
+            u32_bytes(&words)
+        };
+        intermediates.write_bytes(&valid_metadata).unwrap();
+        device.run_resident_kernel_dispatch(&dispatch, &[]).unwrap();
+        let expected_activation = f32_to_bf16_bits(1.0 / (1.0 + (-1.0_f32).exp()));
+        assert_eq!(
+            &intermediates.read_bytes(FRAME_BYTES).unwrap(),
+            &u16_bytes(&vec![expected_activation; WIDTH]),
+            "the guard must not alter a valid dynamic-resource execution"
+        );
+
+        let invalid_route_metadata = {
+            let mut words = vec![0u32; expert_frame_words];
+            words[WIDTH / 2] = u32::MAX;
+            u32_bytes(&words)
+        };
+        intermediates.write_bytes(&invalid_route_metadata).unwrap();
+        device.run_resident_kernel_dispatch(&dispatch, &[]).unwrap();
+        assert_eq!(
+            intermediates.read_bytes(FRAME_BYTES).unwrap(),
+            vec![0; FRAME_BYTES],
+            "out-of-range compact routes must not reach an address dereference"
+        );
+
+        intermediates.write_bytes(&valid_metadata).unwrap();
+        addresses.write_bytes(&vec![0; 128]).unwrap();
+        device.run_resident_kernel_dispatch(&dispatch, &[]).unwrap();
+        assert_eq!(
+            intermediates.read_bytes(FRAME_BYTES).unwrap(),
+            vec![0; FRAME_BYTES],
+            "unpublished address records must fail closed before buffer-reference access"
+        );
+    }
+
+    #[test]
     fn native_mxfp4_real_geometry_microbenchmark_finishes_under_one_minute() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!(
@@ -526,6 +632,12 @@ mod mxfp4_tests {
         {
             source = source.replace(pattern, value);
         }
+        if template_name.contains("_batch1_") {
+            source = source.replace(
+                "layout(push_constant) uniform BatchControl",
+                "layout(set = 0, binding = 31) readonly buffer BatchControl",
+            );
+        }
         let source_path = std::env::temp_dir().join(format!(
             "nerve-test-{}-{}.comp",
             template_name.replace(['/', '.'], "-"),
@@ -614,8 +726,13 @@ mod mxfp4_tests {
         let mut words = vec![0u32; resources.len() * 8];
         for (slot, resource) in resources.iter().enumerate() {
             let address = resource.device_address().unwrap();
+            let byte_count = resource.byte_capacity() as u64;
             words[slot * 8] = address as u32;
             words[slot * 8 + 1] = (address >> 32) as u32;
+            words[slot * 8 + 2] = byte_count as u32;
+            words[slot * 8 + 3] = (byte_count >> 32) as u32;
+            words[slot * 8 + 4] = 1;
+            words[slot * 8 + 6] = 1;
         }
         table.write_bytes(&u32_bytes(&words)).unwrap();
         table

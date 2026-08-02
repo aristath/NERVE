@@ -285,6 +285,12 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     assert "min(gate_value, SWIGLU_LIMIT)" in gate_source
     assert "clamp(up_value, -SWIGLU_LIMIT, SWIGLU_LIMIT)" in gate_source
     assert "expert * DYNAMIC_PARAMETER_COUNT + parameter" in gate_source
+    assert "bool dynamic_parameter_record_is_valid" in gate_source
+    assert "address_table_slot_count" in gate_source
+    assert "address_record_byte_count" in gate_source
+    assert "address_record_is_resident" in gate_source
+    assert "route_index >= route_capacity" in gate_batch_source
+    assert "bool dynamic_parameter_record_is_valid" in down_source
     assert "batch_control.owned_route_count" in gate_batch_source
     assert "batch_index * HIDDEN_WORDS" in gate_batch_source
     assert "readonly buffer QuantizedHidden" in prequant_gate_source
