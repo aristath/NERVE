@@ -39,6 +39,7 @@ def device_payload(
         "cooperative_float16_shapes": [[16, 16, 16]],
         "cooperative_bfloat16_shapes": [[16, 16, 16]],
         "cooperative_float8_e4m3_shapes": [[16, 16, 32]],
+        "cooperative_sint8_shapes": [[16, 16, 64]],
     }
 
 
@@ -92,6 +93,7 @@ def test_compiler_target_preserves_dtype_supported_by_any_gpu() -> None:
     assert target.devices[0].cooperative_bfloat16_shapes == ((16, 16, 16),)
     assert target.devices[0].cooperative_float16_shapes == ((16, 16, 16),)
     assert target.devices[0].cooperative_float8_e4m3_shapes == ((16, 16, 32),)
+    assert target.devices[0].cooperative_sint8_shapes == ((16, 16, 64),)
     assert len(target.hardware_profiles) == 2
     assert CompilerTarget.from_json(target.to_json()) == target
 

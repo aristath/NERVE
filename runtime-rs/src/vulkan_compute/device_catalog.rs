@@ -178,6 +178,20 @@ impl VulkanComputeDeviceCatalog {
                 } else {
                     BTreeSet::new()
                 };
+                let cooperative_sint8_shapes = if BTreeSet::from([
+                    VulkanShaderFeature::CooperativeMatrix,
+                    VulkanShaderFeature::ShaderInt8,
+                ])
+                .is_subset(&shader_features)
+                {
+                    physical_device_cooperative_sint8_shapes(
+                        &self.context._entry,
+                        &self.context.instance,
+                        physical_device,
+                    )?
+                } else {
+                    BTreeSet::new()
+                };
                 Ok(VulkanComputeTargetCapabilities {
                     physical_device_index: device.physical_device_index,
                     physical_device_id: device.physical_device_id.clone(),
@@ -202,6 +216,7 @@ impl VulkanComputeDeviceCatalog {
                     cooperative_float16_shapes,
                     cooperative_bfloat16_shapes,
                     cooperative_float8_e4m3_shapes,
+                    cooperative_sint8_shapes,
                 })
             })
             .collect()
@@ -354,6 +369,17 @@ impl VulkanComputeDeviceCatalog {
                 } else {
                     BTreeSet::new()
                 };
+            let cooperative_sint8_shapes = if cooperative_matrix_supported
+                && enabled_shader_features.contains(&VulkanShaderFeature::ShaderInt8)
+            {
+                physical_device_cooperative_sint8_shapes(
+                    &self.context._entry,
+                    instance,
+                    physical_device,
+                )?
+            } else {
+                BTreeSet::new()
+            };
             let shared_host_memory_alignment =
                 if physical_device_supports_extension(
                     instance,
@@ -684,6 +710,7 @@ impl VulkanComputeDeviceCatalog {
                 opaque_fd_timeline_semaphore_supported,
                 cooperative_bfloat16_shapes,
                 cooperative_float8_e4m3_shapes,
+                cooperative_sint8_shapes,
                 subgroup_size,
                 subgroup_supported_stages: subgroup_support.supported_stages,
                 subgroup_supported_operations: subgroup_support.supported_operations,

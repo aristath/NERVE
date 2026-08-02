@@ -1918,6 +1918,7 @@ fn synthetic_vulkan_hardware_profile_covers_exposed_and_unavailable_processes() 
         cooperative_float16_shapes: BTreeSet::from([(16, 16, 16)]),
         cooperative_bfloat16_shapes: BTreeSet::new(),
         cooperative_float8_e4m3_shapes: BTreeSet::new(),
+        cooperative_sint8_shapes: BTreeSet::from([(16, 16, 32)]),
     };
     let facts = VulkanHardwareFacts {
         api_version: device.api_version,
@@ -2035,6 +2036,13 @@ fn synthetic_vulkan_hardware_profile_covers_exposed_and_unavailable_processes() 
     assert!(
         !process("cooperative_matrix").properties["all_reported_variants"]
             .is_empty()
+    );
+    assert!(process("cooperative_matrix")
+        .numeric_formats
+        .contains(&"i8".to_string()));
+    assert_eq!(
+        process("cooperative_matrix").properties["sint8_shapes"],
+        "16x16x32"
     );
     assert_eq!(
         process("ray_traversal").availability,

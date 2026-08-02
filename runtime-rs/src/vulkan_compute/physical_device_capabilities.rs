@@ -768,11 +768,41 @@ fn physical_device_cooperative_float8_e4m3_shapes(
     )
 }
 
+fn physical_device_cooperative_sint8_shapes(
+    entry: &Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<BTreeSet<(u32, u32, u32)>, VulkanError> {
+    physical_device_cooperative_matrix_shapes_with_accumulator(
+        entry,
+        instance,
+        physical_device,
+        vk::ComponentTypeKHR::SINT8,
+        vk::ComponentTypeKHR::SINT32,
+    )
+}
+
 fn physical_device_cooperative_matrix_shapes(
     entry: &Entry,
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     input_type: vk::ComponentTypeKHR,
+) -> Result<BTreeSet<(u32, u32, u32)>, VulkanError> {
+    physical_device_cooperative_matrix_shapes_with_accumulator(
+        entry,
+        instance,
+        physical_device,
+        input_type,
+        vk::ComponentTypeKHR::FLOAT32,
+    )
+}
+
+fn physical_device_cooperative_matrix_shapes_with_accumulator(
+    entry: &Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    input_type: vk::ComponentTypeKHR,
+    accumulator_type: vk::ComponentTypeKHR,
 ) -> Result<BTreeSet<(u32, u32, u32)>, VulkanError> {
     let cooperative_matrix = ash::khr::cooperative_matrix::Instance::new(entry, instance);
     let properties = unsafe {
@@ -789,8 +819,8 @@ fn physical_device_cooperative_matrix_shapes(
         .filter(|property| {
             property.a_type == input_type
                 && property.b_type == input_type
-                && property.c_type == vk::ComponentTypeKHR::FLOAT32
-                && property.result_type == vk::ComponentTypeKHR::FLOAT32
+                && property.c_type == accumulator_type
+                && property.result_type == accumulator_type
                 && property.scope == vk::ScopeKHR::SUBGROUP
         })
         .map(|property| (property.m_size, property.n_size, property.k_size))

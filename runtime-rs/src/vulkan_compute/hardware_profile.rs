@@ -681,6 +681,9 @@ fn vulkan_matrix_process(
     if !target.cooperative_float8_e4m3_shapes.is_empty() {
         matrix_formats.insert("f8_e4m3".to_string());
     }
+    if !target.cooperative_sint8_shapes.is_empty() {
+        matrix_formats.insert("i8".to_string());
+    }
     process.numeric_formats = matrix_formats.into_iter().collect();
     process.required_features = target
         .shader_features
@@ -706,6 +709,10 @@ fn vulkan_matrix_process(
     process.properties.insert(
         "float8_e4m3_shapes".to_string(),
         matrix_shapes(&target.cooperative_float8_e4m3_shapes),
+    );
+    process.properties.insert(
+        "sint8_shapes".to_string(),
+        matrix_shapes(&target.cooperative_sint8_shapes),
     );
     process.properties.insert(
         "all_reported_variants".to_string(),

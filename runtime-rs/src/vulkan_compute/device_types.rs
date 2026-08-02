@@ -18,6 +18,7 @@ pub struct VulkanComputeDevice {
     opaque_fd_timeline_semaphore_supported: bool,
     cooperative_bfloat16_shapes: BTreeSet<(u32, u32, u32)>,
     cooperative_float8_e4m3_shapes: BTreeSet<(u32, u32, u32)>,
+    cooperative_sint8_shapes: BTreeSet<(u32, u32, u32)>,
     subgroup_size: u32,
     subgroup_supported_stages: vk::ShaderStageFlags,
     subgroup_supported_operations: vk::SubgroupFeatureFlags,
@@ -227,6 +228,7 @@ pub struct VulkanComputeTargetCapabilities {
     pub cooperative_float16_shapes: BTreeSet<(u32, u32, u32)>,
     pub cooperative_bfloat16_shapes: BTreeSet<(u32, u32, u32)>,
     pub cooperative_float8_e4m3_shapes: BTreeSet<(u32, u32, u32)>,
+    pub cooperative_sint8_shapes: BTreeSet<(u32, u32, u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

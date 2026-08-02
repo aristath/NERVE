@@ -43,6 +43,7 @@ class CompilerTargetDevice:
     cooperative_float16_shapes: tuple[tuple[int, int, int], ...]
     cooperative_bfloat16_shapes: tuple[tuple[int, int, int], ...]
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...]
+    cooperative_sint8_shapes: tuple[tuple[int, int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.physical_device_index < 0:
@@ -80,6 +81,7 @@ class CompilerTargetDevice:
             "cooperative_float16_shapes",
             "cooperative_bfloat16_shapes",
             "cooperative_float8_e4m3_shapes",
+            "cooperative_sint8_shapes",
         }
         if set(payload) != expected_fields:
             raise ModelCompileError(
@@ -133,6 +135,9 @@ class CompilerTargetDevice:
                 cooperative_float8_e4m3_shapes=cooperative_matrix_shapes(
                     payload, "cooperative_float8_e4m3_shapes"
                 ),
+                cooperative_sint8_shapes=cooperative_matrix_shapes(
+                    payload, "cooperative_sint8_shapes"
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ModelCompileError(
@@ -168,6 +173,9 @@ class CompilerTargetDevice:
             ],
             "cooperative_float8_e4m3_shapes": [
                 list(shape) for shape in self.cooperative_float8_e4m3_shapes
+            ],
+            "cooperative_sint8_shapes": [
+                list(shape) for shape in self.cooperative_sint8_shapes
             ],
         }
 
@@ -296,6 +304,7 @@ class CompilerTarget:
                 cooperative_float16_shapes=(),
                 cooperative_bfloat16_shapes=(),
                 cooperative_float8_e4m3_shapes=(),
+                cooperative_sint8_shapes=(),
             )
             for index, features in enumerate(feature_sets)
         )
