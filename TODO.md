@@ -40,8 +40,15 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    discovery and calibration now include cooperative SINT8 matrix shapes. On the
    healthy RDNA4 device, the focused 16x16x16 calibration measured 16.3 us for
    SINT8 versus 22.6 us for F16 over the same 8,192-tile workload (about 1.39x
-   faster). Add SINT8-backed physical implementations only for compatible
-   structural scopes and retain the normal benchmark/equivalence promotion gate.
+   faster). MXFP4 E2M1 weights now also have an identity-independent exact
+   reconstruction proof into SINT8 codes: multiply each finite E2M1 value by
+   two and halve its E8M0 group scale. This keeps MXFP4 as the compact backing
+   store and permits a demand-constructed SINT8 physical form without numeric
+   requantization. Implement that on-demand physical form and its structurally
+   matched projection kernels, then retain it only when component benchmarks
+   and behavioral validation beat the native MXFP4 path. Add other SINT8-backed
+   implementations only for compatible structural scopes and retain the normal
+   benchmark/equivalence promotion gate.
 
 3. Complete a real DeepSeek multi-turn quality gate with official thinking and
    sampling defaults, a 65,536-or-larger output allowance, and agentic context.
