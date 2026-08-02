@@ -32,6 +32,34 @@ pub struct VulkanSpeculativeDecodeStats {
     pub total_time_ns: u64,
 }
 
+fn speculative_confident_prefix_len(
+    confidence_logits: &[f32],
+    confidence_threshold: f32,
+) -> Result<usize, VulkanError> {
+    if !confidence_threshold.is_finite() || !(0.0..=1.0).contains(&confidence_threshold) {
+        return Err(VulkanError(format!(
+            "speculative confidence threshold {confidence_threshold} is outside [0, 1]"
+        )));
+    }
+    if confidence_logits.iter().any(|logit| !logit.is_finite()) {
+        return Err(VulkanError(
+            "speculative decoder produced a non-finite confidence logit".to_string(),
+        ));
+    }
+    if confidence_threshold == 0.0 {
+        return Ok(confidence_logits.len());
+    }
+    if confidence_threshold == 1.0 {
+        return Ok(0);
+    }
+
+    let threshold_logit = (confidence_threshold / (1.0 - confidence_threshold)).ln();
+    Ok(confidence_logits
+        .iter()
+        .take_while(|logit| **logit >= threshold_logit)
+        .count())
+}
+
 impl VulkanSpeculativeDecodeStats {
     fn record_cycle(&mut self, cycle: &VulkanSpeculativeCycleRun) {
         self.cycle_count = self.cycle_count.saturating_add(1);

@@ -88,6 +88,30 @@ mod tests {
     }
 
     #[test]
+    fn speculative_confidence_threshold_is_a_bounded_runtime_control() {
+        let args = parse_args_from(
+            ["--speculative-confidence-threshold", "0.625"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(args.speculative_confidence_threshold, 0.625);
+
+        for invalid in ["-0.1", "1.1", "NaN", "inf"] {
+            let error = parse_args_from(
+                ["--speculative-confidence-threshold", invalid]
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "--speculative-confidence-threshold must be finite and in [0, 1]"
+            );
+        }
+    }
+
+    #[test]
     fn component_shard_pools_are_explicit_runtime_controls() {
         let args = parse_args_from(
             [

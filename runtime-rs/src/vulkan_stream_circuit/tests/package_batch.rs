@@ -460,6 +460,24 @@ fn speculative_verification_stops_at_the_first_emitted_stop_token() {
 }
 
 #[test]
+fn speculative_confidence_keeps_only_the_contiguous_confident_prefix() {
+    let logits = [3.0, 0.0, -0.25, 8.0];
+
+    assert_eq!(speculative_confident_prefix_len(&logits, 0.0).unwrap(), 4);
+    assert_eq!(speculative_confident_prefix_len(&logits, 0.5).unwrap(), 2);
+    assert_eq!(speculative_confident_prefix_len(&logits, 1.0).unwrap(), 0);
+}
+
+#[test]
+fn speculative_confidence_rejects_invalid_thresholds_and_logits() {
+    for threshold in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+        assert!(speculative_confident_prefix_len(&[0.0], threshold).is_err());
+    }
+    assert!(speculative_confident_prefix_len(&[f32::NAN], 0.0).is_err());
+    assert!(speculative_confident_prefix_len(&[f32::INFINITY], 0.5).is_err());
+}
+
+#[test]
 fn speculative_decode_stats_report_rollbacks_and_total_cost() {
     let mut stats = VulkanSpeculativeDecodeStats::default();
     stats.record_cycle(&VulkanSpeculativeCycleRun {

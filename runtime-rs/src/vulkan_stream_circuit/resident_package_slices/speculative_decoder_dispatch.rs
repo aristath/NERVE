@@ -96,6 +96,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         initial_token_id: u32,
         start_stream_tick: u64,
         draft_token_count: usize,
+        confidence_threshold: f32,
     ) -> Result<Vec<u32>, VulkanResidentInProcessPlacedRuntimeError> {
         match &self.execution {
             VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
@@ -112,6 +113,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     initial_token_id,
                     start_stream_tick,
                     draft_token_count,
+                    confidence_threshold,
                 )
             }
         }

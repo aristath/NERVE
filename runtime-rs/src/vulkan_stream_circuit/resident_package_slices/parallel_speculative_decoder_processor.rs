@@ -365,6 +365,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
         initial_token_id: u32,
         start_stream_tick: u64,
         draft_token_count: usize,
+        confidence_threshold: f32,
     ) -> Result<Vec<u32>, VulkanResidentInProcessPlacedRuntimeError> {
         let draft_token_count = draft_token_count.min(self.block_width);
         if draft_token_count == 0 {
@@ -415,7 +416,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             .run_with_stream_control(device, control)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
 
-        let tokens = self
+        let mut tokens = self
             .mounted()
             .boundary_io
             .output_buffer(&self.draft_tokens_output_signal_id)
@@ -427,7 +428,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("u32-sized token chunk")))
             .take(draft_token_count)
             .collect::<Vec<_>>();
-        let confidence_bytes = self
+        let confidence_logits = self
             .mounted()
             .boundary_io
             .output_buffer(&self.confidence_output_signal_id)
@@ -435,21 +436,15 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             .buffer
             .read_bytes(self.block_width * size_of::<f32>())
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        if confidence_bytes
+        let confidence_logits = confidence_logits
             .chunks_exact(size_of::<f32>())
             .take(draft_token_count)
-            .any(|bytes| {
-                !f32::from_le_bytes(bytes.try_into().expect("f32-sized confidence chunk"))
-                    .is_finite()
-            })
-        {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(
-                    "parallel speculative decoder produced non-finite confidence logits"
-                        .to_string(),
-                ),
-            ));
-        }
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32-sized confidence chunk")))
+            .collect::<Vec<_>>();
+        let confident_prefix_len =
+            speculative_confident_prefix_len(&confidence_logits, confidence_threshold)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        tokens.truncate(confident_prefix_len);
         Ok(tokens)
     }
 }

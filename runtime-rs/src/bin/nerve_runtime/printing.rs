@@ -489,6 +489,9 @@ Options:
   --max-new-tokens <N>       Generation stop condition, independent of context size. Default: 65536
   --speculative-draft-tokens <N>
                              MTP draft tokens proposed per verification cycle. Default: 0 (disabled).
+  --speculative-confidence-threshold <F32>
+                             Keep the contiguous DSpark prefix whose learned confidence is at least
+                             this probability. Default: 0 (target verification decides every draft).
   --residency-policy <POLICY>
                              Parameter residency: eager or demand-retained. Default: eager.
   --context-size <N>         Runtime transient-state window. Default: auto, up to the model maximum.

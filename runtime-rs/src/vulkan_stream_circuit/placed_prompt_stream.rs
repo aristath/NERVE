@@ -12,6 +12,7 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     active_input_event: Option<VulkanResidentInProcessPlacedActivePromptEvent>,
     pending_input_events: VecDeque<VulkanResidentTokenInputEvent>,
     speculative_draft_tokens: usize,
+    speculative_confidence_threshold: f32,
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
@@ -36,6 +37,19 @@ impl VulkanResidentInProcessPlacedPromptStream {
             ));
         }
         self.speculative_draft_tokens = speculative_draft_tokens;
+        Ok(self)
+    }
+
+    pub fn with_speculative_confidence_threshold(
+        mut self,
+        confidence_threshold: f32,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        if !confidence_threshold.is_finite() || !(0.0..=1.0).contains(&confidence_threshold) {
+            return Err(placed_scheduler_divergence(
+                "speculative confidence threshold must be finite and in [0, 1]",
+            ));
+        }
+        self.speculative_confidence_threshold = confidence_threshold;
         Ok(self)
     }
 
@@ -134,6 +148,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: 0,
+            speculative_confidence_threshold: 0.0,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -209,6 +224,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
+            speculative_confidence_threshold: self.speculative_confidence_threshold,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -743,6 +759,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             activation.input_token_id,
             start_stream_tick,
             draft_token_count,
+            self.speculative_confidence_threshold,
             &stop_token_ids,
         )?;
         self.active_input_event

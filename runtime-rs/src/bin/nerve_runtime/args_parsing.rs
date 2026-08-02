@@ -126,6 +126,10 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
                 parsed.speculative_draft_tokens =
                     parse_next(&mut raw, "--speculative-draft-tokens")?;
             }
+            "--speculative-confidence-threshold" => {
+                parsed.speculative_confidence_threshold =
+                    parse_next(&mut raw, "--speculative-confidence-threshold")?;
+            }
             "--residency-policy" => {
                 parsed.resource_residency_policy =
                     match next_value(&mut raw, "--residency-policy")?.as_str() {
@@ -221,6 +225,13 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
     }
     if parsed.max_new_tokens == 0 {
         return Err("--max-new-tokens must be at least 1".to_string());
+    }
+    if !parsed.speculative_confidence_threshold.is_finite()
+        || !(0.0..=1.0).contains(&parsed.speculative_confidence_threshold)
+    {
+        return Err(
+            "--speculative-confidence-threshold must be finite and in [0, 1]".to_string(),
+        );
     }
     if matches!(parsed.context_size, Some(0)) {
         return Err("--context-size must be at least 1".to_string());

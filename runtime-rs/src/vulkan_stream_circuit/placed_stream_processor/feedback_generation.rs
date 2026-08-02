@@ -69,6 +69,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         initial_token_id: u32,
         start_stream_tick: u64,
         draft_token_count: usize,
+        confidence_threshold: f32,
         stop_token_ids: &BTreeSet<u32>,
     ) -> Result<VulkanSpeculativeCycleRun, VulkanResidentInProcessPlacedRuntimeError> {
         if draft_token_count == 0 {
@@ -105,6 +106,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 initial_token_id,
                 start_stream_tick,
                 draft_token_count,
+                confidence_threshold,
             )?;
             let draft_time_ns = u64::try_from(draft_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 

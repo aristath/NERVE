@@ -53,7 +53,8 @@ fn run_placed_chat(
         args.speculative_draft_tokens,
         sampler_runtime_config(args),
         args.resource_residency_policy,
-    )?;
+    )?
+    .with_speculative_confidence_threshold(args.speculative_confidence_threshold)?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;
     let mounted_device_bindings = bound_devices
@@ -435,7 +436,8 @@ fn execute_placed_prompt_run(
         args.speculative_draft_tokens,
         sampler_runtime_config(args),
         args.resource_residency_policy,
-    )?;
+    )?
+    .with_speculative_confidence_threshold(args.speculative_confidence_threshold)?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;
     let setup_time_ns = elapsed_nanos_u64(setup_start);
