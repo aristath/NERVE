@@ -148,6 +148,8 @@ def _validate_mxfp4_matrix(
         "scale_dtype": "F8_E8M0",
         "scale_mode": "power_of_two_per_output_row_k_group",
     }
+    expected_weight_bytes = rows * columns // 2
+    expected_scale_bytes = rows * columns // 32
     if (
         not isinstance(weight, dict)
         or not isinstance(scale, dict)
@@ -159,6 +161,8 @@ def _validate_mxfp4_matrix(
         or scale.get("dtype") != "F8_E8M0"
         or scale.get("shape") != [rows, columns // 32]
         or scale.get("layout", ROW_MAJOR_LAYOUT) != ROW_MAJOR_LAYOUT
+        or weight.get("byte_count") != expected_weight_bytes
+        or scale.get("byte_count") != expected_scale_bytes
     ):
         raise ModelCompileError(
             f"independent sparse expert node {node_id!r} has incompatible MXFP4 "

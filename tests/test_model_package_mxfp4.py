@@ -4,6 +4,8 @@ import json
 import struct
 from pathlib import Path
 
+import pytest
+
 from nerve.model_package_batching import (
     frame_parallel_batch_shader_file,
     is_sparse_moe_projection_shader,
@@ -16,6 +18,7 @@ from nerve.model_package_shader_selection import (
     workgroup_count_x_for_node,
 )
 from nerve.model_package_shader_templates import copy_shader_templates
+from nerve.model_package_common import ModelCompileError
 from nerve.model_transpiler_tensor_index import make_tensor_index
 
 
@@ -100,6 +103,7 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
             "shape": [rows, columns // 2],
             "logical_shape": [rows, columns],
             "layout": "row_major",
+            "byte_count": rows * columns // 2,
             "quantization": {
                 "format": "mxfp4_e2m1",
                 "bits": 4,
@@ -117,6 +121,7 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
             "dtype": "F8_E8M0",
             "shape": [rows, columns // 32],
             "layout": "row_major",
+            "byte_count": rows * columns // 32,
         }
         return [weight_id, scale_id]
 
@@ -207,6 +212,13 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     )
     assert workgroup_count_x_for_node(circuit, gate, tensor_index) == 4
     assert workgroup_count_x_for_node(circuit, down, tensor_index) == 2
+
+    tensors["expert_0.w1.weight"]["byte_count"] = hidden_size - 1
+    with pytest.raises(ModelCompileError, match="incompatible MXFP4"):
+        shader_file_for_node(circuit, gate, tensor_index, dimensions)
+    tensors["expert_0.w1.weight"]["byte_count"] = (
+        intermediate_size * hidden_size // 2
+    )
 
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     copy_shader_templates(
