@@ -253,9 +253,11 @@ def _validate_optimization_scope(document: Json) -> None:
             "source_node_ids",
         },
     )
-    component_ids = _require_unique_strings(
-        members["component_ids"], "members.component_ids", nonempty=True
+    component_ids = _require_sorted_unique_strings(
+        members["component_ids"], "members.component_ids"
     )
+    if not component_ids:
+        raise ContractValidationError("members.component_ids must not be empty")
     _require_unique_strings(
         members["semantic_module_ids"], "members.semantic_module_ids"
     )

@@ -660,6 +660,55 @@ def test_cross_component_island_contains_only_boundary_producer_and_consumer() -
     ]
 
 
+def test_cross_component_members_are_canonical_when_graph_order_is_not_lexical() -> None:
+    source = layer_component("z_source", "full_attention")
+    destination = layer_component("a_destination", "temporal_convolution")
+    catalog = enumerate_optimization_scope_catalog(
+        package_id="fixture_canonical_component_members",
+        graph=graph_for_components(
+            [source, destination],
+            [
+                {
+                    "id": "nonlexical_edge",
+                    "connection": {"kind": "forward"},
+                    "source": {
+                        "component_id": "z_source",
+                        "port_id": "output_frame",
+                    },
+                    "destination": {
+                        "component_id": "a_destination",
+                        "port_id": "input_frame",
+                    },
+                }
+            ],
+        ),
+    )
+    island = next(
+        scope
+        for scope in catalog["scopes"]
+        if "representation_island" in scope["extensions"]["classifications"]
+        and len(scope["members"]["component_ids"]) == 2
+    )
+
+    assert island["members"]["component_ids"] == ["a_destination", "z_source"]
+
+
+def test_optimization_scope_contract_rejects_noncanonical_component_members() -> None:
+    component = layer_component("layer_00", "full_attention")
+    catalog = enumerate_optimization_scope_catalog(
+        package_id="fixture_noncanonical_members",
+        graph=graph_for_components([component]),
+    )
+    drifted = deepcopy(catalog["scopes"][0])
+    drifted["members"]["component_ids"] = ["z_component", "a_component"]
+
+    with pytest.raises(
+        ContractValidationError,
+        match="members.component_ids must contain unique sorted values",
+    ):
+        validate_contract(drifted)
+
+
 def test_repeated_corresponding_modules_form_cross_layer_scope_once() -> None:
     first = layer_component("layer_00", "full_attention")
     second = layer_component("layer_01", "full_attention")

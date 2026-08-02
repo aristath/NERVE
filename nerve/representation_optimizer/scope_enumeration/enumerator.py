@@ -86,7 +86,7 @@ def _materialize_scope(
     draft: ScopeDraft,
 ) -> tuple[Json, Json]:
     ordered_nodes = _ordered_node_keys(graph, draft)
-    component_ids = _ordered_component_ids(graph, ordered_nodes)
+    component_ids = _canonical_component_ids(ordered_nodes)
     source_node_ids = [
         f"{component_id}/{node_id}"
         for component_id, node_id in ordered_nodes
@@ -184,16 +184,14 @@ def _ordered_node_keys(
     )
 
 
-def _ordered_component_ids(
-    graph: SemanticDependencyGraph,
+def _canonical_component_ids(
     node_keys: tuple[NodeKey, ...],
 ) -> list[str]:
     present = {component_id for component_id, _node_id in node_keys}
-    return [
-        component.component_id
-        for component in graph.components
-        if component.component_id in present
-    ]
+    # Component IDs describe set membership, not execution order. Keep the
+    # serialized contract canonical so every consumer can validate and index it
+    # without carrying a second graph-order convention.
+    return sorted(present)
 
 
 def _ordered_semantic_module_ids(
