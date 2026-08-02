@@ -155,6 +155,7 @@ fn targeted_component_execution_dispatches(
     target: &VulkanMountedPlacedBoundDispatch,
     phase: VulkanTargetedComponentExecutionPhase,
     scope: VulkanTargetedComponentExecutionScope,
+    residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
 ) -> Result<Vec<VulkanMountedPlacedBoundDispatch>, VulkanResidentTokenModelPackageError> {
     match scope {
         VulkanTargetedComponentExecutionScope::Node => Ok(vec![target.clone()]),
@@ -164,22 +165,49 @@ fn targeted_component_execution_dispatches(
                     "component-prefix targeted execution requires decode phase",
                 );
             }
+            let terminal_dispatch_index = residency_schedule
+                .and_then(|schedule| {
+                    schedule.checkpoints.iter().find_map(|checkpoint| {
+                        if checkpoint.component_id != component_id {
+                            return None;
+                        }
+                        let target_is_checkpoint_work =
+                            target.dispatch_index == checkpoint.selection_dispatch_index
+                                || checkpoint
+                                    .selected_computation_dispatch_indices
+                                    .contains(&target.dispatch_index)
+                                || checkpoint.selected_result_continuation_dispatch_index
+                                    == Some(target.dispatch_index);
+                        target_is_checkpoint_work.then(|| {
+                            checkpoint
+                                .selected_result_continuation_dispatch_index
+                                .or_else(|| {
+                                    checkpoint
+                                        .selected_computation_dispatch_indices
+                                        .last()
+                                        .copied()
+                                })
+                                .unwrap_or(checkpoint.selection_dispatch_index)
+                        })
+                    })
+                })
+                .unwrap_or(target.dispatch_index);
             let dispatches = plan
                 .dispatches
                 .iter()
                 .filter(|dispatch| {
                     dispatch.component_id == component_id
-                        && dispatch.dispatch_index <= target.dispatch_index
+                        && dispatch.dispatch_index <= terminal_dispatch_index
                 })
                 .cloned()
                 .collect::<Vec<_>>();
             if dispatches
                 .last()
-                .is_none_or(|dispatch| dispatch.dispatch_index != target.dispatch_index)
+                .is_none_or(|dispatch| dispatch.dispatch_index != terminal_dispatch_index)
             {
                 return targeted_component_error(format!(
-                    "component-prefix target {component_id}.{} is not the terminal dispatch in its compiled prefix",
-                    target.node_id
+                    "component-prefix target {component_id}.{} cannot reach required terminal dispatch {terminal_dispatch_index}",
+                    target.node_id,
                 ));
             }
             Ok(dispatches)
@@ -869,6 +897,9 @@ impl VulkanResidentTargetedComponentSession {
             &source_dispatch,
             phase,
             scope,
+            demand_context
+                .as_ref()
+                .map(|_| slice.physical_residency_schedule()),
         )?;
         let input_count = source_dispatch
             .descriptors

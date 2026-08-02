@@ -111,6 +111,7 @@ fn targeted_component_prefix_executes_only_the_real_causal_prefix() {
         &target,
         VulkanTargetedComponentExecutionPhase::Decode,
         VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+        None,
     )
     .unwrap();
 
@@ -136,6 +137,7 @@ fn targeted_component_prefix_rejects_prefill_instead_of_faking_internal_inputs()
             activation_batch_width: 64,
         },
         VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+        None,
     )
     .unwrap_err();
 
@@ -144,6 +146,63 @@ fn targeted_component_prefix_rejects_prefill_instead_of_faking_internal_inputs()
             .to_string()
             .contains("component-prefix targeted execution requires decode phase"),
         "{error}",
+    );
+}
+
+#[test]
+fn targeted_component_prefix_completes_the_containing_residency_checkpoint() {
+    let before = targeted_test_dispatch(9, "layer_00", "before");
+    let select = targeted_test_dispatch(10, "layer_00", "select");
+    let compute_a = targeted_test_dispatch(11, "layer_00", "compute_a");
+    let target = targeted_test_dispatch(12, "layer_00", "compute_target");
+    let compute_b = targeted_test_dispatch(13, "layer_00", "compute_b");
+    let continuation = targeted_test_dispatch(14, "layer_00", "reduce");
+    let after = targeted_test_dispatch(15, "layer_00", "after");
+    let plan = targeted_test_bound_plan(vec![
+        before,
+        select,
+        compute_a,
+        target.clone(),
+        compute_b,
+        continuation,
+        after,
+    ]);
+    let schedule = VulkanPhysicalResidencySchedule {
+        execution_scope: "layer_00".to_string(),
+        checkpoints: vec![VulkanPhysicalResidencyCheckpoint {
+            id: "experts".to_string(),
+            execution_scope: "layer_00".to_string(),
+            component_id: "layer_00".to_string(),
+            selector_ids: vec!["routes".to_string()],
+            selection_dispatch_index: 10,
+            selected_computation_dispatch_indices: vec![11, 12, 13],
+            selected_result_continuation_dispatch_index: Some(14),
+        }],
+    };
+
+    let prefix = targeted_component_execution_dispatches(
+        &plan,
+        "layer_00",
+        &target,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+        Some(&schedule),
+    )
+    .unwrap();
+
+    assert_eq!(
+        prefix
+            .iter()
+            .map(|dispatch| dispatch.node_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "before",
+            "select",
+            "compute_a",
+            "compute_target",
+            "compute_b",
+            "reduce",
+        ],
     );
 }
 
