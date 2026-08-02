@@ -785,6 +785,52 @@ mod tests {
     }
 
     #[test]
+    fn infers_compact_scale_shape_for_fused_e8m0_fp8_output_representations() {
+        let node = crate::stream_circuit::CircuitNode {
+            id: "normalization".to_string(),
+            op: "rms_norm".to_string(),
+            inputs: vec!["hidden".to_string()],
+            outputs: vec![
+                "normalized".to_string(),
+                "normalized_fp8".to_string(),
+                "normalized_scale".to_string(),
+            ],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "output_element_bytes": [2, 1, 4],
+                "physical_output_representations": [{
+                    "contract": "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1",
+                    "logical_signal": "normalized",
+                    "outputs": ["normalized_fp8", "normalized_scale"],
+                    "consumer_node_ids": ["projection"],
+                    "element_count": 4096,
+                    "block_columns": 128
+                }]
+            }),
+        };
+        let signals = BTreeMap::from([(
+            "hidden".to_string(),
+            PlannedSignal {
+                id: "hidden".to_string(),
+                producer: SignalProducer::BoundaryInput,
+                consumers: vec!["normalization".to_string()],
+                shape: Some(vec![4096]),
+                element_bytes: Some(2),
+                storage: SignalStorage::Boundary,
+                is_boundary_output: false,
+            },
+        )]);
+
+        assert_eq!(
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,)
+                .unwrap(),
+            vec![Some(vec![4096]), Some(vec![4096]), Some(vec![32]),]
+        );
+    }
+
+    #[test]
     fn rejects_physical_output_representation_that_disagrees_with_logical_shape() {
         let node = crate::stream_circuit::CircuitNode {
             id: "normalization".to_string(),

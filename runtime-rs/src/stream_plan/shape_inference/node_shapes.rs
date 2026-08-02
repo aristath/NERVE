@@ -454,6 +454,7 @@ fn apply_physical_output_representation_shapes(
         let expected_outputs = match contract {
             Some(
                 "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+                | "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
                 | "bf16_blockwise_symmetric_int8_f32_scale.v1",
             ) => 2,
             Some(
