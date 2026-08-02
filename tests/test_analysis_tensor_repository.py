@@ -203,6 +203,130 @@ def test_package_repository_decodes_group_scaled_int4(tmp_path: Path):
     np.testing.assert_array_equal(observed.values, expected)
 
 
+def test_package_repository_decodes_and_samples_structural_mxfp4(tmp_path: Path):
+    nibbles = np.resize(
+        np.array(
+            [0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7,
+             0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF],
+            dtype=np.uint8,
+        ),
+        (2, 32),
+    )
+    packed = nibbles[:, 0::2] | (nibbles[:, 1::2] << np.uint8(4))
+    scales = np.array([[127], [128]], dtype=np.uint8)
+    repository = _package(
+        tmp_path,
+        [
+            (
+                "mxfp4",
+                "I8",
+                [2, 16],
+                packed.tobytes(),
+                {
+                    "logical_shape": [2, 32],
+                    "quantization": {
+                        "format": "mxfp4_e2m1",
+                        "bits": 4,
+                        "element_type": "float",
+                        "values_per_byte": 2,
+                        "packing_axis": 1,
+                        "packing_order": (
+                            "low_nibble_then_high_nibble_along_k"
+                        ),
+                        "group_size": 32,
+                        "scales": "mxfp4_scale",
+                        "scale_dtype": "F8_E8M0",
+                        "scale_mode": (
+                            "power_of_two_per_output_row_k_group"
+                        ),
+                    },
+                },
+            ),
+            (
+                "mxfp4_scale",
+                "F8_E8M0",
+                [2, 1],
+                scales.tobytes(),
+                {},
+            ),
+        ],
+    )
+    magnitude = np.array(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        dtype=np.float32,
+    )
+    expected = magnitude[nibbles & 7]
+    expected = np.where(nibbles & 8, -expected, expected)
+    expected[1] *= 2.0
+
+    exhaustive = repository.observe(
+        "mxfp4",
+        exhaustive_element_limit=None,
+        sampled_element_limit=64,
+    )
+    np.testing.assert_array_equal(exhaustive.values, expected)
+    assert exhaustive.effective_values is True
+
+    sampled = repository.observe(
+        "mxfp4",
+        exhaustive_element_limit=1,
+        sampled_element_limit=8,
+    )
+    assert sampled.exhaustive is False
+    np.testing.assert_array_equal(
+        sampled.values,
+        expected[np.ix_(*sampled.sample_indices)],
+    )
+
+
+@pytest.mark.parametrize(
+    ("quantization_overrides", "scale_dtype", "diagnostic"),
+    [
+        ({"values_per_byte": 4}, "F8_E8M0", "packing contract"),
+        ({}, "F16", "MXFP4 scale shape"),
+    ],
+)
+def test_package_repository_rejects_malformed_mxfp4_contracts(
+    tmp_path: Path,
+    quantization_overrides: dict[str, object],
+    scale_dtype: str,
+    diagnostic: str,
+) -> None:
+    quantization = {
+        "format": "mxfp4_e2m1",
+        "bits": 4,
+        "values_per_byte": 2,
+        "packing_axis": 1,
+        "packing_order": "low_nibble_then_high_nibble_along_k",
+        "group_size": 32,
+        "scales": "scale",
+        "scale_dtype": "F8_E8M0",
+        "scale_mode": "power_of_two_per_output_row_k_group",
+        **quantization_overrides,
+    }
+    scale_bytes = bytes((127,)) if scale_dtype == "F8_E8M0" else b"\x00\x3c"
+    repository = _package(
+        tmp_path,
+        [
+            (
+                "weight",
+                "I8",
+                [1, 16],
+                bytes(16),
+                {"logical_shape": [1, 32], "quantization": quantization},
+            ),
+            ("scale", scale_dtype, [1, 1], scale_bytes, {}),
+        ],
+    )
+
+    with pytest.raises(ModelCompileError, match=diagnostic):
+        repository.observe(
+            "weight",
+            exhaustive_element_limit=None,
+            sampled_element_limit=32,
+        )
+
+
 def test_package_repository_decodes_and_samples_autogptq_int4(tmp_path: Path):
     output_features = 10
     input_features = 16

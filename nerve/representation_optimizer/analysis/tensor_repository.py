@@ -12,6 +12,8 @@ from nerve.quantized_layouts import (
     AUTO_GPTQ_FIXED_ZERO_8,
     AUTO_GPTQ_INPUT_MAJOR_PACKING,
     AUTO_GPTQ_PER_GROUP_ZERO,
+    MXFP4_FORMAT,
+    MXFP4_PACKING_ORDER,
     auto_gptq_packing,
     auto_gptq_zero_encoding,
 )
@@ -196,6 +198,20 @@ class PackageTensorRepository:
             return (_select(values, indices), True)
         quantization = info.get("quantization")
         if (
+            dtype == "I8"
+            and isinstance(quantization, dict)
+            and quantization.get("format") == MXFP4_FORMAT
+        ):
+            return (
+                self._decode_mxfp4(
+                    info,
+                    logical_shape,
+                    quantization,
+                    indices,
+                ),
+                True,
+            )
+        if (
             dtype == "I32"
             and isinstance(quantization, dict)
             and quantization.get("format") == "compressed_tensors_pack_quantized"
@@ -293,6 +309,7 @@ class PackageTensorRepository:
             "F32": np.dtype("<f4"),
             "F64": np.dtype("<f8"),
             "F8_E4M3": np.dtype("u1"),
+            "F8_E8M0": np.dtype("u1"),
             "I8": np.dtype("i1"),
             "U8": np.dtype("u1"),
             "I16": np.dtype("<i2"),
@@ -395,6 +412,83 @@ class PackageTensorRepository:
             str(scale_info["dtype"]),
         )
         return values.astype(np.float32) * scales
+
+    def _decode_mxfp4(
+        self,
+        info: Json,
+        logical_shape: tuple[int, ...],
+        quantization: Json,
+        indices: tuple[tuple[int, ...], ...],
+    ) -> np.ndarray:
+        if len(logical_shape) < 2:
+            raise ModelCompileError("MXFP4 analysis requires a rank-2 or higher tensor")
+        storage_shape = tuple(int(value) for value in info["shape"])
+        expected_storage_shape = (*logical_shape[:-1], logical_shape[-1] // 2)
+        if (
+            logical_shape[-1] % 2
+            or storage_shape != expected_storage_shape
+            or int(quantization.get("bits", 0)) != 4
+            or int(quantization.get("values_per_byte", 0)) != 2
+            or int(quantization.get("packing_axis", -1)) != len(logical_shape) - 1
+            or quantization.get("packing_order") != MXFP4_PACKING_ORDER
+        ):
+            raise ModelCompileError(
+                f"MXFP4 storage shape {storage_shape} or packing contract does not "
+                f"encode logical shape {logical_shape}"
+            )
+        group_size = int(quantization.get("group_size", 0))
+        scale_name = quantization.get("scales")
+        if (
+            group_size <= 0
+            or logical_shape[-1] % group_size
+            or not isinstance(scale_name, str)
+            or scale_name not in self._tensors
+            or quantization.get("scale_dtype") != "F8_E8M0"
+            or quantization.get("scale_mode")
+            != "power_of_two_per_output_row_k_group"
+        ):
+            raise ModelCompileError("MXFP4 analysis requires its E8M0 group-scale contract")
+        scale_info = self._tensors[scale_name]
+        scale_shape = tuple(int(value) for value in scale_info["shape"])
+        expected_scale_shape = (
+            *logical_shape[:-1],
+            logical_shape[-1] // group_size,
+        )
+        if (
+            str(scale_info.get("dtype")) != "F8_E8M0"
+            or scale_shape != expected_scale_shape
+        ):
+            raise ModelCompileError(
+                f"MXFP4 scale shape {scale_shape} is incompatible with logical "
+                f"shape {logical_shape} and group size {group_size}"
+            )
+
+        logical_indices = _logical_indices(logical_shape, indices)
+        packed_indices = (*logical_indices[:-1], logical_indices[-1] // 2)
+        packed = np.asarray(
+            self._memmap(info, "I8", storage_shape)[np.ix_(*packed_indices)],
+            dtype=np.uint8,
+        )
+        shifts = ((logical_indices[-1] % 2) * np.uint8(4)).reshape(
+            (1,) * (len(logical_shape) - 1) + (-1,)
+        )
+        nibbles = (packed >> shifts) & np.uint8(0x0F)
+        magnitudes = np.array(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            dtype=np.float32,
+        )[nibbles & np.uint8(7)]
+        values = np.where(nibbles & np.uint8(8), -magnitudes, magnitudes)
+
+        scale_indices = (
+            *logical_indices[:-1],
+            logical_indices[-1] // group_size,
+        )
+        raw_scales = self._memmap(
+            scale_info,
+            "F8_E8M0",
+            scale_shape,
+        )[np.ix_(*scale_indices)]
+        return values * _e8m0_to_f32(raw_scales)
 
     def _decode_auto_gptq_int4(
         self,
@@ -614,6 +708,13 @@ def _to_f32(values: np.ndarray, dtype: str) -> np.ndarray:
     raise ModelCompileError(
         f"analysis cannot decode quantization scale dtype {dtype!r}"
     )
+
+
+def _e8m0_to_f32(values: np.ndarray) -> np.ndarray:
+    encoded = np.asarray(values, dtype=np.uint8)
+    bits = encoded.astype(np.uint32) << np.uint32(23)
+    bits = np.where(encoded == 0, np.uint32(0x00400000), bits)
+    return np.asarray(bits, dtype=np.uint32).view(np.float32)
 
 
 def _bf16_to_f32(values: np.ndarray) -> np.ndarray:

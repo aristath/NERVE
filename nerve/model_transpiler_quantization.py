@@ -6,13 +6,11 @@ from nerve.quantized_layouts import (
     AUTO_GPTQ_FIXED_ZERO_8,
     AUTO_GPTQ_INPUT_MAJOR_PACKING,
     AUTO_GPTQ_PER_GROUP_ZERO,
+    MXFP4_FORMAT,
+    MXFP4_GROUP_SIZE,
+    MXFP4_PACKING_ORDER,
+    MXFP4_VALUES_PER_BYTE,
 )
-
-
-MXFP4_FORMAT = "mxfp4_e2m1"
-MXFP4_GROUP_SIZE = 32
-MXFP4_VALUES_PER_BYTE = 2
-MXFP4_PACKING_ORDER = "low_nibble_then_high_nibble_along_k"
 
 
 def tensor_matrix_shape(tensors: dict[str, Json], tensor_name: str) -> list[int]:
