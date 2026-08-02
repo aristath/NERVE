@@ -1542,6 +1542,8 @@ def _plain_single_input_output_node(node: Json) -> bool:
 
 
 def _linear_params_are_fusible(parameters: list[str]) -> bool:
-    return len(parameters) == 1 or (
-        len(parameters) == 2 and parameters[1] == f"{parameters[0]}_scale_inv"
-    )
+    # Parameter identifiers are compiled-model metadata, not an execution
+    # contract. A linear owns either one matrix parameter or a matrix plus
+    # representation metadata; the target callback validates their concrete
+    # dtypes, layouts, shapes, and relationship before fusion is accepted.
+    return len(parameters) in {1, 2}

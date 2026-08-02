@@ -1,11 +1,13 @@
 from model_package_layout_common import *
 from nerve.model_package_shader_compiler import compile_shader_artifacts
+from nerve.model_package_shader_selection import local_size_x_for_shader_file
 from nerve.model_package_tensors import (
     can_fuse_bf16_linear_sigmoid_scalar_multiply,
     can_fuse_contiguous_linear_swiglu,
     can_fuse_native_parallel_linears,
     physical_input_prequantization_spec,
 )
+from nerve.physical_representations import FP8_E8M0_PREQUANTIZATION_CONTRACT
 
 
 def test_scalar_gate_fusion_requires_one_bf16_row_major_projection() -> None:
@@ -159,6 +161,251 @@ def test_parallel_linear_shader_selector_supports_fp8_weight_scale_pairs() -> No
         "parallel_linear_2way_fp8_e4m3_b128x128_5120x5120_1024.comp"
     )
     assert workgroup_count_x_for_node(circuit, node, tensor_index) == 320
+
+
+def test_parallel_linear_preserves_structural_e8m0_scale_format(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "id": "parallel_projection",
+        "op": "parallel_linear_2way",
+        "inputs": ["hidden"],
+        "outputs": ["left", "right"],
+        "params": [
+            "first_matrix",
+            "first_metadata",
+            "second_matrix",
+            "second_metadata",
+        ],
+        "attrs": {"branch_count": 2, "branch_parameter_counts": [2, 2]},
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                parameter_id: {"tensor": f"tensor.{parameter_id}"}
+                for parameter_id in node["params"]
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "tensor.first_matrix": {
+                "dtype": "F8_E4M3",
+                "shape": [2048, 4096],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "tensor.first_metadata": {
+                "dtype": "F8_E8M0",
+                "shape": [16, 32],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "tensor.second_matrix": {
+                "dtype": "F8_E4M3",
+                "shape": [2048, 4096],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "tensor.second_metadata": {
+                "dtype": "F8_E8M0",
+                "shape": [16, 32],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+
+    shader_file = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 4096, "intermediate_size": 2048},
+    )
+    assert shader_file == (
+        "parallel_linear_2way_fp8_e4m3_se8m0_"
+        "b128x128_4096x2048_2048.comp"
+    )
+    batch_shader_file = weight_shared_batch_shader_file(shader_file, tile_width=16)
+    assert batch_shader_file == (
+        "parallel_linear_batch16_2way_fp8_e4m3_se8m0_"
+        "b128x128_4096x2048_2048.comp"
+    )
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {shader_file, batch_shader_file},
+    )
+    for rendered_file in (shader_file, batch_shader_file):
+        shader = (tmp_path / rendered_file).read_text()
+        assert "uint e8m0 =" in shader
+        assert "uintBitsToFloat(e8m0 << 23u)" in shader
+        assert "read_bf16_word(weight_scale" not in shader
+    compile_shader_artifacts(tmp_path)
+
+    tensor_index["tensors"]["tensor.second_metadata"]["dtype"] = "BF16"
+    with pytest.raises(ModelCompileError, match="incompatible block scales"):
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2048},
+        )
+
+
+def test_prequant_parallel_linear_preserves_e8m0_through_batch_lowering(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "id": "parallel_projection",
+        "op": "parallel_linear_2way",
+        "inputs": ["hidden"],
+        "outputs": ["left", "right"],
+        "params": ["left_w", "left_s", "right_w", "right_s"],
+        "attrs": {
+            "branch_count": 2,
+            "branch_parameter_counts": [2, 2],
+            "physical_input_contract": FP8_E8M0_PREQUANTIZATION_CONTRACT,
+        },
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                parameter_id: {"tensor": parameter_id}
+                for parameter_id in node["params"]
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            **{
+                parameter_id: {
+                    "dtype": "F8_E4M3",
+                    "shape": [2048, 4096],
+                    "layout": ROW_MAJOR_LAYOUT,
+                }
+                for parameter_id in ("left_w", "right_w")
+            },
+            **{
+                parameter_id: {
+                    "dtype": "F8_E8M0",
+                    "shape": [16, 32],
+                    "layout": ROW_MAJOR_LAYOUT,
+                }
+                for parameter_id in ("left_s", "right_s")
+            },
+        }
+    }
+    scalar = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 4096, "intermediate_size": 2048},
+    )
+    assert scalar == (
+        "parallel_linear_2way_prequant_fp8_e4m3_se8m0_"
+        "b128x128_4096x2048_2048.comp"
+    )
+    assert local_size_x_for_shader_file(scalar, node) == 1024
+    assert workgroup_count_x_for_node(circuit, node, tensor_index) == 128
+    batch = weight_shared_batch_shader_file(scalar, tile_width=16)
+    assert batch == (
+        "parallel_linear_batch16_2way_prequant_fp8_e4m3_se8m0_"
+        "b128x128_4096x2048_2048.comp"
+    )
+    cooperative = cooperative_float8_e4m3_batch_shader_file(
+        scalar,
+        shape=(16, 16, 16),
+    )
+    assert cooperative == (
+        "parallel_linear_batch64_2way_prequant_cooperative_"
+        "fp8_e4m3_se8m0_m16n16k16_b128x128_4096x2048_2048.comp"
+    )
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {scalar, batch, cooperative})
+    for rendered_file in (scalar, batch, cooperative):
+        shader = (tmp_path / rendered_file).read_text()
+        assert "uint e8m0 =" in shader
+        assert "uintBitsToFloat(e8m0 << 23u)" in shader
+        assert "read_bf16_word(weight_scale" not in shader
+    scalar_shader = (tmp_path / scalar).read_text()
+    assert "layout(local_size_x = 1024" in scalar_shader
+    assert "uint words[]" in scalar_shader
+    assert "uint first_row = gl_WorkGroupID.x * OUTPUT_TILE_ROWS" in scalar_shader
+    assert "shared float output_rows" in scalar_shader
+    assert "barrier();" in scalar_shader
+    compile_shader_artifacts(tmp_path)
+
+
+def test_fused_linear_residual_preserves_e8m0_and_bf16_boundary(
+    tmp_path: Path,
+) -> None:
+    node = {
+        "id": "projection_with_skip",
+        "op": "linear_residual",
+        "inputs": ["hidden", "skip"],
+        "outputs": ["combined"],
+        "params": ["matrix", "scale_metadata"],
+        "attrs": {
+            "intermediate_rounding": "BF16",
+            "physical_input_contract": FP8_E8M0_PREQUANTIZATION_CONTRACT,
+        },
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "matrix": {"tensor": "projection.matrix"},
+                "scale_metadata": {"tensor": "projection.scale"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "projection.matrix": {
+                "dtype": "F8_E4M3",
+                "shape": [4096, 2048],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+            "projection.scale": {
+                "dtype": "F8_E8M0",
+                "shape": [32, 16],
+                "layout": ROW_MAJOR_LAYOUT,
+            },
+        }
+    }
+    scalar = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 4096, "intermediate_size": 2048},
+    )
+    assert scalar == (
+        "linear_residual_prequant_fp8_e4m3_se8m0_"
+        "b128x128_2048x4096.comp"
+    )
+    batch = weight_shared_batch_shader_file(scalar, tile_width=16)
+    assert batch == (
+        "linear_residual_prequant_batch16_fp8_e4m3_se8m0_"
+        "b128x128_2048x4096.comp"
+    )
+    cooperative = cooperative_float8_e4m3_batch_shader_file(
+        scalar,
+        shape=(16, 16, 16),
+    )
+    assert cooperative == (
+        "linear_residual_prequant_batch64_cooperative_fp8_e4m3_se8m0_"
+        "m16n16k16_b128x128_2048x4096.comp"
+    )
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {scalar, batch, cooperative})
+    for rendered_file in (scalar, batch, cooperative):
+        shader = (tmp_path / rendered_file).read_text()
+        assert "uint e8m0 =" in shader
+        assert "uintBitsToFloat(e8m0 << 23u)" in shader
+        assert "read_bf16_word(weight_scale" not in shader
+        assert "residual" in shader
+        assert "bf16_to_f32(f32_to_bf16(value))" in shader
+    compile_shader_artifacts(tmp_path)
 
 
 def test_linear_shader_selector_preserves_native_e8m0_block_scales(

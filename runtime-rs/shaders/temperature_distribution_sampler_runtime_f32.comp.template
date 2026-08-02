@@ -1,0 +1,321 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = {{LOCAL_SIZE_X}}, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits {
+    float values[];
+} logits;
+
+layout(set = 0, binding = 1) readonly buffer PartitionStatistics {
+    vec2 values[];
+} partition_statistics;
+
+layout(set = 0, binding = 2) buffer SamplerOutput {
+    uint words[];
+} sampler_output;
+
+layout(set = 0, binding = 3) buffer StreamControl {
+    uint words[];
+} stream_control;
+
+layout(set = 0, binding = 4) readonly buffer SamplerSeed {
+    uint words[];
+} sampler_seed;
+
+layout(set = 0, binding = 5) readonly buffer SamplerParameters {
+    uint words[];
+} sampler_parameters;
+
+layout(set = 0, binding = 7) buffer FeedbackControl {
+    uint words[];
+} feedback_control;
+
+layout(set = 0, binding = 8) readonly buffer StopTokens {
+    uint words[];
+} stop_tokens;
+
+const uint VOCAB_SIZE = {{VOCAB_SIZE}}u;
+const uint PARTITION_COUNT = {{PARTITION_COUNT}}u;
+const uint LOCAL_SIZE_X = {{LOCAL_SIZE_X}}u;
+const float LOWEST_FLOAT = -3.4028234663852886e38;
+
+shared float subgroup_values[{{LOCAL_SIZE_X}}];
+shared float global_maximum;
+shared float total_weight;
+shared float accumulated_weight;
+shared float half_weight;
+shared float selected_target;
+shared uint prefix_bits;
+shared uint prefix_mask;
+shared uint threshold_order_key;
+shared uint threshold_tie_cutoff_token;
+shared uint nucleus_active;
+shared uint selected_lane;
+shared uint selected_token;
+shared float selected_logit;
+
+uint hash_u32(uint value) {
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    value ^= value >> 16u;
+    return value;
+}
+
+float random_unit(uint stream_tick_low, uint stream_tick_high) {
+    uint bits = hash_u32(
+        sampler_seed.words[0]
+        ^ stream_tick_low
+        ^ (stream_tick_high * 0x9e3779b9u)
+        ^ 0xa511e9b3u
+    );
+    return (float(bits >> 8u) + 0.5) * (1.0 / 16777216.0);
+}
+
+uint ordered_float_key(float value) {
+    uint bits = floatBitsToUint(value);
+    return (bits & 0x80000000u) != 0u ? ~bits : bits ^ 0x80000000u;
+}
+
+bool valid_scaled_logit(float value) {
+    return !isnan(value) && !isinf(value) && value > LOWEST_FLOAT;
+}
+
+bool is_nucleus_token(uint token, float temperature) {
+    float scaled = logits.values[token] / temperature;
+    if (!valid_scaled_logit(scaled)) {
+        return false;
+    }
+    if (nucleus_active == 0u) {
+        return true;
+    }
+    uint key = ordered_float_key(scaled);
+    return key > threshold_order_key
+        || (key == threshold_order_key && token <= threshold_tie_cutoff_token);
+}
+
+void commit_feedback_control(uint token_id) {
+    uint flags = feedback_control.words[0];
+    if ((flags & 1u) == 0u) {
+        return;
+    }
+    atomicAdd(feedback_control.words[9], 1u);
+    bool cancelled = (flags & 2u) != 0u;
+    bool eos = (stop_tokens.words[token_id >> 5u] & (1u << (token_id & 31u))) != 0u;
+    if (!cancelled && !eos) {
+        return;
+    }
+    if (atomicCompSwap(feedback_control.words[2], 0u, cancelled ? 2u : 1u) == 0u) {
+        feedback_control.words[8] = 2u;
+    }
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint tick_low = stream_control.words[1];
+    uint tick_high = stream_control.words[2];
+    float temperature = uintBitsToFloat(sampler_parameters.words[0]);
+    float top_p = uintBitsToFloat(sampler_parameters.words[2]);
+
+    if (lane == 0u) {
+        global_maximum = LOWEST_FLOAT;
+        for (uint partition_id = 0u; partition_id < PARTITION_COUNT; ++partition_id) {
+            vec2 statistics = partition_statistics.values[partition_id];
+            if (statistics.y > 0.0) {
+                global_maximum = max(global_maximum, statistics.x);
+            }
+        }
+        total_weight = 0.0;
+        for (uint partition_id = 0u; partition_id < PARTITION_COUNT; ++partition_id) {
+            vec2 statistics = partition_statistics.values[partition_id];
+            if (statistics.y > 0.0) {
+                total_weight += statistics.y * exp(statistics.x - global_maximum);
+            }
+        }
+        accumulated_weight = 0.0;
+        prefix_bits = 0u;
+        prefix_mask = 0u;
+        threshold_order_key = 0u;
+        threshold_tie_cutoff_token = 0xffffffffu;
+        nucleus_active = top_p < 1.0 ? 1u : 0u;
+    }
+    barrier();
+
+    if (nucleus_active != 0u) {
+        float target_weight = top_p * total_weight;
+        for (int bit_index = 31; bit_index >= 0; --bit_index) {
+            uint bit = 1u << uint(bit_index);
+            float local_weight = 0.0;
+            for (uint token = lane; token < VOCAB_SIZE; token += LOCAL_SIZE_X) {
+                float scaled = logits.values[token] / temperature;
+                if (!valid_scaled_logit(scaled)) {
+                    continue;
+                }
+                uint key = ordered_float_key(scaled);
+                if ((key & prefix_mask) == prefix_bits && (key & bit) != 0u) {
+                    local_weight += exp(scaled - global_maximum);
+                }
+            }
+            float subgroup_weight = subgroupAdd(local_weight);
+            if (subgroupElect()) {
+                subgroup_values[gl_SubgroupID] = subgroup_weight;
+            }
+            barrier();
+            if (lane == 0u) {
+                float value = subgroup_values[0];
+                for (uint subgroup = 1u; subgroup < gl_NumSubgroups; ++subgroup) {
+                    value += subgroup_values[subgroup];
+                }
+                half_weight = value;
+                if (accumulated_weight + value < target_weight) {
+                    accumulated_weight += value;
+                } else {
+                    prefix_bits |= bit;
+                }
+                prefix_mask |= bit;
+            }
+            barrier();
+        }
+
+        if (lane == 0u) {
+            threshold_order_key = prefix_bits;
+            float threshold_token_weight = 0.0;
+            uint threshold_token_count = 0u;
+            for (uint token = 0u; token < VOCAB_SIZE; ++token) {
+                float scaled = logits.values[token] / temperature;
+                if (valid_scaled_logit(scaled)
+                    && ordered_float_key(scaled) == threshold_order_key) {
+                    if (threshold_token_count == 0u) {
+                        threshold_token_weight = exp(scaled - global_maximum);
+                    }
+                    threshold_token_count += 1u;
+                }
+            }
+            float remaining_weight = max(0.0, target_weight - accumulated_weight);
+            uint required_ties = uint(ceil(remaining_weight / threshold_token_weight));
+            required_ties = clamp(required_ties, 1u, threshold_token_count);
+            uint seen_ties = 0u;
+            for (uint token = 0u; token < VOCAB_SIZE; ++token) {
+                float scaled = logits.values[token] / temperature;
+                if (valid_scaled_logit(scaled)
+                    && ordered_float_key(scaled) == threshold_order_key) {
+                    seen_ties += 1u;
+                    if (seen_ties == required_ties) {
+                        threshold_tie_cutoff_token = token;
+                        break;
+                    }
+                }
+            }
+        }
+        barrier();
+    }
+
+    float local_weight = 0.0;
+    for (uint token = lane; token < VOCAB_SIZE; token += LOCAL_SIZE_X) {
+        if (is_nucleus_token(token, temperature)) {
+            float scaled = logits.values[token] / temperature;
+            local_weight += exp(scaled - global_maximum);
+        }
+    }
+    float subgroup_weight = subgroupAdd(local_weight);
+    if (subgroupElect()) {
+        subgroup_values[gl_SubgroupID] = subgroup_weight;
+    }
+    barrier();
+
+    if (lane == 0u) {
+        float eligible_weight = 0.0;
+        for (uint subgroup = 0u; subgroup < gl_NumSubgroups; ++subgroup) {
+            eligible_weight += subgroup_values[subgroup];
+        }
+        float target = random_unit(tick_low, tick_high) * eligible_weight;
+        float preceding_weight = 0.0;
+        selected_lane = 0u;
+        selected_target = 0.0;
+        for (uint candidate_lane = 0u; candidate_lane < LOCAL_SIZE_X; ++candidate_lane) {
+            float mass = subgroup_values[candidate_lane / gl_SubgroupSize];
+            if (candidate_lane % gl_SubgroupSize != 0u) {
+                mass = 0.0;
+            }
+            if (target < preceding_weight + mass) {
+                selected_lane = candidate_lane;
+                selected_target = target - preceding_weight;
+                break;
+            }
+            preceding_weight += mass;
+        }
+        selected_token = 0u;
+        selected_logit = logits.values[0];
+    }
+    barrier();
+
+    // The subgroup sum above gives one mass per subgroup. Elect one subgroup,
+    // then let its lanes partition that subgroup's candidate stream.
+    uint selected_subgroup = selected_lane / gl_SubgroupSize;
+    if (gl_SubgroupID == selected_subgroup) {
+        float lane_weight = local_weight;
+        subgroup_values[lane] = lane_weight;
+    }
+    barrier();
+    if (lane == 0u) {
+        uint subgroup_begin = selected_subgroup * gl_SubgroupSize;
+        float preceding_weight = 0.0;
+        selected_lane = subgroup_begin;
+        for (uint candidate_lane = subgroup_begin;
+             candidate_lane < min(subgroup_begin + gl_SubgroupSize, LOCAL_SIZE_X);
+             ++candidate_lane) {
+            float mass = subgroup_values[candidate_lane];
+            if (selected_target < preceding_weight + mass) {
+                selected_lane = candidate_lane;
+                selected_target -= preceding_weight;
+                break;
+            }
+            preceding_weight += mass;
+        }
+    }
+    barrier();
+
+    if (lane == selected_lane) {
+        float preceding_weight = 0.0;
+        for (uint token = lane; token < VOCAB_SIZE; token += LOCAL_SIZE_X) {
+            if (!is_nucleus_token(token, temperature)) {
+                continue;
+            }
+            float logit = logits.values[token];
+            float mass = exp(logit / temperature - global_maximum);
+            selected_token = token;
+            selected_logit = logit;
+            if (selected_target < preceding_weight + mass) {
+                break;
+            }
+            preceding_weight += mass;
+        }
+    }
+    barrier();
+
+    if (lane != 0u) {
+        return;
+    }
+    uint logit_bits = floatBitsToUint(selected_logit);
+    uint history_capacity = stream_control.words[4];
+    uint history_word = 4u + (tick_low % history_capacity) * 4u;
+    sampler_output.words[0] = selected_token;
+    sampler_output.words[1] = logit_bits;
+    sampler_output.words[2] = 1u;
+    sampler_output.words[3] = 0u;
+    sampler_output.words[history_word] = selected_token;
+    sampler_output.words[history_word + 1u] = logit_bits;
+    sampler_output.words[history_word + 2u] = 1u;
+    sampler_output.words[history_word + 3u] = 0u;
+    stream_control.words[0] = selected_token;
+    uint next_tick_low = tick_low + 1u;
+    if (next_tick_low == 0u) {
+        stream_control.words[2] += 1u;
+    }
+    stream_control.words[1] = next_tick_low;
+    commit_feedback_control(selected_token);
+}

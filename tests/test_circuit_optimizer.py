@@ -665,6 +665,45 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
         )
         self.assertEqual([2, 2], fused["attrs"]["branch_parameter_counts"])
 
+    def test_parallel_linear_fusion_does_not_depend_on_scale_parameter_names(
+        self,
+    ) -> None:
+        nodes = [
+            {
+                "id": "gate_projection",
+                "op": "linear",
+                "inputs": ["hidden"],
+                "outputs": ["gate"],
+                "params": ["first_matrix", "first_quantization_metadata"],
+            },
+            {
+                "id": "up_projection",
+                "op": "linear",
+                "inputs": ["hidden"],
+                "outputs": ["up"],
+                "params": ["second_matrix", "second_scale"],
+            },
+        ]
+
+        optimized = optimize_circuit_for_vulkan(
+            {"nodes": nodes},
+            can_fuse_parallel_linears=lambda group: len(group) == 2,
+        )
+
+        self.assertEqual(1, len(optimized["nodes"]))
+        fused = optimized["nodes"][0]
+        self.assertEqual("parallel_linear_2way", fused["op"])
+        self.assertEqual(
+            [
+                "first_matrix",
+                "first_quantization_metadata",
+                "second_matrix",
+                "second_scale",
+            ],
+            fused["params"],
+        )
+        self.assertEqual([2, 2], fused["attrs"]["branch_parameter_counts"])
+
     def test_lowers_fp8_input_quantization_to_one_reusable_physical_signal(self) -> None:
         circuit = {
             "nodes": [

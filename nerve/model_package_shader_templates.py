@@ -29,6 +29,41 @@ def _fp8_dynamic_scale_expression(
     return f"{maximum} > 0.0 ? {maximum} / 448.0 : 1.0"
 
 
+def _parallel_fp8_scale_reads(
+    labels: list[str],
+    *,
+    e8m0: bool,
+    packed_bf16: bool = False,
+) -> str:
+    def read_statement(label: str, *, condition: str | None) -> str:
+        words = f"weight_scale_inv_{label.lower()}.words"
+        if not e8m0:
+            prefix = f"if ({condition}) " if condition is not None else ""
+            expression = (
+                f"bf16_to_f32({words}[index >> 1u] >> "
+                "((index & 1u) * 16u))"
+                if packed_bf16
+                else f"read_bf16_word({words}[index >> 1u], index)"
+            )
+            return (
+                f"    {prefix}return {expression};"
+            )
+        body = (
+            f"uint packed = {words}[index >> 2u]; "
+            "uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu; "
+            "return uintBitsToFloat(e8m0 << 23u);"
+        )
+        if condition is not None:
+            return f"    if ({condition}) {{ {body} }}"
+        return f"    {body}"
+
+    reads = "\n".join(
+        read_statement(label, condition=f"branch == {index}u")
+        for index, label in enumerate(labels[:-1])
+    )
+    return reads + "\n" + read_statement(labels[-1], condition=None)
+
+
 def copy_shader_templates(
     source_dir: Path, dest_dir: Path, shader_files: set[str]
 ) -> None:
@@ -1043,23 +1078,24 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     cooperative_prequant_fp8_linear = re.fullmatch(
-        r"(linear|linear_residual)_prequant_batch(\d+)_cooperative_"
-        r"fp8_e4m3_m(\d+)n(\d+)k(\d+)_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        r"(?P<operation>linear|linear_residual)_prequant_"
+        r"batch(?P<batch>\d+)_cooperative_fp8_e4m3"
+        r"(?P<scale>_se8m0)?_m(?P<matrix_m>\d+)n(?P<matrix_n>\d+)"
+        r"k(?P<matrix_k>\d+)_b(?P<block_rows>\d+)x"
+        r"(?P<block_columns>\d+)_(?P<input>\d+)x(?P<output>\d+)\.comp",
         shader_file,
     )
     if cooperative_prequant_fp8_linear is not None:
-        operation = cooperative_prequant_fp8_linear.group(1)
-        (
-            batch_tile_width,
-            matrix_m,
-            matrix_n,
-            matrix_k,
-            block_rows,
-            block_columns,
-            input_size,
-            output_size,
-        ) = map(int, cooperative_prequant_fp8_linear.groups()[1:])
+        operation = cooperative_prequant_fp8_linear["operation"]
+        scale_is_e8m0 = cooperative_prequant_fp8_linear["scale"] is not None
+        batch_tile_width = int(cooperative_prequant_fp8_linear["batch"])
+        matrix_m = int(cooperative_prequant_fp8_linear["matrix_m"])
+        matrix_n = int(cooperative_prequant_fp8_linear["matrix_n"])
+        matrix_k = int(cooperative_prequant_fp8_linear["matrix_k"])
+        block_rows = int(cooperative_prequant_fp8_linear["block_rows"])
+        block_columns = int(cooperative_prequant_fp8_linear["block_columns"])
+        input_size = int(cooperative_prequant_fp8_linear["input"])
+        output_size = int(cooperative_prequant_fp8_linear["output"])
         if (
             min(
                 batch_tile_width,
@@ -1089,7 +1125,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             "    float residual = uintBitsToFloat(\n"
             "        uint(residual_frames.values[residual_index]) << 16u\n"
             "    );\n"
-            "    return value + residual;\n"
+            "    return bf16_to_f32(f32_to_bf16(value)) + residual;\n"
             "}"
             if residual
             else (
@@ -1119,32 +1155,45 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "OUTPUT_BINDING": str(output_binding),
                 "WEIGHT_BINDING": str(weight_binding),
                 "WEIGHT_SCALE_BINDING": str(weight_binding + 1),
+                "WEIGHT_SCALE_READ": (
+                    "uint packed = weight_scale_inv.words[index >> 2u];\n"
+                    "    uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu;\n"
+                    "    return uintBitsToFloat(e8m0 << 23u);"
+                    if scale_is_e8m0
+                    else (
+                        "uint packed = weight_scale_inv.words[index >> 1u];\n"
+                        "    return bf16_to_f32("
+                        "packed >> ((index & 1u) * 16u));"
+                    )
+                ),
                 "FINALIZE_FUNCTION": finalize_function,
             },
         )
 
     cooperative_prequant_parallel_fp8 = re.fullmatch(
-        r"parallel_linear_batch(\d+)_([23])way_prequant_cooperative_"
-        r"fp8_e4m3_m(\d+)n(\d+)k(\d+)_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",
+        r"parallel_linear_batch(?P<batch>\d+)_(?P<branches>[23])way_"
+        r"prequant_cooperative_fp8_e4m3(?P<scale>_se8m0)?_"
+        r"m(?P<matrix_m>\d+)n(?P<matrix_n>\d+)k(?P<matrix_k>\d+)_"
+        r"b(?P<block_rows>\d+)x(?P<block_columns>\d+)_"
+        r"(?P<input>\d+)x(?P<output_a>\d+)_(?P<output_b>\d+)"
+        r"(?:_(?P<output_c>\d+))?\.comp",
         shader_file,
     )
     if cooperative_prequant_parallel_fp8 is not None:
-        (
-            batch_tile_width,
-            branch_count,
-            matrix_m,
-            matrix_n,
-            matrix_k,
-            block_rows,
-            block_columns,
-            input_size,
-            *optional_output_sizes,
-        ) = map(
-            lambda value: int(value) if value is not None else None,
-            cooperative_prequant_parallel_fp8.groups(),
-        )
-        output_sizes = [int(size) for size in optional_output_sizes if size is not None]
+        batch_tile_width = int(cooperative_prequant_parallel_fp8["batch"])
+        branch_count = int(cooperative_prequant_parallel_fp8["branches"])
+        scale_is_e8m0 = cooperative_prequant_parallel_fp8["scale"] is not None
+        matrix_m = int(cooperative_prequant_parallel_fp8["matrix_m"])
+        matrix_n = int(cooperative_prequant_parallel_fp8["matrix_n"])
+        matrix_k = int(cooperative_prequant_parallel_fp8["matrix_k"])
+        block_rows = int(cooperative_prequant_parallel_fp8["block_rows"])
+        block_columns = int(cooperative_prequant_parallel_fp8["block_columns"])
+        input_size = int(cooperative_prequant_parallel_fp8["input"])
+        output_sizes = [
+            int(cooperative_prequant_parallel_fp8[name])
+            for name in ("output_a", "output_b", "output_c")
+            if cooperative_prequant_parallel_fp8[name] is not None
+        ]
         if (
             min(
                 batch_tile_width,
@@ -1198,20 +1247,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
             for index, label in enumerate(labels)
         )
-        weight_scale_reads = "\n".join(
-            f"    if (branch == {index}u) {{\n"
-            f"        uint packed = weight_scale_inv_{label.lower()}."
-            "words[index >> 1u];\n"
-            "        return bf16_to_f32("
-            "packed >> ((index & 1u) * 16u));\n"
-            "    }"
-            for index, label in enumerate(labels[:-1])
-        )
-        weight_scale_reads += (
-            "\n    uint packed = weight_scale_inv_"
-            + labels[-1].lower()
-            + ".words[index >> 1u];\n"
-            "    return bf16_to_f32(packed >> ((index & 1u) * 16u));"
+        weight_scale_reads = _parallel_fp8_scale_reads(
+            labels,
+            e8m0=scale_is_e8m0,
+            packed_bf16=True,
         )
         weight_reads = "\n".join(
             f"    if (branch == {index}u) return weight_{label.lower()}.values[index];"
@@ -1264,6 +1303,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "BLOCK_ROWS": str(block_rows),
                 "BLOCK_COLUMNS": str(block_columns),
                 "INPUT_SIZE": str(input_size),
+                "OUTPUT_TILE_ROWS": str(FP8_PREQUANT_TILE_ROWS),
                 "OUTPUT_CONSTANTS": output_constants,
                 "OUTPUT_SIZE_SELECTION": output_size_selection,
                 "OUTPUT_BINDINGS": output_bindings,
@@ -1434,7 +1474,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             finalize_output = (
                 "float finalize_output(uint row, float value) {\n"
                 "    return read_bf16_word(residual_frame.words[row >> 1u], row)"
-                " + value;\n"
+                " + bf16_to_f32(f32_to_bf16(value));\n"
                 "}"
                 if has_residual
                 else (
@@ -1454,7 +1494,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "float finalize_output(uint batch_index, uint row, float value) {\n"
                 "    return read_bf16_word(residual_frames.words[\n"
                 "        batch_index * (OUTPUT_SIZE / 2u) + (row >> 1u)\n"
-                "    ], row) + value;\n"
+                "    ], row) + bf16_to_f32(f32_to_bf16(value));\n"
                 "}"
                 if has_residual
                 else (
@@ -1569,24 +1609,28 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     prequant_parallel_fp8 = re.fullmatch(
-        r"parallel_linear_(?:batch(\d+)_)?([23])way_prequant_fp8_e4m3_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",
+        r"parallel_linear_(?:batch(?P<batch>\d+)_)?"
+        r"(?P<branches>[23])way_prequant_fp8_e4m3(?P<scale>_se8m0)?_"
+        r"b(?P<block_rows>\d+)x(?P<block_columns>\d+)_"
+        r"(?P<input>\d+)x(?P<output_a>\d+)_(?P<output_b>\d+)"
+        r"(?:_(?P<output_c>\d+))?\.comp",
         shader_file,
     )
     if prequant_parallel_fp8 is not None:
         batch_tile_width = (
-            int(prequant_parallel_fp8.group(1))
-            if prequant_parallel_fp8.group(1) is not None
+            int(prequant_parallel_fp8["batch"])
+            if prequant_parallel_fp8["batch"] is not None
             else None
         )
-        branch_count = int(prequant_parallel_fp8.group(2))
-        block_rows = int(prequant_parallel_fp8.group(3))
-        block_columns = int(prequant_parallel_fp8.group(4))
-        input_size = int(prequant_parallel_fp8.group(5))
+        branch_count = int(prequant_parallel_fp8["branches"])
+        scale_is_e8m0 = prequant_parallel_fp8["scale"] is not None
+        block_rows = int(prequant_parallel_fp8["block_rows"])
+        block_columns = int(prequant_parallel_fp8["block_columns"])
+        input_size = int(prequant_parallel_fp8["input"])
         output_sizes = [
-            int(width)
-            for width in prequant_parallel_fp8.groups()[5:]
-            if width is not None
+            int(prequant_parallel_fp8[name])
+            for name in ("output_a", "output_b", "output_c")
+            if prequant_parallel_fp8[name] is not None
         ]
         if (
             branch_count not in {2, 3}
@@ -1635,16 +1679,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
             for index, label in enumerate(labels)
         )
-        weight_scale_reads = "\n".join(
-            "    if (branch == "
-            f"{index}u) return read_bf16_word("
-            f"weight_scale_inv_{label.lower()}.words[index >> 1u], index);"
-            for index, label in enumerate(labels[:-1])
-        )
-        weight_scale_reads += (
-            "\n    return read_bf16_word(weight_scale_inv_"
-            + labels[-1].lower()
-            + ".words[index >> 1u], index);"
+        weight_scale_reads = _parallel_fp8_scale_reads(
+            labels,
+            e8m0=scale_is_e8m0,
         )
         weight_reads = "\n".join(
             f"    if (branch == {index}u) return weight_{label.lower()}.values[index];"
@@ -1698,20 +1735,28 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
 
     parallel_fp8 = re.fullmatch(
-        r"parallel_linear_(?:batch(\d+)_)?([23])way_fp8_e4m3_"
-        r"b(\d+)x(\d+)_(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",
+        r"parallel_linear_(?:batch(?P<batch>\d+)_)?"
+        r"(?P<branches>[23])way_fp8_e4m3(?P<scale>_se8m0)?_"
+        r"b(?P<block_rows>\d+)x(?P<block_columns>\d+)_"
+        r"(?P<input>\d+)x(?P<output_a>\d+)_(?P<output_b>\d+)"
+        r"(?:_(?P<output_c>\d+))?\.comp",
         shader_file,
     )
     if parallel_fp8 is not None:
         batch_tile_width = (
-            int(parallel_fp8.group(1)) if parallel_fp8.group(1) is not None else None
+            int(parallel_fp8["batch"])
+            if parallel_fp8["batch"] is not None
+            else None
         )
-        branch_count = int(parallel_fp8.group(2))
-        block_rows = int(parallel_fp8.group(3))
-        block_columns = int(parallel_fp8.group(4))
-        input_size = int(parallel_fp8.group(5))
+        branch_count = int(parallel_fp8["branches"])
+        scale_is_e8m0 = parallel_fp8["scale"] is not None
+        block_rows = int(parallel_fp8["block_rows"])
+        block_columns = int(parallel_fp8["block_columns"])
+        input_size = int(parallel_fp8["input"])
         output_sizes = [
-            int(width) for width in parallel_fp8.groups()[5:] if width is not None
+            int(parallel_fp8[name])
+            for name in ("output_a", "output_b", "output_c")
+            if parallel_fp8[name] is not None
         ]
         output_tile_rows = fp8_linear_tile_rows(max(output_sizes))
         if (
@@ -1761,16 +1806,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
             for index, label in enumerate(labels)
         )
-        weight_scale_reads = "\n".join(
-            "    if (branch == "
-            f"{index}u) return read_bf16_word("
-            f"weight_scale_inv_{label.lower()}.words[index >> 1u], index);"
-            for index, label in enumerate(labels[:-1])
-        )
-        weight_scale_reads += (
-            "\n    return read_bf16_word(weight_scale_inv_"
-            + labels[-1].lower()
-            + ".words[index >> 1u], index);"
+        weight_scale_reads = _parallel_fp8_scale_reads(
+            labels,
+            e8m0=scale_is_e8m0,
         )
         weight_reads = "\n".join(
             "    if (branch == "
@@ -2246,7 +2284,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         finalize_output = (
             "float finalize_output(uint batch_index, uint row, float value) {\n"
             "    uint index = batch_index * OUTPUT_WORDS + (row >> 1u);\n"
-            "    return read_bf16_word(residual_frames.words[index], row) + value;\n"
+            "    return read_bf16_word(residual_frames.words[index], row)"
+            " + bf16_to_f32(f32_to_bf16(value));\n"
             "}"
             if has_residual
             else (
@@ -2491,7 +2530,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         )
         finalize_output = (
             "float finalize_output(uint row, float value) {\n"
-            "    return read_bf16_word(residual_frames.words[row >> 1u], row) + value;\n"
+            "    return read_bf16_word(residual_frames.words[row >> 1u], row)"
+            " + bf16_to_f32(f32_to_bf16(value));\n"
             "}"
             if has_residual
             else (
@@ -3215,14 +3255,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("VOCAB_SIZE", "TOP_K_CAPACITY", "PARTITION_COUNT", "LOCAL_SIZE_X"),
         ),
         (
-            r"temperature_distribution_partitions_f32_(\d+)_t([0-9eE+.-]+)_g(\d+)_l(\d+)\.comp",
-            "temperature_distribution_partitions_f32.comp.template",
-            ("VOCAB_SIZE", "TEMPERATURE", "PARTITION_COUNT", "LOCAL_SIZE_X"),
+            r"temperature_distribution_partitions_runtime_f32_(\d+)_g(\d+)_l(\d+)\.comp",
+            "temperature_distribution_partitions_runtime_f32.comp.template",
+            ("VOCAB_SIZE", "PARTITION_COUNT", "LOCAL_SIZE_X"),
         ),
         (
-            r"temperature_distribution_sampler_f32_(\d+)_t([0-9eE+.-]+)_g(\d+)_l(\d+)\.comp",
-            "temperature_distribution_sampler_f32.comp.template",
-            ("VOCAB_SIZE", "TEMPERATURE", "PARTITION_COUNT", "LOCAL_SIZE_X"),
+            r"temperature_distribution_sampler_runtime_f32_(\d+)_g(\d+)_l(\d+)\.comp",
+            "temperature_distribution_sampler_runtime_f32.comp.template",
+            ("VOCAB_SIZE", "PARTITION_COUNT", "LOCAL_SIZE_X"),
         ),
         (
             r"record_seen_token_(\d+)\.comp",
@@ -4015,7 +4055,8 @@ if (
         )
 
     independent_mxfp4_expert_shape = re.fullmatch(
-        r"independent_sparse_moe_(gate_up|down)(?:_(batch1))?_"
+        r"independent_sparse_moe_(gate_up|down)(?:_(batch1))?"
+        r"(?:_(prequant))?_"
         r"mxfp4_e2m1_g32_h(\d+)_i(\d+)_e(\d+)_k(\d+)"
         r"(?:_limit([0-9eE+.-]+))?\.comp",
         shader_file,
@@ -4024,6 +4065,7 @@ if (
         (
             stage,
             batch_mode,
+            prequant,
             hidden_size,
             intermediate_size,
             num_experts,
@@ -4056,6 +4098,7 @@ if (
                 "EXPERTS_PER_TOKEN": str(experts_per_token),
                 "TILE_ROWS": str(32 if stage == "gate_up" else 64),
                 "SWIGLU_LIMIT": swiglu_limit or "0",
+                "PREQUANTIZED_INPUT": "1" if prequant is not None else "0",
             },
         )
 

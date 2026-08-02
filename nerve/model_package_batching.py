@@ -60,7 +60,7 @@ def persistent_batch_control_stage(
 
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     if re.fullmatch(
-        r"independent_sparse_moe_(?:gate_up|down)_mxfp4_e2m1_g32_"
+        r"independent_sparse_moe_(?:gate_up|down)(?:_prequant)?_mxfp4_e2m1_g32_"
         r"h\d+_i\d+_e\d+_k\d+(?:_limit[0-9eE+.-]+)?\.comp",
         shader_file,
     ):
@@ -100,7 +100,8 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
             count=1,
         )
     if re.fullmatch(
-        r"parallel_linear_[23]way_fp8_e4m3_b\d+x\d+_\d+x\d+_\d+(?:_\d+)?\.comp",
+        r"parallel_linear_[23]way_fp8_e4m3(?:_se8m0)?_"
+        r"b\d+x\d+_\d+x\d+_\d+(?:_\d+)?\.comp",
         shader_file,
     ):
         return shader_file.replace(
@@ -155,7 +156,7 @@ def parallel_block_attention_stages(
 
 def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     independent = re.fullmatch(
-        r"independent_sparse_moe_(gate_up|down)_mxfp4_e2m1_g32_"
+        r"independent_sparse_moe_(gate_up|down)(?:_prequant)?_mxfp4_e2m1_g32_"
         r"h(\d+)_i(\d+)_e\d+_k(\d+)(?:_limit[0-9eE+.-]+)?\.comp",
         shader_file,
     )
@@ -494,7 +495,7 @@ def cooperative_float8_e4m3_batch_shader_file(
     shape: tuple[int, int, int],
 ) -> str | None:
     linear = re.fullmatch(
-        r"(linear|linear_residual)_prequant_fp8_e4m3_"
+        r"(linear|linear_residual)_prequant_fp8_e4m3(_se8m0)?_"
         r"b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
         shader_file,
     )
@@ -505,6 +506,7 @@ def cooperative_float8_e4m3_batch_shader_file(
     if linear is not None:
         (
             operation,
+            scale_suffix,
             block_rows,
             block_columns,
             input_size,
@@ -514,17 +516,25 @@ def cooperative_float8_e4m3_batch_shader_file(
             return None
         return (
             f"{operation}_prequant_batch{batch_tile_width}_cooperative_"
-            f"fp8_e4m3_m{m}n{n}k{k}_b{block_rows}x{block_columns}_"
+            f"fp8_e4m3{scale_suffix or ''}_m{m}n{n}k{k}_"
+            f"b{block_rows}x{block_columns}_"
             f"{input_size}x{output_size}.comp"
         )
 
     parallel = re.fullmatch(
-        r"parallel_linear_([23])way_prequant_fp8_e4m3_"
+        r"parallel_linear_([23])way_prequant_fp8_e4m3(_se8m0)?_"
         r"b(\d+)x(\d+)_(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",
         shader_file,
     )
     if parallel is not None:
-        branch_count, block_rows, block_columns, input_size, *output_sizes = (
+        (
+            branch_count,
+            scale_suffix,
+            block_rows,
+            block_columns,
+            input_size,
+            *output_sizes,
+        ) = (
             parallel.groups()
         )
         output_sizes = [size for size in output_sizes if size is not None]
@@ -536,7 +546,7 @@ def cooperative_float8_e4m3_batch_shader_file(
             return None
         return (
             f"parallel_linear_batch{batch_tile_width}_{branch_count}way_"
-            f"prequant_cooperative_fp8_e4m3_m{m}n{n}k{k}_"
+            f"prequant_cooperative_fp8_e4m3{scale_suffix or ''}_m{m}n{n}k{k}_"
             f"b{block_rows}x{block_columns}_{input_size}x"
             f"{'_'.join(output_sizes)}.comp"
         )
@@ -587,7 +597,7 @@ def cooperative_float8_e4m3_workgroup_count_x(
 ) -> int:
     contiguous_swiglu_geometry = False
     linear = re.fullmatch(
-        r"(?:linear|linear_residual)_prequant_fp8_e4m3_"
+        r"(?:linear|linear_residual)_prequant_fp8_e4m3(?:_se8m0)?_"
         r"b\d+x\d+_\d+x(\d+)\.comp",
         shader_file,
     )
@@ -596,7 +606,7 @@ def cooperative_float8_e4m3_workgroup_count_x(
         output_sizes = [int(linear.group(1))]
     else:
         parallel = re.fullmatch(
-            r"parallel_linear_[23]way_prequant_fp8_e4m3_"
+            r"parallel_linear_[23]way_prequant_fp8_e4m3(?:_se8m0)?_"
             r"b\d+x\d+_\d+x(\d+)_(\d+)(?:_(\d+))?\.comp",
             shader_file,
         )
@@ -855,7 +865,7 @@ def weight_shared_batch_shader_file(
             1,
         )
     prequant_parallel_fp8 = re.fullmatch(
-        r"parallel_linear_[23]way_prequant_fp8_e4m3_"
+        r"parallel_linear_[23]way_prequant_fp8_e4m3(?:_se8m0)?_"
         r"b\d+x\d+_\d+x\d+_\d+(?:_\d+)?\.comp",
         shader_file,
     )
@@ -998,16 +1008,19 @@ def weight_shared_batch_shader_file(
                 1,
             )
     parallel_fp8 = re.fullmatch(
-        r"parallel_linear_([23])way_fp8_e4m3_b(\d+)x(\d+)_"
-        r"(\d+)x(\d+)_(\d+)(?:_(\d+))?\.comp",
+        r"parallel_linear_(?P<branches>[23])way_fp8_e4m3(?:_se8m0)?_"
+        r"b(?P<block_rows>\d+)x(?P<block_columns>\d+)_"
+        r"(?P<input>\d+)x(?P<output_a>\d+)_(?P<output_b>\d+)"
+        r"(?:_(?P<output_c>\d+))?\.comp",
         shader_file,
     )
     if parallel_fp8 is not None:
-        branch_count, block_rows, _block_columns, _input_size = map(
-            int, parallel_fp8.groups()[:4]
-        )
+        branch_count = int(parallel_fp8["branches"])
+        block_rows = int(parallel_fp8["block_rows"])
         output_sizes = [
-            int(width) for width in parallel_fp8.groups()[4:] if width is not None
+            int(parallel_fp8[name])
+            for name in ("output_a", "output_b", "output_c")
+            if parallel_fp8[name] is not None
         ]
         if len(output_sizes) != branch_count:
             return None

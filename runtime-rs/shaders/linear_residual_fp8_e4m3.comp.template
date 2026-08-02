@@ -121,7 +121,8 @@ void main() {
     sum = subgroupAdd(sum);
     if (local_row < OUTPUT_TILE_ROWS && gl_SubgroupInvocationID == 0u) {
         output_rows[local_row] =
-            read_bf16_word(residual_frame.words[row >> 1u], row) + sum;
+            read_bf16_word(residual_frame.words[row >> 1u], row)
+            + bf16_to_f32(f32_to_bf16(sum));
     }
     barrier();
 

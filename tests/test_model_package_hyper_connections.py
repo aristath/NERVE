@@ -13,6 +13,7 @@ from nerve.model_package import (
     shader_file_for_node,
     workgroup_count_x_for_node,
 )
+from nerve.model_package_shader_selection import local_size_x_for_shader_file
 
 
 def _circuit() -> tuple[dict[str, object], dict[str, object]]:
@@ -201,6 +202,36 @@ def test_compiles_fused_hyper_connection_kernels(tmp_path: Path) -> None:
     assert any("prior_combination.values" in source for source in sources)
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == 3
+
+
+def test_hyper_connection_pre_parallelizes_rows_without_changing_reduction_order(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _circuit()
+    optimized = optimize_circuit_for_vulkan(circuit)
+    pre = next(
+        node for node in optimized["nodes"] if node["op"] == "hyper_connection_pre"
+    )
+    shader_file = shader_file_for_node(
+        optimized,
+        pre,
+        tensor_index,
+        {"hidden_size": 8},
+    )
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
+    source = (tmp_path / shader_file).read_text()
+
+    assert local_size_x_for_shader_file(shader_file, pre) == 1024
+    assert "layout(local_size_x = 1024" in source
+    assert "const uint REDUCTION_WIDTH = 64u;" in source
+    assert "const uint ROWS_PER_REDUCTION_BATCH = 16u;" in source
+    assert "uint logical_lane = lane % REDUCTION_WIDTH;" in source
+    assert "uint row_slot = lane / REDUCTION_WIDTH;" in source
+    assert "for (uint row_base = 0u; row_base < MIX_COUNT;" in source
+    assert "for (uint column = logical_lane; column < HYPER_SIZE;" in source
+    assert "column += REDUCTION_WIDTH" in source
+    assert "reduction[lane] += reduction[lane + stride];" in source
 
 
 def test_hyper_connection_post_dispatch_covers_every_output_stream_word() -> None:

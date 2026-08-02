@@ -67,8 +67,9 @@ float random_unit(uint stream_tick_low, uint stream_tick_high) {
         sampler_seed.words[0]
         ^ stream_tick_low
         ^ (stream_tick_high * 0x9e3779b9u)
+        ^ 0xa511e9b3u
     );
-    return float(bits >> 8u) * (1.0 / 16777216.0);
+    return (float(bits >> 8u) + 0.5) * (1.0 / 16777216.0);
 }
 
 void commit_feedback_control(uint token_id) {

@@ -1132,6 +1132,29 @@ def _fp8_activation_contract(
 def _fp8_prequantization_spec(
     circuit: Json, node: Json, tensor_index: Json
 ) -> Json | None:
+    if node.get("op") == "independent_sparse_moe_gate_up":
+        try:
+            attrs = node["attrs"]
+            input_size = int(attrs["hidden_size"])
+            first_parameter = str(node["params"][0])
+            parameter_ref = circuit["parameters"]["refs"][first_parameter]
+            parameter = tensor_index["tensors"][parameter_ref["tensor"]]
+            quantization = parameter["quantization"]
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+        if (
+            input_size <= 0
+            or input_size % 128
+            or parameter.get("dtype") != "I8"
+            or quantization.get("format") != "mxfp4_e2m1"
+            or int(quantization.get("group_size", 0)) != 32
+        ):
+            return None
+        return {
+            "input_size": input_size,
+            "block_rows": 1,
+            "block_columns": 128,
+        }
     if node.get("op") == "sparse_moe_gate_up":
         try:
             if (

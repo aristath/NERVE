@@ -8,6 +8,10 @@ from nerve.model_package_common import (
     Json,
     shader_float_token,
 )
+from nerve.physical_representations import (
+    FP8_E8M0_PREQUANTIZATION_CONTRACT,
+    FP8_PREQUANTIZATION_CONTRACT,
+)
 
 
 INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS = 32
@@ -33,6 +37,12 @@ def independent_sparse_moe_shader_file(
     intermediate_size = int(attrs.get("intermediate_size", 0))
     experts_per_token = int(attrs.get("experts_per_token", 0))
     accesses = attrs.get("selected_parameter_accesses")
+    physical_input = attrs.get("physical_input_contract")
+    prequantized_input = stage == "gate_up" and physical_input in {
+        FP8_PREQUANTIZATION_CONTRACT,
+        FP8_E8M0_PREQUANTIZATION_CONTRACT,
+    }
+    expected_input_count = 3 if prequantized_input else 2
     if (
         hidden_size <= 0
         or hidden_size % 128
@@ -40,12 +50,8 @@ def independent_sparse_moe_shader_file(
         or intermediate_size % 128
         or not isinstance(accesses, list)
         or len(accesses) != 1
-        or accesses[0].get("selection_signal")
-        != (
-            node.get("inputs", [None, None])[1]
-            if len(node.get("inputs", [])) == 2
-            else None
-        )
+        or len(node.get("inputs", [])) != expected_input_count
+        or accesses[0].get("selection_signal") != node["inputs"][-1]
         or len(node.get("outputs", [])) != 1
     ):
         raise ModelCompileError(
@@ -109,7 +115,11 @@ def independent_sparse_moe_shader_file(
                 f"SwiGLU limit {limit}"
             )
         suffix += f"_limit{shader_float_token(limit)}"
-    return f"independent_sparse_moe_{stage}_mxfp4_e2m1_g32_{suffix}.comp"
+    representation = "_prequant" if prequantized_input else ""
+    return (
+        f"independent_sparse_moe_{stage}{representation}_"
+        f"mxfp4_e2m1_g32_{suffix}.comp"
+    )
 
 
 def _validate_mxfp4_matrix(

@@ -1946,6 +1946,6 @@ def discover_rope_interleaved(
     # Adjacent-pair rotary is part of the latent sparse-attention operator
     # contract.  Checkpoints using this operator do not necessarily duplicate
     # that semantic invariant in config.json, so derive it from the discovered
-    # circuit structure instead of silently applying the unrelated Llama-style
-    # half-split default.
+    # circuit structure instead of silently applying an unrelated half-split
+    # rotary default.
     return "latent_sparse_attention" in set(operator_types)

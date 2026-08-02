@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,26 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
         ],
     }
     assert "routed_expert_002_w2" in nodes["sparse_moe_down"]["params"]
+
+
+def test_sparse_expert_discovery_depends_on_structure_not_model_identity() -> None:
+    config, tensors = _source()
+    config["architectures"] = ["KnownSparseDecoder"]
+    known = discover_model_structure(Path("synthetic"), config, tensors)
+
+    future_config = dict(config)
+    future_config["model_type"] = "previously_unseen_decoder"
+    future_config["architectures"] = ["PreviouslyUnseenSparseDecoder"]
+    future = discover_model_structure(Path("synthetic"), future_config, tensors)
+
+    assert future.model_type == "previously_unseen_decoder"
+    assert future.architectures == ("PreviouslyUnseenSparseDecoder",)
+    assert replace(
+        future,
+        model_type=known.model_type,
+        architectures=known.architectures,
+    ) == known
+    assert make_layer(future, future.layers[0]) == make_layer(known, known.layers[0])
 
 
 def test_rejects_incomplete_independent_expert() -> None:

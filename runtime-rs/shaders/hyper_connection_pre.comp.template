@@ -1,6 +1,6 @@
 #version 460
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 
 {{SOURCE_BUFFERS}}
 layout(set = 0, binding = {{REDUCED_OUTPUT_BINDING}}) buffer ReducedOutput {
@@ -29,11 +29,13 @@ const uint HYPER_SIZE = MULTIPLICITY * HIDDEN_SIZE;
 const uint HYPER_WORDS = HYPER_SIZE / 2u;
 const uint MIX_COUNT = (2u + MULTIPLICITY) * MULTIPLICITY;
 const uint SINKHORN_ITERATIONS = {{SINKHORN_ITERATIONS}}u;
+const uint REDUCTION_WIDTH = 64u;
+const uint ROWS_PER_REDUCTION_BATCH = 16u;
 const float NORMALIZATION_EPSILON = {{NORMALIZATION_EPSILON}};
 const float SINKHORN_EPSILON = {{SINKHORN_EPSILON}};
 
 shared uint hyper_input[HYPER_WORDS];
-shared float reduction[64];
+shared float reduction[ROWS_PER_REDUCTION_BATCH * REDUCTION_WIDTH];
 shared float mixes[MIX_COUNT];
 shared float pre_mix[MULTIPLICITY];
 shared float combination[MULTIPLICITY * MULTIPLICITY];
@@ -65,9 +67,9 @@ float read_hyper_value(uint index) {
     return read_bf16(hyper_input[index >> 1u], index & 1u);
 }
 
-void reduce_lane_sum(uint lane) {
+void reduce_lane_sum(uint lane, uint logical_lane) {
     for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-        if (lane < stride) {
+        if (logical_lane < stride) {
             reduction[lane] += reduction[lane + stride];
         }
         barrier();
@@ -80,19 +82,23 @@ float sigmoid(float value) {
 
 void main() {
     uint lane = gl_LocalInvocationID.x;
-    for (uint word = lane; word < HYPER_WORDS; word += 64u) {
+    uint logical_lane = lane % REDUCTION_WIDTH;
+    uint row_slot = lane / REDUCTION_WIDTH;
+    for (uint word = lane; word < HYPER_WORDS; word += 1024u) {
         hyper_input[word] = source_hyper_word(word);
     }
     barrier();
 
     float square_sum = 0.0;
-    for (uint index = lane; index < HYPER_SIZE; index += 64u) {
-        float value = read_hyper_value(index);
-        square_sum += value * value;
+    if (row_slot == 0u) {
+        for (uint index = logical_lane; index < HYPER_SIZE; index += REDUCTION_WIDTH) {
+            float value = read_hyper_value(index);
+            square_sum += value * value;
+        }
     }
     reduction[lane] = square_sum;
     barrier();
-    reduce_lane_sum(lane);
+    reduce_lane_sum(lane, logical_lane);
     if (lane == 0u) {
         normalization_factor = inversesqrt(
             reduction[0] / float(HYPER_SIZE) + NORMALIZATION_EPSILON
@@ -100,18 +106,23 @@ void main() {
     }
     barrier();
 
-    for (uint row = 0u; row < MIX_COUNT; ++row) {
+    for (uint row_base = 0u; row_base < MIX_COUNT;
+         row_base += ROWS_PER_REDUCTION_BATCH) {
+        uint row = row_base + row_slot;
         float value = 0.0;
-        uint weight_base = row * HYPER_SIZE;
-        for (uint column = lane; column < HYPER_SIZE; column += 64u) {
-            value += read_hyper_value(column) *
-                function_weight.values[weight_base + column];
+        if (row < MIX_COUNT) {
+            uint weight_base = row * HYPER_SIZE;
+            for (uint column = logical_lane; column < HYPER_SIZE;
+                 column += REDUCTION_WIDTH) {
+                value += read_hyper_value(column) *
+                    function_weight.values[weight_base + column];
+            }
         }
         reduction[lane] = value;
         barrier();
-        reduce_lane_sum(lane);
-        if (lane == 0u) {
-            mixes[row] = reduction[0] * normalization_factor;
+        reduce_lane_sum(lane, logical_lane);
+        if (logical_lane == 0u && row < MIX_COUNT) {
+            mixes[row] = reduction[row_slot * REDUCTION_WIDTH] * normalization_factor;
         }
         barrier();
     }
@@ -177,7 +188,7 @@ void main() {
     }
     barrier();
 
-    for (uint word = lane; word < HIDDEN_WORDS; word += 64u) {
+    for (uint word = lane; word < HIDDEN_WORDS; word += 1024u) {
         float low = 0.0;
         float high = 0.0;
         for (uint stream = 0u; stream < MULTIPLICITY; ++stream) {

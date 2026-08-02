@@ -4,9 +4,9 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_clustered : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_float_e4m3 : require
 #extension GL_EXT_spirv_intrinsics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 
 spirv_instruction(
@@ -18,11 +18,21 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 
+#define PREQUANTIZED_INPUT {{PREQUANTIZED_INPUT}}
+#if PREQUANTIZED_INPUT
+layout(set = 0, binding = 0) readonly buffer QuantizedHidden { uint words[]; } quantized_hidden;
+layout(set = 0, binding = 1) readonly buffer HiddenScales { float values[]; } hidden_scales;
+layout(set = 0, binding = 2) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
+layout(set = 0, binding = 3) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
+layout(set = 0, binding = 4) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
+layout(set = 0, binding = 5) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
+#else
 layout(set = 0, binding = 0) readonly buffer HiddenFrame { uint words[]; } hidden_frame;
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
 layout(set = 0, binding = 2) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
 layout(set = 0, binding = 3) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
 layout(set = 0, binding = 4) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
+#endif
 
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
     uint words[];
@@ -48,8 +58,10 @@ const float MXFP4_VALUES[8] = float[8](
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
 );
 
-shared fe4m3vec4 quantized_hidden[HIDDEN_FP8_WORDS];
-shared float hidden_scales[HIDDEN_BLOCKS];
+#if !PREQUANTIZED_INPUT
+shared fe4m3vec4 cached_hidden[HIDDEN_FP8_WORDS];
+shared float cached_hidden_scales[HIDDEN_BLOCKS];
+#endif
 shared float activated_rows[TILE_ROWS];
 
 float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16); }
@@ -62,6 +74,7 @@ uint f32_to_bf16(float value) {
 
 float round_bf16(float value) { return bf16_to_f32(f32_to_bf16(value)); }
 
+#if !PREQUANTIZED_INPUT
 vec4 read_hiddenx4(uint column) {
     uint offset = column >> 1u;
     uint lo = hidden_frame.words[offset];
@@ -70,6 +83,16 @@ vec4 read_hiddenx4(uint column) {
         bf16_to_f32(lo), bf16_to_f32(lo >> 16u),
         bf16_to_f32(hi), bf16_to_f32(hi >> 16u)
     );
+}
+#endif
+
+fe4m3vec4 read_fp8x4(uint packed) {
+    return uintBitsToFloate4m3EXT(u8vec4(
+        uint8_t(packed),
+        uint8_t(packed >> 8u),
+        uint8_t(packed >> 16u),
+        uint8_t(packed >> 24u)
+    ));
 }
 
 uint dynamic_parameter_slot(uint expert, uint parameter) {
@@ -118,6 +141,7 @@ float rounded_fp8_scale(float block_max) {
     return uintBitsToFloat(uint(exponent + 127) << 23u);
 }
 
+#if !PREQUANTIZED_INPUT
 void quantize_hidden(uint lane) {
     if (lane >= 64u) return;
     uint cluster = lane >> 5u;
@@ -131,10 +155,11 @@ void quantize_hidden(uint lane) {
         );
         float block_max = subgroupClusteredMax(lane_max, 32u);
         float scale = rounded_fp8_scale(block_max);
-        if (cluster_lane == 0u) hidden_scales[block] = scale;
-        quantized_hidden[word] = fe4m3vec4(hidden / scale);
+        if (cluster_lane == 0u) cached_hidden_scales[block] = scale;
+        cached_hidden[word] = fe4m3vec4(hidden / scale);
     }
 }
+#endif
 
 void main() {
     uint route = gl_WorkGroupID.x / TILES_PER_ROUTE;
@@ -151,8 +176,10 @@ void main() {
     DynamicU32Buffer up_scale = dynamic_parameter(expert, 3u);
 
     uint lane = gl_LocalInvocationID.x;
+#if !PREQUANTIZED_INPUT
     quantize_hidden(lane);
     barrier();
+#endif
     uint first_row = tile * TILE_ROWS;
     for (
         uint local_row = gl_SubgroupID;
@@ -171,8 +198,13 @@ void main() {
                 uint column = word * 4u;
                 uint activation_block = column / 128u;
                 uint weight_block = column / 32u;
-                float activation_scale = hidden_scales[activation_block];
-                fe4m3vec4 hidden = quantized_hidden[word];
+#if PREQUANTIZED_INPUT
+                float activation_scale = hidden_scales.values[activation_block];
+                fe4m3vec4 hidden = read_fp8x4(quantized_hidden.words[word]);
+#else
+                float activation_scale = cached_hidden_scales[activation_block];
+                fe4m3vec4 hidden = cached_hidden[word];
+#endif
                 gate = fma(
                     fp8_dot4_acc32(hidden, read_mxfp4x4(gate_weight, row, column), 0.0),
                     activation_scale * read_e8m0_scale(gate_scale, row, weight_block),

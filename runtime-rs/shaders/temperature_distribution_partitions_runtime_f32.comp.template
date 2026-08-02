@@ -13,8 +13,11 @@ layout(set = 0, binding = 1) buffer PartitionStatistics {
     vec2 values[];
 } partition_statistics;
 
+layout(set = 0, binding = 2) readonly buffer SamplerParameters {
+    uint words[];
+} sampler_parameters;
+
 const uint VOCAB_SIZE = {{VOCAB_SIZE}}u;
-const float TEMPERATURE = {{TEMPERATURE}};
 const uint PARTITION_COUNT = {{PARTITION_COUNT}}u;
 const uint PARTITION_SIZE = (VOCAB_SIZE + PARTITION_COUNT - 1u) / PARTITION_COUNT;
 const uint LOCAL_SIZE_X = {{LOCAL_SIZE_X}}u;
@@ -28,11 +31,12 @@ void main() {
     uint partition_id = gl_WorkGroupID.x;
     uint begin = partition_id * PARTITION_SIZE;
     uint end = min(begin + PARTITION_SIZE, VOCAB_SIZE);
+    float temperature = uintBitsToFloat(sampler_parameters.words[0]);
 
     float local_maximum = LOWEST_FLOAT;
     for (uint token = begin + lane; token < end; token += LOCAL_SIZE_X) {
-        float value = logits.values[token] / TEMPERATURE;
-        if (!isnan(value)) {
+        float value = logits.values[token] / temperature;
+        if (!isnan(value) && !isinf(value)) {
             local_maximum = max(local_maximum, value);
         }
     }
@@ -53,8 +57,8 @@ void main() {
     float local_weight = 0.0;
     if (partition_maximum > LOWEST_FLOAT) {
         for (uint token = begin + lane; token < end; token += LOCAL_SIZE_X) {
-            float value = logits.values[token] / TEMPERATURE;
-            if (!isnan(value) && value > LOWEST_FLOAT) {
+            float value = logits.values[token] / temperature;
+            if (!isnan(value) && !isinf(value) && value > LOWEST_FLOAT) {
                 local_weight += exp(value - partition_maximum);
             }
         }

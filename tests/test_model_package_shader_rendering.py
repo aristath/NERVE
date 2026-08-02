@@ -331,6 +331,10 @@ def test_compiler_renders_reusable_fp8_activation_kernel_family(
         tmp_path
         / "linear_residual_prequant_fp8_e4m3_b128x128_5120x5120.comp"
     ).read_text()
+    batch_residual = (
+        tmp_path
+        / "linear_residual_prequant_batch16_fp8_e4m3_b128x128_5120x5120.comp"
+    ).read_text()
     parallel = (
         tmp_path
         / "parallel_linear_batch16_3way_prequant_fp8_e4m3_"
@@ -343,6 +347,8 @@ def test_compiler_renders_reusable_fp8_activation_kernel_family(
     ).read_text()
     assert "const uint ELEMENT_COUNT = 5120u;" in quantize
     assert "binding = 2) readonly buffer ResidualFrame" in residual
+    for source in (residual, batch_residual):
+        assert "bf16_to_f32(f32_to_bf16(value))" in source
     assert "const uint OUTPUT_TILE_ROWS = 16u;" in residual
     assert "binding = 2) buffer OutputA" in parallel
     assert "binding = 5) readonly buffer WeightA" in parallel
@@ -357,6 +363,35 @@ def test_compiler_renders_reusable_fp8_activation_kernel_family(
         assert_uses_direct_packed_fp8_vectors(source)
     for shader_file in shader_files:
         assert "{{" not in (tmp_path / shader_file).read_text()
+
+
+def test_fused_linear_residual_rounds_the_linear_boundary_for_every_representation(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "linear_residual_fp8_e4m3_b128x128_17408x5120.comp",
+        "linear_residual_batch16_fp8_e4m3_b128x128_17408x5120.comp",
+        "linear_residual_prequant_fp8_e4m3_b128x128_17408x5120.comp",
+        "linear_residual_prequant_batch16_fp8_e4m3_b128x128_17408x5120.comp",
+        "linear_residual_q8_0_512x768.comp",
+        "linear_residual_batch16_q8_0_512x768.comp",
+        "linear_residual_int4_ct_sbf16_g32_512x768.comp",
+        "linear_residual_batch16_int4_ct_sbf16_g32_512x768.comp",
+        "linear_residual_prequant_int4_ct_sbf16_g32_512x768.comp",
+        "linear_residual_prequant_batch16_int4_ct_sbf16_g32_512x768.comp",
+        (
+            "linear_residual_batch64_cooperative_int4_ct_sbf16_"
+            "g128_17408x5120.comp"
+        ),
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    for shader_file in shader_files:
+        source = (tmp_path / shader_file).read_text()
+        assert "bf16_to_f32(f32_to_bf16(" in source, shader_file
+        assert "{{" not in source
 
 
 def test_compiler_renders_fused_parallel_ffn_projection_shader(

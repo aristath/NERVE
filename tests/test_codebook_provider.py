@@ -32,6 +32,9 @@ from nerve.representation_optimizer.providers.codebook import (
     ExactEmbeddedHeadNormParameterProgramProvider,
     ExactHeadNormCodebookProvider,
 )
+from nerve.representation_optimizer.providers.codebook.artifacts import (
+    conversation_fixture,
+)
 from nerve.representation_optimizer.providers.codebook.discovery import (
     discover_head_norm_codebook,
 )
@@ -541,6 +544,22 @@ def _run_embedded_parameter_program(problem: ProviderProblem):
         descriptors=load_builtin_representation_descriptors(),
         providers=(ExactEmbeddedHeadNormParameterProgramProvider(),),
     ).run(problem)
+
+
+def test_conversation_validation_accepts_generic_assistant_identity_only() -> None:
+    fixture = conversation_fixture()
+    identity = fixture["semantic_expectations"]["turns"][1]["required_concepts"][0]
+
+    assert identity == {
+        "name": "model_identity",
+        "any_terms": [
+            "ai assistant",
+            "artificial intelligence",
+            "chatbot",
+            "language model",
+            "assistant",
+        ],
+    }
 
 
 def _construct_codebook_candidate(tmp_path: Path, **problem_options):

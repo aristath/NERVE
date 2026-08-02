@@ -1,5 +1,8 @@
 from nerve.model_package_common import *
-from nerve.model_package_assets import all_lowered_circuit_refs
+from nerve.model_package_assets import (
+    all_lowered_circuit_refs,
+    stream_control_binding_from_artifact_path,
+)
 from nerve.semantic_modules import (
     normalized_source_node_ids,
     semantic_module_ids_for_source_nodes,
@@ -145,6 +148,7 @@ def build_vulkan_resident_package_manifest(
         max(256, int(sampling.get("top_k", 1))),
     )
     sampler_scratch_byte_capacity = sampler_partition_count * sampler_top_k_capacity * 8
+    sampler_runtime_parameterized = False
     sampler_state_kernels = []
     if sampler_uses_token_state:
         sampler_state_kernels = [
@@ -231,33 +235,34 @@ def build_vulkan_resident_package_manifest(
         sampler_top_k = 0
         sampler_top_p = float(sampling["top_p"])
         sampler_min_p = float(sampling["min_p"])
-        if sampler_top_p != 1.0 or sampler_min_p != 0.0:
+        if not 0.0 < sampler_top_p <= 1.0 or sampler_min_p != 0.0:
             raise ModelCompileError(
-                "exact sampling without a top-k bound currently requires top_p=1 "
+                "exact full-distribution sampling requires top_p in (0, 1] "
                 "and min_p=0"
             )
         if sampler_uses_token_state:
             raise ModelCompileError(
                 "exact full-distribution sampling with token penalties is not yet supported"
             )
-        sampler_id = "temperature_distribution_sampler"
+        sampler_id = "runtime_temperature_distribution_sampler"
+        sampler_runtime_parameterized = True
         distribution_shape = (
-            f"f32_{vocab_size}_t{shader_float_token(sampler_temperature)}"
-            f"_g{sampler_partition_count}_l{sampler_candidate_local_size_x}.comp"
+            f"f32_{vocab_size}_g{sampler_partition_count}"
+            f"_l{sampler_candidate_local_size_x}.comp"
         )
         sampler_kernels = [
             {
-                "role": "partition_distribution",
+                "role": "runtime_partition_distribution",
                 "shader_path": compiled_shader_path(
-                    f"shaders/temperature_distribution_partitions_{distribution_shape}"
+                    f"shaders/temperature_distribution_partitions_runtime_{distribution_shape}"
                 ),
                 "local_size_x": sampler_candidate_local_size_x,
                 "workgroup_count_x": sampler_partition_count,
             },
             {
-                "role": "sample_distribution",
+                "role": "runtime_sample_distribution",
                 "shader_path": compiled_shader_path(
-                    f"shaders/temperature_distribution_sampler_{distribution_shape}"
+                    f"shaders/temperature_distribution_sampler_runtime_{distribution_shape}"
                 ),
                 "local_size_x": sampler_merge_local_size_x,
                 "workgroup_count_x": 1,
@@ -818,7 +823,7 @@ def build_vulkan_resident_package_manifest(
                 "presence_penalty": sampler_presence_penalty,
                 "repetition_penalty": sampler_repetition_penalty,
                 "top_k_capacity": sampler_top_k_capacity,
-                "runtime_parameterized": False,
+                "runtime_parameterized": sampler_runtime_parameterized,
                 "logits_byte_capacity": logits_bytes,
                 "output_byte_capacity": 16,
                 "scratch_byte_capacity": sampler_scratch_byte_capacity,
@@ -1111,6 +1116,7 @@ def component_kernel_spec(
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...] = (),
 ) -> Json:
     source_node_ids = normalized_source_node_ids(node)
+    stream_control_binding = stream_control_binding_from_artifact_path(shader_file)
     if node["op"] == "mixed_parallel_linear_4way":
         return {
             "execution_index": execution_index,
@@ -1121,6 +1127,7 @@ def component_kernel_spec(
                 circuit, source_node_ids
             ),
             "execution_domain": "decode",
+            "stream_control_binding": stream_control_binding,
             "shader_path": f"shaders/{shader_file}",
             "local_size_x": local_size_x,
             "workgroup_count_x": workgroup_count_x,
@@ -1183,6 +1190,7 @@ def component_kernel_spec(
             circuit, source_node_ids
         ),
         "execution_domain": "decode",
+        "stream_control_binding": stream_control_binding,
         "shader_path": f"shaders/{shader_file}",
         "local_size_x": local_size_x,
         "workgroup_count_x": workgroup_count_x,

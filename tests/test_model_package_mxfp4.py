@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from nerve.model_package_shader_selection import (
 )
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_common import ModelCompileError
+from nerve.model_package_tensors import physical_input_prequantization_spec
 from nerve.model_transpiler_tensor_index import make_tensor_index
 
 
@@ -198,11 +200,45 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
         "independent_sparse_moe_down_",
         "independent_sparse_moe_down_batch1_",
     )
-
+    prequant_gate = deepcopy(gate)
+    prequant_gate["inputs"] = ["hidden_fp8", "hidden_scale", "routes"]
+    prequant_gate["attrs"]["physical_input_contract"] = (
+        "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+    )
+    prequant_gate_shader = gate_shader.replace(
+        "independent_sparse_moe_gate_up_",
+        "independent_sparse_moe_gate_up_prequant_",
+    )
+    prequant_gate_batch_shader = prequant_gate_shader.replace(
+        "independent_sparse_moe_gate_up_",
+        "independent_sparse_moe_gate_up_batch1_",
+    )
     assert shader_file_for_node(circuit, gate, tensor_index, dimensions) == gate_shader
     assert shader_file_for_node(circuit, down, tensor_index, dimensions) == down_shader
+    assert physical_input_prequantization_spec(
+        circuit,
+        gate,
+        tensor_index,
+        activation_quantization={
+            "format": "dynamic_block_fp8_e4m3",
+            "group_size": 128,
+            "scale_format": "e8m0_power_of_two",
+        },
+    ) == {
+        "contract": "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1",
+        "input_size": hidden_size,
+        "block_columns": 128,
+    }
+    assert (
+        shader_file_for_node(circuit, prequant_gate, tensor_index, dimensions)
+        == prequant_gate_shader
+    )
     assert frame_parallel_batch_shader_file(gate_shader) == gate_batch_shader
     assert frame_parallel_batch_shader_file(down_shader) == down_batch_shader
+    assert (
+        frame_parallel_batch_shader_file(prequant_gate_shader)
+        == prequant_gate_batch_shader
+    )
     assert is_sparse_moe_projection_shader(gate_batch_shader)
     assert sparse_moe_route_scheduling_shader_file(gate_shader) == (
         "moe_route_compact_batch1_i128_k1_t4.comp"
@@ -224,10 +260,19 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     copy_shader_templates(
         shader_source_dir,
         tmp_path,
-        {gate_shader, gate_batch_shader, down_shader, down_batch_shader},
+        {
+            gate_shader,
+            gate_batch_shader,
+            prequant_gate_shader,
+            prequant_gate_batch_shader,
+            down_shader,
+            down_batch_shader,
+        },
     )
     gate_source = (tmp_path / gate_shader).read_text()
     gate_batch_source = (tmp_path / gate_batch_shader).read_text()
+    prequant_gate_source = (tmp_path / prequant_gate_shader).read_text()
+    prequant_gate_batch_source = (tmp_path / prequant_gate_batch_shader).read_text()
     down_source = (tmp_path / down_shader).read_text()
     assert "const uint DYNAMIC_PARAMETER_COUNT = 4u;" in gate_source
     assert "const uint DYNAMIC_PARAMETER_COUNT = 2u;" in down_source
@@ -242,7 +287,18 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     assert "expert * DYNAMIC_PARAMETER_COUNT + parameter" in gate_source
     assert "batch_control.owned_route_count" in gate_batch_source
     assert "batch_index * HIDDEN_WORDS" in gate_batch_source
+    assert "readonly buffer QuantizedHidden" in prequant_gate_source
+    assert "readonly buffer HiddenScales" in prequant_gate_source
+    assert "binding = 5) readonly buffer DynamicParameterSlots" in prequant_gate_source
+    assert "#define PREQUANTIZED_INPUT 1" in prequant_gate_source
+    assert "quantized_hidden.words[word]" in prequant_gate_source
+    assert "batch_index * HIDDEN_FP8_WORDS + word" in prequant_gate_batch_source
+    assert "batch_index * HIDDEN_BLOCKS + activation_block" in " ".join(
+        prequant_gate_batch_source.split()
+    )
     assert "{{" not in gate_source
     assert "{{" not in gate_batch_source
+    assert "{{" not in prequant_gate_source
+    assert "{{" not in prequant_gate_batch_source
     assert "{{" not in down_source
     compile_shader_artifacts(tmp_path)

@@ -699,29 +699,35 @@ def shader_file_for_node(
                 f"{sorted(layouts)}"
             )
         if dtypes == {"F8_E4M3"}:
-            block_shapes = {
-                fp8_block_shape_for_node(
-                    circuit,
-                    {
-                        "id": f"{node['id']}__branch_{index}",
-                        "params": parameter_ids,
-                    },
-                    tensor_index,
-                )
+            branch_nodes = [
+                {
+                    "id": f"{node['id']}__branch_{index}",
+                    "params": parameter_ids,
+                }
                 for index, parameter_ids in enumerate(branch_params)
+            ]
+            block_shapes = {
+                fp8_block_shape_for_node(circuit, branch_node, tensor_index)
+                for branch_node in branch_nodes
+            }
+            scale_dtypes = {
+                fp8_scale_dtype_for_node(circuit, branch_node, tensor_index)
+                for branch_node in branch_nodes
             }
             if len(block_shapes) != 1 or any(
                 len(parameter_ids) != 2 for parameter_ids in branch_params
-            ):
+            ) or len(scale_dtypes) != 1:
                 raise ModelCompileError(
                     f"parallel-linear FP8 node {node['id']!r} has incompatible block scales"
                 )
+            scale_dtype = scale_dtypes.pop()
+            scale_suffix = "_se8m0" if scale_dtype == "F8_E8M0" else ""
             block_rows, block_columns = block_shapes.pop()
             input_width = input_widths.pop()
             return (
                 f"parallel_linear_{branch_count}way"
                 f"{'_prequant' if uses_prequantized_fp8_input(node) else ''}"
-                "_fp8_e4m3_"
+                f"_fp8_e4m3{scale_suffix}_"
                 f"b{block_rows}x{block_columns}_{input_width}x"
                 + "_".join(map(str, output_widths))
                 + ".comp"
@@ -932,10 +938,15 @@ def shader_file_for_node(
             block_rows, block_columns = fp8_block_shape_for_node(
                 circuit, node, tensor_index
             )
+            scale_suffix = fp8_scale_shader_suffix_for_node(
+                circuit,
+                node,
+                tensor_index,
+            )
             return (
                 "linear_residual"
                 f"{'_prequant' if uses_prequantized_fp8_input(node) else ''}"
-                f"_fp8_e4m3_b{block_rows}x{block_columns}_"
+                f"_fp8_e4m3{scale_suffix}_b{block_rows}x{block_columns}_"
                 f"{in_features}x{out_features}.comp"
             )
         if parameter_dtype == "Q8_0":
@@ -2124,6 +2135,10 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if shader_file.startswith(
+        ("hyper_connection_pre_", "hyper_connection_post_pre_")
+    ):
+        return 1024
     if shader_file.startswith(("markov_argmax_partials_", "argmax_candidate_reduce_")):
         return 256
     if (
@@ -2276,7 +2291,8 @@ def int4_shader_replacements(
         finalize_output = (
             "float finalize_output(uint batch_index, uint row, float value) {\n"
             "    uint index = batch_index * OUTPUT_WORDS + (row >> 1u);\n"
-            "    return read_bf16_word(residual_frames.words[index], row) + value;\n"
+            "    return read_bf16_word(residual_frames.words[index], row)"
+            " + bf16_to_f32(f32_to_bf16(value));\n"
             "}"
         )
     elif has_bias:

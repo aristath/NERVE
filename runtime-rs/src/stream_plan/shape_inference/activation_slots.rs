@@ -613,6 +613,81 @@ mod tests {
     }
 
     #[test]
+    fn infers_stream_lane_repeat_and_mean_shapes() {
+        let signal = |id: &str, shape: Vec<usize>| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: Vec::new(),
+            shape: Some(shape),
+            element_bytes: Some(2),
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let mut node = crate::stream_circuit::CircuitNode {
+            id: "repeat".to_string(),
+            op: "repeat_stream_lanes".to_string(),
+            inputs: vec!["input_frame".to_string()],
+            outputs: vec!["lane_frames".to_string()],
+            params: Vec::new(),
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"multiplicity": 4, "hidden_size": 4096}),
+        };
+        let repeated_signals = BTreeMap::from([(
+            "input_frame".to_string(),
+            signal("input_frame", vec![4096]),
+        )]);
+        assert_eq!(
+            infer_node_output_shapes(
+                "draft_input",
+                &node,
+                &repeated_signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![4, 4096])]
+        );
+
+        node.id = "mean".to_string();
+        node.op = "mean_stream_lanes".to_string();
+        node.inputs = vec!["lane_frames".to_string()];
+        node.outputs = vec!["mean_frame".to_string()];
+        let lane_signals = BTreeMap::from([(
+            "lane_frames".to_string(),
+            signal("lane_frames", vec![4, 4096]),
+        )]);
+        assert_eq!(
+            infer_node_output_shapes(
+                "draft_input",
+                &node,
+                &lane_signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap(),
+            vec![Some(vec![4096])]
+        );
+
+        let invalid_signals = BTreeMap::from([(
+            "lane_frames".to_string(),
+            signal("lane_frames", vec![2, 8192]),
+        )]);
+        assert!(
+            infer_node_output_shapes(
+                "draft_input",
+                &node,
+                &invalid_signals,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap_err()
+            .0
+            .contains("does not match")
+        );
+    }
+
+    #[test]
     fn infers_fp8_quantization_representation_shapes() {
         let node = crate::stream_circuit::CircuitNode {
             id: "quantize".to_string(),
@@ -1976,6 +2051,7 @@ mod tests {
             id: id.to_string(),
             op: "test".to_string(),
             specialization: String::new(),
+            stream_control_binding: None,
             inputs: Vec::new(),
             outputs: outputs.iter().map(|output| (*output).to_string()).collect(),
             params: Vec::new(),

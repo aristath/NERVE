@@ -560,6 +560,50 @@ fn compile_temperature_top_k_top_p_sampler_test_kernels(
     Some(kernels)
 }
 
+fn compile_temperature_distribution_sampler_test_kernels(
+    vocab_size: usize,
+    _temperature: f32,
+    partition_count: u32,
+    local_size_x: u32,
+) -> Option<Vec<VulkanResidentSamplerKernelArtifact>> {
+    let shader_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
+    let render = |template: &str| std::fs::read_to_string(shader_dir.join(template)).ok();
+    let partitions = render("temperature_distribution_partitions_runtime_f32.comp.template")?
+        .replace("{{VOCAB_SIZE}}", &vocab_size.to_string())
+        .replace("{{PARTITION_COUNT}}", &partition_count.to_string())
+        .replace("{{LOCAL_SIZE_X}}", &local_size_x.to_string());
+    let sampler = render("temperature_distribution_sampler_runtime_f32.comp.template")?
+        .replace("{{VOCAB_SIZE}}", &vocab_size.to_string())
+        .replace("{{PARTITION_COUNT}}", &partition_count.to_string())
+        .replace("{{LOCAL_SIZE_X}}", &local_size_x.to_string());
+    let compile = |suffix: &str, source: String| {
+        let path = std::env::temp_dir().join(format!(
+            "nerve-distribution-sampling-test-{}-{suffix}.comp",
+            std::process::id()
+        ));
+        std::fs::write(&path, source).ok()?;
+        let words = crate::vulkan_compute::compile_shader_words_from_source_path(&path);
+        let _ = std::fs::remove_file(path);
+        words
+    };
+    let mut kernels = vec![
+        VulkanResidentSamplerKernelArtifact {
+            role: "runtime_partition_distribution".to_string(),
+            spirv_words: compile("partitions", partitions)?,
+            local_size_x,
+            workgroup_count_x: partition_count,
+        },
+        VulkanResidentSamplerKernelArtifact {
+            role: "runtime_sample_distribution".to_string(),
+            spirv_words: compile("sample", sampler)?,
+            local_size_x,
+            workgroup_count_x: 1,
+        },
+    ];
+    kernels.push(compile_feedback_control_test_kernel()?);
+    Some(kernels)
+}
+
 fn compile_repetition_temperature_sampler_test_kernels(
     vocab_size: usize,
     repetition_penalty: f32,
@@ -722,10 +766,6 @@ fn sampler_test_hash_u32(mut value: u32) -> u32 {
     value
 }
 
-fn fixture_model_index_path() -> PathBuf {
-    tiny_model_lowered_graph_path()
-}
-
 fn fixture_model_tensor_index_path() -> PathBuf {
     tiny_model_tensor_index_path()
 }
@@ -745,10 +785,7 @@ pub(super) fn tiny_fixture_model_runtime_model_with_placement(
         tiny_fixture_model_package_manifest_path(),
     )
     .unwrap();
-    let source_graph = manifest
-        .circuit_graph
-        .to_resolved_lowered_execution_graph(PathBuf::from("."))
-        .unwrap();
+    let source_graph = manifest.resolved_source_graph(tiny_model_dir()).unwrap();
     let runtime_graph = source_graph
         .runtime_graph_from_placement(&placement)
         .unwrap();
@@ -770,10 +807,7 @@ fn fixture_model_runtime_model_with_three_layer_series(
     middle_device_id: &str,
 ) -> VulkanResidentRuntimeModel {
     let manifest = fixture_model_package_manifest();
-    let source_graph = manifest
-        .circuit_graph
-        .to_resolved_lowered_execution_graph(tiny_model_dir())
-        .unwrap();
+    let source_graph = manifest.resolved_source_graph(tiny_model_dir()).unwrap();
     let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
         .unwrap()
         .duplicate_after_instance(&source_graph, "layer_00", "layer_00_remote")
@@ -794,7 +828,9 @@ fn fixture_model_runtime_model_with_remote_middle() -> VulkanResidentRuntimeMode
 }
 
 fn fixture_model_execution_graph() -> ResolvedLoweredExecutionGraph {
-    let full = ResolvedLoweredExecutionGraph::from_index_file(fixture_model_index_path()).unwrap();
+    let full = fixture_model_package_manifest()
+        .resolved_source_graph(tiny_model_dir())
+        .unwrap();
     let processor_ids = full
         .circuits
         .iter()

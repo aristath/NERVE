@@ -31,14 +31,16 @@ def test_compiler_renders_model_owned_sampling_shader(tmp_path: Path) -> None:
     assert "{{" not in sampler
 
 
-def test_compiler_renders_exact_full_distribution_sampling_shaders(
+def test_compiler_renders_exact_runtime_nucleus_sampling_shaders(
     tmp_path: Path,
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     partition_file = (
-        "temperature_distribution_partitions_f32_129280_t1_g128_l256.comp"
+        "temperature_distribution_partitions_runtime_f32_129280_g128_l256.comp"
     )
-    sample_file = "temperature_distribution_sampler_f32_129280_t1_g128_l256.comp"
+    sample_file = (
+        "temperature_distribution_sampler_runtime_f32_129280_g128_l256.comp"
+    )
 
     copy_shader_templates(
         shader_source_dir,
@@ -49,15 +51,19 @@ def test_compiler_renders_exact_full_distribution_sampling_shaders(
     partitions = (tmp_path / partition_file).read_text()
     sampler = (tmp_path / sample_file).read_text()
     assert "const uint VOCAB_SIZE = 129280u;" in partitions
-    assert "const float TEMPERATURE = 1;" in partitions
     assert "const uint PARTITION_COUNT = 128u;" in partitions
+    assert "binding = 2) readonly buffer SamplerParameters" in partitions
+    assert "uintBitsToFloat(sampler_parameters.words[0])" in partitions
     assert "partition_statistics.values" in partitions
     assert "subgroupMax" in partitions
     assert "subgroupAdd" in partitions
     assert "const uint VOCAB_SIZE = 129280u;" in sampler
+    assert "binding = 5) readonly buffer SamplerParameters" in sampler
+    assert "uintBitsToFloat(sampler_parameters.words[2])" in sampler
     assert "partition_statistics.values" in sampler
     assert "random_unit" in sampler
-    assert "selected_partition" in sampler
+    assert "threshold_order_key" in sampler
+    assert "for (int bit_index = 31; bit_index >= 0; --bit_index)" in sampler
     assert "commit_feedback_control" in sampler
     assert all("{{" not in source for source in (partitions, sampler))
 

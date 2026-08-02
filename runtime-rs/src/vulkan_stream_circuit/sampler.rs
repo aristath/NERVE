@@ -110,13 +110,6 @@ impl VulkanResidentSamplerRuntimeConfig {
         if effective == *default {
             return Ok(default.clone());
         }
-        if effective.method == "temperature_top_p" {
-            return Err(
-                VulkanResidentSamplerRunnerError::UnsupportedRuntimeSamplingOverride(
-                    "changing full-distribution sampling requires an explicit top_k so the runtime-parameterized sampler has a bounded candidate set".to_string(),
-                ),
-            );
-        }
         let valid_common = effective.presence_penalty.is_finite()
             && effective.repetition_penalty.is_finite()
             && effective.repetition_penalty > 0.0;
@@ -139,9 +132,12 @@ impl VulkanResidentSamplerRuntimeConfig {
                 effective.temperature.is_finite()
                     && effective.temperature > 0.0
                     && effective.top_k == 0
-                    && effective.top_p == 1.0
+                    && effective.top_p.is_finite()
+                    && effective.top_p > 0.0
+                    && effective.top_p <= 1.0
                     && effective.min_p == 0.0
-                    && valid_common
+                    && effective.presence_penalty == 0.0
+                    && effective.repetition_penalty == 1.0
             }
             _ => false,
         };
@@ -184,6 +180,11 @@ fn sampler_kernel_role_matches(role: &str, runtime_parameterized: bool, method: 
                 false,
                 "temperature_top_p",
                 "partition_distribution" | "sample_distribution"
+            )
+            | (
+                true,
+                "temperature_top_p",
+                "runtime_partition_distribution" | "runtime_sample_distribution"
             )
     )
 }
@@ -367,10 +368,16 @@ impl VulkanResidentSamplerRunner {
                 .and_then(|candidates| candidates.checked_mul(2 * std::mem::size_of::<u32>()))
                 .is_some_and(|required| required <= spec.scratch_byte_capacity);
         let distribution_kernel_plan_is_valid = sampling_kernels.len() == 2
-            && sampling_kernels[0].role == "partition_distribution"
+            && matches!(
+                sampling_kernels[0].role.as_str(),
+                "partition_distribution" | "runtime_partition_distribution"
+            )
             && sampling_kernels[0].local_size_x > 0
             && sampling_kernels[0].workgroup_count_x > 0
-            && sampling_kernels[1].role == "sample_distribution"
+            && matches!(
+                sampling_kernels[1].role.as_str(),
+                "sample_distribution" | "runtime_sample_distribution"
+            )
             && sampling_kernels[1].local_size_x >= sampling_kernels[0].workgroup_count_x
             && sampling_kernels[1].workgroup_count_x == 1
             && usize::try_from(sampling_kernels[0].workgroup_count_x)
@@ -418,7 +425,9 @@ impl VulkanResidentSamplerRunner {
                 if spec.temperature.is_finite()
                     && spec.temperature > 0.0
                     && spec.top_k == 0
-                    && spec.top_p == 1.0
+                    && spec.top_p.is_finite()
+                    && spec.top_p > 0.0
+                    && spec.top_p <= 1.0
                     && spec.min_p == 0.0
                     && spec.presence_penalty == 0.0
                     && spec.repetition_penalty == 1.0
@@ -612,7 +621,7 @@ impl VulkanResidentSamplerRunner {
                     )
                     .with_access(VulkanResidentKernelBufferAccess::Write),
                 ],
-                "partition_distribution" => vec![
+                "partition_distribution" | "runtime_partition_distribution" => vec![
                     VulkanResidentKernelBufferBinding::new(0, logits_buffer, logits_byte_capacity)
                         .with_access(VulkanResidentKernelBufferAccess::Read),
                     VulkanResidentKernelBufferBinding::new(
@@ -650,7 +659,7 @@ impl VulkanResidentSamplerRunner {
                     )
                     .with_access(VulkanResidentKernelBufferAccess::Read),
                 ],
-                "sample_distribution" => vec![
+                "sample_distribution" | "runtime_sample_distribution" => vec![
                     VulkanResidentKernelBufferBinding::new(0, logits_buffer, logits_byte_capacity)
                         .with_access(VulkanResidentKernelBufferAccess::Read),
                     VulkanResidentKernelBufferBinding::new(
@@ -704,6 +713,8 @@ impl VulkanResidentSamplerRunner {
                     "runtime_sample_logits" => 4,
                     "runtime_partition_top_k" => 3,
                     "runtime_sample_candidates" => 4,
+                    "runtime_partition_distribution" => 2,
+                    "runtime_sample_distribution" => 5,
                     _ => u32::MAX,
                 };
                 if binding != u32::MAX {
@@ -720,6 +731,7 @@ impl VulkanResidentSamplerRunner {
                     | "sample_candidates"
                     | "runtime_sample_candidates"
                     | "sample_distribution"
+                    | "runtime_sample_distribution"
             ) {
                 bindings.push(
                     VulkanResidentKernelBufferBinding::new(
@@ -1001,12 +1013,6 @@ impl VulkanResidentSamplerRunner {
         })
     }
 
-    fn completed_token_id(&self) -> Result<u32, VulkanResidentSamplerRunnerError> {
-        self.output_buffer
-            .read_persistently_mapped_u32_le_at(0)
-            .map_err(VulkanResidentSamplerRunnerError::Vulkan)
-    }
-
     fn completed_run_at(
         &self,
         stream_tick: u64,
@@ -1166,7 +1172,7 @@ impl VulkanResidentSamplerRunner {
                     )
                     .with_access(VulkanResidentKernelBufferAccess::Write),
                 ],
-                "partition_distribution" => vec![
+                "partition_distribution" | "runtime_partition_distribution" => vec![
                     logits_binding(),
                     VulkanResidentKernelBufferBinding::new(
                         1,
@@ -1207,7 +1213,7 @@ impl VulkanResidentSamplerRunner {
                     )
                     .with_access(VulkanResidentKernelBufferAccess::Read),
                 ],
-                "sample_distribution" => vec![
+                "sample_distribution" | "runtime_sample_distribution" => vec![
                     logits_binding(),
                     VulkanResidentKernelBufferBinding::new(
                         1,
@@ -1266,6 +1272,8 @@ impl VulkanResidentSamplerRunner {
                     "runtime_sample_logits" => Some(4),
                     "runtime_partition_top_k" => Some(3),
                     "runtime_sample_candidates" => Some(4),
+                    "runtime_partition_distribution" => Some(2),
+                    "runtime_sample_distribution" => Some(5),
                     _ => None,
                 };
                 if let Some(binding) = binding {
@@ -1282,6 +1290,7 @@ impl VulkanResidentSamplerRunner {
                     | "sample_candidates"
                     | "runtime_sample_candidates"
                     | "sample_distribution"
+                    | "runtime_sample_distribution"
             ) {
                 bindings.push(
                     VulkanResidentKernelBufferBinding::new(
@@ -1447,6 +1456,21 @@ pub struct VulkanResidentSamplerRun {
     pub push_constant_byte_count: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanResidentSampledToken {
+    pub token_id: u32,
+    pub selected_logit_bits: u32,
+}
+
+impl From<&VulkanResidentSamplerRun> for VulkanResidentSampledToken {
+    fn from(run: &VulkanResidentSamplerRun) -> Self {
+        Self {
+            token_id: run.token_id,
+            selected_logit_bits: run.selected_logit_bits,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum VulkanResidentSamplerRunnerError {
     InvalidLogitsByteCapacity {
@@ -1568,15 +1592,21 @@ mod sampler_runtime_tests {
     }
 
     #[test]
-    fn full_distribution_sampler_requires_top_k_for_changed_runtime_policy() {
+    fn full_distribution_sampler_accepts_exact_runtime_nucleus_policy() {
         let default = full_distribution_spec();
-        let error = VulkanResidentSamplerRuntimeConfig {
+        let effective = VulkanResidentSamplerRuntimeConfig {
             temperature: Some(0.8),
+            top_p: Some(0.95),
             ..Default::default()
         }
         .apply_to(&default)
-        .expect_err("the bounded runtime sampler cannot silently approximate full sampling");
-        assert!(error.to_string().contains("requires an explicit top_k"));
+        .expect("full-distribution sampling must remain exact without inventing top-k");
+
+        assert_eq!(effective.method, "temperature_top_p");
+        assert_eq!(effective.top_k, 0);
+        assert_eq!(effective.temperature, 0.8);
+        assert_eq!(effective.top_p, 0.95);
+        assert!(effective.runtime_parameterized);
 
         let effective = VulkanResidentSamplerRuntimeConfig {
             temperature: Some(0.8),
@@ -1589,5 +1619,18 @@ mod sampler_runtime_tests {
         assert_eq!(effective.method, "temperature_top_k_top_p");
         assert_eq!(effective.top_k, 64);
         assert!(effective.runtime_parameterized);
+    }
+
+    #[test]
+    fn full_distribution_sampler_rejects_nonzero_min_p_until_exactly_supported() {
+        let default = full_distribution_spec();
+        let error = VulkanResidentSamplerRuntimeConfig {
+            min_p: Some(0.05),
+            ..Default::default()
+        }
+        .apply_to(&default)
+        .expect_err("min-p must not be silently approximated by nucleus sampling");
+
+        assert!(error.to_string().contains("min_p"));
     }
 }

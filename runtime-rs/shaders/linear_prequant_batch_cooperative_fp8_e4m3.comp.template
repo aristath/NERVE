@@ -61,8 +61,7 @@ uint f32_to_bf16(float value) {
 
 float read_weight_scale(uint row, uint block) {
     uint index = (row / BLOCK_ROWS) * SCALE_COLUMNS + block;
-    uint packed = weight_scale_inv.words[index >> 1u];
-    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+    {{WEIGHT_SCALE_READ}}
 }
 
 {{FINALIZE_FUNCTION}}

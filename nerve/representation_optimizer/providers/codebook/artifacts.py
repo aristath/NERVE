@@ -130,7 +130,7 @@ def conversation_fixture() -> Json:
                                 "artificial intelligence",
                                 "chatbot",
                                 "language model",
-                                "qwen",
+                                "assistant",
                             ],
                         }
                     ],

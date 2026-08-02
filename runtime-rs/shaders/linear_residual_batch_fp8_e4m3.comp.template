@@ -144,7 +144,7 @@ void main() {
                 ? read_bf16_word(
                     residual_frames.words[batch_index * OUTPUT_WORDS + (row >> 1u)],
                     row
-                ) + sum
+                ) + bf16_to_f32(f32_to_bf16(sum))
                 : 0.0;
         }
         barrier();

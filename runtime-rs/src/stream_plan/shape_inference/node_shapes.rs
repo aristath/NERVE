@@ -26,6 +26,12 @@ fn infer_node_output_shapes(
         "hyper_connection_post" => {
             infer_hyper_connection_post_output_shapes(component_id, node, signals)
         }
+        "repeat_stream_lanes" => {
+            infer_stream_lane_transform_shape(component_id, node, signals, false)
+        }
+        "mean_stream_lanes" => {
+            infer_stream_lane_transform_shape(component_id, node, signals, true)
+        }
         "markov_argmax_partials" => {
             let candidates = attr_usize(node, "vocabulary_size")
                 .zip(attr_usize(node, "vocabulary_tile_width"))
@@ -669,6 +675,56 @@ fn infer_hyper_connection_pre_output_shapes(
         Some(vec![multiplicity]),
         Some(vec![multiplicity, multiplicity]),
     ])
+}
+
+fn infer_stream_lane_transform_shape(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+    reduce: bool,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    let multiplicity = attr_usize(node, "multiplicity").filter(|value| *value > 0);
+    let hidden_size = attr_usize(node, "hidden_size").filter(|value| *value > 0);
+    if node.inputs.len() != 1
+        || node.outputs.len() != 1
+        || !node.params.is_empty()
+        || multiplicity.is_none()
+        || hidden_size.is_none()
+    {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid stream-lane transform interface",
+            node.id
+        )));
+    }
+    let multiplicity = multiplicity.unwrap();
+    let hidden_size = hidden_size.unwrap();
+    let input_shape = first_input_shape(node, signals);
+    let expected_input = if reduce {
+        vec![multiplicity, hidden_size]
+    } else {
+        vec![hidden_size]
+    };
+    if input_shape
+        .as_ref()
+        .is_some_and(|shape| shape != &expected_input)
+    {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} stream-lane input shape {input_shape:?} does not match {expected_input:?}",
+            node.id
+        )));
+    }
+    let output_shape = if reduce {
+        vec![hidden_size]
+    } else {
+        multiplicity.checked_mul(hidden_size).ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} stream-lane output shape overflowed",
+                node.id
+            ))
+        })?;
+        vec![multiplicity, hidden_size]
+    };
+    Ok(vec![Some(output_shape)])
 }
 
 fn infer_hyper_connection_post_pre_output_shapes(
