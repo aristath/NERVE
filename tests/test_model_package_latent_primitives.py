@@ -199,6 +199,76 @@ def test_forward_rope_keeps_zero_offset_filename_stable() -> None:
     ) == "rotary_bf16_2x64_r32_theta10000_half__sc2.comp"
 
 
+def test_rms_norm_uses_its_parameter_width_instead_of_model_hidden_size() -> None:
+    circuit = {
+        "parameters": {
+            "refs": {
+                "query_norm": {"tensor": "query_norm.weight"},
+                "kv_norm": {"tensor": "kv_norm.weight"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "query_norm.weight": {"dtype": "BF16", "shape": [1024]},
+            "kv_norm.weight": {"dtype": "BF16", "shape": [512]},
+        }
+    }
+    node = lambda node_id, parameter: {
+        "id": node_id,
+        "op": "rms_norm",
+        "inputs": [f"{node_id}_input"],
+        "outputs": [f"{node_id}_output"],
+        "params": [parameter],
+        "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+    }
+
+    assert shader_file_for_node(
+        circuit,
+        node("query_input_norm", "query_norm"),
+        tensor_index,
+        {"hidden_size": 4096},
+    ) == "rms_norm_bf16_h1024_eps1e-06_offset0.comp"
+    assert shader_file_for_node(
+        circuit,
+        node("key_value_norm", "kv_norm"),
+        tensor_index,
+        {"hidden_size": 4096},
+    ) == "rms_norm_bf16_h512_eps1e-06_offset0.comp"
+
+
+def test_rms_norm_keeps_parameter_width_with_fused_quantized_outputs() -> None:
+    circuit = {
+        "parameters": {"refs": {"norm": {"tensor": "norm.weight"}}}
+    }
+    tensor_index = {
+        "tensors": {"norm.weight": {"dtype": "BF16", "shape": [1024]}}
+    }
+    node = {
+        "id": "norm",
+        "op": "rms_norm",
+        "inputs": ["input"],
+        "outputs": ["normalized", "normalized_fp8", "normalized_scale"],
+        "params": ["norm"],
+        "attrs": {
+            "eps": 1e-6,
+            "weight_offset": 0.0,
+            "physical_output_representations": [
+                {
+                    "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
+                    "logical_signal": "normalized",
+                    "element_count": 1024,
+                    "block_columns": 128,
+                }
+            ],
+        },
+    }
+
+    assert shader_file_for_node(
+        circuit, node, tensor_index, {"hidden_size": 4096}
+    ) == "rms_norm_quantize_fp8_e4m3_b128_h1024_eps1e-06_offset0.comp"
+
+
 def test_compiles_parallel_block_latent_attention(tmp_path: Path) -> None:
     circuit, tensor_index = _fixture()
     circuit["parameters"]["refs"]["attention_sinks"] = {

@@ -282,31 +282,39 @@ def shader_file_for_node(
         )
     if op == "rms_norm":
         attrs = node.get("attrs", {})
+        parameter_shape = parameter_shape_for_node(circuit, node, tensor_index)
+        node_hidden_size = (
+            int(parameter_shape[0])
+            if isinstance(parameter_shape, list) and len(parameter_shape) == 1
+            else 0
+        )
+        eps = float(attrs.get("eps", 0.0))
+        weight_offset = float(attrs.get("weight_offset", 0.0))
+        if (
+            node_hidden_size <= 0
+            or node_hidden_size % 2
+            or len(node.get("inputs", [])) != 1
+            or len(node.get("params", [])) != 1
+            or parameter_dtype_for_node(circuit, node, tensor_index) != "BF16"
+            or not math.isfinite(eps)
+            or eps <= 0.0
+            or not math.isfinite(weight_offset)
+        ):
+            raise ModelCompileError(
+                f"RMS normalization node {node['id']!r} has an invalid contract"
+            )
         block_width = int(attrs.get("block_width", 0))
         if block_width > 0:
-            node_hidden_size = int(attrs.get("hidden_size", 0))
-            eps = float(attrs.get("eps", 0.0))
-            weight_offset = float(attrs.get("weight_offset", 0.0))
             if (
-                node_hidden_size != hidden_size
-                or hidden_size <= 0
-                or hidden_size % 2
-                or len(node.get("inputs", [])) != 1
+                int(attrs.get("hidden_size", 0)) != node_hidden_size
                 or len(node.get("outputs", [])) != 1
-                or len(node.get("params", [])) != 1
-                or parameter_shape_for_node(circuit, node, tensor_index)
-                != [hidden_size]
-                or parameter_dtype_for_node(circuit, node, tensor_index) != "BF16"
-                or not math.isfinite(eps)
-                or eps <= 0.0
-                or not math.isfinite(weight_offset)
                 or attrs.get("output_element_bytes") != [2]
             ):
                 raise ModelCompileError(
                     f"block RMS norm node {node['id']!r} has an invalid contract"
                 )
             return (
-                f"rms_norm_block_b{block_width}_bf16_h{hidden_size}_"
+                f"rms_norm_block_b{block_width}_bf16_h{node_hidden_size}_"
                 f"eps{shader_float_token(eps)}_offset{shader_float_token(weight_offset)}.comp"
             )
         representations = node.get("attrs", {}).get("physical_output_representations")
@@ -315,7 +323,8 @@ def shader_file_for_node(
                 len(representations) != 1
                 or representations[0].get("logical_signal")
                 != node.get("outputs", [None])[0]
-                or int(representations[0].get("element_count", 0)) != hidden_size
+                or int(representations[0].get("element_count", 0))
+                != node_hidden_size
             )
             contract = representations[0].get("contract")
             block_columns = int(representations[0].get("block_columns", 0))
@@ -343,13 +352,17 @@ def shader_file_for_node(
             )
             return (
                 f"rms_norm_quantize_{representation_token}_b{block_columns}_"
-                f"h{hidden_size}_eps{shader_float_token(float(node['attrs']['eps']))}"
-                f"_offset{shader_float_token(float(node['attrs']['weight_offset']))}.comp"
+                f"h{node_hidden_size}_eps{shader_float_token(eps)}"
+                f"_offset{shader_float_token(weight_offset)}.comp"
+            )
+        if len(node.get("outputs", [])) != 1:
+            raise ModelCompileError(
+                f"RMS normalization node {node['id']!r} has an invalid output contract"
             )
         return rms_norm_shader_file(
-            hidden_size,
-            float(node["attrs"]["eps"]),
-            float(node["attrs"]["weight_offset"]),
+            node_hidden_size,
+            eps,
+            weight_offset,
         )
     if (
         op == "linear_projection"
