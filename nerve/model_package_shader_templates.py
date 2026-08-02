@@ -142,7 +142,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                     "    read_bf16(operator_frame.words[hidden_word], 1u);",
                     "for (uint source_stream = 0u; source_stream < MULTIPLICITY; ++source_stream) {",
                     "    float coefficient = prior_combination.values[",
-                    "        stream_index * MULTIPLICITY + source_stream",
+                    "        source_stream * MULTIPLICITY + stream_index",
                     "    ];",
                     "    uint residual_base = source_stream * HIDDEN_WORDS + hidden_word;",
                     "    uint residual_pair = residual_streams.words[residual_base];",

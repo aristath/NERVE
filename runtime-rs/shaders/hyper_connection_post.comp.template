@@ -53,7 +53,7 @@ void main() {
     float high = post_mix.values[output_stream] * read_bf16(operator_pair, 1u);
     for (uint source_stream = 0u; source_stream < MULTIPLICITY; ++source_stream) {
         float coefficient = combination_mix.values[
-            output_stream * MULTIPLICITY + source_stream
+            source_stream * MULTIPLICITY + output_stream
         ];
         uint residual_pair = residual_streams.words[
             source_stream * HIDDEN_WORDS + hidden_word

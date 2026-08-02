@@ -27,4 +27,6 @@ include!("vulkan_compute/stable_resource_address_space_tests.rs");
 include!("vulkan_compute/gpu_residency_gate_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/mxfp4_tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/hyper_connection_tests.rs");
 include!("vulkan_compute/tests.rs");

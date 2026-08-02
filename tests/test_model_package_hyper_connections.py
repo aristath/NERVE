@@ -239,6 +239,41 @@ def test_hyper_connection_post_dispatch_covers_every_output_stream_word() -> Non
     )
 
 
+def test_hyper_connection_post_reads_source_to_output_coefficients(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _circuit()
+    optimized = optimize_circuit_for_vulkan(circuit)
+    nodes = [
+        node
+        for node in optimized["nodes"]
+        if node["op"] in {"hyper_connection_post_pre", "hyper_connection_post"}
+    ]
+    shader_files = {
+        shader_file_for_node(
+            optimized,
+            node,
+            tensor_index,
+            {"hidden_size": 8},
+        )
+        for node in nodes
+    }
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    fused = (
+        tmp_path
+        / "hyper_connection_post_pre_m4_h8_i20_neps1e-06_heps1e-06.comp"
+    ).read_text()
+    post = (tmp_path / "hyper_connection_post_m4_h8.comp").read_text()
+
+    # DeepSeek mHC consumes comb transposed: output k is the sum over source j
+    # of comb[j, k] * residual[j]. A non-symmetric doubly-stochastic matrix is
+    # valid, so reading comb[k, j] is a behavior-changing error.
+    assert "source_stream * MULTIPLICITY + stream_index" in fused
+    assert "source_stream * MULTIPLICITY + output_stream" in post
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
