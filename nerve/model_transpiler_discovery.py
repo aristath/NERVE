@@ -813,11 +813,11 @@ def discover_layer_structure(
             configured,
             configured_head_width=configured_head_width,
         )
+        expected_q_width = num_attention_heads * head_width
         q_projection = layer_tensors.get("q_projection")
         if q_projection is not None:
             q_width = tensor_matrix_shape(tensors, q_projection)[0]
             configured_output_gate = bool(decoder_config.get("attn_output_gate", False))
-            expected_q_width = num_attention_heads * head_width
             if q_width == expected_q_width * 2:
                 configured_output_gate = True
             if q_width != expected_q_width * (2 if configured_output_gate else 1):
@@ -856,6 +856,21 @@ def discover_layer_structure(
         )
         attention_gate_activation = None
         attention_gate_per_head = False
+        if "attention_gate_projection" in layer_tensors:
+            if configured_attention_gate_activation is None:
+                raise ModelTranspileError(
+                    f"could not discover activation for attention gate in layer {layer_index}"
+                )
+            gate_width = tensor_matrix_shape(
+                tensors, layer_tensors["attention_gate_projection"]
+            )[0]
+            attention_gate_per_head = gate_width == num_attention_heads
+            if not attention_gate_per_head and gate_width != expected_q_width:
+                raise ModelTranspileError(
+                    f"attention gate width {gate_width} is incompatible with "
+                    f"{num_attention_heads} heads of width {head_width}"
+                )
+            attention_gate_activation = configured_attention_gate_activation
     elif operator_type == "latent_sparse_attention":
         head_width = configured_head_width
         num_key_value_heads = configured_num_key_value_heads
