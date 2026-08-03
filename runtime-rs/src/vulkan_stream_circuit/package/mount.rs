@@ -254,6 +254,13 @@ impl VulkanResidentModelPackageManifest {
 }
 
 impl VulkanResidentRuntimeModel {
+    pub(super) fn executable_circuit_graph(
+        &self,
+    ) -> Result<VulkanResidentPackageCircuitGraph, VulkanResidentTokenModelPackageError> {
+        self.circuit_graph
+            .with_kernel_runtime_contracts(&self.component_executions)
+    }
+
     pub fn placement_device_ids(&self) -> Vec<String> {
         self.circuit_graph
             .components
@@ -275,8 +282,7 @@ impl VulkanResidentRuntimeModel {
         &self,
         package_root: impl Into<PathBuf>,
     ) -> Result<ResolvedLoweredExecutionGraph, VulkanResidentTokenModelPackageError> {
-        self.circuit_graph
-            .with_kernel_runtime_contracts(&self.component_executions)?
+        self.executable_circuit_graph()?
             .to_resolved_lowered_execution_graph(package_root)
     }
 

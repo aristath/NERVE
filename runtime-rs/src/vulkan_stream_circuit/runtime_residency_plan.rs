@@ -490,10 +490,22 @@ fn speculative_decoder_runtime_model(
     device_id: &str,
 ) -> VulkanResidentRuntimeModel {
     let mut circuit_graph = decoder.circuit_graph.clone();
+    let compiled_component_ids = decoder
+        .component_executions
+        .iter()
+        .map(|execution| execution.component_id.as_str())
+        .collect::<BTreeSet<_>>();
     for component in &mut circuit_graph.components {
-        component.runtime_role = speculative_decoder_planning_role(component.runtime_role);
-        component.circuit.runtime_role =
-            speculative_decoder_planning_role(component.circuit.runtime_role);
+        let has_compiled_execution =
+            compiled_component_ids.contains(component.component_id.as_str());
+        component.runtime_role = speculative_decoder_planning_role(
+            component.runtime_role,
+            has_compiled_execution,
+        );
+        component.circuit.runtime_role = speculative_decoder_planning_role(
+            component.circuit.runtime_role,
+            has_compiled_execution,
+        );
     }
     let mut package = target.package.clone();
     package.package_id = format!("{}::{}", package.package_id, decoder.id);
@@ -512,12 +524,18 @@ fn speculative_decoder_runtime_model(
     }
 }
 
-fn speculative_decoder_planning_role(role: CircuitRuntimeRole) -> CircuitRuntimeRole {
-    match role {
-        CircuitRuntimeRole::DraftInputAdapter
-        | CircuitRuntimeRole::DraftProcessor
-        | CircuitRuntimeRole::DraftOutputTransducer => CircuitRuntimeRole::SignalProcessor,
-        role => role,
+fn speculative_decoder_planning_role(
+    role: CircuitRuntimeRole,
+    has_compiled_execution: bool,
+) -> CircuitRuntimeRole {
+    match (role, has_compiled_execution) {
+        (
+            CircuitRuntimeRole::DraftInputAdapter
+            | CircuitRuntimeRole::DraftProcessor
+            | CircuitRuntimeRole::DraftOutputTransducer,
+            true,
+        ) => CircuitRuntimeRole::SignalProcessor,
+        (role, _) => role,
     }
 }
 

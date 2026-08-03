@@ -290,12 +290,13 @@ fn speculative_planning_mounts_every_executable_draft_phase() {
         CircuitRuntimeRole::DraftOutputTransducer,
     ] {
         assert_eq!(
-            speculative_decoder_planning_role(role),
+            speculative_decoder_planning_role(role, true),
             CircuitRuntimeRole::SignalProcessor
         );
+        assert_eq!(speculative_decoder_planning_role(role, false), role);
     }
     assert_eq!(
-        speculative_decoder_planning_role(CircuitRuntimeRole::OutputTransducer),
+        speculative_decoder_planning_role(CircuitRuntimeRole::OutputTransducer, true),
         CircuitRuntimeRole::OutputTransducer
     );
 }

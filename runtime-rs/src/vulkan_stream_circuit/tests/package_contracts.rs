@@ -626,6 +626,56 @@ fn mounted_runtime_graph_persists_the_compiled_kernel_stream_control_contract() 
 }
 
 #[test]
+fn device_planning_materializes_compiled_kernel_contracts_from_a_raw_runtime_graph() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let execution = runtime_model
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    let kernel = execution
+        .kernels
+        .iter_mut()
+        .find(|kernel| kernel.node_id == "operator_norm")
+        .unwrap();
+    kernel.stream_control_binding = Some(3);
+
+    let raw_node = runtime_model
+        .circuit_graph
+        .components
+        .iter_mut()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .circuit
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "operator_norm")
+        .unwrap();
+    raw_node
+        .attrs
+        .as_object_mut()
+        .unwrap()
+        .remove("stream_control_binding");
+
+    let executable = runtime_model.executable_circuit_graph().unwrap();
+    let node = executable
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .circuit
+        .nodes
+        .iter()
+        .find(|node| node.id == "operator_norm")
+        .unwrap();
+
+    assert_eq!(
+        node.attrs.get("stream_control_binding"),
+        Some(&serde_json::json!(3))
+    );
+}
+
+#[test]
 fn resolved_package_graph_rejects_a_missing_kernel_runtime_contract() {
     let mut manifest = fixture_model_package_manifest();
     let execution = manifest

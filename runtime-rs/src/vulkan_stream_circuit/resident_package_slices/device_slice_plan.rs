@@ -85,12 +85,13 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &runtime_model.package.package_id,
             &runtime_model.component_executions,
         )?;
+        let executable_circuit_graph = runtime_model.executable_circuit_graph()?;
 
         let (resource_plan, _placement_plan, placed_plan) =
             plan_resident_package_placed_stream_circuit_with_tensor_index(
                 device_id,
                 &runtime_model.placement,
-                &runtime_model.circuit_graph,
+                &executable_circuit_graph,
                 manifest_dir,
                 tensor_index,
                 runtime_model.package.activation_element_bytes,
