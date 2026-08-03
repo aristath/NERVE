@@ -214,20 +214,12 @@ impl VulkanComputeDevice {
     }
 
     fn vulkan_operation_error(&self, context: &str, error: vk::Result) -> VulkanError {
-        if error != vk::Result::ERROR_DEVICE_LOST {
-            return VulkanError(format!("{context}: {error:?}"));
-        }
-        match self.device_fault_report() {
-            Ok(Some(report)) => VulkanError(format!(
-                "{context}: {error:?}; device_fault={report:?}"
-            )),
-            Ok(None) => VulkanError(format!(
-                "{context}: {error:?}; VK_EXT_device_fault is unavailable"
-            )),
-            Err(fault_error) => VulkanError(format!(
-                "{context}: {error:?}; device-fault query failed: {fault_error}"
-            )),
-        }
+        vulkan_operation_error_with_device_fault(
+            context,
+            error,
+            self.device_fault.as_ref(),
+            &self.device_address_registry,
+        )
     }
 
     fn track_addressable_buffer(
@@ -245,6 +237,28 @@ impl VulkanComputeDevice {
         buffer.device_address_registry = Some(Arc::clone(&self.device_address_registry));
         Ok(buffer)
     }
+}
+
+fn vulkan_operation_error_with_device_fault(
+    context: &str,
+    error: vk::Result,
+    extension: Option<&ash::ext::device_fault::Device>,
+    registry: &Arc<Mutex<VulkanDeviceAddressRegistry>>,
+) -> VulkanError {
+        if error != vk::Result::ERROR_DEVICE_LOST {
+            return VulkanError(format!("{context}: {error:?}"));
+        }
+        match query_vulkan_device_fault(extension, registry) {
+            Ok(Some(report)) => VulkanError(format!(
+                "{context}: {error:?}; device_fault={report:?}"
+            )),
+            Ok(None) => VulkanError(format!(
+                "{context}: {error:?}; VK_EXT_device_fault is unavailable"
+            )),
+            Err(fault_error) => VulkanError(format!(
+                "{context}: {error:?}; device-fault query failed: {fault_error}"
+            )),
+        }
 }
 
 fn query_vulkan_device_fault(
@@ -328,22 +342,11 @@ fn query_vulkan_device_fault(
 
 impl VulkanResidentQueueSubmitter {
     fn vulkan_operation_error(&self, context: &str, error: vk::Result) -> VulkanError {
-        if error != vk::Result::ERROR_DEVICE_LOST {
-            return VulkanError(format!("{context}: {error:?}"));
-        }
-        match query_vulkan_device_fault(
+        vulkan_operation_error_with_device_fault(
+            context,
+            error,
             self.device_fault.as_ref(),
             &self.device_address_registry,
-        ) {
-            Ok(Some(report)) => VulkanError(format!(
-                "{context}: {error:?}; device_fault={report:?}"
-            )),
-            Ok(None) => VulkanError(format!(
-                "{context}: {error:?}; VK_EXT_device_fault is unavailable"
-            )),
-            Err(fault_error) => VulkanError(format!(
-                "{context}: {error:?}; device-fault query failed: {fault_error}"
-            )),
-        }
+        )
     }
 }

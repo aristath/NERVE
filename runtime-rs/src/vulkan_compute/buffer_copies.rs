@@ -1,5 +1,7 @@
 pub struct VulkanResidentBufferCopy {
     device: ash::Device,
+    device_fault: Option<ash::ext::device_fault::Device>,
+    device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
@@ -13,6 +15,8 @@ pub struct VulkanResidentBufferCopy {
 
 pub struct VulkanResidentBufferCopyBatch {
     device: ash::Device,
+    device_fault: Option<ash::ext::device_fault::Device>,
+    device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
@@ -213,13 +217,23 @@ impl VulkanResidentBufferCopy {
             self.device
                 .queue_submit(self.queue, &submit_info, self.completion_fence)
                 .map_err(|error| {
-                    VulkanError(format!("failed to submit resident byte copy: {error:?}"))
+                    vulkan_operation_error_with_device_fault(
+                        "failed to submit resident byte copy",
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    )
                 })?;
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
             self.device
                 .wait_for_fences(&[self.completion_fence], true, u64::MAX)
                 .map_err(|error| {
-                    VulkanError(format!("failed waiting for resident byte copy: {error:?}"))
+                    vulkan_operation_error_with_device_fault(
+                        "failed waiting for resident byte copy",
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    )
                 })?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
             let device_duration_ns = if let Some(query_pool) = self.timestamp_query_pool {
@@ -274,17 +288,23 @@ impl VulkanResidentBufferCopyBatch {
             self.device
                 .queue_submit(self.queue, &submit_info, self.completion_fence)
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to submit resident buffer copy batch: {error:?}"
-                    ))
+                    vulkan_operation_error_with_device_fault(
+                        "failed to submit resident buffer copy batch",
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    )
                 })?;
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
             self.device
                 .wait_for_fences(&[self.completion_fence], true, u64::MAX)
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed waiting for resident buffer copy batch: {error:?}"
-                    ))
+                    vulkan_operation_error_with_device_fault(
+                        "failed waiting for resident buffer copy batch",
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    )
                 })?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         }

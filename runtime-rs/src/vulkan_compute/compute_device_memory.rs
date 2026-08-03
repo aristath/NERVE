@@ -1406,6 +1406,8 @@ impl VulkanComputeDevice {
 
             Ok(VulkanResidentBufferCopy {
                 device: self.device.clone(),
+                device_fault: self.device_fault.clone(),
+                device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.queue,
                 command_pool,
                 command_buffer,
@@ -1507,9 +1509,10 @@ impl VulkanComputeDevice {
             self.device
                 .queue_submit(self.queue, &submit_info, binding.completion_fence)
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to submit resident buffer copy batch: {error:?}"
-                    ))
+                    self.vulkan_operation_error(
+                        "failed to submit resident buffer copy batch",
+                        error,
+                    )
                 })?;
         }
         RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
@@ -1591,6 +1594,8 @@ impl VulkanComputeDevice {
                 })?;
             Ok(VulkanResidentBufferCopyBatch {
                 device: self.device.clone(),
+                device_fault: self.device_fault.clone(),
+                device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.queue,
                 command_pool,
                 command_buffer,

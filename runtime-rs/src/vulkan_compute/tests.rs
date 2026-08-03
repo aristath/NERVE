@@ -2209,6 +2209,31 @@ fn device_fault_address_registry_rejects_overlap_and_resolves_boundaries() {
 }
 
 #[test]
+fn device_fault_error_context_is_shared_by_detached_queue_objects() {
+    let registry = Arc::new(Mutex::new(VulkanDeviceAddressRegistry::default()));
+
+    let ordinary = vulkan_operation_error_with_device_fault(
+        "copy submit",
+        vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+        None,
+        &registry,
+    );
+    assert_eq!(
+        ordinary.0,
+        "copy submit: ERROR_OUT_OF_DEVICE_MEMORY".to_string()
+    );
+
+    let lost = vulkan_operation_error_with_device_fault(
+        "copy submit",
+        vk::Result::ERROR_DEVICE_LOST,
+        None,
+        &registry,
+    );
+    assert!(lost.0.contains("copy submit: ERROR_DEVICE_LOST"));
+    assert!(lost.0.contains("VK_EXT_device_fault is unavailable"));
+}
+
+#[test]
 fn live_addressable_buffers_are_registered_for_device_fault_attribution() {
     let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
         eprintln!("skipping device-fault attribution test: explicit Vulkan device unset");
