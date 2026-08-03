@@ -14,6 +14,15 @@ struct VulkanResolvedDeviceAddress {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanNearestDeviceAddress {
+    canonical_address: vk::DeviceAddress,
+    label: String,
+    signed_byte_offset: i128,
+    byte_capacity: usize,
+    gap_bytes: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanDeviceFaultAddressReport {
     pub address_type: i32,
     pub reported_address: u64,
@@ -22,6 +31,10 @@ pub struct VulkanDeviceFaultAddressReport {
     pub allocation: Option<String>,
     pub allocation_byte_offset: Option<usize>,
     pub allocation_byte_capacity: Option<usize>,
+    pub nearest_allocation: Option<String>,
+    pub nearest_allocation_signed_byte_offset: Option<i128>,
+    pub nearest_allocation_byte_capacity: Option<usize>,
+    pub nearest_allocation_gap_bytes: Option<u128>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +178,50 @@ impl VulkanDeviceAddressRegistry {
             }
         }
         match_found
+    }
+
+    fn nearest_reported_fault_address(
+        &self,
+        reported_address: vk::DeviceAddress,
+    ) -> Option<VulkanNearestDeviceAddress> {
+        let mut candidates = BTreeSet::from([reported_address]);
+        for address_bit_count in 32..64 {
+            let low_mask = (1u64 << address_bit_count) - 1;
+            let high_mask = !low_mask;
+            if reported_address & high_mask == high_mask {
+                candidates.insert(reported_address & low_mask);
+            }
+        }
+
+        let mut best = None;
+        for canonical_address in candidates {
+            for range in self.annotations.values().chain(self.ranges.values()) {
+                let signed_byte_offset = i128::from(canonical_address)
+                    - i128::from(range.start);
+                let byte_capacity = i128::try_from(range.byte_capacity).ok()?;
+                let gap_bytes = if signed_byte_offset < 0 {
+                    signed_byte_offset.unsigned_abs()
+                } else if signed_byte_offset >= byte_capacity {
+                    u128::try_from(signed_byte_offset - byte_capacity + 1).ok()?
+                } else {
+                    0
+                };
+                let candidate = VulkanNearestDeviceAddress {
+                    canonical_address,
+                    label: range.label.clone(),
+                    signed_byte_offset,
+                    byte_capacity: range.byte_capacity,
+                    gap_bytes,
+                };
+                if best.as_ref().is_none_or(|current: &VulkanNearestDeviceAddress| {
+                    (candidate.gap_bytes, candidate.byte_capacity)
+                        < (current.gap_bytes, current.byte_capacity)
+                }) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best
     }
 }
 
@@ -343,6 +400,9 @@ fn query_vulkan_device_fault(
         .into_iter()
         .map(|address| {
             let resolved = registry.resolve_reported_fault_address(address.reported_address);
+            let nearest = resolved.is_none().then(|| {
+                registry.nearest_reported_fault_address(address.reported_address)
+            }).flatten();
             VulkanDeviceFaultAddressReport {
                 address_type: address.address_type.as_raw(),
                 reported_address: address.reported_address,
@@ -353,6 +413,14 @@ fn query_vulkan_device_fault(
                     .as_ref()
                     .map(|(_, range)| range.byte_offset),
                 allocation_byte_capacity: resolved.map(|(_, range)| range.byte_capacity),
+                nearest_allocation: nearest.as_ref().map(|range| range.label.clone()),
+                nearest_allocation_signed_byte_offset: nearest
+                    .as_ref()
+                    .map(|range| range.signed_byte_offset),
+                nearest_allocation_byte_capacity: nearest
+                    .as_ref()
+                    .map(|range| range.byte_capacity),
+                nearest_allocation_gap_bytes: nearest.map(|range| range.gap_bytes),
             }
         })
         .collect();

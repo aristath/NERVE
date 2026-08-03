@@ -2238,6 +2238,36 @@ fn device_fault_address_registry_resolves_sign_extended_device_addresses() {
 }
 
 #[test]
+fn device_fault_address_registry_attributes_nearest_sign_extended_range() {
+    let mut registry = VulkanDeviceAddressRegistry::default();
+    registry
+        .register(
+            7,
+            0x8000_c740_0000,
+            0xc_0000,
+            "addressable allocation",
+        )
+        .unwrap();
+    registry
+        .register_annotation(
+            70,
+            0x8000_c74a_0000,
+            0x20_000,
+            "stable resource slot=17",
+        )
+        .unwrap();
+
+    let nearest = registry
+        .nearest_reported_fault_address(0xffff_8000_c74c_7000)
+        .unwrap();
+    assert_eq!(nearest.canonical_address, 0x8000_c74c_7000);
+    assert_eq!(nearest.label, "stable resource slot=17");
+    assert_eq!(nearest.signed_byte_offset, 0x2_7000);
+    assert_eq!(nearest.byte_capacity, 0x20_000);
+    assert_eq!(nearest.gap_bytes, 0x7001);
+}
+
+#[test]
 fn device_fault_error_context_is_shared_by_detached_queue_objects() {
     let registry = Arc::new(Mutex::new(VulkanDeviceAddressRegistry::default()));
 
