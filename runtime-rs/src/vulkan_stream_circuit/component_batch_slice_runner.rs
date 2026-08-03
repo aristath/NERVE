@@ -621,8 +621,8 @@ impl VulkanResidentComponentBatchSliceRunner {
                         push_constants: Vec::new(),
                         lane_index: None,
                         commits_state,
-                        dispatch_y_from_batch_width: stage
-                            .dispatch_y_from_batch_width,
+                        dispatch_control: component_batch_dispatch_control(stage)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     });
                 }
                 dispatch_spans.push(VulkanComponentBatchDispatchSpan {
@@ -677,7 +677,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     push_constants: dispatch.push_constants.clone(),
                     lane_index: Some(lane_index),
                     commits_state,
-                    dispatch_y_from_batch_width: false,
+                    dispatch_control: VulkanComponentBatchDispatchControl::Fixed,
                 });
             }
             dispatch_spans.push(VulkanComponentBatchDispatchSpan {
@@ -1119,6 +1119,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                         demand_residency.segment.run(
                             device,
                             &self.steps,
+                            &self.batch_control_buffers,
                             batch_width,
                             stream_ticks,
                             dynamic_state_capacity_activations,
@@ -1392,23 +1393,39 @@ impl VulkanResidentComponentBatchSliceRunner {
             .iter()
             .zip(&push_constant_storage)
             .map(|(step, push_constants)| {
-                if step.dispatch_y_from_batch_width {
-                    VulkanResidentKernelSequenceStep::new_direct_with_workgroup_count(
+                match step.dispatch_control {
+                    VulkanComponentBatchDispatchControl::Fixed => {
+                        Ok(VulkanResidentKernelSequenceStep::new(
+                            &step.dispatch,
+                            push_constants,
+                        ))
+                    }
+                    VulkanComponentBatchDispatchControl::BatchWidthY => {
+                        VulkanResidentKernelSequenceStep::new_direct_with_workgroup_count(
                         &step.dispatch,
                         push_constants,
                         step.dispatch.workgroup_count_x(),
                         u32::try_from(batch_width).map_err(|_| {
                             VulkanError(
                                 "component batch width exceeds direct dispatch range"
-                                    .to_string(),
+                                .to_string(),
                             )
                         })?,
-                    )
-                } else {
-                    Ok(VulkanResidentKernelSequenceStep::new(
+                        )
+                    }
+                    VulkanComponentBatchDispatchControl::Indirect {
+                        payload,
+                        byte_offset,
+                    } => VulkanResidentKernelSequenceStep::new_indirect(
                         &step.dispatch,
                         push_constants,
-                    ))
+                        self.batch_control_buffers.get(&payload).ok_or_else(|| {
+                            VulkanError(format!(
+                                "component batch indirect dispatch has no {payload:?} control buffer"
+                            ))
+                        })?,
+                        byte_offset,
+                    ),
                 }
             })
             .collect::<Result<Vec<_>, VulkanError>>()

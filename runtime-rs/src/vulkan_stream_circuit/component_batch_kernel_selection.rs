@@ -3,7 +3,37 @@ struct VulkanComponentBatchDispatchStep {
     push_constants: Vec<VulkanKernelScalarBinding>,
     lane_index: Option<usize>,
     commits_state: bool,
-    dispatch_y_from_batch_width: bool,
+    dispatch_control: VulkanComponentBatchDispatchControl,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanComponentBatchDispatchControl {
+    Fixed,
+    BatchWidthY,
+    Indirect {
+        payload: VulkanResidentComponentBatchControlPayload,
+        byte_offset: usize,
+    },
+}
+
+fn component_batch_dispatch_control(
+    stage: &VulkanResidentComponentBatchStageArtifact,
+) -> Result<VulkanComponentBatchDispatchControl, VulkanError> {
+    match (
+        stage.dispatch_y_from_batch_width,
+        stage.indirect_dispatch_byte_offset,
+    ) {
+        (true, Some(_)) => Err(VulkanError(format!(
+            "component batch stage {:?} cannot combine a batch-width dispatch with an indirect dispatch",
+            stage.shader_path
+        ))),
+        (true, None) => Ok(VulkanComponentBatchDispatchControl::BatchWidthY),
+        (false, Some(byte_offset)) => Ok(VulkanComponentBatchDispatchControl::Indirect {
+            payload: stage.control.storage_buffer().2,
+            byte_offset: byte_offset as usize,
+        }),
+        (false, None) => Ok(VulkanComponentBatchDispatchControl::Fixed),
+    }
 }
 
 fn component_batch_control_buffer_access(

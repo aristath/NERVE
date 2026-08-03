@@ -174,6 +174,21 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
         inverted: bool,
         region_id: u32,
     ) -> Result<Self, VulkanError> {
+        Self::new(dispatch, push_constants).with_condition(
+            predicate,
+            byte_offset,
+            inverted,
+            region_id,
+        )
+    }
+
+    pub fn with_condition(
+        mut self,
+        predicate: &'a VulkanResidentBuffer,
+        byte_offset: usize,
+        inverted: bool,
+        region_id: u32,
+    ) -> Result<Self, VulkanError> {
         let range_end = byte_offset
             .checked_add(std::mem::size_of::<u32>())
             .ok_or_else(|| {
@@ -187,18 +202,13 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
                 predicate.byte_capacity()
             )));
         }
-        Ok(Self {
-            dispatch,
-            push_constants,
-            direct_workgroup_count: None,
-            indirect_dispatch: None,
-            condition: Some(VulkanResidentKernelSequenceCondition {
-                buffer: predicate,
-                offset: byte_offset as vk::DeviceSize,
-                inverted,
-                region_id,
-            }),
-        })
+        self.condition = Some(VulkanResidentKernelSequenceCondition {
+            buffer: predicate,
+            offset: byte_offset as vk::DeviceSize,
+            inverted,
+            region_id,
+        });
+        Ok(self)
     }
 
     fn workgroup_count_x(self) -> u32 {

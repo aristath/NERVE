@@ -20,11 +20,20 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    stable-address publications, and reusing physical allocations. That bounded
    cache path is now removed: an observed working set that exceeds capacity
    fails admission atomically while every previously loaded component and
-   address remains resident. `VK_EXT_device_fault` reporting and live
-   addressable-buffer attribution are capability-driven runtime facilities.
-   Reproduce safely enough on a verified-healthy placement to determine whether
-   the invalid address transition was the complete fault cause, then complete a
-   multi-cycle conversation before enabling the decoder by default. The guards,
+   address remains resident. A second generic fault was found in local
+   component-batch execution: compiled indirect-dispatch contracts were being
+   discarded, so routed-expert kernels launched their maximum direct grid. The
+   batch step now retains a typed fixed, batch-width, or indirect dispatch
+   contract, including indirect execution under a demand-residency conditional
+   replay. The exact contract tests pass, but the corrected v20 package still
+   faulted at the identical `0x8000c74c7000` SQC data-read address after its
+   first output fragment. Therefore neither eviction nor direct over-dispatch
+   was the complete cause. Trace that deterministic address through stable-slot
+   publication and its exact consuming dispatch, then complete a multi-cycle
+   conversation before enabling the decoder by default. `VK_EXT_device_fault`
+   reporting and live addressable-buffer attribution must cover every queue
+   submission path so this class of failure names the allocation rather than
+   surfacing later through an unrelated copy or transfer operation. The guards,
    retained-capacity regression, and passing batched MXFP4 tests are necessary
    evidence, not proof that the real execution path is correct.
 

@@ -944,6 +944,50 @@ fn component_batch_control_preserves_temporal_position_and_capacity() {
 }
 
 #[test]
+fn component_batch_dispatch_control_preserves_compiled_indirect_execution() {
+    let mut stage = VulkanResidentComponentBatchStageArtifact {
+        shader_path: "shaders/routed_expert.spv".to_string(),
+        spirv_words: Vec::new(),
+        local_size_x: 64,
+        workgroup_count_x: 384,
+        descriptor_bindings: Vec::new(),
+        state_snapshot_binding: None,
+        control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+            byte_count: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+                .byte_count(),
+            binding: 31,
+            payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+            access: VulkanResidentComponentBatchControlAccess::ReadWrite,
+        },
+        indirect_dispatch_byte_offset: Some(16),
+        dispatch_y_from_batch_width: false,
+    };
+
+    assert_eq!(
+        component_batch_dispatch_control(&stage).unwrap(),
+        VulkanComponentBatchDispatchControl::Indirect {
+            payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+            byte_offset: 16,
+        }
+    );
+
+    stage.indirect_dispatch_byte_offset = None;
+    assert_eq!(
+        component_batch_dispatch_control(&stage).unwrap(),
+        VulkanComponentBatchDispatchControl::Fixed,
+    );
+
+    stage.dispatch_y_from_batch_width = true;
+    assert_eq!(
+        component_batch_dispatch_control(&stage).unwrap(),
+        VulkanComponentBatchDispatchControl::BatchWidthY,
+    );
+
+    stage.indirect_dispatch_byte_offset = Some(16);
+    assert!(component_batch_dispatch_control(&stage).is_err());
+}
+
+#[test]
 fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
     let width_only = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/linear_batch2_fp8_e4m3_b128x128_5120x5120.spv".to_string(),

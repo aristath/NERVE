@@ -272,6 +272,10 @@ impl VulkanDemandResidencyBatchSegment {
         &self,
         device: &VulkanComputeDevice,
         steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
         batch_width: usize,
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
@@ -302,6 +306,8 @@ impl VulkanDemandResidencyBatchSegment {
             .run(
                 device,
                 steps,
+                batch_control_buffers,
+                batch_width,
                 stream_ticks,
                 dynamic_state_capacity_activations,
                 &self.context,
@@ -492,6 +498,11 @@ impl VulkanDemandResidencyBatchChain {
         &self,
         device: &VulkanComputeDevice,
         steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
+        batch_width: usize,
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
         context: &VulkanDemandResidencyExecutionContext,
@@ -512,6 +523,8 @@ impl VulkanDemandResidencyBatchChain {
                 device,
                 None,
                 steps,
+                batch_control_buffers,
+                batch_width,
                 stream_ticks,
                 dynamic_state_capacity_activations,
             )?;
@@ -625,6 +638,8 @@ impl VulkanDemandResidencyBatchChain {
                 device,
                 Some(gate_index),
                 steps,
+                batch_control_buffers,
+                batch_width,
                 stream_ticks,
                 dynamic_state_capacity_activations,
             )?;
@@ -636,6 +651,11 @@ impl VulkanDemandResidencyBatchChain {
         device: &VulkanComputeDevice,
         resume_gate_index: Option<usize>,
         steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
+        batch_width: usize,
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
@@ -720,7 +740,11 @@ impl VulkanDemandResidencyBatchChain {
             .enumerate()
             .skip(start_command_index)
         {
-            let (dispatch, push_constants): (&VulkanResidentKernelDispatch, &[u8]) =
+            let (dispatch, push_constants, dispatch_control): (
+                &VulkanResidentKernelDispatch,
+                &[u8],
+                VulkanComponentBatchDispatchControl,
+            ) =
                 match command {
                     VulkanDemandResidencyBatchCommand::Step(step_index) => {
                         let step = steps.get(step_index).ok_or_else(|| {
@@ -738,6 +762,7 @@ impl VulkanDemandResidencyBatchChain {
                                     ))
                                 })?
                                 .as_slice(),
+                            step.dispatch_control,
                         )
                     }
                     VulkanDemandResidencyBatchCommand::Gate(gate_index) => {
@@ -756,14 +781,44 @@ impl VulkanDemandResidencyBatchChain {
                                     ))
                                 })?
                                 .as_slice(),
+                            VulkanComponentBatchDispatchControl::Fixed,
                         )
                     }
                 };
-            if command_index <= direct_gate_command_index {
-                sequence_steps.push(VulkanResidentKernelSequenceStep::new(
+            let sequence_step = match dispatch_control {
+                VulkanComponentBatchDispatchControl::Fixed => {
+                    VulkanResidentKernelSequenceStep::new(dispatch, push_constants)
+                }
+                VulkanComponentBatchDispatchControl::BatchWidthY => {
+                    VulkanResidentKernelSequenceStep::new_direct_with_workgroup_count(
+                        dispatch,
+                        push_constants,
+                        dispatch.workgroup_count_x(),
+                        u32::try_from(batch_width).map_err(|_| {
+                            demand_batch_error(
+                                "demand batch width exceeds direct dispatch range",
+                            )
+                        })?,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
+                }
+                VulkanComponentBatchDispatchControl::Indirect {
+                    payload,
+                    byte_offset,
+                } => VulkanResidentKernelSequenceStep::new_indirect(
                     dispatch,
                     push_constants,
-                ));
+                    batch_control_buffers.get(&payload).ok_or_else(|| {
+                        demand_batch_error(format!(
+                            "demand batch indirect dispatch has no {payload:?} control buffer"
+                        ))
+                    })?,
+                    byte_offset,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+            };
+            if command_index <= direct_gate_command_index {
+                sequence_steps.push(sequence_step);
             } else {
                 let region_id = if matches!(
                     command,
@@ -787,9 +842,7 @@ impl VulkanDemandResidencyBatchChain {
                     conditional_region_id
                 };
                 sequence_steps.push(
-                    VulkanResidentKernelSequenceStep::new_conditional(
-                        dispatch,
-                        push_constants,
+                    sequence_step.with_condition(
                         &self.continuation_predicate,
                         0,
                         false,
