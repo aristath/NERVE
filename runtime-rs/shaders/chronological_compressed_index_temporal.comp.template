@@ -1,0 +1,32 @@
+#version 450
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer CompressedMemory { uint words[]; } compressed_memory;
+layout(set = 0, binding = 1) buffer Indices { uint values[]; } indices;
+layout(set = 0, binding = 2) readonly buffer CompressedMemoryView { uint words[]; } compressed_memory_view;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint start_stream_tick_low;
+    uint start_stream_tick_high;
+    uint dynamic_state_capacity;
+} batch_control;
+
+const uint MAX_INDICES = {{MAX_INDICES}}u;
+const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
+const uint INDEX_OFFSET = {{INDEX_OFFSET}}u;
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    for (uint batch_position = 0u;
+         batch_position < batch_control.batch_width;
+         ++batch_position) {
+        uint absolute_tick = batch_control.start_stream_tick_low + batch_position;
+        uint count = min((absolute_tick + 1u) / COMPRESSION_RATIO, MAX_INDICES);
+        uint output_base = batch_position * MAX_INDICES;
+        for (uint position = lane; position < count; position += 1024u) {
+            indices.values[output_base + position] = INDEX_OFFSET + position;
+        }
+    }
+}

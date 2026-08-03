@@ -387,9 +387,7 @@ def validate_compiled_speculative_decoders(
                 and isinstance(proposal_contract, dict)
                 and proposal_contract.get("configured_block_size") == block_width
                 and isinstance(proposal_contract.get("default_draft_tokens"), int)
-                and not isinstance(
-                    proposal_contract.get("default_draft_tokens"), bool
-                )
+                and not isinstance(proposal_contract.get("default_draft_tokens"), bool)
                 and proposal_contract.get("default_draft_tokens") >= block_width
                 and proposal_contract.get("confidence_prefix")
                 == "first_sigmoid_below_runtime_threshold"
@@ -788,6 +786,9 @@ def valid_batch_stage(stage: Any) -> bool:
     state_snapshot_binding = (
         stage.get("state_snapshot_binding") if isinstance(stage, dict) else None
     )
+    state_snapshot_source_binding = (
+        stage.get("state_snapshot_source_binding") if isinstance(stage, dict) else None
+    )
     dispatch_y_from_batch_width = (
         stage.get("dispatch_y_from_batch_width", False)
         if isinstance(stage, dict)
@@ -808,7 +809,10 @@ def valid_batch_stage(stage: Any) -> bool:
         and valid_batch_control(control)
         and (
             (state_snapshot_binding is not None)
-            == (control.get("payload") == "width_state_snapshots")
+            == (
+                control.get("payload")
+                in {"width_state_snapshots", "temporal_state_snapshots"}
+            )
         )
         and (
             state_snapshot_binding is None
@@ -826,6 +830,17 @@ def valid_batch_stage(stage: Any) -> bool:
                         else []
                     )
                 )
+            )
+        )
+        and (
+            state_snapshot_source_binding is None
+            or (
+                state_snapshot_binding is not None
+                and isinstance(state_snapshot_source_binding, int)
+                and not isinstance(state_snapshot_source_binding, bool)
+                and state_snapshot_source_binding >= 0
+                and state_snapshot_source_binding != control["binding"]
+                and state_snapshot_source_binding != state_snapshot_binding
             )
         )
         and (
@@ -886,6 +901,7 @@ def valid_batch_control(control: Any) -> bool:
         "width_expert_start": 8,
         "width_expert_range_indirect": 28,
         "temporal": 16,
+        "temporal_state_snapshots": 20,
     }
     return (
         control_kind == "storage_buffer"

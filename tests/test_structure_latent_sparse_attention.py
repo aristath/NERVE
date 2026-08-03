@@ -168,6 +168,9 @@ def test_discovers_sliding_and_compressed_latent_attention_topologies() -> None:
         "indexer_kv_memory",
     ]
     state_ports = {port["id"]: port for port in component["state_ports"]}
+    assert state_ports["local_kv_memory"]["shape"] == [8, 4]
+    assert "shape_per_token" not in state_ports["local_kv_memory"]
+    assert "capacity" not in state_ports["local_kv_memory"]
     assert state_ports["compressor_accumulator"]["shape"] == [2, 8, 8]
     assert state_ports["indexer_compressor_accumulator"]["shape"] == [2, 8, 4]
     nodes = {node["id"]: node for node in circuit["nodes"]}

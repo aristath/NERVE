@@ -1,0 +1,54 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer Candidates { uint words[]; } candidates;
+layout(set = 0, binding = 1) readonly buffer StateInput { uint words[]; } state_input;
+layout(set = 0, binding = 2) buffer StateOutput { uint words[]; } state_output;
+layout(set = 0, binding = 3) readonly buffer StateRead { uint words[]; } state_read;
+layout(set = 0, binding = 4) buffer StateWrite { uint words[]; } state_write;
+layout(set = 0, binding = 5) buffer StateView { uint words[]; } state_view;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint start_stream_tick_low;
+    uint start_stream_tick_high;
+    uint dynamic_state_capacity;
+} batch_control;
+
+const uint ELEMENT_COUNT = {{ELEMENT_COUNT}}u;
+const uint WORD_COUNT = ELEMENT_COUNT / 2u;
+const uint PERIOD = {{PERIOD}}u;
+const uint STATE_PAGE_TABLE_WORDS = 9u;
+
+uint state_write_word(uint logical_word) {
+    uint logical_byte = logical_word * 4u;
+    if (logical_byte < state_write.words[2]) {
+        return (state_write.words[3] + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - state_write.words[2];
+    uint page_bytes = state_write.words[4];
+    uint physical_page =
+        state_write.words[STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes];
+    return (
+        state_write.words[8]
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    for (uint position = 0u; position < batch_control.batch_width; ++position) {
+        uint absolute_tick = batch_control.start_stream_tick_low + position;
+        if ((absolute_tick + 1u) % PERIOD != 0u) continue;
+        uint compressed_slot = absolute_tick / PERIOD;
+        uint slot_base = compressed_slot * WORD_COUNT;
+        uint candidate_base = position * WORD_COUNT;
+        for (uint word = lane; word < WORD_COUNT; word += 64u) {
+            state_write.words[state_write_word(slot_base + word)] =
+                candidates.words[candidate_base + word];
+        }
+        barrier();
+    }
+}

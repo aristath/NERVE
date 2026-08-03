@@ -1,0 +1,270 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer HiddenInputs { uint words[]; } hidden_inputs;
+layout(set = 0, binding = 1) readonly buffer StateInput { uint words[]; } state_input;
+layout(set = 0, binding = 2) buffer PooledOutputs { float values[]; } pooled_outputs;
+layout(set = 0, binding = 3) readonly buffer PositionBias { float values[]; } position_bias;
+layout(set = 0, binding = 4) readonly buffer KvWeight { uint words[]; } kv_weight;
+layout(set = 0, binding = 5) readonly buffer GateWeight { uint words[]; } gate_weight;
+layout(set = 0, binding = 6) readonly buffer StateRead { float values[]; } state_read;
+layout(set = 0, binding = 7) buffer StateWrite { float values[]; } state_write;
+layout(set = 0, binding = 30) buffer StateSnapshots { float values[]; } state_snapshots;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint start_stream_tick_low;
+    uint start_stream_tick_high;
+    uint dynamic_state_capacity;
+    uint state_snapshots_enabled;
+} batch_control;
+
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
+const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
+const uint LANE_COEFFICIENT = {{LANE_COEFFICIENT}}u;
+const uint PROJECTED_WIDTH = LANE_COEFFICIENT * HEAD_WIDTH;
+const uint STATE_SLOT_COUNT = LANE_COEFFICIENT * COMPRESSION_RATIO;
+const uint STATE_SLOT_WIDTH = PROJECTED_WIDTH;
+const uint STATE_PLANE_ELEMENTS = STATE_SLOT_COUNT * STATE_SLOT_WIDTH;
+const uint STATE_ELEMENT_COUNT = 2u * STATE_PLANE_ELEMENTS;
+const uint LOCAL_STATE_COUNT = STATE_SLOT_COUNT * LANE_COEFFICIENT;
+const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
+const uint STATE_PAGE_TABLE_WORDS = 9u;
+
+shared float kv_0[64];
+shared float gate_0[64];
+shared float kv_1[64];
+shared float gate_1[64];
+shared float local_state_values[LOCAL_STATE_COUNT];
+shared float local_state_scores[LOCAL_STATE_COUNT];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+float read_bf16(uint packed, uint index) {
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+float read_hidden(uint position, uint column) {
+    uint element = position * HIDDEN_SIZE + column;
+    return read_bf16(hidden_inputs.words[element >> 1u], element);
+}
+float read_kv_weight(uint row, uint column) {
+    uint index = row * HIDDEN_SIZE + column;
+    return read_bf16(kv_weight.words[index >> 1u], index);
+}
+float read_gate_weight(uint row, uint column) {
+    uint index = row * HIDDEN_SIZE + column;
+    return read_bf16(gate_weight.words[index >> 1u], index);
+}
+uint state_read_index(uint logical_index) {
+    uint logical_byte = logical_index * 4u;
+    uint static_bytes = floatBitsToUint(state_read.values[2]);
+    if (logical_byte < static_bytes) {
+        return (floatBitsToUint(state_read.values[3]) + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - static_bytes;
+    uint page_bytes = floatBitsToUint(state_read.values[4]);
+    uint physical_page = floatBitsToUint(
+        state_read.values[STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes]
+    );
+    return (
+        floatBitsToUint(state_read.values[8])
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+uint state_write_index(uint logical_index) {
+    uint logical_byte = logical_index * 4u;
+    uint static_bytes = floatBitsToUint(state_write.values[2]);
+    if (logical_byte < static_bytes) {
+        return (floatBitsToUint(state_write.values[3]) + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - static_bytes;
+    uint page_bytes = floatBitsToUint(state_write.values[4]);
+    uint physical_page = floatBitsToUint(
+        state_write.values[STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes]
+    );
+    return (
+        floatBitsToUint(state_write.values[8])
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+uint state_value_index(uint slot, uint coefficient, uint dim) {
+    return slot * STATE_SLOT_WIDTH + coefficient * HEAD_WIDTH + dim;
+}
+uint state_score_index(uint slot, uint coefficient, uint dim) {
+    return STATE_PLANE_ELEMENTS + state_value_index(slot, coefficient, dim);
+}
+uint local_state_index(uint slot, uint coefficient) {
+    return slot * LANE_COEFFICIENT + coefficient;
+}
+
+void main() {
+    uint dim = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (dim >= HEAD_WIDTH) return;
+
+    if (lane == 0u) {
+        for (uint slot = 0u; slot < STATE_SLOT_COUNT; ++slot) {
+            for (uint coefficient = 0u;
+                 coefficient < LANE_COEFFICIENT;
+                 ++coefficient) {
+                uint local_index = local_state_index(slot, coefficient);
+                local_state_values[local_index] = state_read.values[
+                    state_read_index(state_value_index(slot, coefficient, dim))
+                ];
+                local_state_scores[local_index] = state_read.values[
+                    state_read_index(state_score_index(slot, coefficient, dim))
+                ];
+            }
+        }
+    }
+    barrier();
+
+    for (uint position = 0u; position < batch_control.batch_width; ++position) {
+        float kv0 = 0.0;
+        float gate0 = 0.0;
+        float kv1 = 0.0;
+        float gate1 = 0.0;
+        for (uint column = lane; column < HIDDEN_SIZE; column += 64u) {
+            float hidden = read_hidden(position, column);
+            kv0 += hidden * read_kv_weight(dim, column);
+            gate0 += hidden * read_gate_weight(dim, column);
+            if (LANE_COEFFICIENT == 2u) {
+                kv1 += hidden * read_kv_weight(HEAD_WIDTH + dim, column);
+                gate1 += hidden * read_gate_weight(HEAD_WIDTH + dim, column);
+            }
+        }
+        kv_0[lane] = kv0;
+        gate_0[lane] = gate0;
+        kv_1[lane] = kv1;
+        gate_1[lane] = gate1;
+        barrier();
+        for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+            if (lane < stride) {
+                kv_0[lane] += kv_0[lane + stride];
+                gate_0[lane] += gate_0[lane + stride];
+                kv_1[lane] += kv_1[lane + stride];
+                gate_1[lane] += gate_1[lane + stride];
+            }
+            barrier();
+        }
+
+        if (lane == 0u) {
+            uint absolute_tick = batch_control.start_stream_tick_low + position;
+            uint position_slot = absolute_tick % COMPRESSION_RATIO;
+            uint current_slot = (LANE_COEFFICIENT == 2u ? COMPRESSION_RATIO : 0u)
+                + position_slot;
+            float projected_kv[2] = float[2](kv_0[0], kv_1[0]);
+            float projected_score[2];
+            projected_score[0] = gate_0[0] + position_bias.values[
+                position_slot * PROJECTED_WIDTH + dim
+            ];
+            projected_score[1] = 0.0;
+            if (LANE_COEFFICIENT == 2u) {
+                projected_score[1] = gate_1[0] + position_bias.values[
+                    position_slot * PROJECTED_WIDTH + HEAD_WIDTH + dim
+                ];
+            }
+            for (uint coefficient = 0u;
+                 coefficient < LANE_COEFFICIENT;
+                 ++coefficient) {
+                uint current = local_state_index(current_slot, coefficient);
+                local_state_values[current] = projected_kv[coefficient];
+                local_state_scores[current] = projected_score[coefficient];
+            }
+
+            uint output_index = position * HEAD_WIDTH + dim;
+            if ((absolute_tick + 1u) % COMPRESSION_RATIO != 0u) {
+                pooled_outputs.values[output_index] = 0.0;
+            } else {
+                float maximum = -3.402823466e+38;
+                float weighted = 0.0;
+                float denominator = 0.0;
+                bool old_window_is_valid =
+                    absolute_tick + 1u > COMPRESSION_RATIO;
+                uint candidate_count = LANE_COEFFICIENT * COMPRESSION_RATIO;
+                for (uint candidate = 0u;
+                     candidate < candidate_count;
+                     ++candidate) {
+                    bool old_candidate = LANE_COEFFICIENT == 2u
+                        && candidate < COMPRESSION_RATIO;
+                    if (old_candidate && !old_window_is_valid) continue;
+                    uint coefficient = old_candidate
+                        ? 0u
+                        : (LANE_COEFFICIENT == 2u ? 1u : 0u);
+                    maximum = max(
+                        maximum,
+                        local_state_scores[
+                            local_state_index(candidate, coefficient)
+                        ]
+                    );
+                }
+                for (uint candidate = 0u;
+                     candidate < candidate_count;
+                     ++candidate) {
+                    bool old_candidate = LANE_COEFFICIENT == 2u
+                        && candidate < COMPRESSION_RATIO;
+                    if (old_candidate && !old_window_is_valid) continue;
+                    uint coefficient = old_candidate
+                        ? 0u
+                        : (LANE_COEFFICIENT == 2u ? 1u : 0u);
+                    uint local_index = local_state_index(candidate, coefficient);
+                    float weight = exp(local_state_scores[local_index] - maximum);
+                    weighted += local_state_values[local_index] * weight;
+                    denominator += weight;
+                }
+                pooled_outputs.values[output_index] = weighted / denominator;
+
+                if (LANE_COEFFICIENT == 2u) {
+                    for (uint slot = 0u; slot < COMPRESSION_RATIO; ++slot) {
+                        uint source_slot = COMPRESSION_RATIO + slot;
+                        for (uint coefficient = 0u; coefficient < 2u; ++coefficient) {
+                            uint destination = local_state_index(slot, coefficient);
+                            uint source = local_state_index(source_slot, coefficient);
+                            local_state_values[destination] = local_state_values[source];
+                            local_state_scores[destination] = local_state_scores[source];
+                        }
+                    }
+                }
+            }
+
+            if (batch_control.state_snapshots_enabled != 0u) {
+                uint snapshot_base = position * STATE_ELEMENT_COUNT;
+                for (uint slot = 0u; slot < STATE_SLOT_COUNT; ++slot) {
+                    for (uint coefficient = 0u;
+                         coefficient < LANE_COEFFICIENT;
+                         ++coefficient) {
+                        uint local_index = local_state_index(slot, coefficient);
+                        state_snapshots.values[
+                            snapshot_base + state_value_index(slot, coefficient, dim)
+                        ] = local_state_values[local_index];
+                        state_snapshots.values[
+                            snapshot_base + state_score_index(slot, coefficient, dim)
+                        ] = local_state_scores[local_index];
+                    }
+                }
+            }
+        }
+        barrier();
+    }
+
+    if (lane == 0u) {
+        for (uint slot = 0u; slot < STATE_SLOT_COUNT; ++slot) {
+            for (uint coefficient = 0u;
+                 coefficient < LANE_COEFFICIENT;
+                 ++coefficient) {
+                uint local_index = local_state_index(slot, coefficient);
+                state_write.values[
+                    state_write_index(state_value_index(slot, coefficient, dim))
+                ] = local_state_values[local_index];
+                state_write.values[
+                    state_write_index(state_score_index(slot, coefficient, dim))
+                ] = local_state_scores[local_index];
+            }
+        }
+    }
+}

@@ -69,38 +69,50 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    gates measured 8.50 tok/s for Q4 and 9.50 tok/s for Q2, so the workstation
    evidence does not support a 25 tok/s raw target-pass floor. Preserve and
    improve raw target performance, but reach the product goal through the
-   package-owned DSpark path rather than redefining success. The successful
-   five-device run selected zero optimized implementations, emitted no resident
-   queue batches, and performed thousands of queue submit/wait pairs per turn.
-   The first state-correct DSpark run produced coherent output but only 1.40 raw
-   decode tok/s; its retained-process second response reached 2.11 tok/s. In the
-   second response, 202 draft cycles cost 10.87 seconds while target verification
-   cost 125.93 seconds, and the execution report showed no physical multi-stream
-   batches. Stateless target operators now have exact width-N implementations:
-   hyper-connection pre/post, per-head normalization, inverse RoPE, grouped FP8
-   projection, and bounded activation. In the complete DeepSeek package this
-   reduced causal serial fallbacks from 706 to 384 and the six-lane verifier's
-   compiled dispatch count from 5,213 to 3,603 per window. A retained-process
-   smoke gate remained coherent and improved accepted decode from 2.11 to 2.24
-   tok/s, but its truth turn still loaded another 32.18 GB of experts and target
-   verification took 62.45 seconds for 95 cycles (657 ms/cycle), so it is not a
-   steady-state or material throughput win yet. All 384 remaining fallbacks are
-   stateful rolling-memory, compression/indexing, and sparse-attention kernels.
-   Implement their dependency-preserving causal scans, then make the resulting
-   width-N graph one dependency-aware resident submission while preserving
-   rollback/commit semantics. Continue with structurally selected MXFP4/FP8
-   parallel-linear paths, adaptive-tier exchange, and acceptance improvement.
-   Benchmark complete warmup plus repeated short real requests and report
-   prefill, raw target passes, accepted tokens, and acceptance by default; do not
-   optimize synthetic scores at the expense of behavior.
+   package-owned DSpark path rather than redefining success. Stateless and
+   stateful target operators now have exact dependency-preserving width-N
+   implementations, including rolling state, latent compression and indexing,
+   and indexed sparse attention. The complete package has causal implementations
+   for 1,558 of 1,560 target decode kernels; only the stateless stream repeater
+   and Sinkhorn head remain serial.
+
+   The first complete thinking-enabled two-set gate for this graph remained
+   coherent and retained the model in one process. Its discarded warmup averaged
+   4.500 decode tok/s and 7.755 prefill tok/s while loading 10,850 units / 145.06
+   GB. Its truth set averaged only 3.933 decode tok/s and 7.251 prefill tok/s even
+   though it loaded just 169 additional units / 2.259 GB across 1,335,468 expert
+   selections. Truth-turn DSpark acceptance fell from 25.00% to 22.25% on the
+   final turns, and the retained model ended with 137.62 GB device payload plus
+   9.69 GB host-visible payload. The final truth turn still performed 5,767
+   sequence submissions, 6,137 sequence fence waits, 4,733 copy submissions,
+   and 3,831 copy waits. It selected zero optimized representations. The causal
+   kernels are therefore complete enough to expose the actual bottleneck: host
+   orchestration and residency synchronization dominate target verification even
+   when nearly every selected expert is already resident.
+
+   Replace per-selection host mediation with a GPU-resident expert indirection
+   table, presence map, and compact miss queue. Resident hits must remain entirely
+   device-side; only a real miss may synchronize the owning placement, fill or
+   retier a slot, patch the table, and retry the affected work. Make the causal
+   graph a dependency-aware resident submission and allow deferred completion on
+   demand-resident slices whenever the current execution has no miss, rather than
+   disabling it merely because a demand-residency directory exists. Reduce queue,
+   fence, and copy waits without weakening rollback/commit semantics. Then add
+   structurally selected MXFP4/FP8 parallel-linear implementations, improve the
+   retained-frame DSpark schedule and acceptance, and use adaptive tier exchange
+   so hot experts remain in VRAM while cold experts use the smallest viable lower
+   tier. Benchmark complete warmup plus repeated short real requests and report
+   prefill, raw target passes, accepted tokens, acceptance, residency misses, and
+   host-visible spill by default; do not optimize synthetic scores at the expense
+   of behavior.
 
 5. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. The latest current-schema packages pass the full sampled,
    thinking-enabled five-turn gate with correct Greece recall. The latest
-   causal-batch regression gate averaged 108.33 decode tok/s and 213.38 prefill
-   tok/s for Qwen3.6-35B-A3B, while Qwen3.5-9B averaged 59.97 decode tok/s and
-   181.85 prefill tok/s. Run both gates again before every runtime-performance
+   stateful-causal regression gate averaged 109.88 decode tok/s and 216.45 prefill
+   tok/s for Qwen3.6-35B-A3B, while Qwen3.5-9B averaged 59.81 decode tok/s and
+   184.31 prefill tok/s. Run both gates again before every runtime-performance
    commit.
    Keep the live gate's repetition and conversation checks active so throughput
    alone cannot pass. Do not use faulted AMD devices merely to satisfy this

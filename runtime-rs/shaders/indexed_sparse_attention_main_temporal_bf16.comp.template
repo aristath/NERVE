@@ -1,0 +1,313 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = {{LOCAL_SIZE}}, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QueryFrames { uint words[]; } query_frames;
+layout(set = 0, binding = 1) readonly buffer LocalStateView { uint words[]; } local_state;
+#if {{HAS_COMPRESSED}}
+layout(set = 0, binding = 2) readonly buffer CompressedStateView { uint words[]; } compressed_state;
+layout(set = 0, binding = 3) readonly buffer CompressedIndices { uint words[]; } compressed_indices;
+#endif
+layout(set = 0, binding = {{OUTPUT_BINDING}}) buffer OutputFrames { uint words[]; } output_frames;
+layout(set = 0, binding = {{SINK_BINDING}}) readonly buffer AttentionSinks { uint words[]; } attention_sinks;
+layout(set = 0, binding = 30) readonly buffer LocalStateSnapshots { uint words[]; } local_state_snapshots;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint start_stream_tick_low;
+    uint start_stream_tick_high;
+    uint dynamic_state_capacity;
+    uint state_snapshots_enabled;
+} batch_control;
+
+const uint QUERY_HEADS = {{QUERY_HEADS}}u;
+const uint KV_HEADS = {{KV_HEADS}}u;
+const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
+const uint LOCAL_WINDOW = {{LOCAL_WINDOW}}u;
+const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
+const uint MAX_COMPRESSED_INDICES = {{MAX_COMPRESSED_INDICES}}u;
+const uint TILE_TOKENS = 64u;
+const uint MAX_SUBGROUP_COUNT = HEAD_WIDTH / 4u;
+const uint STATE_PAGE_TABLE_WORDS = 9u;
+const uint QUERY_FRAME_WORDS = QUERY_HEADS * HEAD_WIDTH / 2u;
+const uint OUTPUT_FRAME_WORDS = QUERY_FRAME_WORDS;
+const uint LOCAL_STATE_WORDS = LOCAL_WINDOW * HEAD_WIDTH / 2u;
+const float ATTENTION_SCALE = {{ATTENTION_SCALE}};
+const float LOWEST_FLOAT = -3.4028234663852886e38;
+
+shared float score_partials[MAX_SUBGROUP_COUNT];
+shared float tile_scores[TILE_TOKENS];
+shared float tile_weights[TILE_TOKENS];
+shared float running_maximum;
+shared float running_denominator;
+shared float previous_accumulator_scale;
+shared float output_values[HEAD_WIDTH];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+float read_bf16(uint packed, uint element_index) {
+    return bf16_to_f32(packed >> ((element_index & 1u) * 16u));
+}
+uint local_state_word(uint logical_word) {
+    uint logical_byte = logical_word * 4u;
+    if (logical_byte < local_state.words[2]) {
+        return (local_state.words[3] + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - local_state.words[2];
+    uint page_bytes = local_state.words[4];
+    uint physical_page = local_state.words[
+        STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes
+    ];
+    return (
+        local_state.words[8]
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+#if {{HAS_COMPRESSED}}
+uint compressed_state_word(uint logical_word) {
+    uint logical_byte = logical_word * 4u;
+    if (logical_byte < compressed_state.words[2]) {
+        return (compressed_state.words[3] + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - compressed_state.words[2];
+    uint page_bytes = compressed_state.words[4];
+    uint physical_page = compressed_state.words[
+        STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes
+    ];
+    return (
+        compressed_state.words[8]
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+#endif
+float read_query(uint batch_position, uint head, uint dim) {
+    uint element = head * HEAD_WIDTH + dim;
+    uint word = batch_position * QUERY_FRAME_WORDS + (element >> 1u);
+    return read_bf16(query_frames.words[word], element);
+}
+float read_local_key_value(
+    uint batch_position,
+    uint absolute_tick,
+    uint capacity,
+    uint dim
+) {
+    uint slot = absolute_tick % capacity;
+    uint element = slot * HEAD_WIDTH + dim;
+    uint packed = batch_control.state_snapshots_enabled != 0u
+        ? local_state_snapshots.words[
+            batch_position * LOCAL_STATE_WORDS + (element >> 1u)
+        ]
+        : local_state.words[local_state_word(element >> 1u)];
+    return read_bf16(packed, element);
+}
+#if {{HAS_COMPRESSED}}
+uint compressed_index(uint batch_position, uint position) {
+    return compressed_indices.words[
+        batch_position * MAX_COMPRESSED_INDICES + position
+    ];
+}
+bool valid_compressed_index(
+    uint batch_position,
+    uint position,
+    uint compressed_count
+) {
+    uint index = compressed_index(batch_position, position);
+    return index != 0xffffffffu
+        && index >= LOCAL_WINDOW
+        && index - LOCAL_WINDOW < compressed_count;
+}
+float read_compressed_key_value(uint batch_position, uint position, uint dim) {
+    uint slot = compressed_index(batch_position, position) - LOCAL_WINDOW;
+    uint element = slot * HEAD_WIDTH + dim;
+    return read_bf16(
+        compressed_state.words[compressed_state_word(element >> 1u)],
+        element
+    );
+}
+#endif
+bool token_valid(
+    uint batch_position,
+    uint token,
+    uint local_tokens,
+    uint compressed_count
+) {
+    if (token < local_tokens) return true;
+#if {{HAS_COMPRESSED}}
+    return valid_compressed_index(
+        batch_position,
+        token - local_tokens,
+        compressed_count
+    );
+#else
+    return false;
+#endif
+}
+float read_token_value(
+    uint batch_position,
+    uint token,
+    uint dim,
+    uint local_tokens,
+    uint oldest_tick,
+    uint local_capacity
+) {
+    if (token < local_tokens) {
+        return read_local_key_value(
+            batch_position,
+            oldest_tick + token,
+            local_capacity,
+            dim
+        );
+    }
+#if {{HAS_COMPRESSED}}
+    return read_compressed_key_value(batch_position, token - local_tokens, dim);
+#else
+    return 0.0;
+#endif
+}
+
+void main() {
+    uint query_head = gl_WorkGroupID.x;
+    uint dim = gl_LocalInvocationID.x;
+    if (query_head >= QUERY_HEADS) return;
+
+    for (uint batch_position = 0u;
+         batch_position < batch_control.batch_width;
+         ++batch_position) {
+        uint stream_tick = batch_control.start_stream_tick_low + batch_position;
+        uint local_capacity = min(batch_control.dynamic_state_capacity, LOCAL_WINDOW);
+        uint local_tokens = local_capacity == 0u
+            ? 0u
+            : min(stream_tick + 1u, local_capacity);
+        uint oldest_tick = stream_tick + 1u - local_tokens;
+#if {{HAS_COMPRESSED}}
+        uint compressed_count = min(
+            (stream_tick + 1u) / COMPRESSION_RATIO,
+            MAX_COMPRESSED_INDICES
+        );
+#else
+        uint compressed_count = 0u;
+#endif
+        uint total_tokens = local_tokens + compressed_count;
+        float query_value = read_query(batch_position, query_head, dim);
+        float accumulator = 0.0;
+
+        if (dim == 0u) {
+            running_maximum = uintBitsToFloat(attention_sinks.words[query_head]);
+            running_denominator = 1.0;
+        }
+        barrier();
+
+        for (uint tile_start = 0u;
+             tile_start < total_tokens;
+             tile_start += TILE_TOKENS) {
+            uint tile_count = min(TILE_TOKENS, total_tokens - tile_start);
+            for (uint tile_token = 0u; tile_token < tile_count; ++tile_token) {
+                uint token = tile_start + tile_token;
+                bool valid = token_valid(
+                    batch_position,
+                    token,
+                    local_tokens,
+                    compressed_count
+                );
+                float key_value = valid
+                    ? read_token_value(
+                        batch_position,
+                        token,
+                        dim,
+                        local_tokens,
+                        oldest_tick,
+                        local_capacity
+                    )
+                    : 0.0;
+                float subgroup_partial = subgroupAdd(query_value * key_value);
+                if (subgroupElect()) {
+                    score_partials[gl_SubgroupID] = subgroup_partial;
+                }
+                barrier();
+                if (dim == 0u) {
+                    float score = 0.0;
+                    for (uint subgroup = 0u;
+                         subgroup < gl_NumSubgroups;
+                         ++subgroup) {
+                        score += score_partials[subgroup];
+                    }
+                    tile_scores[tile_token] = valid
+                        ? score * ATTENTION_SCALE
+                        : LOWEST_FLOAT;
+                }
+                barrier();
+            }
+
+            if (dim == 0u) {
+                float tile_maximum = LOWEST_FLOAT;
+                for (uint tile_token = 0u;
+                     tile_token < tile_count;
+                     ++tile_token) {
+                    tile_maximum = max(tile_maximum, tile_scores[tile_token]);
+                }
+                float next_maximum = max(running_maximum, tile_maximum);
+                float old_scale = exp(running_maximum - next_maximum);
+                float tile_denominator = 0.0;
+                for (uint tile_token = 0u;
+                     tile_token < tile_count;
+                     ++tile_token) {
+                    float weight = exp(tile_scores[tile_token] - next_maximum);
+                    tile_weights[tile_token] = weight;
+                    tile_denominator += weight;
+                }
+                running_denominator =
+                    running_denominator * old_scale + tile_denominator;
+                running_maximum = next_maximum;
+                previous_accumulator_scale = old_scale;
+            }
+            barrier();
+
+            float tile_accumulator = 0.0;
+            for (uint tile_token = 0u;
+                 tile_token < tile_count;
+                 ++tile_token) {
+                uint token = tile_start + tile_token;
+                if (token_valid(
+                    batch_position,
+                    token,
+                    local_tokens,
+                    compressed_count
+                )) {
+                    tile_accumulator += tile_weights[tile_token] * read_token_value(
+                        batch_position,
+                        token,
+                        dim,
+                        local_tokens,
+                        oldest_tick,
+                        local_capacity
+                    );
+                }
+            }
+            accumulator =
+                accumulator * previous_accumulator_scale + tile_accumulator;
+            barrier();
+        }
+
+        output_values[dim] = accumulator / running_denominator;
+        barrier();
+        if ((dim & 1u) == 0u) {
+            uint element = query_head * HEAD_WIDTH + dim;
+            output_frames.words[
+                batch_position * OUTPUT_FRAME_WORDS + (element >> 1u)
+            ] = f32_to_bf16(output_values[dim])
+                | (f32_to_bf16(output_values[dim + 1u]) << 16u);
+        }
+        barrier();
+    }
+}

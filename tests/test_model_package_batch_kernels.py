@@ -187,36 +187,36 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
     assert weight_shared_batch_shader_file(
         "hyper_connection_pre_m4_h4096_i20_neps1e-06_heps1e-06.comp",
         tile_width=8,
-    ) == (
-        "hyper_connection_pre_batch8_m4_h4096_i20_"
-        "neps1e-06_heps1e-06.comp"
-    )
+    ) == ("hyper_connection_pre_batch8_m4_h4096_i20_neps1e-06_heps1e-06.comp")
     assert weight_shared_batch_shader_file(
         "hyper_connection_post_pre_m4_h4096_i20_neps1e-06_heps1e-06.comp",
         tile_width=8,
-    ) == (
-        "hyper_connection_post_pre_batch8_m4_h4096_i20_"
-        "neps1e-06_heps1e-06.comp"
+    ) == ("hyper_connection_post_pre_batch8_m4_h4096_i20_neps1e-06_heps1e-06.comp")
+    assert (
+        weight_shared_batch_shader_file(
+            "hyper_connection_post_m4_h4096.comp",
+            tile_width=8,
+        )
+        == "hyper_connection_post_batch8_m4_h4096.comp"
     )
-    assert weight_shared_batch_shader_file(
-        "hyper_connection_post_m4_h4096.comp",
-        tile_width=8,
-    ) == "hyper_connection_post_batch8_m4_h4096.comp"
-    assert weight_shared_batch_shader_file(
-        "rms_norm_per_head_unscaled_bf16_64x512_eps1e-06.comp",
-        tile_width=8,
-    ) == "rms_norm_per_head_unscaled_batch8_bf16_64x512_eps1e-06.comp"
+    assert (
+        weight_shared_batch_shader_file(
+            "rms_norm_per_head_unscaled_bf16_64x512_eps1e-06.comp",
+            tile_width=8,
+        )
+        == "rms_norm_per_head_unscaled_batch8_bf16_64x512_eps1e-06.comp"
+    )
     assert weight_shared_batch_shader_file(
         "grouped_linear_fp8_e4m3_se8m0_b128x128_g8_32768x8192.comp",
         tile_width=8,
-    ) == (
-        "grouped_linear_batch8_fp8_e4m3_se8m0_"
-        "b128x128_g8_32768x8192.comp"
+    ) == ("grouped_linear_batch8_fp8_e4m3_se8m0_b128x128_g8_32768x8192.comp")
+    assert (
+        weight_shared_batch_shader_file(
+            "bounded_silu_multiply_bf16_2048_limit10.comp",
+            tile_width=8,
+        )
+        == "bounded_silu_multiply_batch8_bf16_2048_limit10.comp"
     )
-    assert weight_shared_batch_shader_file(
-        "bounded_silu_multiply_bf16_2048_limit10.comp",
-        tile_width=8,
-    ) == "bounded_silu_multiply_batch8_bf16_2048_limit10.comp"
     for lane_parallel_shader in (
         "linear_bf16_2048x1.comp",
         "split_bf16_2x512.comp",
@@ -507,10 +507,79 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         )
         == 16
     )
-    assert causal_scan_workgroup_count_x(
-        "inverse_rotary_bf16_64x512_r64_theta160000_"
-        "yarn_f16_lo15_hi25_a1_interleaved_tail__sc2.comp"
-    ) == 64
+    assert (
+        causal_scan_workgroup_count_x(
+            "inverse_rotary_bf16_64x512_r64_theta160000_"
+            "yarn_f16_lo15_hi25_a1_interleaved_tail__sc2.comp"
+        )
+        == 64
+    )
+    deepseek_temporal_kernels = {
+        "rolling_state_ring_append_bf16_128x512__sc6.comp": (
+            "rolling_state_ring_append_temporal_bf16_128x512.comp",
+            1,
+        ),
+        "learned_gated_kv_pool_bf16_f32_h4096_d512_r4_c2__sc8.comp": (
+            "learned_gated_kv_pool_temporal_bf16_f32_h4096_d512_r4_c2.comp",
+            512,
+        ),
+        "compressed_kv_finalize_f32_bf16_d512_r64_eps1e-06_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_po-3_qfp8e4m3b64__sc3.comp": (
+            "compressed_kv_finalize_temporal_f32_bf16_d512_r64_eps1e-06_"
+            "theta160000_yarn_f16_lo15_hi25_a1_interleaved_po-3_"
+            "qfp8e4m3b64.comp",
+            1,
+        ),
+        "conditional_append_state_bf16_d512_p4__sc6.comp": (
+            "conditional_append_state_temporal_bf16_d512_p4.comp",
+            1,
+        ),
+        "index_vector_transform_bf16_h64_d128_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_qfp4e2m1b32__sc2.comp": (
+            "index_vector_transform_temporal_bf16_h64_d128_r64_theta160000_"
+            "yarn_f16_lo15_hi25_a1_interleaved_qfp4e2m1b32.comp",
+            64,
+        ),
+        "compressed_index_kv_finalize_f32_bf16_d128_r64_eps1e-06_"
+        "theta160000_yarn_f16_lo15_hi25_a1_interleaved_po-3_"
+        "qfp4e2m1b32__sc3.comp": (
+            "compressed_index_kv_finalize_temporal_f32_bf16_d128_r64_"
+            "eps1e-06_theta160000_yarn_f16_lo15_hi25_a1_interleaved_"
+            "po-3_qfp4e2m1b32.comp",
+            1,
+        ),
+        "learned_index_scores_bf16_f32_h64_d128_r4_m262144_c256_"
+        "scale0.0110485435__sc5.comp": (
+            "learned_index_scores_temporal_bf16_f32_h64_d128_r4_m262144_"
+            "c256_scale0.0110485435.comp",
+            1024,
+        ),
+        "radix_topk_index_f32_u32_m262144_k512_r4_o128__sc2.comp": (
+            "radix_topk_index_temporal_f32_u32_m262144_k512_r4_o128.comp",
+            1,
+        ),
+        "chronological_compressed_index_u32_m8192_r128_o128__sc3.comp": (
+            "chronological_compressed_index_temporal_u32_m8192_r128_o128.comp",
+            1,
+        ),
+        "indexed_sparse_attention_main_bf16_q64_kv1_d512_w128_r4_k512_"
+        "scale0.0441941738__sc8.comp": (
+            "indexed_sparse_attention_main_temporal_bf16_q64_kv1_d512_w128_"
+            "r4_k512_scale0.0441941738.comp",
+            64,
+        ),
+    }
+    for scalar_shader, (
+        temporal_shader,
+        workgroups,
+    ) in deepseek_temporal_kernels.items():
+        assert causal_scan_batch_shader_file(scalar_shader) == temporal_shader
+        assert causal_scan_workgroup_count_x(scalar_shader) == workgroups
+    unsupported_multi_kv_attention = (
+        "indexed_sparse_attention_main_bf16_q64_kv8_d512_w128_r4_k512_"
+        "scale0.0441941738__sc8.comp"
+    )
+    assert causal_scan_batch_shader_file(unsupported_multi_kv_attention) is None
 
     attention_local_size = attention_workgroup_shape(256)[0]
     assert causal_scan_batch_stages(
@@ -614,6 +683,50 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
             },
         }
     ]
+    rolling_stages = causal_scan_batch_stages(
+        "rolling_state_ring_append_bf16_128x512__sc6.comp",
+        64,
+    )
+    assert rolling_stages == [
+        {
+            "shader_path": (
+                "shaders/rolling_state_ring_append_temporal_bf16_128x512__pbc6.comp"
+            ),
+            "local_size_x": 64,
+            "workgroup_count_x": 1,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 20,
+                "binding": 6,
+                "payload": "temporal_state_snapshots",
+            },
+            "state_snapshot_binding": 30,
+        }
+    ]
+    pool_stages = causal_scan_batch_stages(
+        "learned_gated_kv_pool_bf16_f32_h4096_d512_r4_c2__sc8.comp",
+        64,
+    )
+    assert pool_stages[0]["control"] == {
+        "kind": "storage_buffer",
+        "byte_count": 20,
+        "binding": 8,
+        "payload": "temporal_state_snapshots",
+    }
+    assert pool_stages[0]["state_snapshot_binding"] == 30
+    attention_stages = causal_scan_batch_stages(
+        "indexed_sparse_attention_main_bf16_q64_kv1_d512_w128_r4_k512_"
+        "scale0.0441941738__sc8.comp",
+        512,
+    )
+    assert attention_stages[0]["control"] == {
+        "kind": "storage_buffer",
+        "byte_count": 20,
+        "binding": 8,
+        "payload": "temporal_state_snapshots",
+    }
+    assert attention_stages[0]["state_snapshot_binding"] == 30
+    assert attention_stages[0]["state_snapshot_source_binding"] == 1
     conv_stages = causal_scan_batch_stages(
         "causal_conv1d_silu_bf16_c8192_k4.comp",
         128,
@@ -719,15 +832,11 @@ def test_compiler_renders_deepseek_stateless_causal_batch_kernels(
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
-        "hyper_connection_pre_batch8_m4_h4096_i20_"
-        "neps1e-06_heps1e-06__pbc31.comp",
-        "hyper_connection_post_pre_batch8_m4_h4096_i20_"
-        "neps1e-06_heps1e-06__pbc31.comp",
+        "hyper_connection_pre_batch8_m4_h4096_i20_neps1e-06_heps1e-06__pbc31.comp",
+        "hyper_connection_post_pre_batch8_m4_h4096_i20_neps1e-06_heps1e-06__pbc31.comp",
         "hyper_connection_post_batch8_m4_h4096__pbc31.comp",
-        "rms_norm_per_head_unscaled_batch8_bf16_64x512_"
-        "eps1e-06__pbc31.comp",
-        "grouped_linear_batch8_fp8_e4m3_se8m0_"
-        "b128x128_g8_32768x8192__pbc31.comp",
+        "rms_norm_per_head_unscaled_batch8_bf16_64x512_eps1e-06__pbc31.comp",
+        "grouped_linear_batch8_fp8_e4m3_se8m0_b128x128_g8_32768x8192__pbc31.comp",
         "bounded_silu_multiply_batch8_bf16_2048_limit10__pbc31.comp",
         "inverse_rotary_temporal_bf16_64x512_r64_theta160000_"
         "yarn_f16_lo15_hi25_a1_interleaved_tail_po1__pbc2.comp",
@@ -735,23 +844,88 @@ def test_compiler_renders_deepseek_stateless_causal_batch_kernels(
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
 
-    sources = {
-        path.name: path.read_text()
-        for path in tmp_path.glob("*.comp")
-    }
+    sources = {path.name: path.read_text() for path in tmp_path.glob("*.comp")}
     assert sources.keys() == shader_files
     assert all("{{" not in source for source in sources.values())
-    assert all("layout(push_constant) uniform BatchControl" not in source for source in sources.values())
+    assert all(
+        "layout(push_constant) uniform BatchControl" not in source
+        for source in sources.values()
+    )
     assert all("batch_control.batch_width" in source for source in sources.values())
     assert "ROPE_DIRECTION = -1.0" in next(
         source for name, source in sources.items() if name.startswith("inverse_rotary_")
     )
     assert "batch_index * HYPER_WORDS" in next(
-        source for name, source in sources.items() if name.startswith("hyper_connection_pre_batch")
+        source
+        for name, source in sources.items()
+        if name.startswith("hyper_connection_pre_batch")
     )
     assert "batch_index * TOTAL_INPUT_WORDS" in next(
-        source for name, source in sources.items() if name.startswith("grouped_linear_batch")
+        source
+        for name, source in sources.items()
+        if name.startswith("grouped_linear_batch")
     )
+    compile_shader_artifacts(tmp_path)
+    assert len(list(tmp_path.glob("*.spv"))) == len(shader_files)
+
+
+def test_compiler_renders_deepseek_stateful_causal_scan_kernels(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "rolling_state_ring_append_temporal_bf16_128x512__pbc6.comp",
+        "learned_gated_kv_pool_temporal_bf16_f32_h4096_d512_r4_c2__pbc8.comp",
+        "learned_gated_kv_pool_temporal_bf16_f32_h4096_d512_r4_c1__pbc8.comp",
+        "compressed_kv_finalize_temporal_f32_bf16_d512_r64_eps1e-06_"
+        "theta160000_yarn_f16_lo15_hi25_a1_interleaved_po-3_"
+        "qfp8e4m3b64__pbc3.comp",
+        "conditional_append_state_temporal_bf16_d512_p4__pbc6.comp",
+        "index_vector_transform_temporal_bf16_h64_d128_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_qfp4e2m1b32__pbc2.comp",
+        "compressed_index_kv_finalize_temporal_f32_bf16_d128_r64_eps1e-06_"
+        "theta160000_yarn_f16_lo15_hi25_a1_interleaved_po-3_"
+        "qfp4e2m1b32__pbc3.comp",
+        "learned_index_scores_temporal_bf16_f32_h64_d128_r4_m262144_c256_"
+        "scale0.0110485435__pbc5.comp",
+        "radix_topk_index_temporal_f32_u32_m262144_k512_r4_o128__pbc2.comp",
+        "chronological_compressed_index_temporal_u32_m8192_r128_o128__pbc3.comp",
+        "indexed_sparse_attention_main_temporal_bf16_q64_kv1_d512_w128_r4_"
+        "k512_scale0.0441941738__pbc8.comp",
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    sources = {path.name: path.read_text() for path in tmp_path.glob("*.comp")}
+    assert sources.keys() == shader_files
+    assert all("{{" not in source for source in sources.values())
+    assert all(
+        "layout(push_constant) uniform BatchControl" not in source
+        for source in sources.values()
+    )
+    assert all("batch_control.batch_width" in source for source in sources.values())
+    assert (
+        "state_snapshots_enabled"
+        in sources["rolling_state_ring_append_temporal_bf16_128x512__pbc6.comp"]
+    )
+    assert (
+        "state_snapshots_enabled"
+        in sources[
+            "learned_gated_kv_pool_temporal_bf16_f32_h4096_d512_r4_c2__pbc8.comp"
+        ]
+    )
+    assert (
+        "if (LANE_COEFFICIENT == 2u)"
+        in sources[
+            "learned_gated_kv_pool_temporal_bf16_f32_h4096_d512_r4_c1__pbc8.comp"
+        ]
+    )
+    attention = sources[
+        "indexed_sparse_attention_main_temporal_bf16_q64_kv1_d512_w128_r4_"
+        "k512_scale0.0441941738__pbc8.comp"
+    ]
+    assert "binding = 30) readonly buffer LocalStateSnapshots" in attention
+    assert "batch_position * LOCAL_STATE_WORDS" in attention
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == len(shader_files)
 

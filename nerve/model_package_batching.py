@@ -18,6 +18,7 @@ def persistent_batch_control_stage(
     binding: int = 31,
     descriptor_bindings: list[Json] | None = None,
     state_snapshot_binding: int | None = None,
+    state_snapshot_source_binding: int | None = None,
     control_access: str = "read",
     indirect_dispatch_byte_offset: int | None = None,
     dispatch_y_from_batch_width: bool = False,
@@ -28,6 +29,7 @@ def persistent_batch_control_stage(
         "width_expert_start": 8,
         "width_expert_range_indirect": 28,
         "temporal": 16,
+        "temporal_state_snapshots": 20,
     }[payload]
     packaged_shader_file = persistent_batch_control_shader_file(
         shader_file,
@@ -51,6 +53,8 @@ def persistent_batch_control_stage(
         stage["descriptor_bindings"] = descriptor_bindings
     if state_snapshot_binding is not None:
         stage["state_snapshot_binding"] = state_snapshot_binding
+    if state_snapshot_source_binding is not None:
+        stage["state_snapshot_source_binding"] = state_snapshot_source_binding
     if indirect_dispatch_byte_offset is not None:
         stage["indirect_dispatch_byte_offset"] = indirect_dispatch_byte_offset
     if dispatch_y_from_batch_width:
@@ -257,7 +261,26 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
     if causal_scan_shader is not None:
         captures_static_state = causal_scan_shader.startswith(
             "causal_conv1d_silu_temporal_"
-        ) or causal_scan_shader.startswith("gated_delta_scan_")
+        ) or causal_scan_shader.startswith(
+            (
+                "gated_delta_scan_",
+                "rolling_state_ring_append_temporal_",
+                "learned_gated_kv_pool_temporal_",
+            )
+        )
+        reads_static_state_snapshot = causal_scan_shader.startswith(
+            "indexed_sparse_attention_main_temporal_"
+        )
+        temporal_state_snapshot_control = (
+            captures_static_state
+            and causal_scan_shader.startswith(
+                (
+                    "rolling_state_ring_append_temporal_",
+                    "learned_gated_kv_pool_temporal_",
+                )
+            )
+        ) or reads_static_state_snapshot
+        source_stream_control = re.search(r"__sc(\d+)\.comp$", shader_file)
         temporal_binding = (
             6
             if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
@@ -271,13 +294,25 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             )
             else None
         )
+        if temporal_binding is None and source_stream_control is not None:
+            temporal_binding = int(source_stream_control.group(1))
         return [
             persistent_batch_control_stage(
                 causal_scan_shader,
                 local_size_x,
                 causal_scan_workgroup_count_x(shader_file),
-                payload="temporal",
+                payload=(
+                    "temporal_state_snapshots"
+                    if temporal_state_snapshot_control
+                    else "temporal"
+                ),
                 binding=temporal_binding,
+                state_snapshot_binding=(
+                    30 if captures_static_state or reads_static_state_snapshot else None
+                ),
+                state_snapshot_source_binding=(
+                    1 if reads_static_state_snapshot else None
+                ),
             )
             if temporal_binding is not None
             else persistent_batch_control_stage(
@@ -538,9 +573,7 @@ def cooperative_float8_e4m3_batch_shader_file(
             block_columns,
             input_size,
             *output_sizes,
-        ) = (
-            parallel.groups()
-        )
+        ) = parallel.groups()
         output_sizes = [size for size in output_sizes if size is not None]
         if (
             len(output_sizes) != int(branch_count)
@@ -698,6 +731,65 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
             ".comp",
             shader_file.replace("rotary_bf16_", "rotary_temporal_bf16_", 1),
         )
+    temporal_latent_patterns = (
+        (
+            r"rolling_state_ring_append_bf16_\d+x\d+__sc\d+\.comp",
+            "rolling_state_ring_append_",
+            "rolling_state_ring_append_temporal_",
+        ),
+        (
+            r"learned_gated_kv_pool_bf16_f32_h\d+_d\d+_r\d+_c[12]__sc\d+\.comp",
+            "learned_gated_kv_pool_",
+            "learned_gated_kv_pool_temporal_",
+        ),
+        (
+            r"compressed_kv_finalize_f32_bf16_.+__sc\d+\.comp",
+            "compressed_kv_finalize_",
+            "compressed_kv_finalize_temporal_",
+        ),
+        (
+            r"conditional_append_state_bf16_d\d+_p\d+__sc\d+\.comp",
+            "conditional_append_state_",
+            "conditional_append_state_temporal_",
+        ),
+        (
+            r"index_vector_transform_bf16_.+__sc\d+\.comp",
+            "index_vector_transform_",
+            "index_vector_transform_temporal_",
+        ),
+        (
+            r"compressed_index_kv_finalize_f32_bf16_.+__sc\d+\.comp",
+            "compressed_index_kv_finalize_",
+            "compressed_index_kv_finalize_temporal_",
+        ),
+        (
+            r"learned_index_scores_bf16_f32_.+__sc\d+\.comp",
+            "learned_index_scores_",
+            "learned_index_scores_temporal_",
+        ),
+        (
+            r"radix_topk_index_f32_u32_.+__sc\d+\.comp",
+            "radix_topk_index_",
+            "radix_topk_index_temporal_",
+        ),
+        (
+            r"chronological_compressed_index_u32_.+__sc\d+\.comp",
+            "chronological_compressed_index_",
+            "chronological_compressed_index_temporal_",
+        ),
+        (
+            r"indexed_sparse_attention_main_bf16_q\d+_kv1_.+__sc\d+\.comp",
+            "indexed_sparse_attention_main_",
+            "indexed_sparse_attention_main_temporal_",
+        ),
+    )
+    for pattern, source_prefix, temporal_prefix in temporal_latent_patterns:
+        if re.fullmatch(pattern, shader_file):
+            return re.sub(r"__sc\d+\.comp$", ".comp", shader_file).replace(
+                source_prefix,
+                temporal_prefix,
+                1,
+            )
     return None
 
 
@@ -734,6 +826,49 @@ def causal_scan_workgroup_count_x(shader_file: str) -> int:
     )
     if rotary is not None:
         return int(rotary.group(1))
+    rolling = re.fullmatch(
+        r"rolling_state_ring_append_bf16_\d+x\d+__sc\d+\.comp",
+        shader_file,
+    )
+    if rolling is not None:
+        return 1
+    pool = re.fullmatch(
+        r"learned_gated_kv_pool_bf16_f32_h\d+_d(\d+)_r\d+_c[12]__sc\d+\.comp",
+        shader_file,
+    )
+    if pool is not None:
+        return int(pool.group(1))
+    index_transform = re.fullmatch(
+        r"index_vector_transform_bf16_h(\d+)_d\d+_.+__sc\d+\.comp",
+        shader_file,
+    )
+    if index_transform is not None:
+        return int(index_transform.group(1))
+    index_scores = re.fullmatch(
+        r"learned_index_scores_bf16_f32_h\d+_d\d+_r\d+_m(\d+)_c(\d+)_"
+        r"scale[0-9eE+.-]+__sc\d+\.comp",
+        shader_file,
+    )
+    if index_scores is not None:
+        maximum, chunk = map(int, index_scores.groups())
+        return (maximum + chunk - 1) // chunk
+    indexed_attention = re.fullmatch(
+        r"indexed_sparse_attention_main_bf16_q(\d+)_kv1_d\d+_.+__sc\d+\.comp",
+        shader_file,
+    )
+    if indexed_attention is not None:
+        return int(indexed_attention.group(1))
+    if any(
+        re.fullmatch(pattern, shader_file)
+        for pattern in (
+            r"compressed_kv_finalize_f32_bf16_.+__sc\d+\.comp",
+            r"conditional_append_state_bf16_d\d+_p\d+__sc\d+\.comp",
+            r"compressed_index_kv_finalize_f32_bf16_.+__sc\d+\.comp",
+            r"radix_topk_index_f32_u32_.+__sc\d+\.comp",
+            r"chronological_compressed_index_u32_.+__sc\d+\.comp",
+        )
+    ):
+        return 1
     raise ModelCompileError(f"shader {shader_file!r} is not a causal scan kernel")
 
 
@@ -799,9 +934,7 @@ def weight_shared_batch_shader_file(
             f"quantize_batch{tile}_int8_symmetric_pairpacked_",
             1,
         )
-    if re.fullmatch(
-        r"quantize_fp8_e4m3(?:_spow2)?_b128_h\d+\.comp", shader_file
-    ):
+    if re.fullmatch(r"quantize_fp8_e4m3(?:_spow2)?_b128_h\d+\.comp", shader_file):
         return shader_file.replace(
             "quantize_fp8_e4m3_",
             f"quantize_batch{tile}_fp8_e4m3_",

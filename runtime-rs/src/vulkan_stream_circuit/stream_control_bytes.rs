@@ -147,5 +147,14 @@ fn component_batch_control_payload_bytes(
             bytes
         }
         VulkanResidentComponentBatchControlPayload::Temporal => control.to_vec(),
+        VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots => {
+            let mut bytes = Vec::with_capacity(
+                VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots
+                    .byte_count() as usize,
+            );
+            bytes.extend_from_slice(control);
+            bytes.extend_from_slice(&u32::from(state_snapshots_enabled).to_le_bytes());
+            bytes
+        }
     }
 }

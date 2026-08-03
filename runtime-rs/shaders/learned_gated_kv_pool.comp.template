@@ -147,12 +147,15 @@ void main() {
     uint position_slot = position % COMPRESSION_RATIO;
     uint current_slot = (LANE_COEFFICIENT == 2u ? COMPRESSION_RATIO : 0u) + position_slot;
     float projected_kv[2] = float[2](kv_0[0], kv_1[0]);
-    float projected_score[2] = float[2](
-        gate_0[0] + position_bias.values[position_slot * PROJECTED_WIDTH + dim],
-        gate_1[0] + position_bias.values[
+    float projected_score[2];
+    projected_score[0] = gate_0[0]
+        + position_bias.values[position_slot * PROJECTED_WIDTH + dim];
+    projected_score[1] = 0.0;
+    if (LANE_COEFFICIENT == 2u) {
+        projected_score[1] = gate_1[0] + position_bias.values[
             position_slot * PROJECTED_WIDTH + HEAD_WIDTH + dim
-        ]
-    );
+        ];
+    }
     for (uint coefficient = 0u; coefficient < LANE_COEFFICIENT; ++coefficient) {
         write_state_value(current_slot, coefficient, dim, projected_kv[coefficient]);
         write_state_score(current_slot, coefficient, dim, projected_score[coefficient]);

@@ -155,6 +155,8 @@ pub struct VulkanResidentComponentBatchStageSpec {
     pub descriptor_bindings: Vec<VulkanResidentComponentBatchDescriptorBindingSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_snapshot_binding: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_snapshot_source_binding: Option<u32>,
     pub control: VulkanResidentComponentBatchControlSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indirect_dispatch_byte_offset: Option<u32>,
@@ -217,6 +219,7 @@ pub enum VulkanResidentComponentBatchControlPayload {
     WidthExpertStart,
     WidthExpertRangeIndirect,
     Temporal,
+    TemporalStateSnapshots,
 }
 
 impl VulkanResidentComponentBatchControlPayload {
@@ -231,6 +234,10 @@ impl VulkanResidentComponentBatchControlPayload {
                 7 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
             }
             Self::Temporal => VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
+            Self::TemporalStateSnapshots => {
+                VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY
+                    + VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+            }
         }
     }
 }

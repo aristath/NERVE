@@ -1166,8 +1166,7 @@ def make_state_ports(
             {
                 "id": "local_kv_memory",
                 "type": "rolling_attention_memory",
-                "shape_per_token": [layer.head_width],
-                "capacity": int(attributes["window_size"]),
+                "shape": [int(attributes["window_size"]), layer.head_width],
                 "dtype": "BF16",
                 "update": "ring_append",
                 "sharing": "per_stream_per_node_instance",

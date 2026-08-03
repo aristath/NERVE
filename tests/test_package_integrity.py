@@ -432,6 +432,7 @@ def minimal_package(root: Path) -> dict[str, object]:
                         "node_id": "project",
                         "op": "linear",
                         "execution_domain": "decode",
+                        "stream_control_binding": None,
                         "shader_path": "shaders/kernel.spv",
                         "batch_mode": "serial_lanes",
                         "batch_implementations": [],
@@ -740,6 +741,44 @@ def test_batch_stage_descriptor_mapping_is_explicit_and_collision_free() -> None
     assert valid_batch_stage(stage)
     stage["descriptor_bindings"][1]["binding"] = 1
     assert not valid_batch_stage(stage)
+
+
+def test_batch_stage_state_snapshot_contract_distinguishes_writers_and_readers() -> (
+    None
+):
+    writer = {
+        "shader_path": "shaders/state_scan.spv",
+        "local_size_x": 64,
+        "workgroup_count_x": 1,
+        "state_snapshot_binding": 30,
+        "control": {
+            "kind": "storage_buffer",
+            "byte_count": 20,
+            "binding": 6,
+            "payload": "temporal_state_snapshots",
+        },
+    }
+    assert valid_batch_stage(writer)
+
+    reader = {
+        **writer,
+        "shader_path": "shaders/state_snapshot_reader.spv",
+        "state_snapshot_source_binding": 1,
+    }
+    assert valid_batch_stage(reader)
+
+    reader["state_snapshot_source_binding"] = 6
+    assert not valid_batch_stage(reader)
+    reader["state_snapshot_source_binding"] = 30
+    assert not valid_batch_stage(reader)
+
+    writer["control"] = {
+        "kind": "storage_buffer",
+        "byte_count": 16,
+        "binding": 6,
+        "payload": "temporal",
+    }
+    assert not valid_batch_stage(writer)
 
 
 def test_shader_templates_compile_to_vulkan_1_4_spirv(tmp_path: Path) -> None:

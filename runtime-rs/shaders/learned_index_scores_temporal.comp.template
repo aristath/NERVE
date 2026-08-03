@@ -1,0 +1,150 @@
+#version 450
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer QueryVectors { uint words[]; } query_vectors;
+layout(set = 0, binding = 1) readonly buffer HeadWeights { uint words[]; } head_weights;
+layout(set = 0, binding = 2) readonly buffer IndexMemory { uint words[]; } index_memory;
+layout(set = 0, binding = 3) buffer Scores { float values[]; } scores;
+layout(set = 0, binding = 4) readonly buffer IndexMemoryView { uint words[]; } index_memory_view;
+
+layout(push_constant) uniform BatchControl {
+    uint batch_width;
+    uint start_stream_tick_low;
+    uint start_stream_tick_high;
+    uint dynamic_state_capacity;
+} batch_control;
+
+const uint HEAD_COUNT = {{HEAD_COUNT}}u;
+const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
+const uint COMPRESSION_RATIO = {{COMPRESSION_RATIO}}u;
+const uint MAX_COMPRESSED_POSITIONS = {{MAX_COMPRESSED_POSITIONS}}u;
+const uint CHUNK_POSITIONS = {{CHUNK_POSITIONS}}u;
+const float SCORE_SCALE = {{SCORE_SCALE}};
+const uint STATE_PAGE_TABLE_WORDS = 9u;
+const uint QUERY_WORDS = HEAD_COUNT * HEAD_WIDTH / 2u;
+const uint TOKENS_PER_TILE = 4u;
+const uint LANES_PER_HEAD = 16u;
+const uint HEADS_PER_PHASE = 16u;
+
+shared uint query_cache[QUERY_WORDS];
+shared float kv_tile[TOKENS_PER_TILE * HEAD_WIDTH];
+shared float partials[1024];
+shared float contributions[TOKENS_PER_TILE * HEAD_COUNT];
+
+float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16u); }
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+float round_bf16(float value) { return bf16_to_f32(f32_to_bf16(value)); }
+float read_bf16(uint packed, uint element) {
+    return bf16_to_f32(packed >> ((element & 1u) * 16u));
+}
+float read_query(uint head, uint dim) {
+    uint element = head * HEAD_WIDTH + dim;
+    return read_bf16(query_cache[element >> 1u], element);
+}
+float read_head_weight(uint head) {
+    return read_bf16(head_weights.words[head >> 1u], head);
+}
+uint index_memory_word(uint logical_word) {
+    uint logical_byte = logical_word * 4u;
+    if (logical_byte < index_memory.words[2]) {
+        return (index_memory.words[3] + logical_byte) / 4u;
+    }
+    uint dynamic_byte = logical_byte - index_memory.words[2];
+    uint page_bytes = index_memory.words[4];
+    uint physical_page =
+        index_memory.words[STATE_PAGE_TABLE_WORDS + dynamic_byte / page_bytes];
+    return (
+        index_memory.words[8]
+        + physical_page * page_bytes
+        + dynamic_byte % page_bytes
+    ) / 4u;
+}
+float read_index_value(uint token, uint dim) {
+    uint element = token * HEAD_WIDTH + dim;
+    return read_bf16(
+        index_memory.words[index_memory_word(element >> 1u)],
+        element
+    );
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint chunk_start = gl_WorkGroupID.x * CHUNK_POSITIONS;
+    uint token_lane = lane / 256u;
+    uint within_token = lane % 256u;
+    uint head_lane = within_token / LANES_PER_HEAD;
+    uint dim_lane = within_token % LANES_PER_HEAD;
+
+    for (uint position = 0u; position < batch_control.batch_width; ++position) {
+        uint absolute_tick = batch_control.start_stream_tick_low + position;
+        uint compressed_count = min(
+            (absolute_tick + 1u) / COMPRESSION_RATIO,
+            MAX_COMPRESSED_POSITIONS
+        );
+        if (chunk_start >= compressed_count) continue;
+        uint query_base = position * QUERY_WORDS;
+        for (uint word = lane; word < QUERY_WORDS; word += 1024u) {
+            query_cache[word] = query_vectors.words[query_base + word];
+        }
+        barrier();
+        for (uint tile = 0u; tile < CHUNK_POSITIONS; tile += TOKENS_PER_TILE) {
+            uint tile_start = chunk_start + tile;
+            if (lane < TOKENS_PER_TILE * HEAD_WIDTH) {
+                uint local_token = lane / HEAD_WIDTH;
+                uint dim = lane % HEAD_WIDTH;
+                uint token = tile_start + local_token;
+                kv_tile[lane] = token < compressed_count
+                    ? read_index_value(token, dim)
+                    : 0.0;
+            }
+            barrier();
+            uint token = tile_start + token_lane;
+            for (uint head_base = 0u;
+                 head_base < HEAD_COUNT;
+                 head_base += HEADS_PER_PHASE) {
+                uint head = head_base + head_lane;
+                float partial = 0.0;
+                if (token < compressed_count && head < HEAD_COUNT) {
+                    for (uint dim = dim_lane;
+                         dim < HEAD_WIDTH;
+                         dim += LANES_PER_HEAD) {
+                        partial += read_query(head, dim)
+                            * kv_tile[token_lane * HEAD_WIDTH + dim];
+                    }
+                }
+                partials[lane] = partial;
+                barrier();
+                for (uint stride = LANES_PER_HEAD / 2u;
+                     stride > 0u;
+                     stride >>= 1u) {
+                    if (dim_lane < stride) partials[lane] += partials[lane + stride];
+                    barrier();
+                }
+                if (dim_lane == 0u && head < HEAD_COUNT) {
+                    contributions[token_lane * HEAD_COUNT + head] = round_bf16(
+                        max(round_bf16(partials[lane]), 0.0)
+                        * round_bf16(read_head_weight(head) * SCORE_SCALE)
+                    );
+                }
+                barrier();
+            }
+            if (lane < TOKENS_PER_TILE) {
+                float score = 0.0;
+                for (uint head = 0u; head < HEAD_COUNT; ++head) {
+                    score += contributions[lane * HEAD_COUNT + head];
+                }
+                if (tile_start + lane < compressed_count) {
+                    scores.values[
+                        position * MAX_COMPRESSED_POSITIONS + tile_start + lane
+                    ] = round_bf16(score);
+                }
+            }
+            barrier();
+        }
+    }
+}

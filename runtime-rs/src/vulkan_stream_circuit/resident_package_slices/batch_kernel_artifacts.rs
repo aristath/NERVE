@@ -34,6 +34,7 @@ struct VulkanResidentComponentBatchStageArtifact {
     workgroup_count_x: u32,
     descriptor_bindings: Vec<VulkanResidentComponentBatchDescriptorBindingSpec>,
     state_snapshot_binding: Option<u32>,
+    state_snapshot_source_binding: Option<u32>,
     control: VulkanResidentComponentBatchControlSpec,
     indirect_dispatch_byte_offset: Option<u32>,
     dispatch_y_from_batch_width: bool,

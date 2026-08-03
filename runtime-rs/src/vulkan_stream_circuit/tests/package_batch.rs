@@ -905,6 +905,45 @@ fn component_batches_use_causal_compatibility_for_temporal_prefill_kernels() {
 }
 
 #[test]
+fn only_selected_snapshot_reader_artifacts_require_temporal_state_capture() {
+    let artifact = |source_binding: Option<u32>| VulkanResidentComponentBatchKernelArtifact {
+        component_id: "processor".to_string(),
+        node_id: "attention".to_string(),
+        execution_domain: VulkanResidentComponentKernelExecutionDomain::Prefill,
+        batch_mode: VulkanResidentComponentKernelBatchMode::CausalScan,
+        lane_tile_width: 8,
+        independent_candidate_compatible: false,
+        causal_sequence_compatible: true,
+        parallel_block_compatible: false,
+        device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+        stages: vec![VulkanResidentComponentBatchStageArtifact {
+            shader_path: "shaders/attention.comp".to_string(),
+            spirv_words: Vec::new(),
+            local_size_x: 64,
+            workgroup_count_x: 1,
+            descriptor_bindings: Vec::new(),
+            state_snapshot_binding: source_binding.map(|_| 30),
+            state_snapshot_source_binding: source_binding,
+            control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+                byte_count: if source_binding.is_some() { 20 } else { 16 },
+                binding: 8,
+                payload: if source_binding.is_some() {
+                    VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots
+                } else {
+                    VulkanResidentComponentBatchControlPayload::Temporal
+                },
+                access: VulkanResidentComponentBatchControlAccess::Read,
+            },
+            indirect_dispatch_byte_offset: None,
+            dispatch_y_from_batch_width: false,
+        }],
+    };
+
+    assert!(component_batch_artifact_reads_state_snapshots(&artifact(Some(1))));
+    assert!(!component_batch_artifact_reads_state_snapshots(&artifact(None)));
+}
+
+#[test]
 fn component_batch_execution_contract_requires_matching_shader_mode() {
     let execution = |batch_mode, batch_shader_path: Option<String>| {
         let batch_implementations = batch_shader_path
@@ -922,6 +961,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                     workgroup_count_x: 1,
                     descriptor_bindings: Vec::new(),
                     state_snapshot_binding: None,
+                    state_snapshot_source_binding: None,
                     control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
                         byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
                         binding: 31,
@@ -1078,6 +1118,7 @@ fn component_batch_dispatch_control_preserves_compiled_indirect_execution() {
         workgroup_count_x: 384,
         descriptor_bindings: Vec::new(),
         state_snapshot_binding: None,
+        state_snapshot_source_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
                 .byte_count(),
@@ -1122,6 +1163,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         workgroup_count_x: 1,
         descriptor_bindings: Vec::new(),
         state_snapshot_binding: None,
+        state_snapshot_source_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
@@ -1138,6 +1180,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         workgroup_count_x: 1,
         descriptor_bindings: Vec::new(),
         state_snapshot_binding: None,
+        state_snapshot_source_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: VULKAN_COMPONENT_BATCH_CONTROL_BYTE_CAPACITY,
             binding: 7,
@@ -1154,6 +1197,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         workgroup_count_x: 1,
         descriptor_bindings: Vec::new(),
         state_snapshot_binding: None,
+        state_snapshot_source_binding: None,
         control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
             byte_count: 2 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
             binding: 31,
@@ -1269,6 +1313,14 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             false,
         ),
         control,
+    );
+    assert_eq!(
+        component_batch_control_payload_bytes(
+            VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots,
+            &control,
+            true,
+        ),
+        [control.as_slice(), 1u32.to_le_bytes().as_slice()].concat(),
     );
 }
 

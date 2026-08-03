@@ -200,3 +200,46 @@ fn select_component_batch_kernel_artifact_where<'a>(
             }
         })
 }
+
+fn selected_component_batch_kernel_artifact_for_dispatch<'a>(
+    artifacts: &'a [VulkanResidentComponentBatchKernelArtifact],
+    dispatch: &VulkanMountedPlacedBoundDispatch,
+    execution_mode: VulkanComponentBatchExecutionMode,
+    lane_capacity: usize,
+) -> Option<&'a VulkanResidentComponentBatchKernelArtifact> {
+    select_component_batch_kernel_artifact(
+        artifacts,
+        &dispatch.component_id,
+        &dispatch.node_id,
+        execution_mode,
+        lane_capacity,
+    )
+    .filter(|artifact| {
+        component_batch_stages_replace_push_constants(
+            &artifact.stages,
+            &dispatch.push_constants,
+        )
+    })
+    .filter(|artifact| {
+        execution_mode == VulkanComponentBatchExecutionMode::CausalSequence
+            || artifact.batch_mode != VulkanResidentComponentKernelBatchMode::WeightShared
+            || (dispatch.stream_control_binding.is_none()
+                && !dispatch.descriptors.iter().any(|descriptor| {
+                    matches!(
+                        descriptor.usage,
+                        VulkanKernelDescriptorUsage::StateRead
+                            | VulkanKernelDescriptorUsage::StateWrite
+                            | VulkanKernelDescriptorUsage::StateView
+                    )
+                }))
+    })
+}
+
+fn component_batch_artifact_reads_state_snapshots(
+    artifact: &VulkanResidentComponentBatchKernelArtifact,
+) -> bool {
+    artifact
+        .stages
+        .iter()
+        .any(|stage| stage.state_snapshot_source_binding.is_some())
+}

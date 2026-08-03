@@ -21,8 +21,17 @@ fn component_batch_stage_descriptor_contract_is_valid(
                 binding != control_binding && !destinations.contains(&binding)
             })
         && (stage.state_snapshot_binding.is_some()
-            == (control_payload
-                == VulkanResidentComponentBatchControlPayload::WidthStateSnapshots))
+            == matches!(
+                control_payload,
+                VulkanResidentComponentBatchControlPayload::WidthStateSnapshots
+                    | VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots
+            ))
+        && stage.state_snapshot_source_binding.is_none_or(|source_binding| {
+            stage.state_snapshot_binding.is_some_and(|snapshot_binding| {
+                source_binding != control_binding
+                    && source_binding != snapshot_binding
+            })
+        })
 }
 
 fn validate_component_executions(

@@ -23,9 +23,7 @@ def _fp8_dynamic_scale_expression(
     power_of_two: bool,
 ) -> str:
     if power_of_two:
-        return (
-            f"exp2(ceil(log2(max({maximum}, 1e-4) / 448.0)))"
-        )
+        return f"exp2(ceil(log2(max({maximum}, 1e-4) / 448.0)))"
     return f"{maximum} > 0.0 ? {maximum} / 448.0 : 1.0"
 
 
@@ -40,14 +38,11 @@ def _parallel_fp8_scale_reads(
         if not e8m0:
             prefix = f"if ({condition}) " if condition is not None else ""
             expression = (
-                f"bf16_to_f32({words}[index >> 1u] >> "
-                "((index & 1u) * 16u))"
+                f"bf16_to_f32({words}[index >> 1u] >> ((index & 1u) * 16u))"
                 if packed_bf16
                 else f"read_bf16_word({words}[index >> 1u], index)"
             )
-            return (
-                f"    {prefix}return {expression};"
-            )
+            return f"    {prefix}return {expression};"
         body = (
             f"uint packed = {words}[index >> 2u]; "
             "uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu; "
@@ -634,12 +629,13 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return rendered
 
     indexed_sparse_attention_main = re.fullmatch(
-        r"indexed_sparse_attention_main_bf16_q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
+        r"indexed_sparse_attention_main(_temporal)?_bf16_q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
         r"r(\d+)_k(\d+)_scale([0-9eE+.-]+)\.comp",
         shader_file,
     )
     if indexed_sparse_attention_main is not None:
         (
+            temporal,
             query_heads,
             kv_heads,
             head_width,
@@ -671,6 +667,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             query_heads <= 0
             or kv_heads <= 0
             or query_heads % kv_heads
+            or (temporal is not None and kv_heads != 1)
             or head_width <= 0
             or head_width % 64
             or head_width > 1024
@@ -682,7 +679,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             )
         return render_shader_template(
             source_dir,
-            "indexed_sparse_attention_main_bf16.comp.template",
+            (
+                "indexed_sparse_attention_main_temporal_bf16.comp.template"
+                if temporal is not None
+                else "indexed_sparse_attention_main_bf16.comp.template"
+            ),
             {
                 "LOCAL_SIZE": str(head_width),
                 "QUERY_HEADS": str(query_heads),
@@ -1874,9 +1875,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     )
     if parallel_fp8 is not None:
         batch_tile_width = (
-            int(parallel_fp8["batch"])
-            if parallel_fp8["batch"] is not None
-            else None
+            int(parallel_fp8["batch"]) if parallel_fp8["batch"] is not None else None
         )
         branch_count = int(parallel_fp8["branches"])
         scale_is_e8m0 = parallel_fp8["scale"] is not None
@@ -3540,6 +3539,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         (
             r"rolling_state_ring_append_bf16_(\d+)x(\d+)\.comp",
             "rolling_state_ring_append_bf16.comp.template",
+            ("FRAME_COUNT", "HIDDEN_SIZE"),
+        ),
+        (
+            r"rolling_state_ring_append_temporal_bf16_(\d+)x(\d+)\.comp",
+            "rolling_state_ring_append_temporal_bf16.comp.template",
             ("FRAME_COUNT", "HIDDEN_SIZE"),
         ),
         (

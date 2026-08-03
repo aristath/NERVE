@@ -210,6 +210,50 @@ fn component_batch_static_state_write_indices(
     Ok(indices.into_iter().collect())
 }
 
+fn component_batch_state_buffer_index_at_binding(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    dispatch: &VulkanMountedPlacedBoundDispatch,
+    source_binding: u32,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+    let descriptor = dispatch
+        .descriptors
+        .iter()
+        .find(|descriptor| u32::try_from(descriptor.binding).ok() == Some(source_binding))
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "component batch snapshot reader {}.{} references absent descriptor binding {source_binding}",
+                dispatch.component_id, dispatch.node_id,
+            )))
+        })?;
+    let VulkanMountedPlacedBoundDescriptorTarget::Resident {
+        target:
+            VulkanBoundDescriptorTarget::StreamStateBuffer { buffer_index, .. }
+            | VulkanBoundDescriptorTarget::StreamStateView { buffer_index, .. },
+    } = &descriptor.target
+    else {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "component batch snapshot reader {}.{} descriptor {source_binding} is not stream state",
+                dispatch.component_id, dispatch.node_id,
+            )),
+        ));
+    };
+    let state = mounted.buffers.state_buffers.get(*buffer_index).ok_or_else(|| {
+        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+            "component batch snapshot reader references absent buffer {buffer_index}",
+        )))
+    })?;
+    if state.layout.static_byte_capacity == 0 {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "component batch snapshot reader {}.{} references dynamic-only state {}.{}",
+                dispatch.component_id, dispatch.node_id, state.component_id, state.state_id,
+            )),
+        ));
+    }
+    Ok(*buffer_index)
+}
+
 impl VulkanResidentComponentBatchSliceRunner {
     fn supports_deferred_completion(&self) -> bool {
         self.demand_residency.is_empty()
@@ -416,6 +460,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             VulkanResidentComponentBatchControlPayload::WidthExpertStart,
             VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
             VulkanResidentComponentBatchControlPayload::Temporal,
+            VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots,
         ]
         .into_iter()
         .map(|payload| {
@@ -428,10 +473,30 @@ impl VulkanResidentComponentBatchSliceRunner {
             Ok::<_, VulkanResidentInProcessPlacedRuntimeError>((payload, buffer))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let local_distributed_dispatch_indices = distributed_execution_plan
+            .dispatches
+            .iter()
+            .filter(|dispatch| dispatch.owner_device_id == slice.device_id)
+            .map(|dispatch| dispatch.dispatch_index)
+            .collect::<BTreeSet<_>>();
+        let snapshot_readers_require_capture = selected_dispatches
+            .iter()
+            .filter(|dispatch| {
+                !local_distributed_dispatch_indices.contains(&dispatch.dispatch_index)
+            })
+            .filter_map(|dispatch| {
+                selected_component_batch_kernel_artifact_for_dispatch(
+                    &slice.package_slice.batch_kernels,
+                    dispatch,
+                    execution_mode,
+                    lane_capacity,
+                )
+            })
+            .any(component_batch_artifact_reads_state_snapshots);
         let mut causal_state_snapshots = VulkanCausalStateSnapshotBank::new(
             device,
             lane_capacity,
-            capture_causal_state_snapshots,
+            capture_causal_state_snapshots || snapshot_readers_require_capture,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut steps = Vec::new();
@@ -449,14 +514,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     .iter()
                     .map(|descriptor| &descriptor.usage),
             );
-            if distributed_execution_plan
-                .dispatches
-                .iter()
-                .any(|distributed| {
-                    distributed.owner_device_id == slice.device_id
-                        && distributed.dispatch_index == dispatch.dispatch_index
-                })
-            {
+            if local_distributed_dispatch_indices.contains(&dispatch.dispatch_index) {
                 dispatch_spans.push(VulkanComponentBatchDispatchSpan {
                     component_id: dispatch.component_id.clone(),
                     dispatch_index: dispatch.dispatch_index,
@@ -466,32 +524,12 @@ impl VulkanResidentComponentBatchSliceRunner {
                 });
                 continue;
             }
-            let batch_artifact = select_component_batch_kernel_artifact(
+            let batch_artifact = selected_component_batch_kernel_artifact_for_dispatch(
                 &slice.package_slice.batch_kernels,
-                &dispatch.component_id,
-                &dispatch.node_id,
+                dispatch,
                 execution_mode,
                 lane_capacity,
-            )
-            .filter(|artifact| {
-                component_batch_stages_replace_push_constants(
-                    &artifact.stages,
-                    &dispatch.push_constants,
-                )
-            })
-            .filter(|artifact| {
-                execution_mode == VulkanComponentBatchExecutionMode::CausalSequence
-                    || artifact.batch_mode != VulkanResidentComponentKernelBatchMode::WeightShared
-                    || (dispatch.stream_control_binding.is_none()
-                        && !dispatch.descriptors.iter().any(|descriptor| {
-                            matches!(
-                                descriptor.usage,
-                                VulkanKernelDescriptorUsage::StateRead
-                                    | VulkanKernelDescriptorUsage::StateWrite
-                                    | VulkanKernelDescriptorUsage::StateView
-                            )
-                        }))
-            });
+            );
             if let Some(batch_artifact) = batch_artifact {
                 if batch_artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
                     && lane_capacity > batch_artifact.lane_tile_width
@@ -555,20 +593,34 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 ),
                             );
                         }
-                        let [state_buffer_index] = static_state_write_indices.as_slice() else {
-                            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                                VulkanError(format!(
-                                    "component batch stage {} snapshots {} static state writers; expected one",
-                                    stage.shader_path,
-                                    static_state_write_indices.len(),
-                                )),
-                            ));
+                        let (state_buffer_index, snapshot_access) = if let Some(source_binding) =
+                            stage.state_snapshot_source_binding
+                        {
+                            (
+                                component_batch_state_buffer_index_at_binding(
+                                    &slice.mounted,
+                                    dispatch,
+                                    source_binding,
+                                )?,
+                                VulkanResidentKernelBufferAccess::Read,
+                            )
+                        } else {
+                            let [state_buffer_index] = static_state_write_indices.as_slice() else {
+                                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(format!(
+                                        "component batch stage {} snapshots {} static state writers; expected one",
+                                        stage.shader_path,
+                                        static_state_write_indices.len(),
+                                    )),
+                                ));
+                            };
+                            (*state_buffer_index, VulkanResidentKernelBufferAccess::Write)
                         };
                         let snapshot_buffer = causal_state_snapshots
                             .binding_buffer(
                                 device,
                                 &slice.mounted.buffers,
-                                *state_buffer_index,
+                                state_buffer_index,
                             )
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                         bindings.push(
@@ -577,7 +629,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 snapshot_buffer,
                                 snapshot_buffer.byte_capacity(),
                             )
-                            .with_access(VulkanResidentKernelBufferAccess::Write),
+                            .with_access(snapshot_access),
                         );
                     }
                     let control_buffer = batch_control_buffers.get(&payload).ok_or_else(|| {

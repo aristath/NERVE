@@ -5,7 +5,12 @@ import re
 from pathlib import Path
 
 from nerve.model_package_assets import stream_control_binding_for_node
-from nerve.model_package_common import ModelCompileError, ROW_MAJOR_LAYOUT, Json, shader_float_token
+from nerve.model_package_common import (
+    ModelCompileError,
+    ROW_MAJOR_LAYOUT,
+    Json,
+    shader_float_token,
+)
 from nerve.model_package_tensors import (
     parameter_dtype_for_id,
     parameter_layout_for_id,
@@ -16,8 +21,17 @@ from nerve.model_package_tensors import (
 POOL_SHADER_PATTERN = re.compile(
     r"learned_gated_kv_pool_bf16_f32_h(\d+)_d(\d+)_r(\d+)_c([12])\.comp"
 )
+TEMPORAL_POOL_SHADER_PATTERN = re.compile(
+    r"learned_gated_kv_pool_temporal_bf16_f32_h(\d+)_d(\d+)_r(\d+)_c([12])\.comp"
+)
 FINALIZE_SHADER_PATTERN = re.compile(
     r"compressed_kv_finalize_f32_bf16_d(\d+)_r(\d+)_eps([0-9eE+.-]+)_"
+    r"theta([0-9eE+.-]+)"
+    r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
+    r"_(half|interleaved|proportional)_po(-?\d+)_qfp8e4m3b(\d+)\.comp"
+)
+TEMPORAL_FINALIZE_SHADER_PATTERN = re.compile(
+    r"compressed_kv_finalize_temporal_f32_bf16_d(\d+)_r(\d+)_eps([0-9eE+.-]+)_"
     r"theta([0-9eE+.-]+)"
     r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
     r"_(half|interleaved|proportional)_po(-?\d+)_qfp8e4m3b(\d+)\.comp"
@@ -25,8 +39,16 @@ FINALIZE_SHADER_PATTERN = re.compile(
 CONDITIONAL_APPEND_SHADER_PATTERN = re.compile(
     r"conditional_append_state_bf16_d(\d+)_p(\d+)\.comp"
 )
+TEMPORAL_CONDITIONAL_APPEND_SHADER_PATTERN = re.compile(
+    r"conditional_append_state_temporal_bf16_d(\d+)_p(\d+)\.comp"
+)
 INDEX_TRANSFORM_SHADER_PATTERN = re.compile(
     r"index_vector_transform_bf16_h(\d+)_d(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+    r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
+    r"_(half|interleaved)_qfp4e2m1b(\d+)\.comp"
+)
+TEMPORAL_INDEX_TRANSFORM_SHADER_PATTERN = re.compile(
+    r"index_vector_transform_temporal_bf16_h(\d+)_d(\d+)_r(\d+)_theta([0-9eE+.-]+)"
     r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
     r"_(half|interleaved)_qfp4e2m1b(\d+)\.comp"
 )
@@ -36,15 +58,31 @@ INDEX_FINALIZE_SHADER_PATTERN = re.compile(
     r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
     r"_(half|interleaved)_po(-?\d+)_qfp4e2m1b(\d+)\.comp"
 )
+TEMPORAL_INDEX_FINALIZE_SHADER_PATTERN = re.compile(
+    r"compressed_index_kv_finalize_temporal_f32_bf16_d(\d+)_r(\d+)_eps([0-9eE+.-]+)_"
+    r"theta([0-9eE+.-]+)"
+    r"(?:_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)_a([0-9eE+.-]+))?"
+    r"_(half|interleaved)_po(-?\d+)_qfp4e2m1b(\d+)\.comp"
+)
 INDEX_SCORES_SHADER_PATTERN = re.compile(
     r"learned_index_scores_bf16_f32_h(\d+)_d(\d+)_r(\d+)_m(\d+)_c(\d+)_"
+    r"scale([0-9eE+.-]+)\.comp"
+)
+TEMPORAL_INDEX_SCORES_SHADER_PATTERN = re.compile(
+    r"learned_index_scores_temporal_bf16_f32_h(\d+)_d(\d+)_r(\d+)_m(\d+)_c(\d+)_"
     r"scale([0-9eE+.-]+)\.comp"
 )
 RADIX_TOPK_SHADER_PATTERN = re.compile(
     r"radix_topk_index_f32_u32_m(\d+)_k(\d+)_r(\d+)_o(\d+)\.comp"
 )
+TEMPORAL_RADIX_TOPK_SHADER_PATTERN = re.compile(
+    r"radix_topk_index_temporal_f32_u32_m(\d+)_k(\d+)_r(\d+)_o(\d+)\.comp"
+)
 CHRONOLOGICAL_INDEX_SHADER_PATTERN = re.compile(
     r"chronological_compressed_index_u32_m(\d+)_r(\d+)_o(\d+)\.comp"
+)
+TEMPORAL_CHRONOLOGICAL_INDEX_SHADER_PATTERN = re.compile(
+    r"chronological_compressed_index_temporal_u32_m(\d+)_r(\d+)_o(\d+)\.comp"
 )
 
 
@@ -189,8 +227,7 @@ def _finalize_shader_file(circuit: Json, node: Json, tensor_index: Json) -> str:
         or node.get("state_writes")
         or parameter_dtype_for_id(circuit, params[0], tensor_index) != "BF16"
         or parameter_shape_for_id(circuit, params[0], tensor_index) != [head_width]
-        or parameter_layout_for_id(circuit, params[0], tensor_index)
-        != ROW_MAJOR_LAYOUT
+        or parameter_layout_for_id(circuit, params[0], tensor_index) != ROW_MAJOR_LAYOUT
     ):
         raise ModelCompileError(
             f"compressed KV finalizer node {node['id']!r} has an invalid contract"
@@ -216,7 +253,9 @@ def _rope_suffix(attrs: Json) -> str:
     scaling = attrs.get("scaling")
     if rope_type == "yarn":
         if not isinstance(scaling, dict) or scaling.get("type") != "yarn":
-            raise ModelCompileError("YaRN compressor RoPE has no compiled scaling profile")
+            raise ModelCompileError(
+                "YaRN compressor RoPE has no compiled scaling profile"
+            )
         return (
             f"theta{shader_float_token(theta)}_yarn"
             f"_f{shader_float_token(float(scaling['factor']))}"
@@ -337,8 +376,7 @@ def _index_transform_shader_file(
         or epsilon <= 0.0
         or parameter_dtype_for_id(circuit, params[0], tensor_index) != "BF16"
         or parameter_shape_for_id(circuit, params[0], tensor_index) != [head_width]
-        or parameter_layout_for_id(circuit, params[0], tensor_index)
-        != ROW_MAJOR_LAYOUT
+        or parameter_layout_for_id(circuit, params[0], tensor_index) != ROW_MAJOR_LAYOUT
     ):
         raise ModelCompileError(
             f"compressed index finalizer node {node['id']!r} has an invalid norm"
@@ -410,9 +448,7 @@ def _radix_topk_shader_file(node: Json) -> str:
         raise ModelCompileError(
             f"radix top-k node {node['id']!r} has an invalid contract"
         )
-    return (
-        f"radix_topk_index_f32_u32_m{maximum}_k{top_k}_r{ratio}_o{offset}__sc2.comp"
-    )
+    return f"radix_topk_index_f32_u32_m{maximum}_k{top_k}_r{ratio}_o{offset}__sc2.comp"
 
 
 def _chronological_index_shader_file(circuit: Json, node: Json) -> str:
@@ -446,7 +482,8 @@ def render_latent_compression_shader(
     source_dir: Path,
     shader_file: str,
 ) -> str | None:
-    pool = POOL_SHADER_PATTERN.fullmatch(shader_file)
+    temporal_pool = TEMPORAL_POOL_SHADER_PATTERN.fullmatch(shader_file)
+    pool = temporal_pool or POOL_SHADER_PATTERN.fullmatch(shader_file)
     if pool is not None:
         hidden_size, head_width, ratio, coefficient = map(int, pool.groups())
         if (
@@ -457,9 +494,16 @@ def render_latent_compression_shader(
             or ratio <= 0
             or coefficient not in {1, 2}
         ):
-            raise ModelCompileError(f"invalid learned compressor pool shape {shader_file!r}")
+            raise ModelCompileError(
+                f"invalid learned compressor pool shape {shader_file!r}"
+            )
         return _render_template(
-            source_dir / "learned_gated_kv_pool.comp.template",
+            source_dir
+            / (
+                "learned_gated_kv_pool_temporal.comp.template"
+                if temporal_pool is not None
+                else "learned_gated_kv_pool.comp.template"
+            ),
             {
                 "HIDDEN_SIZE": str(hidden_size),
                 "HEAD_WIDTH": str(head_width),
@@ -467,7 +511,12 @@ def render_latent_compression_shader(
                 "LANE_COEFFICIENT": str(coefficient),
             },
         )
-    conditional_append = CONDITIONAL_APPEND_SHADER_PATTERN.fullmatch(shader_file)
+    temporal_conditional_append = TEMPORAL_CONDITIONAL_APPEND_SHADER_PATTERN.fullmatch(
+        shader_file
+    )
+    conditional_append = temporal_conditional_append or (
+        CONDITIONAL_APPEND_SHADER_PATTERN.fullmatch(shader_file)
+    )
     if conditional_append is not None:
         width, period = map(int, conditional_append.groups())
         if width <= 0 or width % 2 or period <= 0:
@@ -475,20 +524,47 @@ def render_latent_compression_shader(
                 f"invalid conditional state append shape {shader_file!r}"
             )
         return _render_template(
-            source_dir / "conditional_append_state_bf16.comp.template",
+            source_dir
+            / (
+                "conditional_append_state_temporal_bf16.comp.template"
+                if temporal_conditional_append is not None
+                else "conditional_append_state_bf16.comp.template"
+            ),
             {"ELEMENT_COUNT": str(width), "PERIOD": str(period)},
         )
-    index_transform = INDEX_TRANSFORM_SHADER_PATTERN.fullmatch(shader_file)
+    temporal_index_transform = TEMPORAL_INDEX_TRANSFORM_SHADER_PATTERN.fullmatch(
+        shader_file
+    )
+    index_transform = (
+        temporal_index_transform
+        or INDEX_TRANSFORM_SHADER_PATTERN.fullmatch(shader_file)
+    )
     if index_transform is not None:
-        return _render_index_transform(source_dir, index_transform, finalizer=False)
-    index_finalize = INDEX_FINALIZE_SHADER_PATTERN.fullmatch(shader_file)
-    if index_finalize is not None:
-        return _render_index_transform(source_dir, index_finalize, finalizer=True)
-    index_scores = INDEX_SCORES_SHADER_PATTERN.fullmatch(shader_file)
-    if index_scores is not None:
-        heads, width, ratio, maximum, chunk = map(
-            int, index_scores.groups()[:5]
+        return _render_index_transform(
+            source_dir,
+            index_transform,
+            finalizer=False,
+            temporal=temporal_index_transform is not None,
         )
+    temporal_index_finalize = TEMPORAL_INDEX_FINALIZE_SHADER_PATTERN.fullmatch(
+        shader_file
+    )
+    index_finalize = temporal_index_finalize or INDEX_FINALIZE_SHADER_PATTERN.fullmatch(
+        shader_file
+    )
+    if index_finalize is not None:
+        return _render_index_transform(
+            source_dir,
+            index_finalize,
+            finalizer=True,
+            temporal=temporal_index_finalize is not None,
+        )
+    temporal_index_scores = TEMPORAL_INDEX_SCORES_SHADER_PATTERN.fullmatch(shader_file)
+    index_scores = temporal_index_scores or INDEX_SCORES_SHADER_PATTERN.fullmatch(
+        shader_file
+    )
+    if index_scores is not None:
+        heads, width, ratio, maximum, chunk = map(int, index_scores.groups()[:5])
         scale = index_scores.group(6)
         if (
             heads <= 0
@@ -499,9 +575,16 @@ def render_latent_compression_shader(
             or maximum <= 0
             or chunk != 256
         ):
-            raise ModelCompileError(f"invalid learned index score shape {shader_file!r}")
+            raise ModelCompileError(
+                f"invalid learned index score shape {shader_file!r}"
+            )
         return _render_template(
-            source_dir / "learned_index_scores.comp.template",
+            source_dir
+            / (
+                "learned_index_scores_temporal.comp.template"
+                if temporal_index_scores is not None
+                else "learned_index_scores.comp.template"
+            ),
             {
                 "HEAD_COUNT": str(heads),
                 "HEAD_WIDTH": str(width),
@@ -511,13 +594,19 @@ def render_latent_compression_shader(
                 "SCORE_SCALE": scale,
             },
         )
-    radix_topk = RADIX_TOPK_SHADER_PATTERN.fullmatch(shader_file)
+    temporal_radix_topk = TEMPORAL_RADIX_TOPK_SHADER_PATTERN.fullmatch(shader_file)
+    radix_topk = temporal_radix_topk or RADIX_TOPK_SHADER_PATTERN.fullmatch(shader_file)
     if radix_topk is not None:
         maximum, top_k, ratio, offset = map(int, radix_topk.groups())
         if maximum <= 0 or top_k <= 0 or top_k > maximum or ratio <= 0:
             raise ModelCompileError(f"invalid radix top-k shape {shader_file!r}")
         return _render_template(
-            source_dir / "radix_topk_index.comp.template",
+            source_dir
+            / (
+                "radix_topk_index_temporal.comp.template"
+                if temporal_radix_topk is not None
+                else "radix_topk_index.comp.template"
+            ),
             {
                 "MAX_SCORES": str(maximum),
                 "TOP_K": str(top_k),
@@ -525,7 +614,13 @@ def render_latent_compression_shader(
                 "INDEX_OFFSET": str(offset),
             },
         )
-    chronological = CHRONOLOGICAL_INDEX_SHADER_PATTERN.fullmatch(shader_file)
+    temporal_chronological = TEMPORAL_CHRONOLOGICAL_INDEX_SHADER_PATTERN.fullmatch(
+        shader_file
+    )
+    chronological = (
+        temporal_chronological
+        or CHRONOLOGICAL_INDEX_SHADER_PATTERN.fullmatch(shader_file)
+    )
     if chronological is not None:
         maximum, ratio, offset = map(int, chronological.groups())
         if maximum <= 0 or ratio <= 0:
@@ -533,14 +628,20 @@ def render_latent_compression_shader(
                 f"invalid chronological compressed-index shape {shader_file!r}"
             )
         return _render_template(
-            source_dir / "chronological_compressed_index.comp.template",
+            source_dir
+            / (
+                "chronological_compressed_index_temporal.comp.template"
+                if temporal_chronological is not None
+                else "chronological_compressed_index.comp.template"
+            ),
             {
                 "MAX_INDICES": str(maximum),
                 "COMPRESSION_RATIO": str(ratio),
                 "INDEX_OFFSET": str(offset),
             },
         )
-    finalize = FINALIZE_SHADER_PATTERN.fullmatch(shader_file)
+    temporal_finalize = TEMPORAL_FINALIZE_SHADER_PATTERN.fullmatch(shader_file)
+    finalize = temporal_finalize or FINALIZE_SHADER_PATTERN.fullmatch(shader_file)
     if finalize is None:
         return None
     (
@@ -569,9 +670,16 @@ def render_latent_compression_shader(
         or (head_width - rotary_width) % block_columns
         or block_columns != 64
     ):
-        raise ModelCompileError(f"invalid compressed KV finalizer shape {shader_file!r}")
+        raise ModelCompileError(
+            f"invalid compressed KV finalizer shape {shader_file!r}"
+        )
     return _render_template(
-        source_dir / "compressed_kv_finalize.comp.template",
+        source_dir
+        / (
+            "compressed_kv_finalize_temporal.comp.template"
+            if temporal_finalize is not None
+            else "compressed_kv_finalize.comp.template"
+        ),
         {
             "HEAD_WIDTH": str(head_width),
             "ROTARY_WIDTH": str(rotary_width),
@@ -607,6 +715,7 @@ def _render_index_transform(
     match: re.Match[str],
     *,
     finalizer: bool,
+    temporal: bool = False,
 ) -> str:
     groups = match.groups()
     if finalizer:
@@ -657,13 +766,17 @@ def _render_index_transform(
         raise ModelCompileError(
             f"invalid index vector transform shape {match.group(0)!r}"
         )
+    template_name = (
+        "compressed_index_kv_finalize_temporal.comp.template"
+        if finalizer and temporal
+        else "compressed_index_kv_finalize.comp.template"
+        if finalizer
+        else "index_vector_transform_temporal.comp.template"
+        if temporal
+        else "index_vector_transform.comp.template"
+    )
     return _render_template(
-        source_dir
-        / (
-            "compressed_index_kv_finalize.comp.template"
-            if finalizer
-            else "index_vector_transform.comp.template"
-        ),
+        source_dir / template_name,
         {
             "HEAD_COUNT": str(head_count),
             "HEAD_WIDTH": str(head_width),
