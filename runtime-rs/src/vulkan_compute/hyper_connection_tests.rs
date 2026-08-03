@@ -57,7 +57,7 @@ mod hyper_connection_tests {
     #[test]
     fn hyper_connection_post_consumes_source_to_output_matrix() {
         let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let template = std::fs::read_to_string(
@@ -143,7 +143,7 @@ mod hyper_connection_tests {
     #[test]
     fn hyper_connection_pre_parallel_row_reduction_is_exact_and_fast_at_product_geometry() {
         let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         const MULTIPLICITY: usize = 4;

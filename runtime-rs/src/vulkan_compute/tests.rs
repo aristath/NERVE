@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn moe_topk_uses_all_lanes_without_changing_tie_or_weight_semantics() {
         let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let template = std::fs::read_to_string(
@@ -1423,11 +1423,11 @@ mod tests {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan predicate test requires a GLSL compiler");
         let owner_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let worker_index = std::env::var("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must be an integer");
         assert_ne!(owner_index, worker_index);
@@ -1557,7 +1557,7 @@ mod tests {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
         let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
@@ -1604,7 +1604,7 @@ mod tests {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
         let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();

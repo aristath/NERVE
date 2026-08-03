@@ -862,7 +862,7 @@ fn external_compiled_group_has_one_device_load_and_explicit_release() {
         Err(error) => panic!("could not read external package root: {error}"),
     };
     let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
         .parse::<usize>()
         .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
     let manifest: VulkanResidentModelPackageManifest = serde_json::from_slice(
@@ -975,7 +975,7 @@ fn external_compiled_group_uses_stable_address_slots_and_explicit_retirement() {
         Err(error) => panic!("could not read external package root: {error}"),
     };
     let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+        .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
         .parse::<usize>()
         .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
     let manifest: VulkanResidentModelPackageManifest = serde_json::from_slice(

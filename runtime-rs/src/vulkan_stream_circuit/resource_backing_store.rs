@@ -1265,7 +1265,7 @@ mod resource_backing_store_tests {
             Err(error) => panic!("could not read external package root: {error}"),
         };
         let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select an idle AMD GPU")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
             .parse::<usize>()
             .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let partition_template_index = std::env::var(
