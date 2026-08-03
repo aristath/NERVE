@@ -1323,6 +1323,18 @@ def test_compiler_renders_native_block_scaled_fp8_sparse_experts(
     ).read_text()
     assert "candidate_expert < source_expert" in route_compaction
     assert "EXPERT_FRAME_WORDS" in route_compaction
+    assert (
+        "batch_control.dispatch_x = EXPERTS_PER_TOKEN * TILES_PER_ROUTE;"
+        in route_compaction
+    )
+    assert "batch_control.dispatch_y = batch_control.batch_width;" in route_compaction
+    route_count = (tmp_path / "moe_route_count_batch1_i512_k8_t32.comp").read_text()
+    assert "if (batch_control.expert_count == 0u)" in route_count
+    assert (
+        "batch_control.dispatch_x = EXPERTS_PER_TOKEN * TILES_PER_ROUTE;"
+        in route_count
+    )
+    assert "batch_control.dispatch_y = batch_control.batch_width;" in route_count
     assert all("{{" not in source for source in (gate_up_shader, down_shader))
     assert (
         "gl_WorkGroupID.y"

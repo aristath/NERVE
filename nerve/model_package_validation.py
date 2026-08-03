@@ -701,6 +701,7 @@ def valid_batch_implementation(implementation: Any) -> bool:
         and isinstance(stages, list)
         and bool(stages)
         and all(valid_batch_stage(stage) for stage in stages)
+        and valid_indirect_dispatch_pipeline(stages)
         and isinstance(extensions, list)
         and all(isinstance(extension, str) and extension for extension in extensions)
         and extensions == sorted(set(extensions))
@@ -748,6 +749,21 @@ def valid_batch_implementation(implementation: Any) -> bool:
             )
         )
     )
+
+
+def valid_indirect_dispatch_pipeline(stages: list[Any]) -> bool:
+    writable_payloads: set[str] = set()
+    for stage in stages:
+        control = stage.get("control") if isinstance(stage, dict) else None
+        if not isinstance(control, dict):
+            return False
+        payload = control.get("payload")
+        if stage.get("indirect_dispatch_byte_offset") is not None:
+            if payload not in writable_payloads:
+                return False
+        if control.get("access", "read") == "read_write" and isinstance(payload, str):
+            writable_payloads.add(payload)
+    return True
 
 
 def valid_batch_stage(stage: Any) -> bool:

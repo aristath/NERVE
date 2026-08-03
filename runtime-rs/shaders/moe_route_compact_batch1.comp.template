@@ -57,6 +57,21 @@ void main() {
         return;
     }
 
+    // An indirect-dispatch command is part of this scheduler's output contract,
+    // even when the expert resources are not partitioned.  In that layout the
+    // projection keeps its native two-dimensional frame geometry.
+    if (
+        gl_WorkGroupID.x == 0u
+        && gl_WorkGroupID.y == 0u
+        && gl_LocalInvocationID.x == 0u
+    ) {
+        batch_control.owned_route_count =
+            batch_control.batch_width * EXPERTS_PER_TOKEN;
+        batch_control.dispatch_x = EXPERTS_PER_TOKEN * TILES_PER_ROUTE;
+        batch_control.dispatch_y = batch_control.batch_width;
+        batch_control.dispatch_z = 1u;
+    }
+
     uint source_batch = gl_WorkGroupID.y;
     uint source_route = gl_WorkGroupID.x;
     if (

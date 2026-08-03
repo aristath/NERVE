@@ -18,11 +18,22 @@ const uint TILES_PER_ROUTE = {{TILES_PER_ROUTE}}u;
 
 void main() {
     if (
-        batch_control.expert_count == 0u
-        || gl_WorkGroupID.x != 0u
+        gl_WorkGroupID.x != 0u
         || gl_WorkGroupID.y != 0u
         || gl_LocalInvocationID.x != 0u
     ) {
+        return;
+    }
+
+    // Every path must initialize the command consumed by the following
+    // indirect projection.  An unpartitioned expert set retains the native
+    // x-by-batch dispatch geometry; a partitioned set is compacted below.
+    if (batch_control.expert_count == 0u) {
+        batch_control.owned_route_count =
+            batch_control.batch_width * EXPERTS_PER_TOKEN;
+        batch_control.dispatch_x = EXPERTS_PER_TOKEN * TILES_PER_ROUTE;
+        batch_control.dispatch_y = batch_control.batch_width;
+        batch_control.dispatch_z = 1u;
         return;
     }
 

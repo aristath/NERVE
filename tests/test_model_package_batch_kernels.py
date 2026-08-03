@@ -1,4 +1,39 @@
 from model_package_layout_common import *
+from nerve.model_package_validation import valid_indirect_dispatch_pipeline
+
+
+def test_indirect_batch_dispatch_requires_an_earlier_writable_producer() -> None:
+    control = {
+        "kind": "storage_buffer",
+        "byte_count": 28,
+        "binding": 31,
+        "payload": "width_expert_range_indirect",
+    }
+    consumer = {
+        "shader_path": "shaders/consume.spv",
+        "control": control,
+        "indirect_dispatch_byte_offset": 16,
+    }
+
+    assert not valid_indirect_dispatch_pipeline([consumer])
+    assert not valid_indirect_dispatch_pipeline(
+        [
+            consumer,
+            {
+                "shader_path": "shaders/late-producer.spv",
+                "control": {**control, "access": "read_write"},
+            },
+        ]
+    )
+    assert valid_indirect_dispatch_pipeline(
+        [
+            {
+                "shader_path": "shaders/producer.spv",
+                "control": {**control, "access": "read_write"},
+            },
+            consumer,
+        ]
+    )
 
 
 def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:

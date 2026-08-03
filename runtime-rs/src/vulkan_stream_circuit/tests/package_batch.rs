@@ -933,6 +933,39 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
     let descriptor_error =
         validate_component_executions("fixture", &invalid_descriptor_mapping).unwrap_err();
     assert!(descriptor_error.to_string().contains("invalid WeightShared"));
+
+    let mut invalid_indirect = execution(
+        VulkanResidentComponentKernelBatchMode::WeightShared,
+        Some("shaders/project_batch.spv".to_string()),
+    );
+    let indirect_consumer = &mut invalid_indirect[0].kernels[0].batch_implementations[0].stages[0];
+    indirect_consumer.control = VulkanResidentComponentBatchControlSpec::StorageBuffer {
+        byte_count: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+            .byte_count(),
+        binding: 31,
+        payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+        access: VulkanResidentComponentBatchControlAccess::Read,
+    };
+    indirect_consumer.indirect_dispatch_byte_offset = Some(16);
+    let indirect_error =
+        validate_component_executions("fixture", &invalid_indirect).unwrap_err();
+    assert!(indirect_error.to_string().contains("invalid WeightShared"));
+
+    let mut valid_indirect = invalid_indirect;
+    let mut producer = valid_indirect[0].kernels[0].batch_implementations[0].stages[0].clone();
+    producer.shader_path = "shaders/dispatch_producer.spv".to_string();
+    producer.indirect_dispatch_byte_offset = None;
+    producer.control = VulkanResidentComponentBatchControlSpec::StorageBuffer {
+        byte_count: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+            .byte_count(),
+        binding: 31,
+        payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+        access: VulkanResidentComponentBatchControlAccess::ReadWrite,
+    };
+    valid_indirect[0].kernels[0].batch_implementations[0]
+        .stages
+        .insert(0, producer);
+    validate_component_executions("fixture", &valid_indirect).unwrap();
 }
 
 #[test]

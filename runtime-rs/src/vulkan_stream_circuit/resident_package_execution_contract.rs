@@ -106,6 +106,9 @@ fn validate_component_executions(
                                 )
                                 && component_batch_stage_descriptor_contract_is_valid(stage)
                         })
+                        && component_batch_indirect_dispatch_contract_is_valid(
+                            &implementation.stages,
+                        )
                         && extensions.iter().all(|extension| !extension.is_empty())
                         && extensions.windows(2).all(|pair| pair[0] < pair[1])
                         && features.iter().collect::<BTreeSet<_>>().len() == features.len()
@@ -147,6 +150,24 @@ fn validate_component_executions(
     }
 
     Ok(())
+}
+
+fn component_batch_indirect_dispatch_contract_is_valid(
+    stages: &[VulkanResidentComponentBatchStageSpec],
+) -> bool {
+    let mut writable_payloads = BTreeSet::new();
+    for stage in stages {
+        let (_, _, payload) = stage.control.storage_buffer();
+        if stage.indirect_dispatch_byte_offset.is_some()
+            && !writable_payloads.contains(&payload)
+        {
+            return false;
+        }
+        if stage.control.access() == VulkanResidentComponentBatchControlAccess::ReadWrite {
+            writable_payloads.insert(payload);
+        }
+    }
+    true
 }
 
 fn validate_generation_execution_contract(
