@@ -18,6 +18,7 @@ pub struct VulkanDeviceFaultAddressReport {
     pub address_type: i32,
     pub reported_address: u64,
     pub address_precision: u64,
+    pub resolved_address: Option<u64>,
     pub allocation: Option<String>,
     pub allocation_byte_offset: Option<usize>,
     pub allocation_byte_capacity: Option<usize>,
@@ -132,6 +133,38 @@ impl VulkanDeviceAddressRegistry {
             byte_offset,
             byte_capacity: range.byte_capacity,
         })
+    }
+
+    fn resolve_reported_fault_address(
+        &self,
+        reported_address: vk::DeviceAddress,
+    ) -> Option<(vk::DeviceAddress, VulkanResolvedDeviceAddress)> {
+        if let Some(resolved) = self.resolve(reported_address) {
+            return Some((reported_address, resolved));
+        }
+
+        let mut match_found = None;
+        for address_bit_count in 32..64 {
+            let low_mask = (1u64 << address_bit_count) - 1;
+            let high_mask = !low_mask;
+            if reported_address & high_mask != high_mask {
+                continue;
+            }
+            let canonical_address = reported_address & low_mask;
+            let Some(resolved) = self.resolve(canonical_address) else {
+                continue;
+            };
+            match &match_found {
+                Some((existing_address, existing))
+                    if *existing_address != canonical_address || *existing != resolved =>
+                {
+                    return None;
+                }
+                Some(_) => {}
+                None => match_found = Some((canonical_address, resolved)),
+            }
+        }
+        match_found
     }
 }
 
@@ -309,14 +342,17 @@ fn query_vulkan_device_fault(
     let addresses = addresses
         .into_iter()
         .map(|address| {
-            let resolved = registry.resolve(address.reported_address);
+            let resolved = registry.resolve_reported_fault_address(address.reported_address);
             VulkanDeviceFaultAddressReport {
                 address_type: address.address_type.as_raw(),
                 reported_address: address.reported_address,
                 address_precision: address.address_precision,
-                allocation: resolved.as_ref().map(|range| range.label.clone()),
-                allocation_byte_offset: resolved.as_ref().map(|range| range.byte_offset),
-                allocation_byte_capacity: resolved.map(|range| range.byte_capacity),
+                resolved_address: resolved.as_ref().map(|(address, _)| *address),
+                allocation: resolved.as_ref().map(|(_, range)| range.label.clone()),
+                allocation_byte_offset: resolved
+                    .as_ref()
+                    .map(|(_, range)| range.byte_offset),
+                allocation_byte_capacity: resolved.map(|(_, range)| range.byte_capacity),
             }
         })
         .collect();

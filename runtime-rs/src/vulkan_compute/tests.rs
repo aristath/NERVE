@@ -2209,6 +2209,35 @@ fn device_fault_address_registry_rejects_overlap_and_resolves_boundaries() {
 }
 
 #[test]
+fn device_fault_address_registry_resolves_sign_extended_device_addresses() {
+    let mut registry = VulkanDeviceAddressRegistry::default();
+    registry
+        .register(
+            7,
+            0x8000_c74c_0000,
+            0x10_0000,
+            "addressable allocation",
+        )
+        .unwrap();
+    registry
+        .register_annotation(
+            70,
+            0x8000_c74c_6000,
+            0x20_000,
+            "stable resource slot=17",
+        )
+        .unwrap();
+
+    let (canonical, resolved) = registry
+        .resolve_reported_fault_address(0xffff_8000_c74c_7000)
+        .unwrap();
+    assert_eq!(canonical, 0x8000_c74c_7000);
+    assert_eq!(resolved.label, "stable resource slot=17");
+    assert_eq!(resolved.byte_offset, 0x1000);
+    assert_eq!(resolved.byte_capacity, 0x20_000);
+}
+
+#[test]
 fn device_fault_error_context_is_shared_by_detached_queue_objects() {
     let registry = Arc::new(Mutex::new(VulkanDeviceAddressRegistry::default()));
 
