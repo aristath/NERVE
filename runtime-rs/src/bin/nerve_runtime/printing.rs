@@ -494,7 +494,7 @@ Options:
                              Keep the contiguous proposed prefix whose compiled confidence is at
                              least this probability. Default: 0 (target verifies every proposal).
   --residency-policy <POLICY>
-                             Parameter residency: eager or demand-retained. Default: eager.
+                             Parameter residency: eager, demand-retained, or demand-paged. Default: eager.
   --context-size <N>         Runtime transient-state window. Default: auto, up to the model maximum.
   --vulkan-device-index <N>  Use Vulkan physical device index N as the default local target.
   --seed <U32>               Explicit sampler randomness seed. Default: 0

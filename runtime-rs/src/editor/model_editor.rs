@@ -98,6 +98,29 @@ impl RuntimeModelEditor {
         &self.manifest.resource_residency.supported_policies
     }
 
+    pub fn supports_runtime_resource_residency_policy(
+        &self,
+        policy: ResourceResidencyPolicy,
+    ) -> bool {
+        self.manifest
+            .resource_residency
+            .supported_policies
+            .contains(&policy.required_compiled_loading_policy())
+    }
+
+    pub fn available_runtime_resource_residency_policies(
+        &self,
+    ) -> Vec<ResourceResidencyPolicy> {
+        [
+            ResourceResidencyPolicy::Eager,
+            ResourceResidencyPolicy::DemandRetained,
+            ResourceResidencyPolicy::DemandPaged,
+        ]
+        .into_iter()
+        .filter(|policy| self.supports_runtime_resource_residency_policy(*policy))
+        .collect()
+    }
+
     pub fn source_components(&self) -> &[RuntimeEditorSourceComponent] {
         &self.source_components
     }

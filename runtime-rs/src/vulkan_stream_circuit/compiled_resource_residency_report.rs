@@ -146,6 +146,7 @@ struct VulkanCompiledResourceStoreInstrumentation {
     uploaded_bytes: std::sync::atomic::AtomicU64,
     upload_time_ns: std::sync::atomic::AtomicU64,
     blocking_time_ns: std::sync::atomic::AtomicU64,
+    released_device_bytes: std::sync::atomic::AtomicU64,
     retiering_event_count: std::sync::atomic::AtomicU64,
     retiering_promoted_group_count: std::sync::atomic::AtomicU64,
     retiering_promoted_payload_bytes: std::sync::atomic::AtomicU64,
@@ -207,6 +208,13 @@ impl VulkanCompiledResourceStoreInstrumentation {
     fn record_blocking_time(&self, blocking_time_ns: u64) {
         self.blocking_time_ns.fetch_add(
             blocking_time_ns,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn record_released_device_bytes(&self, released_device_bytes: usize) {
+        self.released_device_bytes.fetch_add(
+            u64::try_from(released_device_bytes).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
     }

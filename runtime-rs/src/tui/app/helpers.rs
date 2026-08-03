@@ -477,6 +477,12 @@ mod tests {
         app.dispatch(AppAction::ToggleResourceResidencyPolicy);
         assert_eq!(
             app.resource_residency_policy(),
+            ResourceResidencyPolicy::DemandPaged
+        );
+        assert!(app.status.contains("demand-paged"));
+        app.dispatch(AppAction::ToggleResourceResidencyPolicy);
+        assert_eq!(
+            app.resource_residency_policy(),
             ResourceResidencyPolicy::Eager
         );
     }

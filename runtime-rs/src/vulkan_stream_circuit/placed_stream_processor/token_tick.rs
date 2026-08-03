@@ -270,9 +270,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         VulkanResidentInProcessPlacedRuntimeError,
     > {
         let mut tick_slices = self.prepared_token_tick_slices_for_device(device, stream_tick, tail);
-        if self.model.resource_residency_policy
-            == ResourceResidencyPolicy::DemandRetained
-        {
+        if self.model.resource_residency_policy.is_demand_loaded() {
             run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_distributed(
                 &mut tick_slices,
                 transport,
@@ -357,9 +355,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 device_id: self.model.output_device_id.clone(),
             }
         })?;
-        if self.model.resource_residency_policy
-            == ResourceResidencyPolicy::DemandRetained
-        {
+        if self.model.resource_residency_policy.is_demand_loaded() {
             run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_distributed(
                 &mut tick_slices,
                 transport,

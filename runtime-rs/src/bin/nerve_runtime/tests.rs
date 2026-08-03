@@ -69,6 +69,16 @@ mod tests {
             demand.resource_residency_policy,
             ResourceResidencyPolicy::DemandRetained
         );
+        let paged = parse_args_from(
+            ["--residency-policy", "demand-paged"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(
+            paged.resource_residency_policy,
+            ResourceResidencyPolicy::DemandPaged
+        );
 
         let eager = parse_args_from(std::iter::empty()).unwrap();
         assert_eq!(
@@ -84,7 +94,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "invalid --residency-policy \"automatic\"; expected eager or demand-retained"
+            "invalid --residency-policy \"automatic\"; expected eager, demand-retained, or demand-paged"
         );
     }
 

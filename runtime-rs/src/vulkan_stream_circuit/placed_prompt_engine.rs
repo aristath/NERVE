@@ -805,8 +805,11 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             .ok_or_else(|| VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
                 stream_id: stream_ids[0].clone(),
             })?;
-        if first_stream.processor.model.resource_residency_policy
-            == ResourceResidencyPolicy::DemandRetained
+        if first_stream
+            .processor
+            .model
+            .resource_residency_policy
+            .is_demand_loaded()
         {
             return Ok(None);
         }

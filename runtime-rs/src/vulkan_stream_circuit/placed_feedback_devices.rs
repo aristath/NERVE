@@ -530,7 +530,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         F: Fn(&str) -> Result<&'a VulkanComputeDevice, E>,
         E: Display,
     {
-        if model.resource_residency_policy == ResourceResidencyPolicy::DemandRetained {
+        if model.resource_residency_policy.is_demand_loaded() {
             return Ok(None);
         }
         let VulkanResidentPlacedFeedbackMount {

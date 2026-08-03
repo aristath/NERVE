@@ -234,10 +234,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--residency-policy",
-        choices=("eager", "demand-retained"),
+        choices=("eager", "demand-retained", "demand-paged"),
         default="eager",
         help=(
-            "compiled resource residency: eager or demand-retained "
+            "compiled resource residency: eager, demand-retained, or demand-paged "
             "(default: eager)"
         ),
     )

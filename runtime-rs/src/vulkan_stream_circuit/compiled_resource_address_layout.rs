@@ -209,6 +209,11 @@ impl VulkanCompiledResourceAddressLayout {
     pub fn from_contract(
         contract: &CompiledResourceResidencyContract,
     ) -> Result<Self, VulkanCompiledResourceAddressLayoutError> {
+        let contract_index = CompiledResourceContractIndex::new(contract).map_err(|error| {
+            VulkanCompiledResourceAddressLayoutError(format!(
+                "compiled resource contract index is invalid: {error}"
+            ))
+        })?;
         let mut concrete_slots = BTreeMap::new();
         let mut slot_count = 0usize;
         for resource in contract.resources.iter().filter(|resource| {
@@ -261,10 +266,8 @@ impl VulkanCompiledResourceAddressLayout {
                         Vec::with_capacity(atomic_group_ids.len() + 1);
                     resource_address_slot_offsets.push(0);
                     for group_id in atomic_group_ids {
-                        let group = contract
-                            .atomic_groups
-                            .iter()
-                            .find(|group| group.id == *group_id)
+                        let group = contract_index
+                            .atomic_group(contract, group_id)
                             .ok_or_else(|| {
                                 VulkanCompiledResourceAddressLayoutError(
                                     format!(
@@ -301,10 +304,8 @@ impl VulkanCompiledResourceAddressLayout {
                 CompiledResourceSelectorMapping::PartitionTemplate {
                     partition_template_id,
                 } => {
-                    let template = contract
-                        .partition_templates
-                        .iter()
-                        .find(|template| template.id == *partition_template_id)
+                    let template = contract_index
+                        .partition_template(contract, partition_template_id)
                         .ok_or_else(|| {
                             VulkanCompiledResourceAddressLayoutError(format!(
                                 "selector {:?} maps missing partition template {partition_template_id:?}",

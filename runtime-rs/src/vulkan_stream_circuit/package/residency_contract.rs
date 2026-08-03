@@ -25,6 +25,7 @@ pub struct CompiledResourceResidencyContract {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceResidencyPolicy {
+    DemandPaged,
     DemandRetained,
     Eager,
 }
@@ -32,8 +33,24 @@ pub enum ResourceResidencyPolicy {
 impl ResourceResidencyPolicy {
     pub fn as_runtime_name(self) -> &'static str {
         match self {
+            Self::DemandPaged => "demand-paged",
             Self::DemandRetained => "demand-retained",
             Self::Eager => "eager",
+        }
+    }
+
+    pub fn is_demand_loaded(self) -> bool {
+        matches!(self, Self::DemandPaged | Self::DemandRetained)
+    }
+
+    pub fn evicts_inactive_resources(self) -> bool {
+        self == Self::DemandPaged
+    }
+
+    pub(crate) fn required_compiled_loading_policy(self) -> Self {
+        match self {
+            Self::DemandPaged => Self::DemandRetained,
+            policy => policy,
         }
     }
 }
@@ -762,6 +779,7 @@ fn validate_compiled_resource_residency(
     {
         return invalid_residency("compiled resource residency header is invalid");
     }
+    let contract_index = CompiledResourceContractIndex::new(contract)?;
 
     let mut resource_ids = BTreeSet::new();
     let mut artifact_ranges: BTreeMap<&str, Vec<(usize, usize, &str)>> =
@@ -886,10 +904,8 @@ fn validate_compiled_resource_residency(
             &group.dependencies,
         )?;
         for resource_id in &group.resource_ids {
-            let resource = contract
-                .resources
-                .iter()
-                .find(|resource| resource.id == *resource_id)
+            let resource = contract_index
+                .resource(contract, resource_id)
                 .ok_or_else(|| {
                     invalid_residency_error(
                         "compiled atomic group references an unknown resource",
@@ -946,8 +962,13 @@ fn validate_compiled_resource_residency(
     }
     validate_compiled_partition_storage(package_root, contract)?;
 
-    validate_bindings_against_package(manifest, &group_ids, &template_ids)?;
-    validate_selectors_and_checkpoints(manifest, &template_ids)
+    validate_bindings_against_package(
+        manifest,
+        &contract_index,
+        &group_ids,
+        &template_ids,
+    )?;
+    validate_selectors_and_checkpoints(manifest, &contract_index, &template_ids)
 }
 
 fn validate_resource_compatibility(
@@ -1103,6 +1124,7 @@ fn validate_partition_template(
 
 fn validate_bindings_against_package(
     manifest: &VulkanResidentModelPackageManifest,
+    contract_index: &CompiledResourceContractIndex,
     group_ids: &BTreeSet<&str>,
     template_ids: &BTreeSet<&str>,
 ) -> io::Result<()> {
@@ -1121,11 +1143,8 @@ fn validate_bindings_against_package(
                 atomic_group_id,
                 resource_id,
             } => {
-                let group = manifest
-                    .resource_residency
-                    .atomic_groups
-                    .iter()
-                    .find(|group| group.id == *atomic_group_id);
+                let group = contract_index
+                    .atomic_group(&manifest.resource_residency, atomic_group_id);
                 if !group_ids.contains(atomic_group_id.as_str())
                     || group.is_none_or(|group| {
                         !group.resource_ids.contains(resource_id)
@@ -1145,11 +1164,8 @@ fn validate_bindings_against_package(
                 selector_index,
                 parameter_slot,
             } => {
-                let group = manifest
-                    .resource_residency
-                    .atomic_groups
-                    .iter()
-                    .find(|group| group.id == *atomic_group_id);
+                let group = contract_index
+                    .atomic_group(&manifest.resource_residency, atomic_group_id);
                 if !group_ids.contains(atomic_group_id.as_str())
                     || group.is_none_or(|group| {
                         group.lifetime != CompiledResourceLifetime::Dynamic
@@ -1191,11 +1207,8 @@ fn validate_bindings_against_package(
                     "resource binding partition resource seed",
                     resource_identity_seed,
                 )?;
-                let template = manifest
-                    .resource_residency
-                    .partition_templates
-                    .iter()
-                    .find(|template| template.id == *partition_template_id);
+                let template = contract_index
+                    .partition_template(&manifest.resource_residency, partition_template_id);
                 if !template_ids.contains(partition_template_id.as_str())
                     || template.is_none_or(|template| {
                         !template.member_templates.iter().any(|member| {
@@ -1393,6 +1406,7 @@ fn collect_graph_parameter_semantics(
 
 fn validate_selectors_and_checkpoints(
     manifest: &VulkanResidentModelPackageManifest,
+    contract_index: &CompiledResourceContractIndex,
     template_ids: &BTreeSet<&str>,
 ) -> io::Result<()> {
     let contract = &manifest.resource_residency;
@@ -1496,10 +1510,8 @@ fn validate_selectors_and_checkpoints(
                     );
                 }
                 for group_id in atomic_group_ids {
-                    let group = contract
-                        .atomic_groups
-                        .iter()
-                        .find(|group| group.id == *group_id)
+                    let group = contract_index
+                        .atomic_group(contract, group_id)
                         .ok_or_else(|| {
                             invalid_residency_error(
                                 "selector maps an unknown atomic group",
@@ -1516,10 +1528,8 @@ fn validate_selectors_and_checkpoints(
             CompiledResourceSelectorMapping::PartitionTemplate {
                 partition_template_id,
             } => {
-                let template = contract
-                    .partition_templates
-                    .iter()
-                    .find(|template| template.id == *partition_template_id)
+                let template = contract_index
+                    .partition_template(contract, partition_template_id)
                     .ok_or_else(|| {
                         invalid_residency_error(
                             "selector maps an unknown partition template",
@@ -1608,10 +1618,8 @@ fn validate_selectors_and_checkpoints(
             &checkpoint.selector_ids,
         )?;
         for selector_id in &checkpoint.selector_ids {
-            let selector = contract
-                .selectors
-                .iter()
-                .find(|selector| selector.id == *selector_id)
+            let selector = contract_index
+                .selector(contract, selector_id)
                 .ok_or_else(|| {
                     invalid_residency_error(
                         "checkpoint references an unknown selector",
@@ -1849,6 +1857,8 @@ mod shared_template_tests {
         manifest.resource_residency.checkpoints = checkpoints;
 
         let template_ids = BTreeSet::from([template_id.as_str()]);
-        validate_selectors_and_checkpoints(&manifest, &template_ids).unwrap();
+        let contract_index =
+            CompiledResourceContractIndex::new(&manifest.resource_residency).unwrap();
+        validate_selectors_and_checkpoints(&manifest, &contract_index, &template_ids).unwrap();
     }
 }

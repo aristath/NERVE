@@ -579,12 +579,12 @@ impl App {
     }
 
     pub(crate) fn install_editor(&mut self, editor: RuntimeModelEditor) {
-        if !editor
-            .supported_resource_residency_policies()
-            .contains(&self.resource_residency_policy)
+        if !editor.supports_runtime_resource_residency_policy(
+            self.resource_residency_policy,
+        )
         {
             self.resource_residency_policy = editor
-                .supported_resource_residency_policies()
+                .available_runtime_resource_residency_policies()
                 .first()
                 .copied()
                 .unwrap_or(ResourceResidencyPolicy::Eager);

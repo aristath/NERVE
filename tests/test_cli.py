@@ -273,6 +273,17 @@ class RuntimeCliCommandTest(unittest.TestCase):
             [command[index : index + 2] for index in range(len(command) - 1)],
         )
 
+    def test_build_runtime_command_forwards_paged_resource_residency_policy(self) -> None:
+        package = Path("compiled_models/model_x/vulkan_resident_package.json")
+        args = runtime_args(prompt="Hello", residency_policy="demand-paged")
+
+        command = build_runtime_command(args, package)
+
+        self.assertIn(
+            ["--residency-policy", "demand-paged"],
+            [command[index : index + 2] for index in range(len(command) - 1)],
+        )
+
     def test_build_runtime_command_can_inspect_device_slice_without_prompt(
         self,
     ) -> None:

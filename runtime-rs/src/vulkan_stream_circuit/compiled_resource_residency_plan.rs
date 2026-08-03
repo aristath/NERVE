@@ -110,17 +110,17 @@ fn plan_compiled_parameter_residency(
     BTreeMap<String, VulkanRuntimeParameterResidencyBytes>,
     VulkanRuntimeResidencyPlanError,
 > {
-    if !contract.supported_policies.contains(&policy) {
+    if !contract
+        .supported_policies
+        .contains(&policy.required_compiled_loading_policy())
+    {
         return Err(VulkanRuntimeResidencyPlanError(format!(
             "compiled package does not support {policy:?} residency"
         )));
     }
 
-    let groups = contract
-        .atomic_groups
-        .iter()
-        .map(|group| (group.id.as_str(), group))
-        .collect::<BTreeMap<_, _>>();
+    let contract_index = CompiledResourceContractIndex::new(contract)
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let mut selected = owner_device_ids
         .iter()
         .map(|device_id| (device_id.clone(), DeviceResourceSelection::default()))
@@ -142,13 +142,13 @@ fn plan_compiled_parameter_residency(
                 "resource binding resolved to non-owner device {device_id:?}"
             ))
         })?;
-        accumulate_compiled_resource_binding(device, binding, &groups)?;
+        accumulate_compiled_resource_binding(device, binding, contract, &contract_index)?;
     }
 
     selected
         .into_iter()
         .map(|(device_id, selection)| {
-            compiled_parameter_residency_bytes(contract, &selection, policy)
+            compiled_parameter_residency_bytes(contract, &contract_index, &selection, policy)
                 .map(|bytes| (device_id, bytes))
         })
         .collect()
@@ -163,11 +163,8 @@ fn plan_compiled_parameter_residency_for_device_set(
     mount_speculative_decoders: bool,
     policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeParameterResidencyBytes, VulkanRuntimeResidencyPlanError> {
-    let groups = contract
-        .atomic_groups
-        .iter()
-        .map(|group| (group.id.as_str(), group))
-        .collect::<BTreeMap<_, _>>();
+    let contract_index = CompiledResourceContractIndex::new(contract)
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let mut selected = DeviceResourceSelection::default();
     for binding in &contract.bindings {
         let Some(device_id) = resource_binding_device(
@@ -186,10 +183,11 @@ fn plan_compiled_parameter_residency_for_device_set(
         accumulate_compiled_resource_binding(
             &mut selected,
             binding,
-            &groups,
+            contract,
+            &contract_index,
         )?;
     }
-    compiled_parameter_residency_bytes(contract, &selected, policy)
+    compiled_parameter_residency_bytes(contract, &contract_index, &selected, policy)
 }
 
 fn compiled_resource_selector_ids_for_device_set(
@@ -223,14 +221,15 @@ fn compiled_resource_selector_ids_for_device_set(
 fn accumulate_compiled_resource_binding(
     selection: &mut DeviceResourceSelection,
     binding: &CompiledResourceBinding,
-    groups: &BTreeMap<&str, &CompiledAtomicResidencyGroup>,
+    contract: &CompiledResourceResidencyContract,
+    contract_index: &CompiledResourceContractIndex,
 ) -> Result<(), VulkanRuntimeResidencyPlanError> {
     match &binding.mapping {
         CompiledResourceBindingMapping::AtomicGroup {
             atomic_group_id,
             resource_id,
         } => {
-            let group = groups.get(atomic_group_id.as_str()).ok_or_else(|| {
+            let group = contract_index.atomic_group(contract, atomic_group_id).ok_or_else(|| {
                 VulkanRuntimeResidencyPlanError(format!(
                     "resource binding references unknown group {atomic_group_id:?}"
                 ))
@@ -247,7 +246,7 @@ fn accumulate_compiled_resource_binding(
             atomic_group_id,
             ..
         } => {
-            let group = groups.get(atomic_group_id.as_str()).ok_or_else(|| {
+            let group = contract_index.atomic_group(contract, atomic_group_id).ok_or_else(|| {
                 VulkanRuntimeResidencyPlanError(format!(
                     "selected resource binding references unknown group {atomic_group_id:?}"
                 ))
@@ -270,28 +269,13 @@ fn accumulate_compiled_resource_binding(
 
 fn compiled_parameter_residency_bytes(
     contract: &CompiledResourceResidencyContract,
+    contract_index: &CompiledResourceContractIndex,
     selection: &DeviceResourceSelection,
     policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeParameterResidencyBytes, VulkanRuntimeResidencyPlanError> {
-    let resources = contract
-        .resources
-        .iter()
-        .map(|resource| (resource.id.as_str(), resource))
-        .collect::<BTreeMap<_, _>>();
-    let groups = contract
-        .atomic_groups
-        .iter()
-        .map(|group| (group.id.as_str(), group))
-        .collect::<BTreeMap<_, _>>();
-    let templates = contract
-        .partition_templates
-        .iter()
-        .map(|template| (template.id.as_str(), template))
-        .collect::<BTreeMap<_, _>>();
-
     let mut always_resident_bytes = 0usize;
     for resource_id in &selection.concrete_always {
-        let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
+        let resource = contract_index.resource(contract, resource_id).ok_or_else(|| {
             VulkanRuntimeResidencyPlanError(format!(
                 "residency plan references unknown resource {resource_id:?}"
             ))
@@ -307,7 +291,7 @@ fn compiled_parameter_residency_bytes(
     let mut staging_headroom_bytes = 0usize;
     let mut staged_concrete_groups = BTreeSet::new();
     for resource_id in &selection.concrete_dynamic {
-        let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
+        let resource = contract_index.resource(contract, resource_id).ok_or_else(|| {
             VulkanRuntimeResidencyPlanError(format!(
                 "residency plan references unknown dynamic resource {resource_id:?}"
             ))
@@ -317,24 +301,25 @@ fn compiled_parameter_residency_bytes(
             compiled_resource_bytes(resource)?,
             "maximum dynamic parameter bytes",
         )?;
-        for group in contract.atomic_groups.iter().filter(|group| {
-            group.lifetime == CompiledResourceLifetime::Dynamic
-                && group.resource_ids.contains(resource_id)
-        }) {
-            staged_concrete_groups.insert(group.id.as_str());
+        for group_index in contract_index.atomic_group_indices_for_resource(resource_id) {
+            let group = &contract.atomic_groups[*group_index];
+            if group.lifetime == CompiledResourceLifetime::Dynamic {
+                staged_concrete_groups.insert(group.id.as_str());
+            }
         }
     }
     for group_id in staged_concrete_groups {
-        let group = groups
-            .get(group_id)
+        let group = contract_index
+            .atomic_group(contract, group_id)
             .expect("selected group was indexed above");
         let group_bytes =
             group
                 .resource_ids
                 .iter()
                 .try_fold(0usize, |total, resource_id| {
-                    let resource =
-                        resources.get(resource_id.as_str()).ok_or_else(|| {
+                    let resource = contract_index
+                        .resource(contract, resource_id)
+                        .ok_or_else(|| {
                             VulkanRuntimeResidencyPlanError(format!(
                                 "dynamic group references unknown resource {resource_id:?}"
                             ))
@@ -350,7 +335,7 @@ fn compiled_parameter_residency_bytes(
 
     let mut dynamic_members = BTreeMap::<String, (usize, usize)>::new();
     for template_id in &selection.partition_templates {
-        let template = templates.get(template_id.as_str()).ok_or_else(|| {
+        let template = contract_index.partition_template(contract, template_id).ok_or_else(|| {
             VulkanRuntimeResidencyPlanError(format!(
                 "residency plan references unknown partition template {template_id:?}"
             ))
@@ -403,7 +388,7 @@ fn compiled_parameter_residency_bytes(
     }
 
     let initial_dynamic_bytes = match policy {
-        ResourceResidencyPolicy::DemandRetained => 0,
+        ResourceResidencyPolicy::DemandPaged | ResourceResidencyPolicy::DemandRetained => 0,
         ResourceResidencyPolicy::Eager => maximum_dynamic_bytes,
     };
     let current_resident_bytes = checked_residency_add(

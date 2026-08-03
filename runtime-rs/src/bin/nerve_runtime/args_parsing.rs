@@ -134,10 +134,11 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
                 parsed.resource_residency_policy =
                     match next_value(&mut raw, "--residency-policy")?.as_str() {
                         "eager" => ResourceResidencyPolicy::Eager,
+                        "demand-paged" => ResourceResidencyPolicy::DemandPaged,
                         "demand-retained" => ResourceResidencyPolicy::DemandRetained,
                         value => {
                             return Err(format!(
-                                "invalid --residency-policy {value:?}; expected eager or demand-retained"
+                                "invalid --residency-policy {value:?}; expected eager, demand-retained, or demand-paged"
                             ));
                         }
                     };

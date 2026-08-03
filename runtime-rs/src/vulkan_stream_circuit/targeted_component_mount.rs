@@ -166,6 +166,7 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
         let store = Arc::new(
             VulkanCompiledResourceDeviceStore::new(
                 device,
+                ResourceResidencyPolicy::DemandRetained,
                 store_id.clone(),
                 device.physical_device_id(),
                 vec![device_id.to_string()],

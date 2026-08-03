@@ -204,7 +204,7 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
         };
 
         let demand_residency_context =
-            if context.resource_residency_policy == ResourceResidencyPolicy::DemandRetained {
+            if context.resource_residency_policy.is_demand_loaded() {
                 let store = context
                     .compiled_resource_device_stores
                     .get(device_id)

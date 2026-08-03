@@ -257,6 +257,20 @@ fn runtime_resource_contract_instantiates_duplicates_without_copying_resources()
         device.parameter_residency.initial_dynamic_bytes == 0
             && device.parameter_residency.maximum_addressable_bytes > 0
     }));
+    let paged = plan_vulkan_runtime_residency(
+        &package_root,
+        &runtime_model,
+        &tensor_index,
+        16,
+        false,
+        ResourceResidencyPolicy::DemandPaged,
+    )
+    .expect("runtime paging must reuse the package demand-loading contract");
+    assert_eq!(
+        paged.residency_policy,
+        ResourceResidencyPolicy::DemandPaged
+    );
+    assert_eq!(paged.device_plans, plan.device_plans);
 }
 
 #[test]

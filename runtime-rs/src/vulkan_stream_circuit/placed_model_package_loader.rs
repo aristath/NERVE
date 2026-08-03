@@ -743,6 +743,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             let store = Arc::new(
                 VulkanCompiledResourceDeviceStore::new_tiered(
                     physical_device,
+                    resource_residency_policy,
                     store_id.clone(),
                     physical_device_id.clone(),
                     logical_device_ids.iter().cloned().collect(),
@@ -1241,8 +1242,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .filter(|group| group.owner_device_id == package_slice.device_id)
                 .map(|group| group.dispatch_indices())
                 .collect::<Vec<_>>();
-            let demand_context = if self.resource_residency_policy
-                == ResourceResidencyPolicy::DemandRetained
+            let demand_context = if self.resource_residency_policy.is_demand_loaded()
                 && !package_slice
                     .physical_residency_schedule()
                     .checkpoints

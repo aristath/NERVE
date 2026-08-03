@@ -102,6 +102,123 @@ fn tiered_host_memory_budget_rejects_missing_or_inconsistent_kernel_data() {
 }
 
 #[test]
+fn paged_eviction_reclaims_complete_unprotected_allocation_cohorts() {
+    let cohort = |chunk_id| VulkanCompiledResourceAllocationCohort {
+        tier: VulkanCompiledResourceMemoryTier::Device,
+        chunk_id,
+    };
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "old-protected-sibling".to_string(),
+            byte_count: 40,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "next-a".to_string(),
+            byte_count: 40,
+            last_access_epoch: 3,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "next-b".to_string(),
+            byte_count: 40,
+            last_access_epoch: 4,
+        },
+    ];
+    let group_chunks = BTreeMap::from([
+        (
+            "old-protected-sibling".to_string(),
+            BTreeSet::from([cohort(10)]),
+        ),
+        ("protected".to_string(), BTreeSet::from([cohort(10)])),
+        ("next-a".to_string(), BTreeSet::from([cohort(20)])),
+        ("next-b".to_string(), BTreeSet::from([cohort(20)])),
+    ]);
+    let chunk_groups = BTreeMap::from([
+        (
+            cohort(10),
+            BTreeSet::from(["old-protected-sibling".to_string(), "protected".to_string()]),
+        ),
+        (
+            cohort(20),
+            BTreeSet::from(["next-a".to_string(), "next-b".to_string()]),
+        ),
+    ]);
+
+    let selected = compiled_resource_lru_eviction_groups(
+        &candidates,
+        &group_chunks,
+        &chunk_groups,
+        &BTreeSet::from(["protected".to_string()]),
+        60,
+    )
+    .unwrap();
+
+    assert_eq!(
+        selected,
+        BTreeSet::from(["next-a".to_string(), "next-b".to_string()])
+    );
+}
+
+#[test]
+fn paged_eviction_reclaims_selector_overage_before_an_unrelated_working_set() {
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "under-budget-old".to_string(),
+            byte_count: 40,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "borrowed-newer".to_string(),
+            byte_count: 140,
+            last_access_epoch: 20,
+        },
+    ];
+    let directory = vec![
+        DeviceResourceResidencyDirectoryEntry {
+            group_id: "under-budget-old".to_string(),
+            state: ResourceResidencyState::Resident,
+            location: DeviceResourceResidencyLocation::Local {
+                device_id: "gpu0".to_string(),
+            },
+            byte_count: 40,
+            owner_count: 1,
+            active_lease_count: 0,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyDirectoryEntry {
+            group_id: "borrowed-newer".to_string(),
+            state: ResourceResidencyState::Resident,
+            location: DeviceResourceResidencyLocation::Local {
+                device_id: "gpu0".to_string(),
+            },
+            byte_count: 140,
+            owner_count: 1,
+            active_lease_count: 0,
+            last_access_epoch: 20,
+        },
+    ];
+    let group_selector_ids = BTreeMap::from([
+        ("under-budget-old".to_string(), "layer-a".to_string()),
+        ("borrowed-newer".to_string(), "layer-b".to_string()),
+    ]);
+    let selector_payload_budgets =
+        BTreeMap::from([("layer-a".to_string(), 100), ("layer-b".to_string(), 100)]);
+
+    let ordered = compiled_resource_selector_fair_eviction_candidates(
+        &candidates,
+        &directory,
+        &group_selector_ids,
+        &selector_payload_budgets,
+        "layer-a",
+        40,
+    )
+    .unwrap();
+
+    assert_eq!(ordered[0].group_id, "borrowed-newer");
+    assert_eq!(ordered[1].group_id, "under-budget-old");
+}
+
+#[test]
 fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let root = crate::test_support::TempDir::new("compiled_resource_device_store");
@@ -213,6 +330,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     let layout = Arc::new(VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap());
     let capacity_error = match VulkanCompiledResourceDeviceStore::new(
         &device,
+        ResourceResidencyPolicy::DemandRetained,
         "amd-test",
         device.physical_device_id(),
         vec!["gpu0".to_string()],
@@ -238,6 +356,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     );
     let over_capacity_store = VulkanCompiledResourceDeviceStore::new(
         &device,
+        ResourceResidencyPolicy::DemandRetained,
         "amd-over-capacity-test",
         device.physical_device_id(),
         vec!["gpu0".to_string()],
@@ -292,8 +411,90 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     );
     drop(over_capacity_store);
 
+    let paged_store = VulkanCompiledResourceDeviceStore::new(
+        &device,
+        ResourceResidencyPolicy::DemandPaged,
+        "amd-paged-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
+        root.path(),
+        Arc::clone(&contract),
+        Arc::clone(&layout),
+        BTreeSet::from([selector_id.clone()]),
+        8,
+        256 * 1024,
+        8,
+        1,
+        128,
+        64,
+        layout.address_table_byte_count().unwrap(),
+    )
+    .unwrap();
+    let paged_buffers = paged_store
+        .dynamic_buffers_for_components(
+            &device,
+            "target",
+            &BTreeSet::from(["component".to_string()]),
+        )
+        .unwrap();
+    paged_store.mark_mount_complete().unwrap();
+    let paged_owner = DeviceResourceResidencyOwnerId::new("paged-graph").unwrap();
+    let address_words = || {
+        paged_buffers
+            .address_table()
+            .read_bytes(layout.slot_count() * 32)
+            .unwrap()
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>()
+    };
+    let resource_slot = |resource_index| {
+        layout.selectors[0]
+            .mapping
+            .resource_slots(resource_index)
+            .unwrap()[0]
+    };
+    paged_store
+        .load_selector_resource(&device, &selector_id, 0, paged_owner.clone())
+        .unwrap();
+    let first_words = address_words();
+    assert_eq!(first_words[resource_slot(0) * 8 + 6], 1);
+    assert_eq!(first_words[resource_slot(1) * 8 + 6], 0);
+
+    paged_store
+        .load_selector_resource(&device, &selector_id, 1, paged_owner.clone())
+        .expect("bounded paging must evict an inactive cohort before admission");
+    let second_words = address_words();
+    assert_eq!(second_words[resource_slot(0) * 8 + 6], 0);
+    assert_eq!(second_words[resource_slot(1) * 8 + 6], 1);
+
+    paged_store
+        .load_selector_resource(&device, &selector_id, 0, paged_owner)
+        .expect("an evicted resource must reload into a valid stable slot");
+    let reloaded_words = address_words();
+    assert_eq!(reloaded_words[resource_slot(0) * 8 + 6], 1);
+    assert_eq!(reloaded_words[resource_slot(1) * 8 + 6], 0);
+    let paged = paged_store.residency_report().unwrap();
+    assert_eq!(paged.current_payload_bytes, 8);
+    assert_eq!(paged.resident_unit_count, 1);
+    assert_eq!(paged.eviction_count, 2);
+    assert_eq!(paged.evicted_unit_count, 2);
+    assert_eq!(paged.evicted_payload_bytes, 16);
+    assert!(paged.released_device_bytes >= 16);
+    assert_eq!(paged.reload_count, 1);
+    assert_eq!(
+        paged_store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 1,
+            byte_count: 8,
+            cancelled_load_count: 0,
+        }
+    );
+    drop(paged_store);
+
     let tiered_store = VulkanCompiledResourceDeviceStore::new_tiered(
         &device,
+        ResourceResidencyPolicy::DemandRetained,
         "amd-tiered-test",
         device.physical_device_id(),
         vec!["gpu0".to_string()],
@@ -556,6 +757,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
 
     let store = VulkanCompiledResourceDeviceStore::new(
         &device,
+        ResourceResidencyPolicy::DemandRetained,
         "amd-test",
         device.physical_device_id(),
         vec!["gpu0".to_string()],
@@ -741,6 +943,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     for cycle_index in 0..3 {
         let cycle_store = VulkanCompiledResourceDeviceStore::new(
             &device,
+            ResourceResidencyPolicy::DemandRetained,
             format!("amd-test-cycle-{cycle_index}"),
             device.physical_device_id(),
             vec!["gpu0".to_string()],
@@ -949,6 +1152,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
 
     let store = VulkanCompiledResourceDeviceStore::new(
         &device,
+        ResourceResidencyPolicy::DemandRetained,
         "amd-optional-head-test",
         device.physical_device_id(),
         vec!["gpu0".to_string()],

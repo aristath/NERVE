@@ -201,13 +201,15 @@ impl App {
                     .to_string();
             return;
         };
-        let supported =
-            editor.supported_resource_residency_policies();
+        let supported = editor.available_runtime_resource_residency_policies();
         let requested = match self.resource_residency_policy {
             ResourceResidencyPolicy::Eager => {
                 ResourceResidencyPolicy::DemandRetained
             }
             ResourceResidencyPolicy::DemandRetained => {
+                ResourceResidencyPolicy::DemandPaged
+            }
+            ResourceResidencyPolicy::DemandPaged => {
                 ResourceResidencyPolicy::Eager
             }
         };
