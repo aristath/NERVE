@@ -221,7 +221,7 @@ impl VulkanPlacedEdgeIoPlan {
             }
         }
 
-        let mut local_fanout_requirements =
+        let mut produced_port_requirements =
             BTreeMap::<(String, String), (usize, Option<Arc<VulkanResidentBuffer>>)>::new();
         for edge in &self.local_edges {
             let byte_capacity = edge.byte_capacity.ok_or_else(|| {
@@ -237,7 +237,7 @@ impl VulkanPlacedEdgeIoPlan {
             let edge_override = local_override_by_edge
                 .get(&edge.edge_index)
                 .map(|override_| Arc::clone(&override_.buffer));
-            match local_fanout_requirements.entry(key.clone()) {
+            match produced_port_requirements.entry(key.clone()) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert((byte_capacity, edge_override));
                 }
@@ -245,7 +245,7 @@ impl VulkanPlacedEdgeIoPlan {
                     let (group_capacity, group_override) = entry.get_mut();
                     if *group_capacity != byte_capacity {
                         return Err(VulkanError(format!(
-                            "local fan-out from {}.{} has incompatible edge capacities {} and {byte_capacity}",
+                            "produced port {}.{} has incompatible edge capacities {} and {byte_capacity}",
                             key.0, key.1, *group_capacity
                         )));
                     }
@@ -253,7 +253,7 @@ impl VulkanPlacedEdgeIoPlan {
                         if let Some(group_override) = group_override {
                             if !Arc::ptr_eq(group_override, &edge_override) {
                                 return Err(VulkanError(format!(
-                                    "local fan-out from {}.{} has incompatible physical buffer overrides",
+                                    "produced port {}.{} has incompatible physical buffer overrides",
                                     key.0, key.1
                                 )));
                             }
@@ -265,13 +265,59 @@ impl VulkanPlacedEdgeIoPlan {
             }
         }
 
-        let mut local_fanout_buffers = BTreeMap::new();
-        for (key, (byte_capacity, buffer_override)) in local_fanout_requirements {
+        for endpoint in self
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.direction == VulkanPlacedEdgeDirection::Outgoing)
+        {
+            let byte_capacity = endpoint.byte_capacity.ok_or_else(|| {
+                VulkanError(format!(
+                    "{} outgoing endpoint {} has unknown byte capacity",
+                    self.device_id, endpoint.endpoint_id
+                ))
+            })?;
+            let key = (
+                endpoint.local_component_id.clone(),
+                endpoint.local_port_id.clone(),
+            );
+            let endpoint_override = overrides
+                .get(&(VulkanPlacedEdgeDirection::Outgoing, endpoint.edge_index))
+                .map(|override_| Arc::clone(&override_.buffer));
+            match produced_port_requirements.entry(key.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((byte_capacity, endpoint_override));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (group_capacity, group_override) = entry.get_mut();
+                    if *group_capacity != byte_capacity {
+                        return Err(VulkanError(format!(
+                            "produced port {}.{} has incompatible edge capacities {} and {byte_capacity}",
+                            key.0, key.1, *group_capacity
+                        )));
+                    }
+                    if let Some(endpoint_override) = endpoint_override {
+                        if let Some(group_override) = group_override {
+                            if !Arc::ptr_eq(group_override, &endpoint_override) {
+                                return Err(VulkanError(format!(
+                                    "produced port {}.{} has incompatible physical buffer overrides",
+                                    key.0, key.1
+                                )));
+                            }
+                        } else {
+                            *group_override = Some(endpoint_override);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut produced_port_buffers = BTreeMap::new();
+        for (key, (byte_capacity, buffer_override)) in produced_port_requirements {
             let buffer = match buffer_override {
                 Some(buffer) => buffer,
                 None => Arc::new(device.create_resident_buffer(byte_capacity)?),
             };
-            local_fanout_buffers.insert(key, buffer);
+            produced_port_buffers.insert(key, buffer);
         }
 
         for edge in &self.local_edges {
@@ -290,12 +336,12 @@ impl VulkanPlacedEdgeIoPlan {
                 edge: edge.clone(),
                 byte_capacity,
                 buffer: Arc::clone(
-                    local_fanout_buffers
+                    produced_port_buffers
                         .get(&(
                             edge.source_component_id.clone(),
                             edge.source_port_id.clone(),
                         ))
-                        .expect("every local edge has a validated fan-out allocation"),
+                        .expect("every local edge has a validated produced-port allocation"),
                 ),
             });
         }
@@ -312,14 +358,27 @@ impl VulkanPlacedEdgeIoPlan {
                 byte_capacity,
                 "placed edge endpoint buffer allocation",
             )?;
-            let buffer = if let Some(endpoint_override) =
-                overrides.get(&(endpoint.direction, endpoint.edge_index))
-            {
-                endpoint_override.buffer.clone()
-            } else {
-                let mut buffer = device.create_host_visible_resident_buffer(byte_capacity)?;
-                buffer.persistently_map()?;
-                Arc::new(buffer)
+            let buffer = match endpoint.direction {
+                VulkanPlacedEdgeDirection::Outgoing => Arc::clone(
+                    produced_port_buffers
+                        .get(&(
+                            endpoint.local_component_id.clone(),
+                            endpoint.local_port_id.clone(),
+                        ))
+                        .expect("every outgoing endpoint has a validated produced-port allocation"),
+                ),
+                VulkanPlacedEdgeDirection::Incoming => {
+                    if let Some(endpoint_override) =
+                        overrides.get(&(endpoint.direction, endpoint.edge_index))
+                    {
+                        endpoint_override.buffer.clone()
+                    } else {
+                        let mut buffer =
+                            device.create_host_visible_resident_buffer(byte_capacity)?;
+                        buffer.persistently_map()?;
+                        Arc::new(buffer)
+                    }
+                }
             };
             let allocation = VulkanPlacedEdgeBufferAllocation {
                 endpoint: endpoint.clone(),

@@ -1193,7 +1193,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             ));
         }
-        let distributed_activation_buffers = VulkanDistributedActivationBuffers::allocate(
+        let mut distributed_activation_buffers = VulkanDistributedActivationBuffers::allocate(
             &self.distributed_activation_plan,
             |device_id| device_for(device_id),
         )
@@ -1205,13 +1205,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
             )
         })?;
         let VulkanPlacedDeviceLinks {
+            local_edge_overrides: shared_local_edge_overrides,
             endpoint_overrides: shared_edge_endpoint_overrides,
             synchronizations: edge_synchronizations,
             stream_control_buffers,
             every_edge_is_resident_replayable,
         } = create_placed_device_links(
             &self.device_slices,
-            &distributed_activation_buffers,
+            &mut distributed_activation_buffers,
             &device_for,
         )?;
         let mut devices = Vec::with_capacity(self.device_slices.len());
@@ -1219,11 +1220,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
             let device = device_for(&package_slice.device_id)?;
             let activation_overrides = distributed_activation_buffers
                 .activation_overrides_for_owner_device(&package_slice.device_id);
+            let shared_local_edge_ids = shared_local_edge_overrides
+                .get(&package_slice.device_id)
+                .into_iter()
+                .flat_map(|overrides| overrides.iter().map(|override_| override_.edge_index))
+                .collect::<BTreeSet<_>>();
             let local_edge_overrides = package_slice
                 .placed_plan
                 .placed_resident_plan
                 .local_edges
                 .iter()
+                .filter(|edge| !shared_local_edge_ids.contains(&edge.edge_index))
                 .filter_map(|edge| {
                     distributed_activation_buffers
                         .edge_buffer(edge.edge_index, &package_slice.device_id)
@@ -1232,6 +1239,16 @@ impl VulkanResidentInProcessPlacedModelPackage {
                             buffer: Arc::clone(buffer),
                         })
                 })
+                .chain(
+                    shared_local_edge_overrides
+                        .get(&package_slice.device_id)
+                        .into_iter()
+                        .flat_map(|overrides| overrides.iter())
+                        .map(|override_| VulkanPlacedLocalEdgeBufferOverride {
+                            edge_index: override_.edge_index,
+                            buffer: Arc::clone(&override_.buffer),
+                        }),
+                )
                 .collect::<Vec<_>>();
             let mounted = package_slice
                 .create_mounted_stream_circuit_with_all_buffer_overrides(

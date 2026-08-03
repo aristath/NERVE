@@ -90,13 +90,6 @@ impl VulkanMountedPlacedStreamTickDispatch {
                         byte_capacity: edge.byte_capacity,
                     });
                 }
-                VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => {
-                    writes.push(VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer {
-                        edge_index: edge.edge.edge_index,
-                        buffer_index: edge.buffer_index,
-                        byte_capacity: edge.byte_capacity,
-                    });
-                }
                 VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { endpoint } => {
                     reads.push(VulkanMountedPlacedStreamTickIo::IncomingEdgeBuffer {
                         edge_index: endpoint.endpoint.edge_index,
@@ -104,12 +97,21 @@ impl VulkanMountedPlacedStreamTickDispatch {
                         byte_capacity: endpoint.byte_capacity,
                     });
                 }
-                VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { endpoint } => {
-                    writes.push(VulkanMountedPlacedStreamTickIo::OutgoingEdgeBuffer {
-                        edge_index: endpoint.endpoint.edge_index,
-                        buffer_index: endpoint.buffer_index,
-                        byte_capacity: endpoint.byte_capacity,
-                    });
+                VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
+                    writes.extend(port.local_edges.iter().map(|edge| {
+                        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer {
+                            edge_index: edge.edge.edge_index,
+                            buffer_index: edge.buffer_index,
+                            byte_capacity: edge.byte_capacity,
+                        }
+                    }));
+                    writes.extend(port.outgoing_endpoints.iter().map(|endpoint| {
+                        VulkanMountedPlacedStreamTickIo::OutgoingEdgeBuffer {
+                            edge_index: endpoint.endpoint.edge_index,
+                            buffer_index: endpoint.buffer_index,
+                            byte_capacity: endpoint.byte_capacity,
+                        }
+                    }));
                 }
             }
         }

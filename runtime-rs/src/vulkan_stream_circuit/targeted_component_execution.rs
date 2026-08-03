@@ -242,9 +242,8 @@ fn targeted_signal_accepts_fixture_mutation(
             | VulkanMountedPlacedBoundDescriptorTarget::ModelInput { .. }
             | VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { .. }
             | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { .. }
-            | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { .. }
             | VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { .. }
-            | VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { .. }
+            | VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { .. }
     )
 }
 

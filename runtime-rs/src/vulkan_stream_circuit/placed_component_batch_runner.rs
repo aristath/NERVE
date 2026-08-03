@@ -821,8 +821,7 @@ fn component_batch_signal_target(
         VulkanMountedPlacedBoundDescriptorTarget::Resident { .. } => None,
         VulkanMountedPlacedBoundDescriptorTarget::ModelInput { .. }
         | VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { .. } => None,
-        VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge }
-        | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => Some((
+        VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge } => Some((
             produced_port_signal_key(
                 &edge.edge.source_component_id,
                 &edge.edge.source_port_id,
@@ -836,15 +835,55 @@ fn component_batch_signal_target(
             VulkanComponentBatchSignalKey::IncomingEdge(endpoint.endpoint.edge_index),
             endpoint.byte_capacity,
         )),
-        VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { endpoint } => Some((
-            produced_port_signal_key(
-                &endpoint.endpoint.local_component_id,
-                &endpoint.endpoint.local_port_id,
-            ),
-            endpoint.byte_capacity,
-        )),
+        VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
+            let (component_id, port_id) = port.source().ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "component batch encountered an empty produced port".to_string(),
+                ))
+            })?;
+            Some((
+                produced_port_signal_key(component_id, port_id),
+                component_batch_produced_port_frame_byte_capacity(port)?,
+            ))
+        }
     };
     Ok(target)
+}
+
+fn component_batch_produced_port_frame_byte_capacity(
+    port: &VulkanPlacedProducedPortBufferBinding,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+    let mut frame_capacities = port
+        .local_edges
+        .iter()
+        .map(|edge| {
+            component_batch_edge_frame_byte_capacity(
+                &edge.edge.connection,
+                edge.byte_capacity,
+            )
+        })
+        .chain(port.outgoing_endpoints.iter().map(|endpoint| {
+            component_batch_edge_frame_byte_capacity(
+                &endpoint.endpoint.connection,
+                endpoint.byte_capacity,
+            )
+        }));
+    let frame_byte_capacity = frame_capacities.next().ok_or_else(|| {
+        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+            "component batch encountered an empty produced port".to_string(),
+        ))
+    })??;
+    for candidate in frame_capacities {
+        if candidate? != frame_byte_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "component batch produced-port consumers require incompatible frame capacities"
+                        .to_string(),
+                ),
+            ));
+        }
+    }
+    Ok(frame_byte_capacity)
 }
 
 fn component_batch_edge_frame_byte_capacity(

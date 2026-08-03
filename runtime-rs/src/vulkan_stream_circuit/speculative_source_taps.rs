@@ -197,33 +197,13 @@ fn resolved_speculative_source_tap_buffer<'a>(
                 })?;
             (allocation.buffer.as_ref(), allocation.byte_capacity)
         }
-        VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => {
-            let allocation = slice
-                .mounted
-                .edge_io
-                .local_buffers
-                .get(edge.buffer_index)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                        "speculative source tap local edge {} is absent",
-                        edge.edge.edge_index
-                    )))
-                })?;
-            (allocation.buffer.as_ref(), edge.byte_capacity)
-        }
-        VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { endpoint } => {
-            let allocation = slice
-                .mounted
-                .edge_io
-                .outgoing_buffers
-                .get(endpoint.buffer_index)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                        "speculative source tap outgoing edge {} is absent",
-                        endpoint.endpoint.edge_index
-                    )))
-                })?;
-            (allocation.buffer.as_ref(), endpoint.byte_capacity)
+        VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
+            let allocation = port.buffer(&slice.mounted.edge_io).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative source tap produced port is absent".to_string(),
+                ))
+            })?;
+            (allocation.as_ref(), port.byte_capacity)
         }
         _ => {
             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(

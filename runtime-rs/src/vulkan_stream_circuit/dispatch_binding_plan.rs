@@ -330,15 +330,18 @@ impl VulkanPlacedBoundDispatchPlan {
                     | VulkanPlacedBoundDescriptorTarget::ModelOutput { .. } => {
                         model_boundary_descriptor_count += 1;
                     }
-                    VulkanPlacedBoundDescriptorTarget::LocalEdgeInput { .. }
-                    | VulkanPlacedBoundDescriptorTarget::LocalEdgeOutput { .. } => {
+                    VulkanPlacedBoundDescriptorTarget::LocalEdgeInput { .. } => {
                         local_edge_descriptor_count += 1;
                     }
                     VulkanPlacedBoundDescriptorTarget::IncomingEdge { .. } => {
                         incoming_edge_descriptor_count += 1;
                     }
-                    VulkanPlacedBoundDescriptorTarget::OutgoingEdge { .. } => {
-                        outgoing_edge_descriptor_count += 1;
+                    VulkanPlacedBoundDescriptorTarget::ProducedPort {
+                        ref local_edges,
+                        ref outgoing_edges,
+                    } => {
+                        local_edge_descriptor_count += usize::from(!local_edges.is_empty());
+                        outgoing_edge_descriptor_count += usize::from(!outgoing_edges.is_empty());
                     }
                 }
                 descriptors.push(VulkanPlacedBoundDescriptor {
@@ -367,11 +370,7 @@ impl VulkanPlacedBoundDispatchPlan {
             });
         }
 
-        let total_descriptor_count = resident_descriptor_count
-            + model_boundary_descriptor_count
-            + local_edge_descriptor_count
-            + incoming_edge_descriptor_count
-            + outgoing_edge_descriptor_count;
+        let total_descriptor_count = bound_plan.total_descriptor_count;
 
         Self {
             backend_id: bound_plan.backend_id.clone(),
@@ -441,17 +440,19 @@ impl VulkanMountedPlacedBoundDispatchPlan {
                     | VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { .. } => {
                         model_boundary_descriptor_count += 1;
                     }
-                    VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { .. }
-                    | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { .. } => {
+                    VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { .. } => {
                         local_edge_descriptor_count += 1;
                     }
                     VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { .. } => {
                         incoming_edge_descriptor_count += 1;
                         edge_endpoint_descriptor_count += 1;
                     }
-                    VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { .. } => {
-                        outgoing_edge_descriptor_count += 1;
-                        edge_endpoint_descriptor_count += 1;
+                    VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { ref port } => {
+                        local_edge_descriptor_count += usize::from(!port.local_edges.is_empty());
+                        outgoing_edge_descriptor_count +=
+                            usize::from(!port.outgoing_endpoints.is_empty());
+                        edge_endpoint_descriptor_count +=
+                            usize::from(!port.outgoing_endpoints.is_empty());
                     }
                 }
                 descriptors.push(VulkanMountedPlacedBoundDescriptor {
@@ -480,10 +481,7 @@ impl VulkanMountedPlacedBoundDispatchPlan {
             });
         }
 
-        let total_descriptor_count = resident_descriptor_count
-            + model_boundary_descriptor_count
-            + local_edge_descriptor_count
-            + edge_endpoint_descriptor_count;
+        let total_descriptor_count = placed_bound_plan.total_descriptor_count;
 
         Ok(Self {
             backend_id: placed_bound_plan.backend_id.clone(),
@@ -565,14 +563,11 @@ pub enum VulkanMountedPlacedBoundDescriptorTarget {
     LocalEdgeInputBuffer {
         edge: VulkanPlacedLocalEdgeBufferBinding,
     },
-    LocalEdgeOutputBuffer {
-        edge: VulkanPlacedLocalEdgeBufferBinding,
-    },
     IncomingEdgeBuffer {
         endpoint: VulkanPlacedEdgeEndpointBufferBinding,
     },
-    OutgoingEdgeBuffer {
-        endpoint: VulkanPlacedEdgeEndpointBufferBinding,
+    ProducedPortBuffer {
+        port: VulkanPlacedProducedPortBufferBinding,
     },
 }
 
@@ -602,16 +597,6 @@ impl VulkanMountedPlacedBoundDescriptorTarget {
                     )?,
                 })
             }
-            VulkanPlacedBoundDescriptorTarget::LocalEdgeOutput { edge } => {
-                Ok(Self::LocalEdgeOutputBuffer {
-                    edge: bind_local_edge_buffer(
-                        dispatch,
-                        descriptor,
-                        edge.edge_index,
-                        edge_io,
-                    )?,
-                })
-            }
             VulkanPlacedBoundDescriptorTarget::IncomingEdge { edge } => {
                 Ok(Self::IncomingEdgeBuffer {
                     endpoint: bind_edge_endpoint_buffer(
@@ -623,17 +608,18 @@ impl VulkanMountedPlacedBoundDescriptorTarget {
                     )?,
                 })
             }
-            VulkanPlacedBoundDescriptorTarget::OutgoingEdge { edge } => {
-                Ok(Self::OutgoingEdgeBuffer {
-                    endpoint: bind_edge_endpoint_buffer(
-                        dispatch,
-                        descriptor,
-                        VulkanPlacedEdgeDirection::Outgoing,
-                        edge.edge_index,
-                        edge_io,
-                    )?,
-                })
-            }
+            VulkanPlacedBoundDescriptorTarget::ProducedPort {
+                local_edges,
+                outgoing_edges,
+            } => Ok(Self::ProducedPortBuffer {
+                port: bind_produced_port_buffer(
+                    dispatch,
+                    descriptor,
+                    local_edges,
+                    outgoing_edges,
+                    edge_io,
+                )?,
+            }),
         }
     }
 }
@@ -774,6 +760,124 @@ pub struct VulkanPlacedEdgeEndpointBufferBinding {
     pub buffer_index: usize,
     pub endpoint: VulkanPlacedEdgeEndpoint,
     pub byte_capacity: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPlacedProducedPortBufferBinding {
+    pub local_edges: Vec<VulkanPlacedLocalEdgeBufferBinding>,
+    pub outgoing_endpoints: Vec<VulkanPlacedEdgeEndpointBufferBinding>,
+    pub byte_capacity: usize,
+}
+
+impl VulkanPlacedProducedPortBufferBinding {
+    fn buffer<'a>(
+        &self,
+        edge_io: &'a VulkanPlacedEdgeIoBuffers,
+    ) -> Option<&'a Arc<VulkanResidentBuffer>> {
+        self.local_edges
+            .first()
+            .and_then(|edge| edge_io.local_buffers.get(edge.buffer_index))
+            .map(|allocation| &allocation.buffer)
+            .or_else(|| {
+                self.outgoing_endpoints
+                    .first()
+                    .and_then(|endpoint| edge_io.outgoing_buffers.get(endpoint.buffer_index))
+                    .map(|allocation| &allocation.buffer)
+            })
+    }
+
+    fn source(&self) -> Option<(&str, &str)> {
+        self.local_edges
+            .first()
+            .map(|edge| {
+                (
+                    edge.edge.source_component_id.as_str(),
+                    edge.edge.source_port_id.as_str(),
+                )
+            })
+            .or_else(|| {
+                self.outgoing_endpoints.first().map(|endpoint| {
+                    (
+                        endpoint.endpoint.local_component_id.as_str(),
+                        endpoint.endpoint.local_port_id.as_str(),
+                    )
+                })
+            })
+    }
+}
+
+fn bind_produced_port_buffer(
+    dispatch: &VulkanPlacedBoundDispatch,
+    descriptor: &VulkanPlacedBoundDescriptor,
+    local_edges: &[ComponentEdgePlacement],
+    outgoing_edges: &[ComponentEdgePlacement],
+    edge_io: &VulkanPlacedEdgeIoBuffers,
+) -> Result<VulkanPlacedProducedPortBufferBinding, VulkanBoundDispatchPlanError> {
+    let local_edges = local_edges
+        .iter()
+        .map(|edge| bind_local_edge_buffer(dispatch, descriptor, edge.edge_index, edge_io))
+        .collect::<Result<Vec<_>, _>>()?;
+    let outgoing_endpoints = outgoing_edges
+        .iter()
+        .map(|edge| {
+            bind_edge_endpoint_buffer(
+                dispatch,
+                descriptor,
+                VulkanPlacedEdgeDirection::Outgoing,
+                edge.edge_index,
+                edge_io,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let byte_capacity = local_edges
+        .first()
+        .map(|edge| edge.byte_capacity)
+        .or_else(|| outgoing_endpoints.first().map(|endpoint| endpoint.byte_capacity))
+        .ok_or(VulkanBoundDispatchPlanError::EmptyProducedPort {
+            dispatch_index: dispatch.dispatch_index,
+            binding: descriptor.binding,
+        })?;
+    if local_edges
+        .iter()
+        .any(|edge| edge.byte_capacity != byte_capacity)
+        || outgoing_endpoints
+            .iter()
+            .any(|endpoint| endpoint.byte_capacity != byte_capacity)
+    {
+        return Err(VulkanBoundDispatchPlanError::ProducedPortByteCapacityMismatch {
+            dispatch_index: dispatch.dispatch_index,
+            binding: descriptor.binding,
+        });
+    }
+    let mut buffers = local_edges
+        .iter()
+        .map(|edge| {
+            &edge_io
+                .local_buffers
+                .get(edge.buffer_index)
+                .expect("bound local edge buffer remains mounted")
+                .buffer
+        })
+        .chain(outgoing_endpoints.iter().map(|endpoint| {
+            &edge_io
+                .outgoing_buffers
+                .get(endpoint.buffer_index)
+                .expect("bound outgoing edge buffer remains mounted")
+                .buffer
+        }));
+    if let Some(canonical) = buffers.next()
+        && buffers.any(|buffer| !Arc::ptr_eq(canonical, buffer))
+    {
+        return Err(VulkanBoundDispatchPlanError::ProducedPortBufferMismatch {
+            dispatch_index: dispatch.dispatch_index,
+            binding: descriptor.binding,
+        });
+    }
+    Ok(VulkanPlacedProducedPortBufferBinding {
+        local_edges,
+        outgoing_endpoints,
+        byte_capacity,
+    })
 }
 
 fn bind_local_edge_buffer(

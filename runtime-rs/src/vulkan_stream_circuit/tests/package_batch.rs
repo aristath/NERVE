@@ -166,8 +166,9 @@ fn component_batch_sibling_edges_resolve_to_one_produced_port() {
             binding: 0,
             usage: VulkanKernelDescriptorUsage::OutputSignal,
             name: "shared_context".to_string(),
-            target: VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer {
-                edge: VulkanPlacedLocalEdgeBufferBinding {
+            target: VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer {
+                port: VulkanPlacedProducedPortBufferBinding {
+                    local_edges: vec![VulkanPlacedLocalEdgeBufferBinding {
                     buffer_index: edge_index,
                     edge: VulkanPlacedLocalEdge {
                         buffer_index: edge_index,
@@ -189,6 +190,9 @@ fn component_batch_sibling_edges_resolve_to_one_produced_port() {
                             device_id: "gpu0".to_string(),
                         },
                     },
+                    byte_capacity: 8_192,
+                    }],
+                    outgoing_endpoints: Vec::new(),
                     byte_capacity: 8_192,
                 },
             },
@@ -333,6 +337,43 @@ fn parallel_block_edge_capacity_is_partitioned_into_exact_lane_frames() {
             4096,
         )
         .is_err()
+    );
+}
+
+#[test]
+fn produced_parallel_block_port_uses_one_lane_as_its_batch_frame() {
+    let port = VulkanPlacedProducedPortBufferBinding {
+        local_edges: vec![VulkanPlacedLocalEdgeBufferBinding {
+            buffer_index: 0,
+            edge: VulkanPlacedLocalEdge {
+                buffer_index: 0,
+                edge_id: "edge_3_local".to_string(),
+                edge_index: 3,
+                connection: StreamCircuitConnection::ParallelBlockGather { width: 5 },
+                signal: "stream_frame_block".to_string(),
+                shape: vec![5, 4, 4096],
+                element_count: 5 * 4 * 4096,
+                byte_capacity: Some(5 * 4 * 4096 * 2),
+                device_id: "gpu0".to_string(),
+                source_component_id: "draft_layer_02".to_string(),
+                source_port_id: "output_frame".to_string(),
+                source_component_port: Some("output_frame".to_string()),
+                destination_component_id: "draft_output".to_string(),
+                destination_port_id: "input_frames".to_string(),
+                destination_component_port: Some("input_frames".to_string()),
+                transport: EdgeTransport::LocalBuffer {
+                    device_id: "gpu0".to_string(),
+                },
+            },
+            byte_capacity: 5 * 4 * 4096 * 2,
+        }],
+        outgoing_endpoints: Vec::new(),
+        byte_capacity: 5 * 4 * 4096 * 2,
+    };
+
+    assert_eq!(
+        component_batch_produced_port_frame_byte_capacity(&port).unwrap(),
+        4 * 4096 * 2,
     );
 }
 

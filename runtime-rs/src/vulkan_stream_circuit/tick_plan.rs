@@ -99,20 +99,24 @@ impl VulkanMountedPlacedStreamTickPlan {
             });
 
             for descriptor in &dispatch.descriptors {
-                if let VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { endpoint } =
+                if let VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } =
                     &descriptor.target
-                    && published_endpoints
-                        .insert((endpoint.endpoint.edge_index, endpoint.buffer_index))
                 {
-                    stages.push(VulkanMountedPlacedStreamTickStage::PublishEdge {
-                        stage_index: stages.len(),
-                        edge_index: endpoint.endpoint.edge_index,
-                        endpoint_id: endpoint.endpoint.endpoint_id.clone(),
-                        buffer_index: endpoint.buffer_index,
-                        byte_capacity: endpoint.byte_capacity,
-                        remote_device_id: endpoint.endpoint.remote_device_id.clone(),
-                        remote_component_id: endpoint.endpoint.remote_component_id.clone(),
-                    });
+                    for endpoint in &port.outgoing_endpoints {
+                        if published_endpoints
+                            .insert((endpoint.endpoint.edge_index, endpoint.buffer_index))
+                        {
+                            stages.push(VulkanMountedPlacedStreamTickStage::PublishEdge {
+                                stage_index: stages.len(),
+                                edge_index: endpoint.endpoint.edge_index,
+                                endpoint_id: endpoint.endpoint.endpoint_id.clone(),
+                                buffer_index: endpoint.buffer_index,
+                                byte_capacity: endpoint.byte_capacity,
+                                remote_device_id: endpoint.endpoint.remote_device_id.clone(),
+                                remote_component_id: endpoint.endpoint.remote_component_id.clone(),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -334,4 +338,3 @@ impl VulkanMountedPlacedStreamTickPlan {
         VulkanMountedPlacedResidentStreamTickCursor::new(self.clone(), stream_tick)
     }
 }
-

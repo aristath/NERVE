@@ -30,9 +30,11 @@ pub enum VulkanPlacedBoundDescriptorTarget {
     ModelInput { signal_id: String },
     ModelOutput { signal_id: String },
     LocalEdgeInput { edge: ComponentEdgePlacement },
-    LocalEdgeOutput { edge: ComponentEdgePlacement },
     IncomingEdge { edge: ComponentEdgePlacement },
-    OutgoingEdge { edge: ComponentEdgePlacement },
+    ProducedPort {
+        local_edges: Vec<ComponentEdgePlacement>,
+        outgoing_edges: Vec<ComponentEdgePlacement>,
+    },
 }
 
 impl VulkanPlacedBoundDescriptorTarget {
@@ -90,21 +92,27 @@ fn classify_boundary_output(
     signal_id: &str,
     placed_resident_plan: &VulkanPlacedStreamCircuitResidentPlan,
 ) -> VulkanPlacedBoundDescriptorTarget {
-    if let Some(edge) = placed_resident_plan
+    let local_edges = placed_resident_plan
         .local_edges
         .iter()
-        .find(|edge| edge.source_component_id == component_id && edge.source_port_id == signal_id)
+        .filter(|edge| {
+            edge.source_component_id == component_id && edge.source_port_id == signal_id
+        })
         .cloned()
-    {
-        return VulkanPlacedBoundDescriptorTarget::LocalEdgeOutput { edge };
-    }
-    if let Some(edge) = placed_resident_plan
+        .collect::<Vec<_>>();
+    let outgoing_edges = placed_resident_plan
         .outgoing_edges
         .iter()
-        .find(|edge| edge.source_component_id == component_id && edge.source_port_id == signal_id)
+        .filter(|edge| {
+            edge.source_component_id == component_id && edge.source_port_id == signal_id
+        })
         .cloned()
-    {
-        return VulkanPlacedBoundDescriptorTarget::OutgoingEdge { edge };
+        .collect::<Vec<_>>();
+    if !local_edges.is_empty() || !outgoing_edges.is_empty() {
+        return VulkanPlacedBoundDescriptorTarget::ProducedPort {
+            local_edges,
+            outgoing_edges,
+        };
     }
     VulkanPlacedBoundDescriptorTarget::ModelOutput {
         signal_id: signal_id.to_string(),
@@ -467,6 +475,18 @@ pub enum VulkanBoundDispatchPlanError {
         endpoint_byte_capacity: Option<usize>,
         mounted_byte_capacity: usize,
     },
+    EmptyProducedPort {
+        dispatch_index: usize,
+        binding: usize,
+    },
+    ProducedPortByteCapacityMismatch {
+        dispatch_index: usize,
+        binding: usize,
+    },
+    ProducedPortBufferMismatch {
+        dispatch_index: usize,
+        binding: usize,
+    },
 }
 
 impl Display for VulkanBoundDispatchPlanError {
@@ -553,6 +573,27 @@ impl Display for VulkanBoundDispatchPlanError {
             } => write!(
                 f,
                 "dispatch {dispatch_index} descriptor {binding} edge {edge_index} endpoint expects {endpoint_byte_capacity:?} bytes but mounted buffer has {mounted_byte_capacity} bytes"
+            ),
+            Self::EmptyProducedPort {
+                dispatch_index,
+                binding,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} has an empty produced port"
+            ),
+            Self::ProducedPortByteCapacityMismatch {
+                dispatch_index,
+                binding,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} produced-port consumers have incompatible byte capacities"
+            ),
+            Self::ProducedPortBufferMismatch {
+                dispatch_index,
+                binding,
+            } => write!(
+                f,
+                "dispatch {dispatch_index} descriptor {binding} produced-port consumers do not share one physical buffer"
             ),
         }
     }

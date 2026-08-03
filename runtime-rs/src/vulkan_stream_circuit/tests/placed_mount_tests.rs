@@ -75,6 +75,357 @@ fn local_fanout_edge_plan() -> VulkanPlacedEdgeIoPlan {
     }
 }
 
+fn outgoing_fanout_endpoint(
+    endpoint_index: usize,
+    edge_index: usize,
+    destination_device_id: &str,
+    destination_component_id: &str,
+) -> VulkanPlacedEdgeEndpoint {
+    VulkanPlacedEdgeEndpoint {
+        endpoint_index,
+        endpoint_id: format!("edge_{edge_index}_out"),
+        direction: VulkanPlacedEdgeDirection::Outgoing,
+        edge_index,
+        connection: StreamCircuitConnection::Forward,
+        signal: "shared_context".to_string(),
+        shape: vec![4_096],
+        element_count: 4_096,
+        byte_capacity: Some(8_192),
+        local_device_id: "gpu0".to_string(),
+        remote_device_id: destination_device_id.to_string(),
+        local_component_id: "input_adapter".to_string(),
+        remote_component_id: destination_component_id.to_string(),
+        local_port_id: "shared_context".to_string(),
+        remote_port_id: "shared_context".to_string(),
+        local_component_port: Some("shared_context".to_string()),
+        remote_component_port: Some("shared_context".to_string()),
+        transport: EdgeTransport::CrossDevice {
+            from_device_id: "gpu0".to_string(),
+            to_device_id: destination_device_id.to_string(),
+        },
+    }
+}
+
+fn incoming_fanout_endpoint(outgoing: &VulkanPlacedEdgeEndpoint) -> VulkanPlacedEdgeEndpoint {
+    VulkanPlacedEdgeEndpoint {
+        endpoint_index: outgoing.endpoint_index,
+        endpoint_id: format!("edge_{}_in", outgoing.edge_index),
+        direction: VulkanPlacedEdgeDirection::Incoming,
+        edge_index: outgoing.edge_index,
+        connection: outgoing.connection.clone(),
+        signal: outgoing.signal.clone(),
+        shape: outgoing.shape.clone(),
+        element_count: outgoing.element_count,
+        byte_capacity: outgoing.byte_capacity,
+        local_device_id: outgoing.remote_device_id.clone(),
+        remote_device_id: outgoing.local_device_id.clone(),
+        local_component_id: outgoing.remote_component_id.clone(),
+        remote_component_id: outgoing.local_component_id.clone(),
+        local_port_id: outgoing.remote_port_id.clone(),
+        remote_port_id: outgoing.local_port_id.clone(),
+        local_component_port: outgoing.remote_component_port.clone(),
+        remote_component_port: outgoing.local_component_port.clone(),
+        transport: outgoing.transport.clone(),
+    }
+}
+
+fn mixed_fanout_edge_plan() -> VulkanPlacedEdgeIoPlan {
+    VulkanPlacedEdgeIoPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        signal_element_bytes: Some(2),
+        local_edges: vec![local_fanout_edge(4, "draft_00")],
+        endpoints: vec![
+            outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01"),
+            outgoing_fanout_endpoint(1, 6, "gpu2", "draft_02"),
+        ],
+        local_edge_count: 1,
+        incoming_endpoint_count: 0,
+        outgoing_endpoint_count: 2,
+        total_buffer_count: 3,
+        total_endpoint_count: 2,
+        total_byte_capacity: Some(3 * 8_192),
+        unresolved_byte_edges: Vec::new(),
+    }
+}
+
+#[test]
+fn boundary_output_classification_retains_every_local_and_remote_consumer() {
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
+    let mut plan = fixture_model_placed_resident_plan_for_device(&runtime_model, "gpu0");
+    let outgoing = plan.outgoing_edges[0].clone();
+    let mut local = outgoing.clone();
+    local.edge_index = 100;
+    local.destination_component_id = "layer_00_tail".to_string();
+    local.destination_device_id = "gpu0".to_string();
+    local.transport = EdgeTransport::LocalBuffer {
+        device_id: "gpu0".to_string(),
+    };
+    let mut second_outgoing = outgoing.clone();
+    second_outgoing.edge_index = 101;
+    second_outgoing.destination_component_id = "layer_00_second_remote".to_string();
+    second_outgoing.destination_device_id = "gpu2".to_string();
+    second_outgoing.transport = EdgeTransport::CrossDevice {
+        from_device_id: "gpu0".to_string(),
+        to_device_id: "gpu2".to_string(),
+    };
+    plan.local_edges.push(local);
+    plan.outgoing_edges.push(second_outgoing);
+
+    let target = classify_boundary_output(
+        &outgoing.source_component_id,
+        &outgoing.source_port_id,
+        &plan,
+    );
+    let VulkanPlacedBoundDescriptorTarget::ProducedPort {
+        local_edges,
+        outgoing_edges,
+    } = target
+    else {
+        panic!("boundary output must classify as one produced port");
+    };
+    assert_eq!(
+        local_edges
+            .iter()
+            .map(|edge| edge.edge_index)
+            .collect::<Vec<_>>(),
+        vec![100]
+    );
+    assert_eq!(
+        outgoing_edges
+            .iter()
+            .map(|edge| edge.edge_index)
+            .collect::<Vec<_>>(),
+        vec![outgoing.edge_index, 101]
+    );
+}
+
+#[test]
+fn placed_edge_pairs_group_every_remote_consumer_by_produced_port() {
+    let first = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
+    let second = outgoing_fanout_endpoint(1, 6, "gpu2", "draft_02");
+    let groups = group_placed_edge_pairs_by_produced_port(vec![
+        (first.clone(), incoming_fanout_endpoint(&first)),
+        (second.clone(), incoming_fanout_endpoint(&second)),
+    ])
+    .unwrap();
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].source_device_id, "gpu0");
+    assert_eq!(groups[0].source_component_id, "input_adapter");
+    assert_eq!(groups[0].source_port_id, "shared_context");
+    assert_eq!(groups[0].byte_capacity, 8_192);
+    assert_eq!(
+        groups[0]
+            .edges
+            .iter()
+            .map(|(outgoing, _)| outgoing.edge_index)
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
+}
+
+#[test]
+fn placed_edge_allocation_aliases_mixed_local_and_remote_fanout() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let buffers = mixed_fanout_edge_plan().allocate_buffers(&device).unwrap();
+
+    assert_eq!(buffers.local_buffers.len(), 1);
+    assert_eq!(buffers.outgoing_buffers.len(), 2);
+    assert!(Arc::ptr_eq(
+        &buffers.local_buffers[0].buffer,
+        &buffers.outgoing_buffers[0].buffer
+    ));
+    assert!(Arc::ptr_eq(
+        &buffers.outgoing_buffers[0].buffer,
+        &buffers.outgoing_buffers[1].buffer
+    ));
+}
+
+#[test]
+fn placed_tick_plan_publishes_every_remote_consumer_of_one_produced_port() {
+    let local = local_fanout_edge(4, "draft_00");
+    let first = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
+    let second = outgoing_fanout_endpoint(1, 6, "gpu2", "draft_02");
+    let mounted = VulkanMountedPlacedBoundDispatchPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        dispatches: vec![VulkanMountedPlacedBoundDispatch {
+            dispatch_index: 0,
+            kernel_id: "producer".to_string(),
+            component_id: "input_adapter".to_string(),
+            circuit_id: "input_adapter".to_string(),
+            node_index: 0,
+            node_id: "producer".to_string(),
+            op: "identity".to_string(),
+            reusable_family_id: "identity".to_string(),
+            artifact_path: "shaders/identity.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            descriptors: vec![VulkanMountedPlacedBoundDescriptor {
+                binding: 0,
+                usage: VulkanKernelDescriptorUsage::OutputSignal,
+                name: "shared_context".to_string(),
+                target: VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer {
+                    port: VulkanPlacedProducedPortBufferBinding {
+                        local_edges: vec![VulkanPlacedLocalEdgeBufferBinding {
+                            buffer_index: 0,
+                            edge: local,
+                            byte_capacity: 8_192,
+                        }],
+                        outgoing_endpoints: vec![
+                            VulkanPlacedEdgeEndpointBufferBinding {
+                                buffer_index: 0,
+                                endpoint: first,
+                                byte_capacity: 8_192,
+                            },
+                            VulkanPlacedEdgeEndpointBufferBinding {
+                                buffer_index: 1,
+                                endpoint: second,
+                                byte_capacity: 8_192,
+                            },
+                        ],
+                        byte_capacity: 8_192,
+                    },
+                },
+            }],
+            push_constants: Vec::new(),
+            stream_control_binding: None,
+        }],
+        total_descriptor_count: 1,
+        resident_descriptor_count: 0,
+        model_boundary_descriptor_count: 0,
+        local_edge_descriptor_count: 1,
+        edge_endpoint_descriptor_count: 1,
+        incoming_edge_descriptor_count: 0,
+        outgoing_edge_descriptor_count: 1,
+    };
+
+    let tick = VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted);
+
+    assert_eq!(tick.stage_count, 3);
+    assert_eq!(tick.dispatch_stage_count, 1);
+    assert_eq!(tick.publish_stage_count, 2);
+    assert_eq!(tick.local_edge_write_count, 1);
+    assert_eq!(tick.outgoing_edge_write_count, 2);
+    assert!(matches!(
+        &tick.stages[1],
+        VulkanMountedPlacedStreamTickStage::PublishEdge { edge_index: 5, .. }
+    ));
+    assert!(matches!(
+        &tick.stages[2],
+        VulkanMountedPlacedStreamTickStage::PublishEdge { edge_index: 6, .. }
+    ));
+}
+
+#[test]
+fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge() {
+    let Some((owner, first_peer, second_peer)) = selected_test_vulkan_device_triple() else {
+        eprintln!(
+            "skipping three-device produced-port test without three explicit Vulkan devices"
+        );
+        return;
+    };
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
+    let manifest_path = fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([
+        ("gpu0".to_string(), owner.clone()),
+        ("gpu1".to_string(), first_peer.clone()),
+        ("gpu2".to_string(), second_peer.clone()),
+    ]);
+    let mut gpu0 = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+        &owner,
+        manifest_dir,
+        runtime_model.clone(),
+        "gpu0",
+        Some(4),
+    )
+    .unwrap();
+    let gpu1 = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+        &first_peer,
+        manifest_dir,
+        runtime_model.clone(),
+        "gpu1",
+        Some(4),
+    )
+    .unwrap();
+    let mut gpu2 = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+        &second_peer,
+        manifest_dir,
+        fixture_model_runtime_model_with_three_layer_series("gpu2"),
+        "gpu2",
+        Some(4),
+    )
+    .unwrap();
+    let first_outgoing = gpu0.placed_plan.placed_resident_plan.outgoing_edges[0].clone();
+    let mut local = first_outgoing.clone();
+    local.edge_index = 100;
+    local.destination_component_id = "fanout_local".to_string();
+    local.destination_device_id = "gpu0".to_string();
+    local.transport = EdgeTransport::LocalBuffer {
+        device_id: "gpu0".to_string(),
+    };
+    let mut second_outgoing = first_outgoing.clone();
+    second_outgoing.edge_index = 101;
+    second_outgoing.destination_component_id = "layer_00_remote".to_string();
+    second_outgoing.destination_device_id = "gpu2".to_string();
+    second_outgoing.transport = EdgeTransport::CrossDevice {
+        from_device_id: "gpu0".to_string(),
+        to_device_id: "gpu2".to_string(),
+    };
+    gpu0.placed_plan
+        .placed_resident_plan
+        .local_edges
+        .push(local);
+    gpu0.placed_plan
+        .placed_resident_plan
+        .outgoing_edges
+        .push(second_outgoing.clone());
+    gpu2.placed_plan.placed_resident_plan.incoming_edges.clear();
+    gpu2.placed_plan.placed_resident_plan.outgoing_edges.clear();
+    gpu2.placed_plan.placed_resident_plan.local_edges.clear();
+    gpu2.placed_plan
+        .placed_resident_plan
+        .incoming_edges
+        .push(second_outgoing);
+    let slices = vec![Arc::new(gpu0), Arc::new(gpu1), Arc::new(gpu2)];
+    let empty_plan = VulkanDistributedActivationBufferPlan {
+        allocations: Vec::new(),
+        allocation_count: 0,
+        import_count: 0,
+        reference_count: 0,
+        total_shared_byte_capacity: 0,
+    };
+    let mut distributed = VulkanDistributedActivationBuffers::allocate(&empty_plan, |device_id| {
+        devices
+            .get(device_id)
+            .map(Rc::as_ref)
+            .ok_or_else(|| format!("missing fixture device {device_id}"))
+    })
+    .unwrap();
+    let links = create_placed_device_links(&slices, &mut distributed, &|device_id| {
+        devices.get(device_id).map(Rc::as_ref).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: device_id.to_string(),
+            }
+        })
+    })
+    .unwrap();
+    let local = &links.local_edge_overrides["gpu0"];
+    let outgoing = links.endpoint_overrides["gpu0"]
+        .iter()
+        .filter(|override_| override_.direction == VulkanPlacedEdgeDirection::Outgoing)
+        .collect::<Vec<_>>();
+    assert_eq!(local.len(), 1);
+    assert_eq!(outgoing.len(), 2);
+    assert!(outgoing.iter().all(|override_| Arc::ptr_eq(
+        &local[0].buffer,
+        &override_.buffer,
+    )));
+    assert_eq!(links.synchronizations.edges.len(), 3);
+}
+
 #[test]
 fn placed_edge_allocation_aliases_every_local_fanout_consumer() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");

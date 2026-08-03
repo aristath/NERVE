@@ -78,6 +78,36 @@ fn selected_test_vulkan_device_pair() -> Option<(Rc<VulkanComputeDevice>, Rc<Vul
     Some((owner, peer))
 }
 
+fn selected_test_vulkan_device_triple() -> Option<(
+    Rc<VulkanComputeDevice>,
+    Rc<VulkanComputeDevice>,
+    Rc<VulkanComputeDevice>,
+)> {
+    let (Ok(raw_owner), Ok(raw_first_peer), Ok(raw_second_peer)) = (
+        std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX"),
+        std::env::var("NERVE_TEST_VULKAN_PEER_DEVICE_INDEX"),
+        std::env::var("NERVE_TEST_VULKAN_THIRD_DEVICE_INDEX"),
+    ) else {
+        return None;
+    };
+    let indices = [raw_owner, raw_first_peer, raw_second_peer].map(|raw| {
+        raw.parse::<usize>()
+            .expect("explicit Vulkan test device index must be an integer")
+    });
+    assert_eq!(indices.iter().copied().collect::<BTreeSet<_>>().len(), 3);
+    let devices = indices.map(|index| {
+        Rc::new(
+            VulkanComputeDevice::new_for_physical_device_index(index)
+                .expect("explicit Vulkan test device must open"),
+        )
+    });
+    Some((
+        devices[0].clone(),
+        devices[1].clone(),
+        devices[2].clone(),
+    ))
+}
+
 #[test]
 fn backend_loop_window_is_device_owned_and_snapshot_memory_bounded() {
     assert_eq!(
@@ -825,6 +855,30 @@ fn fixture_model_runtime_model_with_colocated_three_layer_series() -> VulkanResi
 
 fn fixture_model_runtime_model_with_remote_middle() -> VulkanResidentRuntimeModel {
     fixture_model_runtime_model_with_three_layer_series("gpu1")
+}
+
+fn fixture_model_placed_resident_plan_for_device(
+    runtime_model: &VulkanResidentRuntimeModel,
+    device_id: &str,
+) -> VulkanPlacedStreamCircuitResidentPlan {
+    let graph = runtime_model
+        .circuit_graph
+        .to_signal_processor_graph(tiny_model_dir())
+        .unwrap();
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let execution_plan =
+        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
+    let resource_plan =
+        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();
+    VulkanPlacedStreamCircuitResidentPlan::from_resource_plan_for_device(
+        &resource_plan,
+        &placement_plan,
+        device_id,
+        Some(&tensor_index),
+        Some(2),
+    )
+    .unwrap()
 }
 
 fn fixture_model_execution_graph() -> ResolvedLoweredExecutionGraph {

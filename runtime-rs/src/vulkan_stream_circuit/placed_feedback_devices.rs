@@ -742,7 +742,56 @@ fn pair_placed_edge_endpoints(
     Ok(pairs)
 }
 
+#[derive(Clone, Debug)]
+struct VulkanPlacedProducedPortEdgeGroup {
+    source_device_id: String,
+    source_component_id: String,
+    source_port_id: String,
+    byte_capacity: usize,
+    edges: Vec<(VulkanPlacedEdgeEndpoint, VulkanPlacedEdgeEndpoint)>,
+}
+
+fn group_placed_edge_pairs_by_produced_port(
+    edge_pairs: Vec<(VulkanPlacedEdgeEndpoint, VulkanPlacedEdgeEndpoint)>,
+) -> Result<Vec<VulkanPlacedProducedPortEdgeGroup>, VulkanError> {
+    let mut groups = BTreeMap::<
+        (String, String, String),
+        VulkanPlacedProducedPortEdgeGroup,
+    >::new();
+    for (outgoing, incoming) in edge_pairs {
+        let byte_capacity = outgoing
+            .byte_capacity
+            .expect("paired outgoing edge capacity was validated");
+        let key = (
+            outgoing.local_device_id.clone(),
+            outgoing.local_component_id.clone(),
+            outgoing.local_port_id.clone(),
+        );
+        let group = groups
+            .entry(key)
+            .or_insert_with(|| VulkanPlacedProducedPortEdgeGroup {
+                source_device_id: outgoing.local_device_id.clone(),
+                source_component_id: outgoing.local_component_id.clone(),
+                source_port_id: outgoing.local_port_id.clone(),
+                byte_capacity,
+                edges: Vec::new(),
+            });
+        if group.byte_capacity != byte_capacity {
+            return Err(VulkanError(format!(
+                "produced port {}.{} on {:?} has incompatible outgoing capacities {} and {byte_capacity}",
+                group.source_component_id,
+                group.source_port_id,
+                group.source_device_id,
+                group.byte_capacity,
+            )));
+        }
+        group.edges.push((outgoing, incoming));
+    }
+    Ok(groups.into_values().collect())
+}
+
 struct VulkanPlacedDeviceLinks {
+    local_edge_overrides: BTreeMap<String, Vec<VulkanPlacedLocalEdgeBufferOverride>>,
     endpoint_overrides: BTreeMap<String, Vec<VulkanPlacedEdgeEndpointBufferOverride>>,
     synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     stream_control_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
@@ -871,7 +920,7 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
 
 fn create_placed_device_links<'a, F>(
     device_slices: &[Arc<VulkanResidentModelPackageDeviceSlice>],
-    distributed_activation_buffers: &VulkanDistributedActivationBuffers,
+    distributed_activation_buffers: &mut VulkanDistributedActivationBuffers,
     device_for: &F,
 ) -> Result<VulkanPlacedDeviceLinks, VulkanResidentInProcessPlacedRuntimeError>
 where
@@ -891,168 +940,246 @@ where
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let edge_pairs = pair_placed_edge_endpoints(&plans)
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    let edge_groups = group_placed_edge_pairs_by_produced_port(
+        pair_placed_edge_endpoints(&plans)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+    )
+    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
+    let mut local_edge_overrides =
+        BTreeMap::<String, Vec<VulkanPlacedLocalEdgeBufferOverride>>::new();
     let mut endpoint_overrides =
         BTreeMap::<String, Vec<VulkanPlacedEdgeEndpointBufferOverride>>::new();
     let mut synchronizations = BTreeMap::new();
     let mut every_edge_is_resident_replayable = true;
-    for (outgoing, incoming) in edge_pairs {
-        let outgoing_byte_capacity = outgoing
-            .byte_capacity
-            .expect("paired outgoing edge capacity was validated");
-        let source_device = device_for(&outgoing.local_device_id)?;
-        let destination_device = device_for(&incoming.local_device_id)?;
-        let devices_share_queue = source_device.shares_logical_device_with(destination_device);
-        let supports_cross_queue_timeline =
-            source_device.supports_opaque_fd_timeline_semaphores()
-                && destination_device.supports_opaque_fd_timeline_semaphores();
-        let mut resident_transfer = None;
-        let edge_buffers = if let Some(distributed) =
-            distributed_activation_buffers.edge_allocation(outgoing.edge_index)
-        {
-            if !devices_share_queue && !supports_cross_queue_timeline {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "distributed activation edge {} requires cross-queue timeline semaphore support",
-                        outgoing.edge_index
-                    )),
-                ));
-            }
-            let outgoing_buffer = distributed
-                .device_buffers
-                .get(&outgoing.local_device_id)
-                .cloned()
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                        "distributed activation edge {} is not imported on source {:?}",
-                        outgoing.edge_index, outgoing.local_device_id
-                    )))
-                })?;
-            let incoming_buffer = distributed
-                .device_buffers
-                .get(&incoming.local_device_id)
-                .cloned()
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                        "distributed activation edge {} is not imported on destination {:?}",
-                        incoming.edge_index, incoming.local_device_id
-                    )))
-                })?;
-            resident_transfer = (!devices_share_queue).then_some(match distributed.route {
-                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
-                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+    for group in edge_groups {
+        let source_device = device_for(&group.source_device_id)?;
+        let matching_local_edges = plans
+            .iter()
+            .find(|plan| plan.device_id == group.source_device_id)
+            .into_iter()
+            .flat_map(|plan| &plan.local_edges)
+            .filter(|edge| {
+                edge.source_component_id == group.source_component_id
+                    && edge.source_port_id == group.source_port_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let produced_edge_indices = matching_local_edges
+            .iter()
+            .map(|edge| edge.edge_index)
+            .chain(group.edges.iter().map(|(outgoing, _)| outgoing.edge_index))
+            .collect::<BTreeSet<_>>();
+
+        let mut participant_device_ids = group
+            .edges
+            .iter()
+            .flat_map(|(outgoing, incoming)| {
+                [
+                    outgoing.local_device_id.clone(),
+                    incoming.local_device_id.clone(),
+                ]
+            })
+            .collect::<BTreeSet<_>>();
+        for allocation in &distributed_activation_buffers.allocations {
+            if matches!(
+                allocation.planned.storage,
+                VulkanDistributedActivationStorage::Edge { edge_index, .. }
+                    if produced_edge_indices.contains(&edge_index)
+            ) {
+                if allocation.planned.byte_capacity != group.byte_capacity {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "distributed produced port {}.{} has capacities {} and {}",
+                            group.source_component_id,
+                            group.source_port_id,
+                            group.byte_capacity,
+                            allocation.planned.byte_capacity,
+                        )),
+                    ));
                 }
-                VulkanSharedResidentBufferRoute::SharedHost => {
-                    VulkanPlacedEdgeTransferRoute::SharedHost
-                }
-            });
-            (outgoing_buffer, incoming_buffer, true)
-        } else if devices_share_queue {
-                let buffer = Arc::new(
-                    source_device
-                        .create_resident_buffer(outgoing_byte_capacity)
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                );
-                (buffer.clone(), buffer, true)
-            } else if supports_cross_queue_timeline
-                && let Ok(shared) = source_device
-                    .create_shared_resident_buffers(&[destination_device], outgoing_byte_capacity)
-            {
-                let mut buffers = shared.buffers.into_iter();
-                let source_shared_buffer = buffers
-                    .next()
-                    .expect("shared edge allocation contains its owner");
-                let destination_shared_buffer = buffers
-                    .next()
-                    .expect("shared edge allocation contains its destination");
-                match shared.route {
-                    VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
-                        resident_transfer = Some(
-                            VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
-                        );
-                        (source_shared_buffer, destination_shared_buffer, true)
-                    }
-                    VulkanSharedResidentBufferRoute::SharedHost => {
-                        resident_transfer = Some(VulkanPlacedEdgeTransferRoute::SharedHost);
-                        (source_shared_buffer, destination_shared_buffer, true)
-                    }
-                }
-            } else {
-                let mut outgoing_buffer = source_device
-                    .create_host_visible_resident_buffer(outgoing_byte_capacity)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                outgoing_buffer
-                    .persistently_map()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                let mut incoming_buffer = destination_device
-                    .create_host_visible_resident_buffer(outgoing_byte_capacity)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                incoming_buffer
-                    .persistently_map()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                (
-                    Arc::new(outgoing_buffer),
-                    Arc::new(incoming_buffer),
-                    false,
-                )
-            };
-        let (outgoing_buffer, incoming_buffer, edge_is_resident_replayable) = edge_buffers;
-        every_edge_is_resident_replayable &= edge_is_resident_replayable;
-        if let Some(transfer_route) = resident_transfer {
-            debug_assert!(supports_cross_queue_timeline);
-            let source_signal = source_device
-                .create_opaque_fd_exportable_timeline_semaphore(0)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            let destination_wait = destination_device
-                .create_timeline_semaphore(0)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            destination_device
-                .import_timeline_semaphore_opaque_fd(
-                    &destination_wait,
-                    source_device
-                        .export_timeline_semaphore_opaque_fd(&source_signal)
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                )
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            let key = VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing);
-            if synchronizations
-                .insert(
-                    key.clone(),
-                    VulkanPlacedEdgeTimelineSynchronization {
-                        source_signal,
-                        destination_wait,
-                        next_value: Cell::new(1),
-                        pending_value: Cell::new(None),
-                        transfer_route,
-                    },
-                )
-                .is_some()
-            {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "cross-device edge synchronization repeats {key:?}"
-                    )),
-                ));
+                participant_device_ids.extend(allocation.device_buffers.keys().cloned());
             }
         }
-        endpoint_overrides
-            .entry(outgoing.local_device_id.clone())
-            .or_default()
-            .push(VulkanPlacedEdgeEndpointBufferOverride {
-                direction: VulkanPlacedEdgeDirection::Outgoing,
-                edge_index: outgoing.edge_index,
-                buffer: outgoing_buffer,
-            });
-        endpoint_overrides
-            .entry(incoming.local_device_id.clone())
-            .or_default()
-            .push(VulkanPlacedEdgeEndpointBufferOverride {
-                direction: VulkanPlacedEdgeDirection::Incoming,
-                edge_index: incoming.edge_index,
-                buffer: incoming_buffer,
-            });
+
+        let mut unique_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
+        for device_id in &participant_device_ids {
+            let device = device_for(device_id)?;
+            if let Some((_, logical_ids)) = unique_devices
+                .iter_mut()
+                .find(|(candidate, _)| candidate.shares_logical_device_with(device))
+            {
+                logical_ids.push(device_id.clone());
+            } else {
+                unique_devices.push((device, vec![device_id.clone()]));
+            }
+        }
+        let owner_index = unique_devices
+            .iter()
+            .position(|(device, _)| device.shares_logical_device_with(source_device))
+            .expect("produced-port participants include the source device");
+        unique_devices.swap(0, owner_index);
+        let peer_devices = unique_devices
+            .iter()
+            .skip(1)
+            .map(|(device, _)| *device)
+            .collect::<Vec<_>>();
+        let supports_cross_queue_timeline = peer_devices.iter().all(|destination| {
+            source_device.supports_opaque_fd_timeline_semaphores()
+                && destination.supports_opaque_fd_timeline_semaphores()
+        });
+
+        let (physical_buffers, shared_route, group_is_resident_replayable) =
+            if peer_devices.is_empty() {
+                (
+                    vec![Arc::new(
+                        source_device
+                            .create_resident_buffer(group.byte_capacity)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    )],
+                    None,
+                    true,
+                )
+            } else if supports_cross_queue_timeline
+                && let Ok(shared) = source_device
+                    .create_shared_resident_buffers(&peer_devices, group.byte_capacity)
+            {
+                (shared.buffers, Some(shared.route), true)
+            } else {
+                let allocation = source_device
+                    .create_shared_host_allocation(&peer_devices, group.byte_capacity)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let buffers = unique_devices
+                    .iter()
+                    .map(|(device, _)| {
+                        device
+                            .import_shared_host_buffer(Arc::clone(&allocation))
+                            .map(Arc::new)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (
+                    buffers,
+                    supports_cross_queue_timeline
+                        .then_some(VulkanSharedResidentBufferRoute::SharedHost),
+                    supports_cross_queue_timeline,
+                )
+            };
+        every_edge_is_resident_replayable &= group_is_resident_replayable;
+        let mut group_buffers = BTreeMap::<String, Arc<VulkanResidentBuffer>>::new();
+        for ((_, logical_ids), buffer) in unique_devices.iter().zip(&physical_buffers) {
+            for device_id in logical_ids {
+                group_buffers.insert(device_id.clone(), Arc::clone(buffer));
+            }
+        }
+        let source_buffer = group_buffers
+            .get(&group.source_device_id)
+            .cloned()
+            .expect("produced-port source buffer was allocated");
+
+        for allocation in &mut distributed_activation_buffers.allocations {
+            if matches!(
+                allocation.planned.storage,
+                VulkanDistributedActivationStorage::Edge { edge_index, .. }
+                    if produced_edge_indices.contains(&edge_index)
+            ) {
+                for (device_id, buffer) in &mut allocation.device_buffers {
+                    *buffer = group_buffers.get(device_id).cloned().ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "produced port {}.{} has no shared allocation on {device_id:?}",
+                                group.source_component_id, group.source_port_id,
+                            ),
+                        ))
+                    })?;
+                }
+                if let Some(route) = shared_route {
+                    allocation.route = route;
+                    allocation.external_device_local_error = None;
+                }
+            }
+        }
+
+        for edge in matching_local_edges {
+            local_edge_overrides
+                .entry(group.source_device_id.clone())
+                .or_default()
+                .push(VulkanPlacedLocalEdgeBufferOverride {
+                    edge_index: edge.edge_index,
+                    buffer: Arc::clone(&source_buffer),
+                });
+        }
+
+        for (outgoing, incoming) in group.edges {
+            let destination_device = device_for(&incoming.local_device_id)?;
+            let devices_share_queue = source_device.shares_logical_device_with(destination_device);
+            let incoming_buffer = group_buffers
+                .get(&incoming.local_device_id)
+                .cloned()
+                .expect("produced-port destination buffer was allocated");
+            if !devices_share_queue
+                && let Some(route) = shared_route
+            {
+                let transfer_route = match route {
+                    VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                        VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                    }
+                    VulkanSharedResidentBufferRoute::SharedHost => {
+                        VulkanPlacedEdgeTransferRoute::SharedHost
+                    }
+                };
+                let source_signal = source_device
+                    .create_opaque_fd_exportable_timeline_semaphore(0)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let destination_wait = destination_device
+                    .create_timeline_semaphore(0)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                destination_device
+                    .import_timeline_semaphore_opaque_fd(
+                        &destination_wait,
+                        source_device
+                            .export_timeline_semaphore_opaque_fd(&source_signal)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let key = VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing);
+                if synchronizations
+                    .insert(
+                        key.clone(),
+                        VulkanPlacedEdgeTimelineSynchronization {
+                            source_signal,
+                            destination_wait,
+                            next_value: Cell::new(1),
+                            pending_value: Cell::new(None),
+                            transfer_route,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "cross-device edge synchronization repeats {key:?}"
+                        )),
+                    ));
+                }
+            }
+            endpoint_overrides
+                .entry(outgoing.local_device_id.clone())
+                .or_default()
+                .push(VulkanPlacedEdgeEndpointBufferOverride {
+                    direction: VulkanPlacedEdgeDirection::Outgoing,
+                    edge_index: outgoing.edge_index,
+                    buffer: Arc::clone(&source_buffer),
+                });
+            endpoint_overrides
+                .entry(incoming.local_device_id.clone())
+                .or_default()
+                .push(VulkanPlacedEdgeEndpointBufferOverride {
+                    direction: VulkanPlacedEdgeDirection::Incoming,
+                    edge_index: incoming.edge_index,
+                    buffer: incoming_buffer,
+                });
+        }
     }
     let mut unique_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
     for slice in device_slices {
@@ -1105,6 +1232,7 @@ where
         }
     }
     Ok(VulkanPlacedDeviceLinks {
+        local_edge_overrides,
         endpoint_overrides,
         synchronizations: VulkanPlacedEdgeTimelineSynchronizations {
             edges: synchronizations,

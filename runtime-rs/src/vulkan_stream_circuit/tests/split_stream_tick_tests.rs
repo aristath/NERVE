@@ -1,3 +1,19 @@
+fn expected_placed_processor_stage_count(
+    processor: &VulkanResidentInProcessPlacedStreamProcessor,
+) -> usize {
+    processor
+        .device_slices
+        .iter()
+        .map(|slice| {
+            slice
+                .dispatch_count
+                .checked_add(slice.incoming_edge_count)
+                .and_then(|count| count.checked_add(slice.outgoing_edge_count))
+                .expect("fixture placed stage count must fit usize")
+        })
+        .sum()
+}
+
 #[test]
 fn placed_tick_plan_interleaves_cross_device_edges_with_hosted_components() {
     let device = match selected_test_vulkan_device() {
@@ -573,7 +589,10 @@ fn placed_model_package_runs_split_stream_tick_in_process() {
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed
     );
     assert_eq!(run.scheduler_turn_count, 2);
-    assert_eq!(run.completed_stage_delta, 31);
+    assert_eq!(
+        run.completed_stage_delta,
+        expected_placed_processor_stage_count(&placed_package)
+    );
     assert_eq!(run.transport_stats.pending_packet_count, 0);
     assert_eq!(run.transport_stats.pending_direct_edge_count, 0);
     assert_eq!(run.transport_stats.published_packet_count, 0);
@@ -647,7 +666,10 @@ fn placed_model_package_runs_split_single_token_tick_and_sampler() {
         run.tick_run.placed_run.status,
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed
     );
-    assert_eq!(run.tick_run.placed_run.completed_stage_delta, 31);
+    assert_eq!(
+        run.tick_run.placed_run.completed_stage_delta,
+        expected_placed_processor_stage_count(&placed_package)
+    );
     assert_eq!(run.tick_run.output_run.as_ref().unwrap().dispatch_count, 2);
     assert_eq!(run.sampler_run.descriptor_count, 5);
     assert_eq!(run.sampler_run.token_id, 16);
@@ -720,7 +742,10 @@ fn placed_model_package_runs_split_greedy_feedback_loop() {
             .iter()
             .map(|tick| tick.tick_run.tick_run.placed_run.completed_stage_delta)
             .collect::<Vec<_>>(),
-        vec![31, 31]
+        vec![
+            expected_placed_processor_stage_count(&placed_package),
+            expected_placed_processor_stage_count(&placed_package),
+        ]
     );
 
     let gpu0_states = &placed_package

@@ -654,8 +654,7 @@ impl VulkanMountedPlacedStreamCircuit {
                 })?;
                 (allocation.buffer.as_ref(), allocation.byte_capacity)
             }
-            VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge }
-            | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => {
+            VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge } => {
                 let allocation = self
                     .edge_io
                     .local_buffers
@@ -685,20 +684,16 @@ impl VulkanMountedPlacedStreamCircuit {
                     })?;
                 (allocation.buffer.as_ref(), endpoint.byte_capacity)
             }
-            VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { endpoint } => {
-                let allocation = self
-                    .edge_io
-                    .outgoing_buffers
-                    .get(endpoint.buffer_index)
-                    .ok_or_else(|| {
-                        VulkanMountedPlacedResidentKernelDispatchError::MissingMountedBuffer {
-                            dispatch_index: dispatch.dispatch_index,
-                            binding: descriptor.binding,
-                            buffer_kind: "outgoing_edge".to_string(),
-                            buffer_index: endpoint.buffer_index,
-                        }
-                    })?;
-                (allocation.buffer.as_ref(), endpoint.byte_capacity)
+            VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
+                let allocation = port.buffer(&self.edge_io).ok_or_else(|| {
+                    VulkanMountedPlacedResidentKernelDispatchError::MissingMountedBuffer {
+                        dispatch_index: dispatch.dispatch_index,
+                        binding: descriptor.binding,
+                        buffer_kind: "produced_port".to_string(),
+                        buffer_index: 0,
+                    }
+                })?;
+                (allocation.as_ref(), port.byte_capacity)
             }
         };
 
