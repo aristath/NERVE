@@ -11,35 +11,14 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
 
 ## Work queue
 
-1. Add an explicit bounded on-demand residency policy for packages whose full
-   addressable resource set exceeds aggregate VRAM. Preserve `demand-retained`
-   exactly: a first-use load stays resident and a full store fails admission
-   atomically. Add a separately named runtime policy that evicts only inactive
-   allocation cohorts at synchronous checkpoint boundaries, clears their
-   stable-address publications before physical reuse, and cannot overlap an
-   execution lease. The 157 GB DeepSeek package exhausted retained stores on
-   one, two, and three 32 GB execution GPUs during real target-only generation;
-   moving component boundaries merely delayed the same cumulative-working-set
-   limit. The separate `demand-paged` policy now passes exact reload,
-   cohort-eviction, selector-fairness, address-publication, and AMD Vulkan store
-   tests. The real 157 GB package mounts target-only across three AMD devices in
-   17.89 seconds and releases its acquired capacity back to the recorded
-   pre-run reservations. Its first cold
-   prefill then exposed a compiler storage-layout defect: 72,317 independently
-   addressable tensors were emitted as 72,317 one-tensor files, forcing a top-6
-   expert wave through 36 files per layer. The compiler now derives artifact
-   affinity from selector topology and plans 47 contiguous banks for this
-   package (one execution spine plus 46 selected-resource domains), with no
-   model-name dispatch and no intermediate per-tensor writes for compatible
-   native sources. The fresh 47-bank package mounts and produces a coherent
-   target-only greeting, but its cold turn loads 4,719 of 11,008 expert cohorts
-   (63.09 GB), spends 66.14 seconds blocked on residency, and reaches only 1.364
-   decode tok/s. It also performs 3,023 sequence submit/wait pairs and 5,069
-   copy submissions with no resident queue batches. Coalesce selected ranges by
-   artifact and destination, overlap read/upload with independent execution,
-   and split command batches only at a real unresolved dependency. Re-measure
-   with a complete discarded conversation followed by an identical measured
-   conversation in one resident process before removing this item.
+1. Coalesce each checkpoint's missing selected-resource ranges by backing
+   artifact and destination allocation, and preserve those coalesced waves
+   through asynchronous read and upload. Overlap independent residency work
+   with execution and split a command batch only at a real unresolved data or
+   synchronization dependency. The two-set 128K-context gate still loaded 188
+   cohorts (2.51 GB) and blocked for 3.99 seconds in the measured conversation;
+   require the gate's second-set residency deltas to be negligible before
+   calling the result steady state.
 
 2. Finish the identity-independent `parallel_backbone_markov` speculative
    decoder. CPU-side SPIR-V reflection exposed that raw speculative graphs lost
@@ -78,25 +57,23 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    compatible structural scopes and retain the normal benchmark/equivalence
    promotion gate.
 
-4. Complete a real DeepSeek multi-turn quality gate with official thinking and
-   sampling defaults, a 65,536-or-larger output allowance, and agentic context.
-   Require coherent reasoning and answers, turn recall, tool-call syntax,
-   long-stream continuity, and clean teardown. Because routed resources are
-   demand-resident, run two identical canonical conversation sets without a
-   reset: validate but discard the complete first set and use only the second
-   set as performance truth. Report cumulative residency deltas for both sets;
-   if the measured set still has misses, blocking loads, or reloads, identify it
-   as partially warm rather than presenting it as steady state. The generic
-   conversation gate now supports this through
-   `--warmup-conversation-sets 1` without any model-family branch.
+4. Extend the generic quality gate with a representative tool-call round trip
+   and long-stream continuity case, using package-owned chat-template behavior
+   rather than a model-name branch. Keep official thinking and sampling
+   defaults, the 65,536-token output allowance, agentic context, coherent final
+   answers, turn recall, and clean teardown. Apply the same complete-conversation
+   warmup rule to these cases before accepting their performance measurements.
 
-5. Raise DeepSeek steady-state decode from the current retained-session range
-   of roughly 6.4--7.2 tok/s past the 25 tok/s floor and toward 50 tok/s, then
-   continue until no material bottleneck remains. The next measured target is
-   the common single-frame FP8 parallel-linear path, followed by synchronization,
-   adaptive-tier exchange, and speculative acceptance overhead. Benchmark
-   warmup plus repeated short real requests and report prefill and decode by
-   default; do not optimize synthetic scores at the expense of behavior.
+5. Raise DeepSeek decode from the current partially warm two-set mean of 7.93
+   tok/s past the 25 tok/s floor and toward 50 tok/s, then continue until no
+   material bottleneck remains. The successful five-device run selected zero
+   optimized implementations, emitted no resident queue batches, and performed
+   thousands of queue submit/wait pairs per turn. First make the common decode
+   execution graph dependency-aware and submission-resident; then optimize the
+   structurally selected MXFP4/FP8 parallel-linear paths, adaptive-tier exchange,
+   and speculative acceptance overhead. Benchmark complete warmup plus repeated
+   short real requests and report prefill and decode by default; do not optimize
+   synthetic scores at the expense of behavior.
 
 6. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
