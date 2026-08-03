@@ -479,30 +479,29 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let mut completed_input_run = None;
         let mut processed = 0usize;
         while processed < token_ids.len() {
-            let before_index = self
-                .active_input_event
-                .as_ref()
-                .map(|event| event.next_external_input_index);
+            self.validate_scheduled_prefill_position(
+                scheduler_activation,
+                processed,
+                &token_ids[processed..],
+            )?;
             let remaining = token_ids.len() - processed;
-            let (ran_block, completed_run) =
+            let (processed_count, completed_run) =
                 self.run_temporal_external_input_block_limited_with_output(remaining, on_output_event)?;
-            if ran_block {
-                let after_index = self
-                    .active_input_event
-                    .as_ref()
-                    .map(|event| event.next_external_input_index)
-                    .or_else(|| before_index.map(|index| index + remaining));
-                let processed_delta = before_index
-                    .zip(after_index)
-                    .map(|(before, after)| after.saturating_sub(before))
-                    .unwrap_or(remaining);
-                if processed_delta == 0 || processed_delta > remaining {
+            if processed_count > 0 {
+                if processed_count > remaining {
                     return Err(placed_scheduler_divergence(
-                        "temporal prefill block did not advance by the scheduled prompt window",
+                        "temporal prefill block exceeded the scheduled prompt window",
                     ));
                 }
-                processed += processed_delta;
+                processed += processed_count;
                 if let Some(completed_run) = completed_run {
+                    if processed != token_ids.len() {
+                        return Err(placed_scheduler_divergence(format!(
+                            "scheduled prefill input event {:?} completed after {processed} of {} scheduled tokens",
+                            scheduler_activation.input_event_id,
+                            token_ids.len(),
+                        )));
+                    }
                     completed_input_run = Some(completed_run);
                     break;
                 }
@@ -532,6 +531,13 @@ impl VulkanResidentInProcessPlacedPromptStream {
             }
             processed += 1;
             if let Some(completed_run) = run.completed_input_run {
+                if processed != token_ids.len() {
+                    return Err(placed_scheduler_divergence(format!(
+                        "scheduled prefill input event {:?} completed after {processed} of {} scheduled tokens",
+                        scheduler_activation.input_event_id,
+                        token_ids.len(),
+                    )));
+                }
                 completed_input_run = Some(completed_run);
                 break;
             }
@@ -540,6 +546,74 @@ impl VulkanResidentInProcessPlacedPromptStream {
             completed_input_run = self.close_scheduled_loop_if_exhausted()?;
         }
         Ok(completed_input_run)
+    }
+
+    fn validate_scheduled_prefill_position(
+        &mut self,
+        scheduler_activation: &RuntimeStreamActivation,
+        processed: usize,
+        scheduled_token_ids: &[u32],
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.activate_next_input_event()? {
+            return Err(placed_scheduler_divergence(format!(
+                "scheduled prefill input event {:?} has no backend input event",
+                scheduler_activation.input_event_id,
+            )));
+        }
+        let active = self
+            .active_input_event
+            .as_ref()
+            .expect("scheduled prefill validation activates an input event");
+        if active.input_event.id != scheduler_activation.input_event_id {
+            return Err(placed_scheduler_divergence(format!(
+                "scheduled prefill input event {:?} diverged from backend input event {:?}",
+                scheduler_activation.input_event_id,
+                active.input_event.id,
+            )));
+        }
+        let RuntimeStreamActivationKind::PrefillChunk { token_offset, .. } =
+            &scheduler_activation.kind
+        else {
+            return Err(placed_scheduler_divergence(
+                "scheduled prefill validation received a decode activation",
+            ));
+        };
+        let expected_offset = token_offset
+            .checked_add(processed)
+            .ok_or_else(|| placed_scheduler_divergence("scheduled prefill offset overflow"))?;
+        if active.next_external_input_index != expected_offset {
+            return Err(placed_scheduler_divergence(format!(
+                "scheduled prefill input event {:?} expected backend offset {expected_offset}, found {}",
+                scheduler_activation.input_event_id,
+                active.next_external_input_index,
+            )));
+        }
+        if active.pending_feedback.is_some() {
+            return Err(placed_scheduler_divergence(format!(
+                "scheduled prefill input event {:?} reached private feedback at external offset {expected_offset}",
+                scheduler_activation.input_event_id,
+            )));
+        }
+        let backend_token_ids = active
+            .input_event
+            .token_ids
+            .get(expected_offset..)
+            .unwrap_or_default();
+        if !backend_token_ids.starts_with(scheduled_token_ids) {
+            let mismatch_index = scheduled_token_ids
+                .iter()
+                .zip(backend_token_ids.iter())
+                .position(|(scheduled, backend)| scheduled != backend)
+                .unwrap_or_else(|| scheduled_token_ids.len().min(backend_token_ids.len()));
+            return Err(placed_scheduler_divergence(format!(
+                "scheduled prefill input event {:?} diverged at external offset {}: scheduled={:?}, backend={:?}",
+                scheduler_activation.input_event_id,
+                expected_offset.saturating_add(mismatch_index),
+                scheduled_token_ids.get(mismatch_index),
+                backend_token_ids.get(mismatch_index),
+            )));
+        }
+        Ok(())
     }
 
     fn run_scheduled_feedback_window_with_output<F>(

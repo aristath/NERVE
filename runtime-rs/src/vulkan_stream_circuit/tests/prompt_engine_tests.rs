@@ -350,6 +350,98 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
 }
 
 #[test]
+fn placed_prompt_engine_prefill_scheduler_tracks_partial_temporal_blocks_exactly() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for partial temporal prefill was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping partial temporal prefill test: {error}");
+            return;
+        }
+    };
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let mut stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(64),
+        7,
+        0,
+    )
+    .unwrap();
+    let prompt = (0..80)
+        .map(|index| u32::try_from(index % 7 + 1).unwrap())
+        .collect::<Vec<_>>();
+    stream.enqueue_input_event(VulkanResidentTokenInputEvent::new(
+        "partial-temporal-prefill",
+        prompt.clone(),
+        0,
+    ));
+    let scheduler_activation = RuntimeStreamActivation {
+        id: 1,
+        stream_id: "main".to_string(),
+        execution_class_id: stream.package().stream_execution_class_id(),
+        input_event_id: "partial-temporal-prefill".to_string(),
+        kind: RuntimeStreamActivationKind::PrefillChunk {
+            token_offset: 0,
+            token_ids: prompt.clone(),
+            remaining_prompt_token_count: 0,
+        },
+        max_state_activation_count: prompt.len(),
+        state_reservations: Vec::new(),
+    };
+
+    let completed = stream
+        .run_scheduled_prefill_chunk_with_output(&scheduler_activation, &prompt, &mut |_| {})
+        .unwrap();
+
+    assert_eq!(completed.unwrap().input_event.token_ids, prompt);
+    assert_eq!(stream.next_stream_tick(), 80);
+    assert!(stream.is_idle());
+
+    stream.enqueue_input_event(VulkanResidentTokenInputEvent::new(
+        "divergent-prefill",
+        vec![4, 5, 6],
+        0,
+    ));
+    let divergent_tokens = vec![4, 7, 6];
+    let divergent_activation = RuntimeStreamActivation {
+        id: 2,
+        stream_id: "main".to_string(),
+        execution_class_id: stream.package().stream_execution_class_id(),
+        input_event_id: "divergent-prefill".to_string(),
+        kind: RuntimeStreamActivationKind::PrefillChunk {
+            token_offset: 0,
+            token_ids: divergent_tokens.clone(),
+            remaining_prompt_token_count: 0,
+        },
+        max_state_activation_count: divergent_tokens.len(),
+        state_reservations: Vec::new(),
+    };
+    let error = stream
+        .run_scheduled_prefill_chunk_with_output(
+            &divergent_activation,
+            &divergent_tokens,
+            &mut |_| {},
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("diverged at external offset 1: scheduled=Some(7), backend=Some(5)"),
+        "unexpected divergence diagnostic: {error}"
+    );
+    assert_eq!(stream.next_stream_tick(), 80);
+}
+
+#[test]
 fn placed_prompt_engine_transaction_restores_after_backend_failure() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,

@@ -382,7 +382,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         &mut self,
         on_output_event: &mut F,
     ) -> Result<
-        (bool, Option<VulkanResidentInProcessPlacedSubmittedInputRun>),
+        (usize, Option<VulkanResidentInProcessPlacedSubmittedInputRun>),
         VulkanResidentInProcessPlacedRuntimeError,
     >
     where
@@ -396,17 +396,17 @@ impl VulkanResidentInProcessPlacedPromptStream {
         max_external_inputs: usize,
         on_output_event: &mut F,
     ) -> Result<
-        (bool, Option<VulkanResidentInProcessPlacedSubmittedInputRun>),
+        (usize, Option<VulkanResidentInProcessPlacedSubmittedInputRun>),
         VulkanResidentInProcessPlacedRuntimeError,
     >
     where
         F: FnMut(VulkanResidentTokenOutputEvent),
     {
         if !self.activate_next_input_event()? {
-            return Ok((false, None));
+            return Ok((0, None));
         }
         if max_external_inputs < 2 {
-            return Ok((false, None));
+            return Ok((0, None));
         }
         let active = self
             .active_input_event
@@ -418,16 +418,16 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .len()
             .saturating_sub(active.next_external_input_index);
         if external_input_count < 2 || active.pending_feedback.is_some() {
-            return Ok((false, None));
+            return Ok((0, None));
         }
         let block_width = self
             .processor
             .temporal_block_width(&self.devices, external_input_count)?;
         if block_width < 2 {
-            return Ok((false, None));
+            return Ok((0, None));
         }
         if block_width > max_external_inputs {
-            return Ok((false, None));
+            return Ok((0, None));
         }
         let block_start_index = active.next_external_input_index;
         let block_end_index = block_start_index + block_width;
@@ -491,7 +491,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .is_some_and(VulkanResidentInProcessPlacedActivePromptEvent::is_complete)
             .then(|| self.complete_active_input_event())
             .transpose()?;
-        Ok((true, completed_input_run))
+        Ok((block_width, completed_input_run))
     }
 
     pub fn run_next_activation(
@@ -668,12 +668,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
             return Ok(None);
         }
         loop {
-            let (ran_temporal_block, completed_input_run) =
+            let (processed_external_inputs, completed_input_run) =
                 self.run_temporal_external_input_block_with_output(&mut on_output_event)?;
             if let Some(completed_input_run) = completed_input_run {
                 return Ok(Some(completed_input_run));
             }
-            if ran_temporal_block {
+            if processed_external_inputs > 0 {
                 continue;
             }
             if self.run_speculative_feedback_window_limited_with_output(
