@@ -12,9 +12,19 @@ struct VulkanCompiledResourceAllocationCohort {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanCompiledResourceMemoryPlan {
+    group_payload_bytes: BTreeMap<String, usize>,
     group_tiers: BTreeMap<String, VulkanCompiledResourceMemoryTier>,
+    dynamic_admission: bool,
+    device_payload_capacity: usize,
+    host_visible_payload_capacity: usize,
     device_payload_bytes: usize,
     host_visible_payload_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanCompiledResourceTierAdmission {
+    tiers: Vec<VulkanCompiledResourceMemoryTier>,
+    newly_assigned_group_ids: Vec<String>,
 }
 
 impl VulkanCompiledResourceMemoryPlan {
@@ -66,10 +76,182 @@ impl VulkanCompiledResourceMemoryPlan {
             )));
         }
         Ok(Self {
+            group_payload_bytes: group_payload_bytes.clone(),
             group_tiers,
+            dynamic_admission: false,
+            device_payload_capacity,
+            host_visible_payload_capacity,
             device_payload_bytes,
             host_visible_payload_bytes,
         })
+    }
+
+    fn dynamic_tiered(
+        group_payload_bytes: &BTreeMap<String, usize>,
+        device_payload_capacity: usize,
+        host_visible_payload_capacity: usize,
+    ) -> Result<Self, VulkanCompiledResourceDeviceStoreError> {
+        if group_payload_bytes.is_empty()
+            || device_payload_capacity == 0
+            || host_visible_payload_capacity == 0
+            || group_payload_bytes
+                .values()
+                .any(|byte_count| *byte_count == 0)
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "dynamic tiered compiled-resource memory plan has an invalid capacity or group",
+            ));
+        }
+        Ok(Self {
+            group_payload_bytes: group_payload_bytes.clone(),
+            group_tiers: BTreeMap::new(),
+            dynamic_admission: true,
+            device_payload_capacity,
+            host_visible_payload_capacity,
+            device_payload_bytes: 0,
+            host_visible_payload_bytes: 0,
+        })
+    }
+
+    fn admit_groups(
+        &mut self,
+        groups: &[(String, usize)],
+    ) -> Result<VulkanCompiledResourceTierAdmission, VulkanCompiledResourceDeviceStoreError> {
+        if groups.is_empty()
+            || groups
+                .iter()
+                .map(|(group_id, _)| group_id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != groups.len()
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "tiered compiled-resource admission is empty or repeats a group",
+            ));
+        }
+        let mut device_payload_bytes = self.device_payload_bytes;
+        let mut host_visible_payload_bytes = self.host_visible_payload_bytes;
+        let mut assignments = Vec::with_capacity(groups.len());
+        let mut newly_assigned_group_ids = Vec::new();
+        for (group_id, byte_count) in groups {
+            let expected = self.group_payload_bytes.get(group_id).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "tiered compiled-resource admission references unknown group {group_id:?}"
+                ))
+            })?;
+            if expected != byte_count {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "tiered compiled-resource group {group_id:?} has {byte_count} bytes, expected {expected}"
+                )));
+            }
+            if let Some(tier) = self.group_tiers.get(group_id).copied() {
+                assignments.push((group_id.clone(), tier, false));
+                continue;
+            }
+            if !self.dynamic_admission {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "complete tiered compiled-resource plan omitted group {group_id:?}"
+                )));
+            }
+            let device_end = device_payload_bytes.checked_add(*byte_count).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "tiered device admission byte count overflowed",
+                )
+            })?;
+            let tier = if device_end <= self.device_payload_capacity {
+                device_payload_bytes = device_end;
+                VulkanCompiledResourceMemoryTier::Device
+            } else {
+                let host_end = host_visible_payload_bytes
+                    .checked_add(*byte_count)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "tiered host-visible admission byte count overflowed",
+                        )
+                    })?;
+                if host_end > self.host_visible_payload_capacity {
+                    return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "tiered compiled resources cannot admit group {group_id:?}: device tier uses {device_payload_bytes}/{} bytes and host-visible tier would use {host_end}/{} bytes",
+                        self.device_payload_capacity, self.host_visible_payload_capacity,
+                    )));
+                }
+                host_visible_payload_bytes = host_end;
+                VulkanCompiledResourceMemoryTier::HostVisible
+            };
+            assignments.push((group_id.clone(), tier, true));
+            newly_assigned_group_ids.push(group_id.clone());
+        }
+        for (group_id, tier, is_new) in &assignments {
+            if *is_new {
+                self.group_tiers.insert(group_id.clone(), *tier);
+            }
+        }
+        self.device_payload_bytes = device_payload_bytes;
+        self.host_visible_payload_bytes = host_visible_payload_bytes;
+        Ok(VulkanCompiledResourceTierAdmission {
+            tiers: assignments.into_iter().map(|(_, tier, _)| tier).collect(),
+            newly_assigned_group_ids,
+        })
+    }
+
+    fn release_dynamic_groups(
+        &mut self,
+        group_ids: &BTreeSet<String>,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        if group_ids.is_empty() {
+            return Ok(());
+        }
+        if !self.dynamic_admission {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "cannot release groups from a complete tiered compiled-resource plan",
+            ));
+        }
+        for group_id in group_ids {
+            let tier = self.group_tiers.remove(group_id).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "dynamic tiered compiled-resource plan has no admitted group {group_id:?}"
+                ))
+            })?;
+            let byte_count = self.group_payload_bytes[group_id];
+            match tier {
+                VulkanCompiledResourceMemoryTier::Device => {
+                    self.device_payload_bytes = self
+                        .device_payload_bytes
+                        .checked_sub(byte_count)
+                        .expect("admitted device-tier bytes include the released group");
+                }
+                VulkanCompiledResourceMemoryTier::HostVisible => {
+                    self.host_visible_payload_bytes = self
+                        .host_visible_payload_bytes
+                        .checked_sub(byte_count)
+                        .expect("admitted host-tier bytes include the released group");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_admission(
+        &mut self,
+        admission: &VulkanCompiledResourceTierAdmission,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        self.release_dynamic_groups(
+            &admission
+                .newly_assigned_group_ids
+                .iter()
+                .cloned()
+                .collect(),
+        )
+    }
+
+    fn clear_dynamic_admissions(
+        &mut self,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        if !self.dynamic_admission {
+            return Ok(());
+        }
+        let group_ids = self.group_tiers.keys().cloned().collect();
+        self.release_dynamic_groups(&group_ids)
     }
 
     fn tier_for_group(

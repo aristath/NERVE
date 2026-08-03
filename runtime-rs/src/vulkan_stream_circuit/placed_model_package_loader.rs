@@ -503,6 +503,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })
                 .collect::<Vec<_>>();
 
+        let physical_store_count = physical_slice_groups.len();
         let mut compiled_resource_device_stores = BTreeMap::new();
         let mut compiled_resource_physical_placements = Vec::new();
         let mut planned_selector_physical_placements =
@@ -689,9 +690,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
             let resident_payload_capacity = maximum_dynamic_bytes
                 .min(safe_dynamic_bytes.saturating_sub(maximum_alignment_padding));
             let (store_payload_capacity, device_payload_capacity, host_visible_payload_capacity) =
-                if resource_residency_policy == ResourceResidencyPolicy::Eager
-                    && maximum_dynamic_bytes > resident_payload_capacity
-                {
+                if maximum_dynamic_bytes > resident_payload_capacity {
+                    if remaining_safe_host_visible_payload_bytes.is_none() {
+                        let capacity = read_vulkan_host_memory_capacity()
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+                        remaining_safe_host_visible_payload_bytes =
+                            Some(capacity.safe_tiered_payload_bytes());
+                    }
+                    let remaining = remaining_safe_host_visible_payload_bytes
+                        .as_mut()
+                        .expect("tiered host capacity was established");
+                    if resource_residency_policy == ResourceResidencyPolicy::Eager {
                     let minimum_host_payload_bytes = maximum_dynamic_bytes
                         .saturating_sub(resident_payload_capacity)
                         .checked_add(physical_parameters.staging_headroom_bytes)
@@ -711,15 +720,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                                 ),
                             )
                         })?;
-                    if remaining_safe_host_visible_payload_bytes.is_none() {
-                        let capacity = read_vulkan_host_memory_capacity()
-                            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-                        remaining_safe_host_visible_payload_bytes =
-                            Some(capacity.safe_tiered_payload_bytes());
-                    }
-                    let remaining = remaining_safe_host_visible_payload_bytes
-                        .as_mut()
-                        .expect("tiered host capacity was established");
                     if maximum_host_allocation_bytes > *remaining {
                         return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                             VulkanResidentTokenModelPackageError::new(format!(
@@ -733,6 +733,35 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         resident_payload_capacity,
                         minimum_host_payload_bytes,
                     )
+                    } else {
+                        let remaining_store_count =
+                            physical_store_count.saturating_sub(physical_group_index);
+                        let desired_host_payload_bytes = maximum_dynamic_bytes
+                            .saturating_sub(resident_payload_capacity);
+                        let host_visible_payload_capacity =
+                            reserve_fair_vulkan_host_visible_payload_bytes(
+                                remaining,
+                                remaining_store_count,
+                                desired_host_payload_bytes,
+                                physical_parameters
+                                    .staging_headroom_bytes
+                                    .saturating_add(maximum_alignment_padding),
+                            );
+                        let store_payload_capacity = resident_payload_capacity
+                            .checked_add(host_visible_payload_capacity)
+                            .ok_or_else(|| {
+                                VulkanResidentInProcessPlacedRuntimeError::Package(
+                                    VulkanResidentTokenModelPackageError::new(
+                                        "demand-tiered payload capacity overflowed",
+                                    ),
+                                )
+                            })?;
+                        (
+                            store_payload_capacity,
+                            resident_payload_capacity,
+                            host_visible_payload_capacity,
+                        )
+                    }
                 } else {
                     (resident_payload_capacity, resident_payload_capacity, 0)
                 };

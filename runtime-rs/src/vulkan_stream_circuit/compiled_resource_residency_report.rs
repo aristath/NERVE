@@ -1,5 +1,5 @@
 pub const VULKAN_COMPILED_RESOURCE_RESIDENCY_REPORT_SCHEMA: &str =
-    "nerve.vulkan_compiled_resource_residency_report.v2";
+    "nerve.vulkan_compiled_resource_residency_report.v3";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanCompiledResourceComponentCoverageReport {
@@ -40,6 +40,10 @@ pub struct VulkanCompiledResourceStoreReport {
     pub current_payload_bytes: usize,
     pub maximum_payload_bytes: usize,
     pub high_water_payload_bytes: usize,
+    pub device_tier_payload_bytes: usize,
+    pub host_visible_tier_payload_bytes: usize,
+    pub maximum_device_tier_payload_bytes: usize,
+    pub maximum_host_visible_tier_payload_bytes: usize,
     pub addressable_unit_count: usize,
     pub initial_resident_unit_count: usize,
     pub resident_unit_count: usize,
@@ -94,6 +98,10 @@ pub struct VulkanCompiledResourceResidencyTotalsReport {
     pub current_payload_bytes: usize,
     pub maximum_payload_bytes: usize,
     pub high_water_payload_bytes: usize,
+    pub device_tier_payload_bytes: usize,
+    pub host_visible_tier_payload_bytes: usize,
+    pub maximum_device_tier_payload_bytes: usize,
+    pub maximum_host_visible_tier_payload_bytes: usize,
     pub addressable_unit_count: usize,
     pub initial_resident_unit_count: usize,
     pub resident_unit_count: usize,
@@ -604,6 +612,10 @@ impl VulkanCompiledResourceResidencyTotalsReport {
         add_usize!(current_payload_bytes);
         add_usize!(maximum_payload_bytes);
         add_usize!(high_water_payload_bytes);
+        add_usize!(device_tier_payload_bytes);
+        add_usize!(host_visible_tier_payload_bytes);
+        add_usize!(maximum_device_tier_payload_bytes);
+        add_usize!(maximum_host_visible_tier_payload_bytes);
         add_usize!(addressable_unit_count);
         add_usize!(initial_resident_unit_count);
         add_usize!(resident_unit_count);
@@ -794,6 +806,10 @@ mod compiled_resource_residency_report_tests {
             current_payload_bytes: 50,
             maximum_payload_bytes: 130,
             high_water_payload_bytes: 70,
+            device_tier_payload_bytes: 40,
+            host_visible_tier_payload_bytes: 10,
+            maximum_device_tier_payload_bytes: 80,
+            maximum_host_visible_tier_payload_bytes: 50,
             addressable_unit_count: 13,
             initial_resident_unit_count: 3,
             resident_unit_count: 5,
@@ -838,6 +854,10 @@ mod compiled_resource_residency_report_tests {
         assert_eq!(totals.metadata_device_bytes, 20);
         assert_eq!(totals.transfer_staging_host_bytes, 16);
         assert_eq!(totals.resident_unit_count, 10);
+        assert_eq!(totals.device_tier_payload_bytes, 80);
+        assert_eq!(totals.host_visible_tier_payload_bytes, 20);
+        assert_eq!(totals.maximum_device_tier_payload_bytes, 160);
+        assert_eq!(totals.maximum_host_visible_tier_payload_bytes, 100);
         assert_eq!(totals.gpu_selection_count, 22);
         assert_eq!(totals.gpu_resident_hit_count, 18);
         assert_eq!(totals.gpu_miss_count, 4);

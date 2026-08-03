@@ -502,11 +502,19 @@ impl VulkanCompiledResourceDeviceStore {
         let memory_plan = if maximum_dynamic_host_visible_payload_bytes == 0 {
             None
         } else {
-            Some(VulkanCompiledResourceMemoryPlan::exact_tiered(
-                &selector_cache_policy.group_payload_bytes,
-                maximum_dynamic_device_payload_bytes,
-                maximum_dynamic_host_visible_payload_bytes,
-            )?)
+            Some(if residency_policy == ResourceResidencyPolicy::Eager {
+                VulkanCompiledResourceMemoryPlan::exact_tiered(
+                    &selector_cache_policy.group_payload_bytes,
+                    maximum_dynamic_device_payload_bytes,
+                    maximum_dynamic_host_visible_payload_bytes,
+                )?
+            } else {
+                VulkanCompiledResourceMemoryPlan::dynamic_tiered(
+                    &selector_cache_policy.group_payload_bytes,
+                    maximum_dynamic_device_payload_bytes,
+                    maximum_dynamic_host_visible_payload_bytes,
+                )?
+            })
         };
         let host_visible_arena = if memory_plan.is_some() {
             let host_visible_allocation_capacity = maximum_dynamic_host_visible_payload_bytes
@@ -960,6 +968,13 @@ impl VulkanCompiledResourceDeviceStore {
             .stats()
             .map_err(compiled_device_store_vulkan_error)?
             .committed_byte_capacity;
+        let host_committed_before = self
+            .host_visible_arena
+            .as_ref()
+            .map(|arena| arena.stats().map(|stats| stats.committed_byte_capacity))
+            .transpose()
+            .map_err(compiled_device_store_vulkan_error)?
+            .unwrap_or(0);
         let eviction = self
             .manager
             .evict_inactive_groups(selected_group_ids.clone())
@@ -1011,19 +1026,40 @@ impl VulkanCompiledResourceDeviceStore {
         }
         let release = eviction.release();
         drop(eviction);
+        if let Some(memory_plan) = &self.memory_plan {
+            memory_plan
+                .lock()
+                .map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource memory plan was poisoned",
+                    )
+                })?
+                .release_dynamic_groups(&selected_group_ids)?;
+        }
         let committed_after = self
             .device_arena
             .stats()
             .map_err(compiled_device_store_vulkan_error)?
             .committed_byte_capacity;
-        if committed_after >= committed_before {
+        let host_committed_after = self
+            .host_visible_arena
+            .as_ref()
+            .map(|arena| arena.stats().map(|stats| stats.committed_byte_capacity))
+            .transpose()
+            .map_err(compiled_device_store_vulkan_error)?
+            .unwrap_or(0);
+        if committed_after >= committed_before
+            && host_committed_after >= host_committed_before
+        {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                "evicting {} complete allocation-cohort groups released no physical device bytes",
+                "evicting {} complete allocation-cohort groups released no device-local or host-visible bytes",
                 release.group_count
             )));
         }
-        self.instrumentation
-            .record_released_device_bytes(committed_before - committed_after);
+        if committed_after < committed_before {
+            self.instrumentation
+                .record_released_device_bytes(committed_before - committed_after);
+        }
         Ok(())
     }
 
@@ -1099,7 +1135,7 @@ impl VulkanCompiledResourceDeviceStore {
         } = &mut *state;
         let mut device_indices = Vec::new();
         let mut host_visible_indices = Vec::new();
-        let memory_plan = self
+        let mut memory_plan = self
             .memory_plan
             .as_ref()
             .map(|memory_plan| {
@@ -1110,16 +1146,25 @@ impl VulkanCompiledResourceDeviceStore {
                 })
             })
             .transpose()?;
-        let tiers = loaded
-            .iter()
-            .map(|(plan, _, _)| {
-                memory_plan
-                    .as_ref()
-                    .map(|memory_plan| memory_plan.tier_for_group(&plan.descriptor.id))
-                    .transpose()
-                    .map(|tier| tier.unwrap_or(VulkanCompiledResourceMemoryTier::Device))
+        let tier_admission = memory_plan
+            .as_mut()
+            .map(|memory_plan| {
+                memory_plan.admit_groups(
+                    &loaded
+                        .iter()
+                        .map(|(plan, _, _)| {
+                            (plan.descriptor.id.clone(), plan.descriptor.byte_count)
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .transpose()?;
+        let tiers = tier_admission
+            .as_ref()
+            .map(|admission| admission.tiers.clone())
+            .unwrap_or_else(|| {
+                vec![VulkanCompiledResourceMemoryTier::Device; loaded.len()]
+            });
         for (index, tier) in tiers.iter().copied().enumerate() {
             match tier {
                 VulkanCompiledResourceMemoryTier::Device => device_indices.push(index),
@@ -1173,6 +1218,11 @@ impl VulkanCompiledResourceDeviceStore {
         let uploads = match upload_result {
             Ok(uploads) => uploads,
             Err(error) => {
+                if let (Some(memory_plan), Some(admission)) =
+                    (memory_plan.as_mut(), tier_admission.as_ref())
+                {
+                    memory_plan.rollback_admission(admission)?;
+                }
                 if compiled_resource_vulkan_error_is_device_loss(&error) {
                     self.record_terminal_device_failure(&error)?;
                 }
@@ -1183,6 +1233,16 @@ impl VulkanCompiledResourceDeviceStore {
                 return Err(compiled_device_store_vulkan_error(error));
             }
         };
+        let mut newly_assigned_group_ids = tier_admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .newly_assigned_group_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         let mut staged = loaded
             .into_iter()
             .zip(uploads)
@@ -1214,6 +1274,11 @@ impl VulkanCompiledResourceDeviceStore {
         while !staged.is_empty() {
             let (group_id, permit, group, publications, chunks) = staged.remove(0);
             if chunks.is_empty() {
+                if let Some(memory_plan) = memory_plan.as_mut() {
+                    memory_plan.release_dynamic_groups(
+                        &newly_assigned_group_ids,
+                    )?;
+                }
                 return Err(VulkanCompiledResourceDeviceStoreError::new(
                     "stable compiled resource publication has no allocation cohort",
                 ));
@@ -1228,6 +1293,7 @@ impl VulkanCompiledResourceDeviceStore {
                             .or_default()
                             .insert(group_id.clone());
                     }
+                    newly_assigned_group_ids.remove(&group_id);
                     drop(lease);
                 }
                 Err(error) => {
@@ -1238,6 +1304,11 @@ impl VulkanCompiledResourceDeviceStore {
                     address_table
                         .clear_group(transfer, &unpublished)
                         .map_err(compiled_device_store_vulkan_error)?;
+                    if let Some(memory_plan) = memory_plan.as_mut() {
+                        memory_plan.release_dynamic_groups(
+                            &newly_assigned_group_ids,
+                        )?;
+                    }
                     return Err(compiled_device_store_residency_error(error));
                 }
             }
@@ -1525,6 +1596,40 @@ impl VulkanCompiledResourceDeviceStore {
                     ))
                 })
         };
+        let (
+            device_tier_payload_bytes,
+            host_visible_tier_payload_bytes,
+            maximum_device_tier_payload_bytes,
+            maximum_host_visible_tier_payload_bytes,
+        ) = match &self.memory_plan {
+            Some(memory_plan) => {
+                let memory_plan = memory_plan.lock().map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource memory plan was poisoned while reporting",
+                    )
+                })?;
+                (
+                    memory_plan.device_payload_bytes,
+                    memory_plan.host_visible_payload_bytes,
+                    memory_plan.device_payload_capacity,
+                    memory_plan.host_visible_payload_capacity,
+                )
+            }
+            None => (
+                residency.dynamic_resident_bytes,
+                0,
+                self.maximum_dynamic_payload_bytes,
+                0,
+            ),
+        };
+        if device_tier_payload_bytes
+            .checked_add(host_visible_tier_payload_bytes)
+            != Some(residency.dynamic_resident_bytes)
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource tier payload accounting differs from resident payload bytes",
+            ));
+        }
         Ok(VulkanCompiledResourceStoreReport {
             store_id: self.device_id.clone(),
             physical_device_id: self.physical_device_id.clone(),
@@ -1552,6 +1657,10 @@ impl VulkanCompiledResourceDeviceStore {
             current_payload_bytes: residency.dynamic_resident_bytes,
             maximum_payload_bytes: self.maximum_dynamic_payload_bytes,
             high_water_payload_bytes: residency.high_water_dynamic_resident_bytes,
+            device_tier_payload_bytes,
+            host_visible_tier_payload_bytes,
+            maximum_device_tier_payload_bytes,
+            maximum_host_visible_tier_payload_bytes,
             addressable_unit_count,
             initial_resident_unit_count: usize::try_from(
                 self.instrumentation
@@ -1838,6 +1947,16 @@ impl VulkanCompiledResourceDeviceStore {
                 host_visible_arena.committed_byte_capacity,
                 host_visible_arena.chunk_count,
             )));
+        }
+        if let Some(memory_plan) = &self.memory_plan {
+            memory_plan
+                .lock()
+                .map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource memory plan was poisoned during teardown",
+                    )
+                })?
+                .clear_dynamic_admissions()?;
         }
         Ok(())
     }

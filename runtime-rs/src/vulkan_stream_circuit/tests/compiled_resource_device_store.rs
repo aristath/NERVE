@@ -77,6 +77,92 @@ fn exact_tiered_resource_plan_rejects_unknown_groups() {
 }
 
 #[test]
+fn dynamic_tiered_plan_fills_device_then_retains_overflow_in_host_memory() {
+    let groups = BTreeMap::from([
+        ("identity-0".to_string(), 40usize),
+        ("identity-1".to_string(), 40usize),
+        ("identity-2".to_string(), 40usize),
+        ("identity-3".to_string(), 40usize),
+    ]);
+    let mut plan = VulkanCompiledResourceMemoryPlan::dynamic_tiered(&groups, 100, 80).unwrap();
+
+    let admission = plan
+        .admit_groups(&[
+            ("identity-0".to_string(), 40),
+            ("identity-1".to_string(), 40),
+            ("identity-2".to_string(), 40),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        admission.tiers,
+        vec![
+            VulkanCompiledResourceMemoryTier::Device,
+            VulkanCompiledResourceMemoryTier::Device,
+            VulkanCompiledResourceMemoryTier::HostVisible,
+        ]
+    );
+    assert_eq!(plan.device_payload_bytes, 80);
+    assert_eq!(plan.host_visible_payload_bytes, 40);
+    assert_eq!(plan.group_tiers.len(), 3);
+}
+
+#[test]
+fn dynamic_tiered_admission_is_atomic_when_both_tiers_are_full() {
+    let groups = BTreeMap::from([
+        ("resident".to_string(), 60usize),
+        ("would-fit".to_string(), 40usize),
+        ("overflow".to_string(), 60usize),
+    ]);
+    let mut plan = VulkanCompiledResourceMemoryPlan::dynamic_tiered(&groups, 100, 40).unwrap();
+    plan.admit_groups(&[("resident".to_string(), 60)]).unwrap();
+    let before = plan.clone();
+
+    let error = plan
+        .admit_groups(&[
+            ("would-fit".to_string(), 40),
+            ("overflow".to_string(), 60),
+        ])
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot admit group"));
+    assert_eq!(plan, before);
+}
+
+#[test]
+fn dynamic_tiered_release_reuses_the_released_tier_capacity() {
+    let groups = BTreeMap::from([
+        ("device".to_string(), 80usize),
+        ("host-old".to_string(), 40usize),
+        ("host-new".to_string(), 40usize),
+    ]);
+    let mut plan = VulkanCompiledResourceMemoryPlan::dynamic_tiered(&groups, 80, 40).unwrap();
+    plan.admit_groups(&[
+        ("device".to_string(), 80),
+        ("host-old".to_string(), 40),
+    ])
+    .unwrap();
+
+    plan.release_dynamic_groups(&BTreeSet::from(["host-old".to_string()]))
+        .unwrap();
+    let admission = plan
+        .admit_groups(&[("host-new".to_string(), 40)])
+        .unwrap();
+
+    assert_eq!(
+        admission.tiers,
+        vec![VulkanCompiledResourceMemoryTier::HostVisible]
+    );
+    assert_eq!(plan.device_payload_bytes, 80);
+    assert_eq!(plan.host_visible_payload_bytes, 40);
+    assert!(!plan.group_tiers.contains_key("host-old"));
+    assert_eq!(
+        plan.tier_for_group("host-new").unwrap(),
+        VulkanCompiledResourceMemoryTier::HostVisible
+    );
+}
+
+#[test]
 fn tiered_host_memory_budget_preserves_explicit_system_headroom() {
     let capacity = parse_vulkan_host_memory_capacity(
         "MemTotal:       67108864 kB\nMemAvailable:   41943040 kB\n",
@@ -99,6 +185,53 @@ fn tiered_host_memory_budget_rejects_missing_or_inconsistent_kernel_data() {
     assert!(
         parse_vulkan_host_memory_capacity("MemTotal: 1024 bytes\nMemAvailable: 512 kB\n").is_err()
     );
+}
+
+#[test]
+fn demand_tiered_host_budget_is_shared_fairly_across_physical_stores() {
+    let mut remaining = 390usize;
+    let first = reserve_fair_vulkan_host_visible_payload_bytes(
+        &mut remaining,
+        3,
+        220,
+        0,
+    );
+    let second = reserve_fair_vulkan_host_visible_payload_bytes(
+        &mut remaining,
+        2,
+        220,
+        0,
+    );
+    let third = reserve_fair_vulkan_host_visible_payload_bytes(
+        &mut remaining,
+        1,
+        220,
+        0,
+    );
+
+    assert_eq!((first, second, third), (130, 130, 130));
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn demand_tiered_host_budget_preserves_overhead_and_redistributes_slack() {
+    let mut remaining = 110usize;
+    let first = reserve_fair_vulkan_host_visible_payload_bytes(
+        &mut remaining,
+        2,
+        20,
+        5,
+    );
+    let second = reserve_fair_vulkan_host_visible_payload_bytes(
+        &mut remaining,
+        1,
+        100,
+        5,
+    );
+
+    assert_eq!(first, 20);
+    assert_eq!(second, 80);
+    assert_eq!(remaining, 0);
 }
 
 #[test]
@@ -753,6 +886,17 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             byte_count: 16,
             cancelled_load_count: 0,
         }
+    );
+    assert!(
+        tiered_store
+            .memory_plan
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .group_tiers
+            .is_empty(),
+        "demand-tier assignments must not outlive model teardown"
     );
     drop(tiered_buffers);
     drop(tiered_store);

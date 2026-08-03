@@ -341,6 +341,13 @@ fn print_runtime_resource_residency(
         totals.reload_count,
     );
     println!(
+        "  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={}/{}/{}/{}",
+        totals.device_tier_payload_bytes,
+        totals.host_visible_tier_payload_bytes,
+        totals.maximum_device_tier_payload_bytes,
+        totals.maximum_host_visible_tier_payload_bytes,
+    );
+    println!(
         "  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={}/{}/{}/{:.3}/{:.3}/{:.3}",
         totals.physical_read_count,
         totals.physical_bytes_read,

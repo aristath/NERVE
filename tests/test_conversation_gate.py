@@ -117,6 +117,7 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
             f"  gpu_accesses(selections/resident_hits/misses)={index * 2}/{index}/{index}\n"
             f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={index}/{index}/0/{index}/0/0\n"
             "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0\n"
+            f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={index * 8}/{index * 2}/80/20\n"
             f"  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={index}/{index * 10}/{index * 10}/{index * 0.5}/{index * 0.25}/{index * 0.75}\n"
             "determinism:\n"
         )
@@ -146,6 +147,12 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
         "transfers.read_ms": 3.0,
         "transfers.upload_ms": 1.5,
         "transfers.blocking_ms": 4.5,
+    }
+    assert turns[-1].residency_gauges == {
+        "memory_tiers.device_payload": 48,
+        "memory_tiers.host_visible_payload": 12,
+        "memory_tiers.device_capacity": 80,
+        "memory_tiers.host_visible_capacity": 20,
     }
 
 
@@ -436,6 +443,7 @@ while True:
     print(f"  gpu_accesses(selections/resident_hits/misses)={completed}/{completed - misses}/{misses}")
     print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={misses}/{misses}/0/{misses}/0/0")
     print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
+    print(f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={misses * 8}/{misses * 2}/80/20")
     print(f"  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={misses}/{misses * 10}/{misses * 10}/{misses}.0/{misses}.0/{misses}.0", flush=True)
 """.lstrip()
     )
@@ -465,6 +473,15 @@ while True:
     assert run.measured_set.residency_delta["gpu_accesses.selections"] == 6
     assert run.measured_set.residency_delta["gpu_accesses.misses"] == 0
     assert run.measured_set.residency_delta["transfers.blocking_ms"] == 0.0
+    assert run.measured_set.residency_gauges_start == {
+        "memory_tiers.device_payload": 48,
+        "memory_tiers.host_visible_payload": 12,
+        "memory_tiers.device_capacity": 80,
+        "memory_tiers.host_visible_capacity": 20,
+    }
+    assert run.measured_set.residency_gauges_end == (
+        run.measured_set.residency_gauges_start
+    )
 
 
 def test_resident_runner_terminates_a_long_multiline_response_cycle(tmp_path) -> None:

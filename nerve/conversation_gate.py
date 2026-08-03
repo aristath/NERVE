@@ -41,6 +41,7 @@ _CUMULATIVE_RESIDENCY_COUNTER_GROUPS = {
     "residency_eviction",
     "transfers",
 }
+_RESIDENCY_GAUGE_GROUPS = {"memory_tiers"}
 
 
 class ConversationGateError(RuntimeError):
@@ -54,6 +55,7 @@ class ConversationTurn:
     stats: dict[str, int | float | str]
     residency_policy: str | None = None
     residency_counters: dict[str, int | float] | None = None
+    residency_gauges: dict[str, int | float] | None = None
 
     @property
     def decode_tokens_per_second(self) -> float:
@@ -84,6 +86,8 @@ class ConversationSetReport:
     residency_start: dict[str, int | float] | None
     residency_end: dict[str, int | float] | None
     residency_delta: dict[str, int | float] | None
+    residency_gauges_start: dict[str, int | float] | None
+    residency_gauges_end: dict[str, int | float] | None
 
 
 @dataclass(frozen=True)
@@ -115,15 +119,24 @@ def _parse_scalar(raw: str) -> int | float | str:
             return raw
 
 
-def _residency_metrics(report: str) -> tuple[str | None, dict[str, int | float] | None]:
+def _residency_metrics(
+    report: str,
+) -> tuple[
+    str | None,
+    dict[str, int | float] | None,
+    dict[str, int | float] | None,
+]:
     marker = "\nresource_residency:\n"
     if marker not in report:
-        return None, None
+        return None, None, None
     block = report.split(marker, 1)[1]
     policy_match = _RESIDENCY_POLICY.search(block)
     counters: dict[str, int | float] = {}
+    gauges: dict[str, int | float] = {}
     for group, raw_labels, raw_values in _RESIDENCY_COUNTER_LINE.findall(block):
-        if group not in _CUMULATIVE_RESIDENCY_COUNTER_GROUPS:
+        if group not in (
+            _CUMULATIVE_RESIDENCY_COUNTER_GROUPS | _RESIDENCY_GAUGE_GROUPS
+        ):
             continue
         labels = raw_labels.split("/")
         values = raw_values.split("/")
@@ -139,10 +152,16 @@ def _residency_metrics(report: str) -> tuple[str | None, dict[str, int | float] 
                     f"resource residency counter {group}.{label} is not numeric: "
                     f"{value!r}"
                 )
-            counters[f"{group}.{label}"] = parsed
+            destination = (
+                counters
+                if group in _CUMULATIVE_RESIDENCY_COUNTER_GROUPS
+                else gauges
+            )
+            destination[f"{group}.{label}"] = parsed
     return (
         policy_match.group(1) if policy_match is not None else None,
         counters or None,
+        gauges or None,
     )
 
 
@@ -166,8 +185,8 @@ def parse_conversation_transcript(
                     break
                 continue
             stats[match.group(1)] = _parse_scalar(match.group(2))
-        policy, counters = _residency_metrics(report)
-        completed_sections.append((response.rstrip(), stats, policy, counters))
+        policy, counters, gauges = _residency_metrics(report)
+        completed_sections.append((response.rstrip(), stats, policy, counters, gauges))
 
     expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (
         warmup_conversation_sets + 1
@@ -184,8 +203,9 @@ def parse_conversation_transcript(
             stats=stats,
             residency_policy=policy,
             residency_counters=counters,
+            residency_gauges=gauges,
         )
-        for prompt, (response, stats, policy, counters) in zip(
+        for prompt, (response, stats, policy, counters, gauges) in zip(
             expected_prompts, completed_sections, strict=True
         )
     ]
@@ -547,6 +567,7 @@ def run_conversation_gate(
         ]
         reports: list[ConversationSetReport] = []
         prior_residency: dict[str, int | float] | None = None
+        prior_residency_gauges: dict[str, int | float] | None = None
         for set_index, conversation_set in enumerate(conversation_sets):
             warmup, turns = conversation_set[0], conversation_set[1:]
             _final_answer(warmup.response, require_thinking)
@@ -566,6 +587,7 @@ def run_conversation_gate(
                 minimum_decode_tokens_per_second=set_minimum,
             )
             residency_end = conversation_set[-1].residency_counters
+            residency_gauges_end = conversation_set[-1].residency_gauges
             residency_delta = _residency_delta(prior_residency, residency_end)
             residency_policies = {
                 turn.residency_policy
@@ -588,9 +610,12 @@ def run_conversation_gate(
                     residency_start=prior_residency,
                     residency_end=residency_end,
                     residency_delta=residency_delta,
+                    residency_gauges_start=prior_residency_gauges,
+                    residency_gauges_end=residency_gauges_end,
                 )
             )
             prior_residency = residency_end
+            prior_residency_gauges = residency_gauges_end
         session_policies = {
             report.residency_policy
             for report in reports

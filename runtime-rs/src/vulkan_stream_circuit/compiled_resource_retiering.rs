@@ -114,7 +114,7 @@ impl VulkanCompiledResourceDeviceStore {
                 .any(|group_id| !address_state.publications.contains_key(group_id))
         {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource retiering requires the complete tiered eager model to be resident",
+                "compiled resource tier assignments and resident address publications diverged",
             ));
         }
 
