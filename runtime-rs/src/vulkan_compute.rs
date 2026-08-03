@@ -4,6 +4,7 @@ use crate::execution_schedule::{
 };
 
 include!("vulkan_compute/features.rs");
+include!("vulkan_compute/spirv_interface.rs");
 include!("vulkan_compute/device_fault.rs");
 include!("vulkan_compute/device_types.rs");
 include!("vulkan_compute/resident_buffers.rs");
@@ -30,4 +31,6 @@ include!("vulkan_compute/gpu_residency_gate_tests.rs");
 include!("vulkan_compute/mxfp4_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/hyper_connection_tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/spirv_interface_tests.rs");
 include!("vulkan_compute/tests.rs");

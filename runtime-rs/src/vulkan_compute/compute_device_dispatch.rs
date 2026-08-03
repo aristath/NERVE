@@ -163,7 +163,15 @@ impl VulkanComputeDevice {
             &descriptor_bindings,
             push_constant_byte_count,
             local_size_x,
-        )?;
+        ).map_err(|error| {
+            VulkanError(format!(
+                "failed to create resident kernel pipeline{}: {error}",
+                semantic_label
+                    .as_deref()
+                    .map(|label| format!(" for {label}"))
+                    .unwrap_or_default()
+            ))
+        })?;
 
         unsafe {
             let set_layouts = [descriptor_set_layout];

@@ -6,6 +6,7 @@ impl VulkanComputeDevice {
         push_constant_byte_count: u32,
         local_size_x: u32,
     ) -> Result<(vk::DescriptorSetLayout, vk::PipelineLayout, vk::Pipeline), VulkanError> {
+        validate_spirv_storage_descriptor_bindings(spirv_words, descriptor_bindings)?;
         validate_spirv_device_contract(
             spirv_words,
             &self.enabled_shader_features,
@@ -140,4 +141,3 @@ impl VulkanComputeDevice {
         })
     }
 }
-
