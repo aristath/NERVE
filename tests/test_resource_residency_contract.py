@@ -205,6 +205,8 @@ def _replace_eager_resource_with_dynamic_template(
         "resource_identity_seed": template["member_templates"][0][
             "resource_identity_seed"
         ],
+        "selection_signal": "selection",
+        "parameter_slot": 0,
     }
 
 

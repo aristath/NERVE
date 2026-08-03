@@ -15,6 +15,7 @@ from nerve.compiler_target import CompilerTarget
 from nerve.representation_optimizer.stage import initialize_optimizer_stage
 from nerve.resource_residency_planning import (
     analyze_lowered_resource_residency,
+    artifact_affinity_groups_for_packaging,
     partition_counts_for_packaging,
 )
 
@@ -120,6 +121,9 @@ def compile_model_package(
         tensor_index,
         package_dir,
         partition_counts=partition_counts_for_packaging(residency_analysis),
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(
+            residency_analysis
+        ),
         progress=lambda current, total, tensor_name: emit_compile_event(
             event_sink,
             "TensorPackagingStarted",

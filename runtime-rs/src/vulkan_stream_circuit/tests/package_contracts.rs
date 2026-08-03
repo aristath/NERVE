@@ -116,14 +116,19 @@ fn resource_bindings_are_strictly_typed_for_all_resource_representations() {
             "mapping": {
                 "kind": "partition_template_member",
                 "partition_template_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "resource_identity_seed": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "resource_identity_seed": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "selection_signal": "selected",
+                "parameter_slot": 1
             }
         }),
     )
     .unwrap();
     assert!(matches!(
         partition.mapping,
-        CompiledResourceBindingMapping::PartitionTemplateMember { .. }
+        CompiledResourceBindingMapping::PartitionTemplateMember {
+            parameter_slot: 1,
+            ..
+        }
     ));
 
     let error = serde_json::from_value::<CompiledResourceBinding>(
@@ -136,6 +141,8 @@ fn resource_bindings_are_strictly_typed_for_all_resource_representations() {
                 "kind": "partition_template_member",
                 "partition_template_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "resource_identity_seed": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "selection_signal": "selected",
+                "parameter_slot": 0,
                 "silent_fallback": true
             }
         }),

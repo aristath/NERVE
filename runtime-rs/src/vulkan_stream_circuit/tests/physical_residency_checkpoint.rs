@@ -39,9 +39,12 @@ fn physical_checkpoint_fixture() -> (
             component_id: "component".to_string(),
             node_id: node_id.to_string(),
             parameter_id: format!("{node_id}_parameter"),
-            mapping: CompiledResourceBindingMapping::AtomicGroup {
+            mapping: CompiledResourceBindingMapping::SelectedAtomicGroup {
                 atomic_group_id: "group_0".to_string(),
                 resource_id: format!("{node_id}_resource"),
+                selection_signal: "selected".to_string(),
+                selector_index: 0,
+                parameter_slot: 0,
             },
         })
         .collect();

@@ -1,6 +1,11 @@
 from nerve.model_package_common import *
 from nerve.model_package_tensors import *
 from nerve.model_package_packed_tensors import *
+from nerve.model_package_artifact_layout import (
+    pack_tensor_artifacts_by_affinity,
+    validate_artifact_affinity_groups,
+    write_direct_tensor_affinity_bank,
+)
 from nerve.resource_residency_planning import (
     TENSOR_PARTITION_INTEGRITY_SCHEMA,
 )
@@ -159,11 +164,24 @@ def all_lowered_circuit_refs(lowered_index: Json) -> list[Json]:
     return refs
 
 
+def _supports_direct_affinity_packaging(info: Json, *, partitioned: bool) -> bool:
+    if partitioned or info.get("derived") is not None or info.get("source_parts"):
+        return False
+    quantization = info.get("quantization")
+    return not (
+        isinstance(quantization, dict)
+        and quantization.get("format") == "auto_gptq"
+        and auto_gptq_packing(info) == AUTO_GPTQ_INPUT_MAJOR_PACKING
+        and auto_gptq_zero_encoding(info) == AUTO_GPTQ_PER_GROUP_ZERO
+    )
+
+
 def copy_tensor_package(
     tensor_index: Json,
     package_dir: Path,
     *,
     partition_counts: dict[str, int] | None = None,
+    artifact_affinity_groups: list[list[str]] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> Json:
@@ -188,10 +206,55 @@ def copy_tensor_package(
             "partition plan references unknown tensors: "
             + ", ".join(sorted(unknown_partition_tensors))
         )
+    affinity_groups = validate_artifact_affinity_groups(
+        packaged["tensors"], artifact_affinity_groups
+    )
+    direct_affinity_groups = [
+        group
+        for group in affinity_groups
+        if all(
+            _supports_direct_affinity_packaging(
+                packaged["tensors"][tensor_name],
+                partitioned=tensor_name in partition_counts,
+            )
+            for tensor_name in group
+        )
+    ]
+    deferred_affinity_groups = [
+        group for group in affinity_groups if group not in direct_affinity_groups
+    ]
+    direct_affinity_group_by_tensor = {
+        tensor_name: group
+        for group in direct_affinity_groups
+        for tensor_name in group
+    }
+    direct_affinity_groups_written: set[tuple[str, ...]] = set()
     partition_digest_payload = bytearray()
     partition_integrity_records: list[tuple[Json, int, int, int]] = []
     for index, (tensor_name, info) in enumerate(tensors, start=1):
         check_compile_cancelled(cancel_requested)
+        direct_group = direct_affinity_group_by_tensor.get(tensor_name)
+        if direct_group is not None:
+            group_key = tuple(direct_group)
+            if group_key not in direct_affinity_groups_written:
+                source_record, emitted = write_direct_tensor_affinity_bank(
+                    package_dir=package_dir,
+                    tensor_names=direct_group,
+                    tensors=packaged["tensors"],
+                    cancel_requested=cancel_requested,
+                )
+                compiled_sources.append(source_record)
+                for emitted_name, emitted_metadata in emitted.items():
+                    emitted_info = packaged["tensors"][emitted_name]
+                    emitted_info.update(emitted_metadata)
+                    emitted_info["layout"] = ROW_MAJOR_LAYOUT
+                    emitted_info.pop("source_parts", None)
+                    emitted_info.pop("source_header_bytes", None)
+                    emitted_info.pop("layout_hint", None)
+                direct_affinity_groups_written.add(group_key)
+            if progress is not None:
+                progress(index, total, tensor_name)
+            continue
         if tensor_name in derived_tensors_written:
             continue
         if progress is not None:
@@ -489,6 +552,14 @@ def copy_tensor_package(
                 "digest_stride_bytes": 32,
                 "table_sha256": table_sha256,
             }
+
+    compiled_sources = pack_tensor_artifacts_by_affinity(
+        package_dir=package_dir,
+        tensors=packaged["tensors"],
+        compiled_sources=compiled_sources,
+        affinity_groups=deferred_affinity_groups,
+        cancel_requested=cancel_requested,
+    )
 
     packaged["tensors"] = {
         name: info

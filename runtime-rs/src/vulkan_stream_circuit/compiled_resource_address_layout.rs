@@ -362,13 +362,15 @@ impl VulkanCompiledResourceAddressLayout {
         }
 
         let mut partition_bindings: BTreeMap<
-            (String, String, String, String),
-            Vec<(&str, &str)>,
+            (String, String, String, String, String),
+            Vec<(&str, &str, usize)>,
         > = BTreeMap::new();
         for binding in &contract.bindings {
             if let CompiledResourceBindingMapping::PartitionTemplateMember {
                 partition_template_id,
                 resource_identity_seed,
+                selection_signal,
+                parameter_slot,
             } = &binding.mapping
             {
                 partition_bindings
@@ -377,31 +379,28 @@ impl VulkanCompiledResourceAddressLayout {
                         binding.component_id.clone(),
                         binding.node_id.clone(),
                         partition_template_id.clone(),
+                        selection_signal.clone(),
                     ))
                     .or_default()
                     .push((
                         binding.parameter_id.as_str(),
                         resource_identity_seed.as_str(),
+                        *parameter_slot,
                     ));
             }
         }
 
         let mut parameter_slot_tables = Vec::new();
-        for ((scope, component_id, node_id, template_id), mut bindings) in
+        for ((scope, component_id, node_id, template_id, selection_signal), bindings) in
             partition_bindings
         {
-            bindings.sort_unstable();
-            if bindings.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-                return Err(VulkanCompiledResourceAddressLayoutError(format!(
-                    "{scope} {component_id}.{node_id} repeats a selected parameter binding"
-                )));
-            }
             let matching_selectors = contract
                 .selectors
                 .iter()
                 .filter(|selector| {
                     selector.execution_scope == scope
                         && selector.component_id == component_id
+                        && selector.selection_signal == selection_signal
                         && matches!(
                             &selector.mapping,
                             CompiledResourceSelectorMapping::PartitionTemplate {
@@ -416,35 +415,53 @@ impl VulkanCompiledResourceAddressLayout {
                 )));
             }
             let selector = matching_selectors[0];
-            let parameter_ids = bindings
-                .iter()
-                .map(|(parameter_id, _)| (*parameter_id).to_string())
-                .collect::<Vec<_>>();
-            let parameter_slot_bases = bindings
-                .iter()
-                .map(|(_, seed)| {
+            let mut parameter_ids = vec![None; bindings.len()];
+            let mut parameter_slot_bases = vec![None; bindings.len()];
+            for (parameter_id, seed, parameter_slot) in bindings {
+                if parameter_slot >= parameter_ids.len()
+                    || parameter_ids[parameter_slot]
+                        .replace(parameter_id.to_string())
+                        .is_some()
+                {
+                    return Err(VulkanCompiledResourceAddressLayoutError(
+                        format!(
+                            "{scope} {component_id}.{node_id} repeats or skips a selected parameter slot"
+                        ),
+                    ));
+                }
+                parameter_slot_bases[parameter_slot] = Some(
                     partition_slots
-                        .get(&(template_id.clone(), (*seed).to_string()))
+                        .get(&(template_id.clone(), seed.to_string()))
                         .copied()
                         .ok_or_else(|| {
                             VulkanCompiledResourceAddressLayoutError(format!(
                                 "{scope} {component_id}.{node_id} selected parameter has no address slot"
                             ))
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                        })?,
+                );
+            }
+            if parameter_ids.iter().any(Option::is_none)
+                || parameter_slot_bases.iter().any(Option::is_none)
+            {
+                return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                    "{scope} {component_id}.{node_id} selected parameter slots are incomplete"
+                )));
+            }
             parameter_slot_tables.push(VulkanCompiledParameterSlotTable {
                 key: VulkanDynamicResourceBindingKey::new(
                     component_id,
                     node_id,
-                    &selector.selection_signal,
+                    &selection_signal,
                 ),
                 selector_id: selector.id.clone(),
                 execution_scope: scope,
-                parameter_ids,
+                parameter_ids: parameter_ids.into_iter().flatten().collect(),
                 resource_count: selector.resource_count,
                 mapping: VulkanCompiledParameterSlotMapping::Partitioned {
-                    parameter_slot_bases,
+                    parameter_slot_bases: parameter_slot_bases
+                        .into_iter()
+                        .flatten()
+                        .collect(),
                 },
             });
         }
@@ -1036,7 +1053,7 @@ mod compiled_resource_address_layout_tests {
             ],
             dependencies: Vec::new(),
         };
-        let contract = CompiledResourceResidencyContract {
+        let mut contract = CompiledResourceResidencyContract {
             schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
             identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
             state_machine_schema:
@@ -1058,6 +1075,8 @@ mod compiled_resource_address_layout_tests {
                         CompiledResourceBindingMapping::PartitionTemplateMember {
                             partition_template_id: template_id.clone(),
                             resource_identity_seed: weight_seed.clone(),
+                            selection_signal: "selected".to_string(),
+                            parameter_slot: 0,
                         },
                 },
                 CompiledResourceBinding {
@@ -1069,6 +1088,8 @@ mod compiled_resource_address_layout_tests {
                         CompiledResourceBindingMapping::PartitionTemplateMember {
                             partition_template_id: template_id.clone(),
                             resource_identity_seed: scale_seed.clone(),
+                            selection_signal: "selected".to_string(),
+                            parameter_slot: 1,
                         },
                 },
             ],
@@ -1094,6 +1115,11 @@ mod compiled_resource_address_layout_tests {
             }],
             checkpoints: Vec::new(),
         };
+        let mut structurally_reused_selector = contract.selectors[0].clone();
+        structurally_reused_selector.id = content_id('f');
+        structurally_reused_selector.node_id = "other_choose".to_string();
+        structurally_reused_selector.selection_signal = "other_selected".to_string();
+        contract.selectors.push(structurally_reused_selector);
 
         let layout =
             VulkanCompiledResourceAddressLayout::from_contract(&contract)
@@ -1196,6 +1222,8 @@ mod compiled_resource_address_layout_tests {
                         CompiledResourceBindingMapping::PartitionTemplateMember {
                             partition_template_id: template_id.clone(),
                             resource_identity_seed: weight_seed,
+                            selection_signal: "selected_feature".to_string(),
+                            parameter_slot: 0,
                         },
                 },
                 CompiledResourceBinding {
@@ -1207,6 +1235,8 @@ mod compiled_resource_address_layout_tests {
                         CompiledResourceBindingMapping::PartitionTemplateMember {
                             partition_template_id: template_id.clone(),
                             resource_identity_seed: scale_seed,
+                            selection_signal: "selected_feature".to_string(),
+                            parameter_slot: 1,
                         },
                 },
             ],
@@ -1260,7 +1290,7 @@ mod compiled_resource_address_layout_tests {
         assert_eq!(
             layout.parameter_slot_tables[0].mapping,
             VulkanCompiledParameterSlotMapping::Partitioned {
-                parameter_slot_bases: vec![PARTITION_COUNT, 0],
+                parameter_slot_bases: vec![0, PARTITION_COUNT],
             }
         );
         assert_eq!(

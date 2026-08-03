@@ -1,5 +1,5 @@
 pub const COMPILED_RESOURCE_RESIDENCY_SCHEMA: &str =
-    "nerve.compiled_resource_residency.v2";
+    "nerve.compiled_resource_residency.v3";
 pub const RESOURCE_IDENTITY_ALGORITHM: &str =
     "nerve.resource_identity_sha256.v1";
 pub const RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA: &str =
@@ -136,6 +136,8 @@ pub enum CompiledResourceBindingMapping {
     PartitionTemplateMember {
         partition_template_id: String,
         resource_identity_seed: String,
+        selection_signal: String,
+        parameter_slot: usize,
     },
 }
 
@@ -1137,6 +1139,10 @@ fn validate_bindings_against_package(
         (String, String, String, String),
         Vec<(String, usize, usize)>,
     > = BTreeMap::new();
+    let mut partition_slots: BTreeMap<
+        (String, String, String, String, String),
+        Vec<usize>,
+    > = BTreeMap::new();
     for binding in &manifest.resource_residency.bindings {
         let mapping_key = match &binding.mapping {
             CompiledResourceBindingMapping::AtomicGroup {
@@ -1198,6 +1204,8 @@ fn validate_bindings_against_package(
             CompiledResourceBindingMapping::PartitionTemplateMember {
                 partition_template_id,
                 resource_identity_seed,
+                selection_signal,
+                parameter_slot,
             } => {
                 validate_content_id(
                     "resource binding partition template id",
@@ -1207,6 +1215,11 @@ fn validate_bindings_against_package(
                     "resource binding partition resource seed",
                     resource_identity_seed,
                 )?;
+                if selection_signal.trim().is_empty() {
+                    return invalid_residency(
+                        "compiled partition resource binding has no selection signal",
+                    );
+                }
                 let template = contract_index
                     .partition_template(&manifest.resource_residency, partition_template_id);
                 if !template_ids.contains(partition_template_id.as_str())
@@ -1225,8 +1238,18 @@ fn validate_bindings_against_package(
                     partition_template_id.as_str(),
                     resource_identity_seed.as_str(),
                 ));
+                partition_slots
+                    .entry((
+                        binding.execution_scope.clone(),
+                        binding.component_id.clone(),
+                        binding.node_id.clone(),
+                        partition_template_id.clone(),
+                        selection_signal.clone(),
+                    ))
+                    .or_default()
+                    .push(*parameter_slot);
                 format!(
-                    "partition_template_member||{partition_template_id}|{resource_identity_seed}"
+                    "partition_template_member||{partition_template_id}|{resource_identity_seed}|{selection_signal}|{parameter_slot}"
                 )
             }
         };
@@ -1263,6 +1286,32 @@ fn validate_bindings_against_package(
     if !is_strictly_sorted(&keys) || bound_semantics != semantics {
         return invalid_residency(
             "compiled resource bindings must exactly cover package parameters",
+        );
+    }
+    let expected_concrete_resources = manifest
+        .resource_residency
+        .atomic_groups
+        .iter()
+        .flat_map(|group| group.resource_ids.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let expected_partition_members = manifest
+        .resource_residency
+        .partition_templates
+        .iter()
+        .flat_map(|template| {
+            template.member_templates.iter().map(|member| {
+                (
+                    template.id.as_str(),
+                    member.resource_identity_seed.as_str(),
+                )
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if bound_concrete_resources != expected_concrete_resources
+        || bound_partition_members != expected_partition_members
+    {
+        return invalid_residency(
+            "compiled resource bindings do not cover atomic membership",
         );
     }
     for ((scope, component_id, node_id, selection_signal), slots) in
@@ -1330,31 +1379,34 @@ fn validate_bindings_against_package(
             ));
         }
     }
-    let expected_concrete_resources = manifest
-        .resource_residency
-        .atomic_groups
-        .iter()
-        .flat_map(|group| group.resource_ids.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    let expected_partition_members = manifest
-        .resource_residency
-        .partition_templates
-        .iter()
-        .flat_map(|template| {
-            template.member_templates.iter().map(|member| {
-                (
-                    template.id.as_str(),
-                    member.resource_identity_seed.as_str(),
-                )
-            })
-        })
-        .collect::<BTreeSet<_>>();
-    if bound_concrete_resources != expected_concrete_resources
-        || bound_partition_members != expected_partition_members
+    for ((scope, component_id, node_id, template_id, selection_signal), slots) in
+        partition_slots
     {
-        return invalid_residency(
-            "compiled resource bindings do not cover atomic membership",
-        );
+        let matching_selector_count = manifest
+            .resource_residency
+            .selectors
+            .iter()
+            .filter(|selector| {
+                selector.execution_scope == scope
+                    && selector.component_id == component_id
+                    && selector.selection_signal == selection_signal
+                    && matches!(
+                        &selector.mapping,
+                        CompiledResourceSelectorMapping::PartitionTemplate {
+                            partition_template_id
+                        } if *partition_template_id == template_id
+                    )
+            })
+            .count();
+        let unique_slots = slots.iter().copied().collect::<BTreeSet<_>>();
+        if matching_selector_count != 1
+            || unique_slots.len() != slots.len()
+            || unique_slots.iter().copied().ne(0..slots.len())
+        {
+            return invalid_residency(format!(
+                "compiled partition resource bindings for {scope} {component_id}.{node_id} do not define one selector and contiguous parameter-slot layout"
+            ));
+        }
     }
     Ok(())
 }

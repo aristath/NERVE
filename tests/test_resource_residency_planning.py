@@ -10,6 +10,7 @@ import pytest
 import nerve.resource_residency_planning as residency_planning
 
 from nerve.compilation import ModelCompileError
+from nerve.model_package_artifact_layout import pack_tensor_artifacts_by_affinity
 from nerve.model_package_assets import copy_tensor_package
 from nerve.resource_residency import (
     validate_resource_residency_contract,
@@ -18,6 +19,7 @@ from nerve.resource_residency_planning import (
     RESIDENCY_ANALYSIS_SCHEMA,
     TENSOR_PARTITION_INTEGRITY_SCHEMA,
     analyze_resource_residency_components,
+    artifact_affinity_groups_for_packaging,
     build_planned_resource_residency_contract,
     partition_counts_for_packaging,
 )
@@ -312,6 +314,63 @@ def test_discovers_independently_stored_selected_resources() -> None:
     }
 
 
+def test_derives_artifact_affinity_from_selection_cohorts_not_model_identity() -> None:
+    nodes, refs = _independent_component()
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index={
+            "tensors": {
+                "tensor.router": _tensor(4, [2]),
+                "tensor.unit_0_scale": _tensor(2, [2]),
+                "tensor.unit_0_weight": _tensor(8, [2, 4]),
+                "tensor.unit_1_scale": _tensor(2, [2]),
+                "tensor.unit_1_weight": _tensor(8, [2, 4]),
+            }
+        },
+        require_direct_packaging=True,
+    )
+
+    assert artifact_affinity_groups_for_packaging(analysis) == [
+        [
+            "tensor.unit_0_scale",
+            "tensor.unit_0_weight",
+            "tensor.unit_1_scale",
+            "tensor.unit_1_weight",
+        ]
+    ]
+
+
+def test_artifact_affinity_merges_shared_structural_views_once() -> None:
+    nodes, refs = _independent_component()
+    analysis = analyze_resource_residency_components(
+        components=[
+            _component(nodes, refs, component_id="first_view"),
+            _component(nodes, refs, component_id="second_view"),
+        ],
+        tensor_index={
+            "tensors": {
+                "tensor.router": _tensor(4, [2]),
+                "tensor.unit_0_scale": _tensor(2, [2]),
+                "tensor.unit_0_weight": _tensor(8, [2, 4]),
+                "tensor.unit_1_scale": _tensor(2, [2]),
+                "tensor.unit_1_weight": _tensor(8, [2, 4]),
+            }
+        },
+        require_direct_packaging=True,
+    )
+
+    affinity_groups = artifact_affinity_groups_for_packaging(analysis)
+    assert len(analysis["groups"]) == 2
+    assert affinity_groups == [
+        [
+            "tensor.unit_0_scale",
+            "tensor.unit_0_weight",
+            "tensor.unit_1_scale",
+            "tensor.unit_1_weight",
+        ]
+    ]
+
+
 def test_rejects_incomplete_independent_selector_table() -> None:
     nodes, refs = _independent_component()
     nodes[1]["attrs"]["selected_parameter_accesses"][0]["mapping"].pop()
@@ -517,6 +576,7 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
         tensor_index,
         package_dir,
         partition_counts=partition_counts_for_packaging(analysis),
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(analysis),
     )
     manifest = {
         "circuit_graph": {
@@ -584,6 +644,7 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
     )
     assert dynamic_binding["mapping"]["kind"] == "partition_template_member"
     assert dynamic_binding["mapping"]["partition_template_id"] == template["id"]
+    assert dynamic_binding["mapping"]["selection_signal"] == "feature_index"
     spine_binding = next(
         binding
         for binding in contract["bindings"]
@@ -610,6 +671,96 @@ def test_packages_partition_digests_and_builds_compact_dynamic_contract(
         return set()
 
     assert keys(contract).isdisjoint(forbidden_runtime_policy_fields)
+
+
+def test_partition_bindings_preserve_physical_parameter_slot_order(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    specs = {
+        "tensor.router": ([4, 2], 8),
+        "tensor.bank_a": ([4, 8], 32),
+        "tensor.scale_a": ([4, 4], 16),
+        "tensor.bank_b": ([4, 12], 48),
+        "tensor.scale_b": ([4, 4], 16),
+    }
+    tensor_index = {
+        "tensors": {
+            name: _write_source_tensor(
+                source_dir,
+                tensor_name=name,
+                shape=shape,
+                payload=bytes([index]) * byte_count,
+            )
+            for index, (name, (shape, byte_count)) in enumerate(
+                specs.items(), start=1
+            )
+        },
+        "totals": {
+            "tensor_count": len(specs),
+            "parameter_count": sum(byte_count for _, byte_count in specs.values()),
+            "byte_count": sum(byte_count for _, byte_count in specs.values()),
+        },
+    }
+    nodes, refs = _routed_component()
+    nodes[1]["params"] = ["scale_a", "bank_a"]
+    nodes[1]["attrs"]["selected_parameter_accesses"][0]["parameter_ids"] = [
+        "scale_a",
+        "bank_a",
+    ]
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensor_index,
+        require_direct_packaging=True,
+    )
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    packaged = copy_tensor_package(
+        tensor_index,
+        package_dir,
+        partition_counts=partition_counts_for_packaging(analysis),
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(analysis),
+    )
+    manifest = {
+        "circuit_graph": {
+            "components": [
+                {
+                    "component_id": "component",
+                    "circuit": {"nodes": nodes},
+                    "params": {"refs": refs},
+                }
+            ]
+        },
+        "speculative_decoders": [],
+    }
+    contract = build_planned_resource_residency_contract(
+        package_dir=package_dir,
+        tensor_index=packaged,
+        manifest=manifest,
+    )
+
+    first_node_slots = {
+        binding["parameter_id"]: binding["mapping"]["parameter_slot"]
+        for binding in contract["bindings"]
+        if binding["node_id"] == "first_selected_compute"
+    }
+    assert first_node_slots == {"scale_a": 0, "bank_a": 1}
+    validate_resource_residency_contract(package_dir, contract, manifest)
+
+    corrupt = json.loads(json.dumps(contract))
+    first_node_bindings = [
+        binding
+        for binding in corrupt["bindings"]
+        if binding["node_id"] == "first_selected_compute"
+    ]
+    next(
+        binding
+        for binding in first_node_bindings
+        if binding["parameter_id"] == "bank_a"
+    )["mapping"]["parameter_slot"] = 0
+    with pytest.raises(ModelCompileError, match="contiguous parameter-slot layout"):
+        validate_resource_residency_contract(package_dir, corrupt, manifest)
 
 
 def test_builds_concrete_group_table_for_independent_resources(
@@ -655,6 +806,7 @@ def test_builds_concrete_group_table_for_independent_resources(
         tensor_index,
         package_dir,
         partition_counts=partition_counts_for_packaging(analysis),
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(analysis),
     )
     manifest = {
         "circuit_graph": {
@@ -711,6 +863,20 @@ def test_builds_concrete_group_table_for_independent_resources(
         binding["mapping"]["kind"] == "selected_atomic_group"
         for binding in dynamic_bindings
     )
+    dynamic_resource_ids = {
+        binding["mapping"]["resource_id"] for binding in dynamic_bindings
+    }
+    dynamic_ranges = [
+        resource["ranges"][0]
+        for resource in contract["resources"]
+        if resource["id"] in dynamic_resource_ids
+    ]
+    assert len({range_["artifact_path"] for range_ in dynamic_ranges}) == 1
+    ordered_ranges = sorted(dynamic_ranges, key=lambda range_: range_["byte_offset"])
+    assert all(
+        current["byte_offset"] + current["byte_count"] == following["byte_offset"]
+        for current, following in zip(ordered_ranges, ordered_ranges[1:])
+    )
     assert sorted(
         (
             binding["mapping"]["selector_index"],
@@ -759,6 +925,170 @@ def test_builds_concrete_group_table_for_independent_resources(
     ]
     with pytest.raises(ModelCompileError, match="repeat a selector parameter slot"):
         validate_resource_residency_contract(package_dir, corrupt, manifest)
+
+
+def test_packages_co_selected_resources_contiguously_in_one_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    payloads = {
+        "tensor.router": b"rt",
+        "tensor.unit_0_scale": b"aa",
+        "tensor.unit_0_weight": b"bbbbbbbb",
+        "tensor.unit_1_scale": b"cc",
+        "tensor.unit_1_weight": b"dddddddd",
+    }
+    tensor_index = {
+        "tensors": {
+            name: _write_source_tensor(
+                source_dir,
+                tensor_name=name,
+                shape=[len(payload)],
+                payload=payload,
+            )
+            for name, payload in payloads.items()
+        },
+        "totals": {
+            "tensor_count": len(payloads),
+            "parameter_count": sum(map(len, payloads.values())),
+            "byte_count": sum(map(len, payloads.values())),
+        },
+    }
+    nodes, refs = _independent_component()
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensor_index,
+        require_direct_packaging=True,
+    )
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    individual_writes: list[str] = []
+    original_writer = __import__(
+        "nerve.model_package_assets", fromlist=["write_compiled_tensor"]
+    ).write_compiled_tensor
+
+    def count_individual_writes(**kwargs: object) -> tuple[int, str, list[bytes]]:
+        individual_writes.append(str(kwargs["tensor_name"]))
+        return original_writer(**kwargs)
+
+    monkeypatch.setattr(
+        "nerve.model_package_assets.write_compiled_tensor",
+        count_individual_writes,
+    )
+
+    packaged = copy_tensor_package(
+        tensor_index,
+        package_dir,
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(analysis),
+    )
+
+    dynamic_names = artifact_affinity_groups_for_packaging(analysis)[0]
+    dynamic_infos = [packaged["tensors"][name] for name in dynamic_names]
+    assert len({info["source_file"] for info in dynamic_infos}) == 1
+    assert [info["data_offsets"] for info in dynamic_infos] == [
+        [0, 2],
+        [2, 10],
+        [10, 12],
+        [12, 20],
+    ]
+    assert len(packaged["source"]["weights_files"]) == 2
+    bank_path = package_dir / dynamic_infos[0]["source_file"]
+    bank_payload = bank_path.read_bytes()
+    header_bytes = dynamic_infos[0]["safetensors_header_bytes"]
+    data_start = 8 + header_bytes
+    assert bank_payload[data_start:] == b"aabbbbbbbbccdddddddd"
+    assert all(
+        info["data_sha256"] == sha256(payloads[name]).hexdigest()
+        for name, info in zip(dynamic_names, dynamic_infos, strict=True)
+    )
+    assert len(list((package_dir / "weights").glob("tensor_*.safetensors"))) == 1
+    assert individual_writes == ["tensor.router"]
+
+
+def test_rejects_overlapping_artifact_affinity_groups(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    tensor_index = {
+        "tensors": {
+            name: _write_source_tensor(
+                source_dir,
+                tensor_name=name,
+                shape=[1],
+                payload=payload,
+            )
+            for name, payload in (("a", b"a"), ("b", b"b"), ("c", b"c"))
+        },
+        "totals": {"tensor_count": 3, "parameter_count": 3, "byte_count": 3},
+    }
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+
+    with pytest.raises(ModelCompileError, match="appears in multiple artifact affinity"):
+        copy_tensor_package(
+            tensor_index,
+            package_dir,
+            artifact_affinity_groups=[["a", "b"], ["b", "c"]],
+        )
+
+
+def test_affinity_repack_retains_a_shared_artifact_still_used_elsewhere(
+    tmp_path: Path,
+) -> None:
+    package_dir = tmp_path / "package"
+    weights_dir = package_dir / "weights"
+    weights_dir.mkdir(parents=True)
+    payloads = {"a": b"aa", "b": b"bbb", "c": b"cccc"}
+    offsets: dict[str, list[int]] = {}
+    cursor = 0
+    header: dict[str, object] = {}
+    for name, payload in payloads.items():
+        offsets[name] = [cursor, cursor + len(payload)]
+        header[name] = {
+            "dtype": "U8",
+            "shape": [len(payload)],
+            "data_offsets": offsets[name],
+        }
+        cursor += len(payload)
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    source_path = weights_dir / "shared.safetensors"
+    source_path.write_bytes(
+        struct.pack("<Q", len(encoded)) + encoded + b"".join(payloads.values())
+    )
+    tensors = {
+        name: {
+            "dtype": "U8",
+            "shape": [len(payload)],
+            "byte_count": len(payload),
+            "source_file": "weights/shared.safetensors",
+            "safetensors_header_bytes": len(encoded),
+            "data_offsets": offsets[name],
+            "data_sha256": sha256(payload).hexdigest(),
+        }
+        for name, payload in payloads.items()
+    }
+
+    records = pack_tensor_artifacts_by_affinity(
+        package_dir=package_dir,
+        tensors=tensors,
+        compiled_sources=[
+            {
+                "path": "weights/shared.safetensors",
+                "safetensors_header_bytes": len(encoded),
+            }
+        ],
+        affinity_groups=[["a", "b"]],
+    )
+
+    assert source_path.is_file()
+    assert tensors["c"]["source_file"] == "weights/shared.safetensors"
+    assert tensors["a"]["source_file"] == tensors["b"]["source_file"]
+    assert tensors["a"]["source_file"] != tensors["c"]["source_file"]
+    assert {record["path"] for record in records} == {
+        "weights/shared.safetensors",
+        tensors["a"]["source_file"],
+    }
 
 
 def test_composite_packaging_hashes_output_partitions_across_source_parts(
@@ -837,4 +1167,18 @@ def test_planner_implementation_has_no_model_or_operator_special_cases(
     source = (
         Path(__file__).parents[1] / "nerve" / "resource_residency_planning.py"
     ).read_text()
+    assert forbidden not in source.lower()
+
+
+@pytest.mark.parametrize("forbidden", ("deepseek", "qwen", "gemma", "llama", "lfm"))
+def test_artifact_layout_has_no_model_family_switches(forbidden: str) -> None:
+    root = Path(__file__).parents[1] / "nerve"
+    source = "\n".join(
+        (root / filename).read_text()
+        for filename in (
+            "model_package_artifact_layout.py",
+            "model_package_assets.py",
+            "resource_residency_planning.py",
+        )
+    )
     assert forbidden not in source.lower()

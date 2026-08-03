@@ -18,7 +18,7 @@ from nerve.resource_range_integrity import (
 )
 
 
-RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v2"
+RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v3"
 RESOURCE_IDENTITY_ALGORITHM = "nerve.resource_identity_sha256.v1"
 RESOURCE_STATE_MACHINE_SCHEMA = "nerve.resource_residency_state_machine.v1"
 SUPPORTED_RESIDENCY_POLICIES = ("demand_retained", "eager")
@@ -77,7 +77,13 @@ _SELECTED_ATOMIC_GROUP_BINDING_FIELDS = frozenset(
     )
 )
 _PARTITION_MEMBER_BINDING_FIELDS = frozenset(
-    ("kind", "partition_template_id", "resource_identity_seed")
+    (
+        "kind",
+        "partition_template_id",
+        "resource_identity_seed",
+        "selection_signal",
+        "parameter_slot",
+    )
 )
 _PARTITION_TEMPLATE_FIELDS = frozenset(
     (
@@ -1148,6 +1154,9 @@ def _validate_bindings(
     ] = (
         defaultdict(list)
     )
+    partition_slots: dict[tuple[str, str, str, str, str], list[int]] = defaultdict(
+        list
+    )
     for binding in bindings:
         _require_exact_fields(binding, _BINDING_FIELDS, "resource binding")
         for field in ("execution_scope", "component_id", "node_id", "parameter_id"):
@@ -1233,12 +1242,29 @@ def _validate_bindings(
                 mapping["resource_identity_seed"],
                 "resource binding partition resource seed",
             )
+            selection_signal = _require_non_empty_string(
+                mapping["selection_signal"],
+                "resource binding partition selection signal",
+            )
+            parameter_slot = _require_non_negative_int(
+                mapping["parameter_slot"],
+                "resource binding partition parameter slot",
+            )
             template = template_by_id.get(template_id)
             if template is None or resource_seed not in member_seeds_by_template[template_id]:
                 raise ModelCompileError(
                     "resource binding references an unknown partition template member"
                 )
             bound_partition_members.add((template_id, resource_seed))
+            partition_slots[
+                (
+                    binding["execution_scope"],
+                    binding["component_id"],
+                    binding["node_id"],
+                    template_id,
+                    selection_signal,
+                )
+            ].append(parameter_slot)
         else:
             raise ModelCompileError(
                 f"resource binding has unsupported mapping {mapping.get('kind')!r}"
@@ -1250,6 +1276,23 @@ def _validate_bindings(
     if Counter(bound_semantics) != Counter(parameter_semantics):
         raise ModelCompileError(
             "resource bindings must exactly cover compiled parameter semantics"
+        )
+    expected_concrete_resources = {
+        resource_id
+        for group in group_by_id.values()
+        for resource_id in group["resource_ids"]
+    }
+    expected_partition_members = {
+        (template_id, member["resource_identity_seed"])
+        for template_id, template in template_by_id.items()
+        for member in template["member_templates"]
+    }
+    if (
+        bound_concrete_resources != expected_concrete_resources
+        or bound_partition_members != expected_partition_members
+    ):
+        raise ModelCompileError(
+            "resource bindings do not completely cover atomic resource membership"
         )
     for (scope, component_id, node_id, selection_signal), slots in selected_slots.items():
         candidates = []
@@ -1301,25 +1344,33 @@ def _validate_bindings(
                 f"selected resource bindings for {scope} {component_id}.{node_id} "
                 "do not define one contiguous parameter-slot layout"
             )
-    expected_concrete_resources = {
-        resource_id
-        for group in group_by_id.values()
-        for resource_id in group["resource_ids"]
-    }
-    expected_partition_members = {
-        (template_id, member["resource_identity_seed"])
-        for template_id, template in template_by_id.items()
-        for member in template["member_templates"]
-    }
-    if (
-        bound_concrete_resources != expected_concrete_resources
-        or bound_partition_members != expected_partition_members
-    ):
-        raise ModelCompileError(
-            "resource bindings do not completely cover atomic resource membership"
-        )
-
-
+    for (
+        scope,
+        component_id,
+        node_id,
+        template_id,
+        selection_signal,
+    ), slots in partition_slots.items():
+        matching_selectors = [
+            selector
+            for selector in selectors
+            if selector.get("execution_scope") == scope
+            and selector.get("component_id") == component_id
+            and selector.get("selection_signal") == selection_signal
+            and isinstance(selector.get("mapping"), dict)
+            and selector["mapping"].get("kind") == "partition_template"
+            and selector["mapping"].get("partition_template_id") == template_id
+        ]
+        if len(matching_selectors) != 1:
+            raise ModelCompileError(
+                f"partition resource bindings for {scope} {component_id}.{node_id} "
+                "do not map exactly one partition-template selector"
+            )
+        if sorted(slots) != list(range(len(slots))):
+            raise ModelCompileError(
+                f"partition resource bindings for {scope} {component_id}.{node_id} "
+                "do not define one contiguous parameter-slot layout"
+            )
 def _validate_selectors(
     selectors: list[Json],
     group_by_id: dict[str, Json],

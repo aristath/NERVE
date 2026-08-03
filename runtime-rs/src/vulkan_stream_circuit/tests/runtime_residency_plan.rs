@@ -433,6 +433,8 @@ fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
         CompiledResourceBindingMapping::PartitionTemplateMember {
             partition_template_id: template_id.clone(),
             resource_identity_seed: member_seed.clone(),
+            selection_signal: "selection".to_string(),
+            parameter_slot: 0,
         };
     contract.partition_templates.push(CompiledPartitionTemplate {
         id: template_id,

@@ -373,7 +373,9 @@ def analyze_resource_residency_components(
                         component_id=component_id,
                         node_id=node_id,
                     )
-                    for parameter_id in selected_parameters:
+                    for parameter_slot, parameter_id in enumerate(
+                        selected_parameters
+                    ):
                         node_parameter = (node_id, parameter_id)
                         if node_parameter in covered_node_parameters:
                             raise ModelCompileError(
@@ -408,6 +410,7 @@ def analyze_resource_residency_components(
                                 "parameter_id": parameter_id,
                                 "tensor": tensor_name,
                                 "partition_axis": partition_axis,
+                                "parameter_slot": parameter_slot,
                                 "selection_signal": selection_signal,
                             }
                         )
@@ -563,6 +566,7 @@ def analyze_resource_residency_components(
                             "parameter_id",
                             "tensor",
                             "partition_axis",
+                            "parameter_slot",
                         )
                     }
                     for access in accesses
@@ -676,6 +680,153 @@ def partition_counts_for_packaging(analysis: Json) -> dict[str, int]:
             metadata.get("partition_count"), "dynamic tensor partition count"
         )
     return counts
+
+
+def artifact_affinity_groups_for_packaging(analysis: Json) -> list[list[str]]:
+    """Derive disjoint tensor banks from physical co-access topology.
+
+    This is deliberately independent of model and operator names. Independently
+    stored resources selected by the same signal are ordered by selector and
+    parameter slot so one selected cohort occupies one contiguous byte run.
+    Compatible views that share tensors are merged into one bank; the longest
+    physical access order wins and remaining tensors are appended
+    deterministically. Always-resident tensors form a separate bank when there
+    is more than one of them.
+    """
+
+    if analysis.get("schema") != RESIDENCY_ANALYSIS_SCHEMA:
+        raise ModelCompileError("compiler residency analysis schema is invalid")
+    raw_groups = analysis.get("groups")
+    spine_tensors = analysis.get("spine_tensors")
+    if not isinstance(raw_groups, list) or not isinstance(spine_tensors, list):
+        raise ModelCompileError("compiler residency analysis is incomplete")
+
+    candidates: list[tuple[tuple[str, ...], list[str]]] = []
+    normalized_spine = _unique_tensor_sequence(
+        spine_tensors, "always-resident artifact affinity"
+    )
+    if len(normalized_spine) > 1:
+        candidates.append((("always_resident",), sorted(normalized_spine)))
+
+    for index, group in enumerate(raw_groups):
+        if not isinstance(group, dict):
+            raise ModelCompileError(
+                f"compiler residency group {index} is not an object"
+            )
+        if group.get("storage") != "independent_resources":
+            continue
+        accesses = group.get("accesses")
+        if not isinstance(accesses, list) or not accesses:
+            raise ModelCompileError(
+                "independent residency group has no artifact affinity accesses"
+            )
+        ordered_accesses: list[tuple[int, int, str, str, str]] = []
+        for access in accesses:
+            if not isinstance(access, dict):
+                raise ModelCompileError(
+                    "independent artifact affinity access is not an object"
+                )
+            ordered_accesses.append(
+                (
+                    _non_negative_int(
+                        access.get("selector"), "artifact affinity selector"
+                    ),
+                    _non_negative_int(
+                        access.get("parameter_slot"),
+                        "artifact affinity parameter slot",
+                    ),
+                    _non_empty_string(
+                        access.get("node_id"), "artifact affinity node id"
+                    ),
+                    _non_empty_string(
+                        access.get("parameter_id"),
+                        "artifact affinity parameter id",
+                    ),
+                    _non_empty_string(
+                        access.get("tensor"), "artifact affinity tensor"
+                    ),
+                )
+            )
+        ordered_accesses.sort()
+        sequence = _unique_tensor_sequence(
+            [access[-1] for access in ordered_accesses],
+            "independent artifact affinity",
+        )
+        if len(sequence) < 2:
+            continue
+        candidate_key = (
+            "selected",
+            _non_empty_string(
+                group.get("execution_scope"), "artifact affinity execution scope"
+            ),
+            _non_empty_string(
+                group.get("component_id"), "artifact affinity component id"
+            ),
+            _non_empty_string(
+                group.get("selector_node_id"), "artifact affinity selector node"
+            ),
+            _non_empty_string(
+                group.get("selection_signal"), "artifact affinity selection signal"
+            ),
+        )
+        candidates.append((candidate_key, sequence))
+
+    components: list[dict[str, Any]] = []
+    for key, sequence in sorted(candidates, key=lambda item: item[0]):
+        tensor_set = set(sequence)
+        overlapping = [
+            component_index
+            for component_index, component in enumerate(components)
+            if tensor_set.intersection(component["tensors"])
+        ]
+        if not overlapping:
+            components.append(
+                {"tensors": tensor_set, "orders": [(key, sequence)]}
+            )
+            continue
+        first = overlapping[0]
+        merged_tensors = set(tensor_set)
+        merged_orders = [(key, sequence)]
+        for component_index in reversed(overlapping):
+            component = components.pop(component_index)
+            merged_tensors.update(component["tensors"])
+            merged_orders.extend(component["orders"])
+        components.insert(
+            min(first, len(components)),
+            {"tensors": merged_tensors, "orders": merged_orders},
+        )
+
+    affinity_groups = []
+    for component in components:
+        orders = sorted(
+            component["orders"],
+            key=lambda item: (-len(item[1]), tuple(item[1]), item[0]),
+        )
+        ordered_tensors: list[str] = []
+        seen: set[str] = set()
+        for _, sequence in orders:
+            for tensor_name in sequence:
+                if tensor_name not in seen:
+                    seen.add(tensor_name)
+                    ordered_tensors.append(tensor_name)
+        if seen != component["tensors"]:
+            raise ModelCompileError("artifact affinity merge lost a tensor")
+        affinity_groups.append(ordered_tensors)
+    affinity_groups.sort(key=lambda group: tuple(group))
+    return affinity_groups
+
+
+def _unique_tensor_sequence(values: Any, label: str) -> list[str]:
+    if not isinstance(values, list):
+        raise ModelCompileError(f"{label} must be a list")
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        tensor_name = _non_empty_string(value, f"{label} tensor")
+        if tensor_name not in seen:
+            seen.add(tensor_name)
+            result.append(tensor_name)
+    return result
 
 
 def build_planned_resource_residency_contract(
@@ -847,6 +998,8 @@ def build_planned_resource_residency_contract(
                     "kind": "partition_template_member",
                     "partition_template_id": template["id"],
                     "resource_identity_seed": tensor_to_seed[access["tensor"]],
+                    "selection_signal": group["selection_signal"],
+                    "parameter_slot": access["parameter_slot"],
                 }
         else:
             raise ModelCompileError(
@@ -949,11 +1102,11 @@ def _selected_parameter_ids(
         not isinstance(value, list)
         or not value
         or any(not isinstance(parameter, str) or not parameter for parameter in value)
-        or value != sorted(set(value))
+        or len(set(value)) != len(value)
     ):
         raise ModelCompileError(
             f"{scope} component {component_id!r} node {node_id!r} selected "
-            "parameters must be non-empty, unique, and sorted"
+            "parameters must be non-empty and unique"
         )
     return value
 

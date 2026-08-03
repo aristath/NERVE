@@ -284,6 +284,8 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             mapping: CompiledResourceBindingMapping::PartitionTemplateMember {
                 partition_template_id: template_id.clone(),
                 resource_identity_seed: member_seed,
+                selection_signal: "selected".to_string(),
+                parameter_slot: 0,
             },
         }],
         selectors: vec![CompiledResourceSelector {

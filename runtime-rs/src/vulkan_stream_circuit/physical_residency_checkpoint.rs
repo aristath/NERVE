@@ -147,7 +147,7 @@ impl VulkanPhysicalResidencySchedule {
                         compiled.id, compiled.after_node_id
                     ))
                 })?;
-            let selected_mappings = compiled
+            let selected_selectors = compiled
                 .selector_ids
                 .iter()
                 .map(|selector_id| {
@@ -166,7 +166,7 @@ impl VulkanPhysicalResidencySchedule {
                             compiled.id
                         )));
                     }
-                    Ok(&selector.mapping)
+                    Ok(*selector)
                 })
                 .collect::<Result<Vec<_>, VulkanPhysicalResidencyCheckpointError>>()?;
             let selected_node_ids = contract
@@ -175,9 +175,9 @@ impl VulkanPhysicalResidencySchedule {
                 .filter(|binding| {
                     binding.execution_scope == compiled.execution_scope
                         && binding.component_id == compiled.component_id
-                        && selected_mappings
+                        && selected_selectors
                             .iter()
-                            .any(|mapping| binding_is_selected_by(&binding.mapping, mapping))
+                            .any(|selector| binding_is_selected_by(&binding.mapping, selector))
                 })
                 .map(|binding| binding.node_id.as_str())
                 .collect::<BTreeSet<_>>();
@@ -296,24 +296,33 @@ fn validate_physical_residency_schedule_coverage<'a>(
 
 fn binding_is_selected_by(
     binding: &CompiledResourceBindingMapping,
-    selector: &CompiledResourceSelectorMapping,
+    selector: &CompiledResourceSelector,
 ) -> bool {
-    match (binding, selector) {
+    match (binding, &selector.mapping) {
         (
             CompiledResourceBindingMapping::SelectedAtomicGroup {
-                atomic_group_id, ..
+                atomic_group_id,
+                selection_signal,
+                ..
             },
             CompiledResourceSelectorMapping::GroupTable { atomic_group_ids },
-        ) => atomic_group_ids.contains(atomic_group_id),
+        ) => {
+            atomic_group_ids.contains(atomic_group_id)
+                && selection_signal == &selector.selection_signal
+        }
         (
             CompiledResourceBindingMapping::PartitionTemplateMember {
                 partition_template_id: binding_template,
+                selection_signal,
                 ..
             },
             CompiledResourceSelectorMapping::PartitionTemplate {
                 partition_template_id: selector_template,
             },
-        ) => binding_template == selector_template,
+        ) => {
+            binding_template == selector_template
+                && selection_signal == &selector.selection_signal
+        }
         _ => false,
     }
 }
