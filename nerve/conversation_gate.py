@@ -22,13 +22,25 @@ MEASURED_PROMPTS = (
     "What is your knowledge cutoff date?",
     "I asked you earlier to tell me the capital of a country. Which country was that?",
 )
+CANONICAL_CONVERSATION_PROMPTS = (WARMUP_PROMPT, *MEASURED_PROMPTS)
 CANONICAL_OUTPUT_TOKEN_ALLOWANCE = 65_536
 _PROMPT_MARKER = b"you> "
 _RESPONSE_PREFIX = "llm> "
 _TURN_START = _PROMPT_MARKER.decode() + _RESPONSE_PREFIX
 _STATS_MARKER = "\nstats:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
+_RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
+_RESIDENCY_COUNTER_LINE = re.compile(
+    r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE
+)
 _WORD = re.compile(r"\S+")
+
+_CUMULATIVE_RESIDENCY_COUNTER_GROUPS = {
+    "gpu_accesses",
+    "residency_requests",
+    "residency_eviction",
+    "transfers",
+}
 
 
 class ConversationGateError(RuntimeError):
@@ -40,6 +52,8 @@ class ConversationTurn:
     prompt: str
     response: str
     stats: dict[str, int | float | str]
+    residency_policy: str | None = None
+    residency_counters: dict[str, int | float] | None = None
 
     @property
     def decode_tokens_per_second(self) -> float:
@@ -61,14 +75,24 @@ class ConversationTurn:
 
 
 @dataclass(frozen=True)
-class ConversationSeedReport:
-    seed: int
-    command: list[str]
-    transcript_sha256: str
+class ConversationSetReport:
     warmup: ConversationTurn
     turns: list[ConversationTurn]
     mean_decode_tokens_per_second: float
     mean_prefill_tokens_per_second: float
+    residency_policy: str | None
+    residency_start: dict[str, int | float] | None
+    residency_end: dict[str, int | float] | None
+    residency_delta: dict[str, int | float] | None
+
+
+@dataclass(frozen=True)
+class ConversationSeedReport:
+    seed: int
+    command: list[str]
+    transcript_sha256: str
+    discarded_warmup_sets: list[ConversationSetReport]
+    measured_set: ConversationSetReport
 
 
 @dataclass(frozen=True)
@@ -76,6 +100,7 @@ class ConversationGateReport:
     ok: bool
     minimum_decode_tokens_per_second: float
     require_thinking: bool
+    warmup_conversation_sets: int
     package: dict[str, Any]
     runs: list[ConversationSeedReport]
 
@@ -90,7 +115,44 @@ def _parse_scalar(raw: str) -> int | float | str:
             return raw
 
 
-def parse_conversation_transcript(transcript: str) -> list[ConversationTurn]:
+def _residency_metrics(report: str) -> tuple[str | None, dict[str, int | float] | None]:
+    marker = "\nresource_residency:\n"
+    if marker not in report:
+        return None, None
+    block = report.split(marker, 1)[1]
+    policy_match = _RESIDENCY_POLICY.search(block)
+    counters: dict[str, int | float] = {}
+    for group, raw_labels, raw_values in _RESIDENCY_COUNTER_LINE.findall(block):
+        if group not in _CUMULATIVE_RESIDENCY_COUNTER_GROUPS:
+            continue
+        labels = raw_labels.split("/")
+        values = raw_values.split("/")
+        if len(labels) != len(values):
+            raise ConversationGateError(
+                f"resource residency group {group!r} has {len(labels)} labels "
+                f"but {len(values)} values"
+            )
+        for label, value in zip(labels, values, strict=True):
+            parsed = _parse_scalar(value)
+            if not isinstance(parsed, (int, float)):
+                raise ConversationGateError(
+                    f"resource residency counter {group}.{label} is not numeric: "
+                    f"{value!r}"
+                )
+            counters[f"{group}.{label}"] = parsed
+    return (
+        policy_match.group(1) if policy_match is not None else None,
+        counters or None,
+    )
+
+
+def parse_conversation_transcript(
+    transcript: str,
+    *,
+    warmup_conversation_sets: int = 0,
+) -> list[ConversationTurn]:
+    if warmup_conversation_sets < 0:
+        raise ConversationGateError("warmup conversation set count cannot be negative")
     completed_sections = []
     for section in transcript.split(_TURN_START)[1:]:
         if _STATS_MARKER not in section:
@@ -104,17 +166,28 @@ def parse_conversation_transcript(transcript: str) -> list[ConversationTurn]:
                     break
                 continue
             stats[match.group(1)] = _parse_scalar(match.group(2))
-        completed_sections.append((response.rstrip(), stats))
+        policy, counters = _residency_metrics(report)
+        completed_sections.append((response.rstrip(), stats, policy, counters))
 
-    expected_prompts = (WARMUP_PROMPT, *MEASURED_PROMPTS)
+    expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (
+        warmup_conversation_sets + 1
+    )
     if len(completed_sections) != len(expected_prompts):
         raise ConversationGateError(
             "chat transcript contains "
             f"{len(completed_sections)} completed turn(s); expected {len(expected_prompts)}"
         )
     return [
-        ConversationTurn(prompt=prompt, response=response, stats=stats)
-        for prompt, (response, stats) in zip(expected_prompts, completed_sections, strict=True)
+        ConversationTurn(
+            prompt=prompt,
+            response=response,
+            stats=stats,
+            residency_policy=policy,
+            residency_counters=counters,
+        )
+        for prompt, (response, stats, policy, counters) in zip(
+            expected_prompts, completed_sections, strict=True
+        )
     ]
 
 
@@ -298,7 +371,13 @@ def _terminate(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def run_resident_conversation(command: Sequence[str]) -> tuple[str, int]:
+def run_resident_conversation(
+    command: Sequence[str],
+    *,
+    warmup_conversation_sets: int = 0,
+) -> tuple[str, int]:
+    if warmup_conversation_sets < 0:
+        raise ConversationGateError("warmup conversation set count cannot be negative")
     process = subprocess.Popen(
         list(command),
         stdin=subprocess.PIPE,
@@ -310,7 +389,13 @@ def run_resident_conversation(command: Sequence[str]) -> tuple[str, int]:
         _terminate(process)
         raise ConversationGateError("could not open runtime process pipes")
 
-    prompts = (WARMUP_PROMPT, *MEASURED_PROMPTS, "/exit")
+    prompts = (
+        *(
+            CANONICAL_CONVERSATION_PROMPTS
+            * (warmup_conversation_sets + 1)
+        ),
+        "/exit",
+    )
     transcript = bytearray()
     search_from = 0
     accepted_marker_end = 0
@@ -429,6 +514,7 @@ def run_conversation_gate(
     seeds: Sequence[int],
     minimum_decode_tokens_per_second: float,
     require_thinking: bool,
+    warmup_conversation_sets: int = 0,
     transcript_dir: Path | None = None,
 ) -> ConversationGateReport:
     if not seeds:
@@ -438,39 +524,96 @@ def run_conversation_gate(
             "run exactly one seed per invocation so GPU residency can be verified "
             "between model loads"
         )
+    if warmup_conversation_sets < 0:
+        raise ConversationGateError("warmup conversation set count cannot be negative")
     package = _package_metadata(command)
     runs = []
     for seed in seeds:
         seeded_command = canonical_runtime_command(command, seed)
-        transcript, _ = run_resident_conversation(seeded_command)
+        transcript, _ = run_resident_conversation(
+            seeded_command,
+            warmup_conversation_sets=warmup_conversation_sets,
+        )
         if transcript_dir is not None:
             transcript_dir.mkdir(parents=True, exist_ok=True)
             (transcript_dir / f"conversation-seed-{seed}.log").write_text(transcript)
-        parsed = parse_conversation_transcript(transcript)
-        warmup, turns = parsed[0], parsed[1:]
-        _final_answer(warmup.response, require_thinking)
-        if repeated_suffix(warmup.response) is not None:
-            raise ConversationGateError(f"seed {seed} warmup ended in repetition")
-        mean_decode, mean_prefill = validate_conversation_turns(
-            turns,
-            require_thinking=require_thinking,
-            minimum_decode_tokens_per_second=minimum_decode_tokens_per_second,
+        parsed = parse_conversation_transcript(
+            transcript,
+            warmup_conversation_sets=warmup_conversation_sets,
         )
+        conversation_sets = [
+            parsed[index : index + len(CANONICAL_CONVERSATION_PROMPTS)]
+            for index in range(0, len(parsed), len(CANONICAL_CONVERSATION_PROMPTS))
+        ]
+        reports: list[ConversationSetReport] = []
+        prior_residency: dict[str, int | float] | None = None
+        for set_index, conversation_set in enumerate(conversation_sets):
+            warmup, turns = conversation_set[0], conversation_set[1:]
+            _final_answer(warmup.response, require_thinking)
+            if repeated_suffix(warmup.response) is not None:
+                raise ConversationGateError(
+                    f"seed {seed} conversation set {set_index + 1} "
+                    "warmup ended in repetition"
+                )
+            set_minimum = (
+                minimum_decode_tokens_per_second
+                if set_index == warmup_conversation_sets
+                else 0.0
+            )
+            mean_decode, mean_prefill = validate_conversation_turns(
+                turns,
+                require_thinking=require_thinking,
+                minimum_decode_tokens_per_second=set_minimum,
+            )
+            residency_end = conversation_set[-1].residency_counters
+            residency_delta = _residency_delta(prior_residency, residency_end)
+            residency_policies = {
+                turn.residency_policy
+                for turn in conversation_set
+                if turn.residency_policy is not None
+            }
+            if len(residency_policies) > 1:
+                raise ConversationGateError(
+                    "resource residency policy changed within one conversation set"
+                )
+            reports.append(
+                ConversationSetReport(
+                    warmup=warmup,
+                    turns=list(turns),
+                    mean_decode_tokens_per_second=mean_decode,
+                    mean_prefill_tokens_per_second=mean_prefill,
+                    residency_policy=(
+                        next(iter(residency_policies)) if residency_policies else None
+                    ),
+                    residency_start=prior_residency,
+                    residency_end=residency_end,
+                    residency_delta=residency_delta,
+                )
+            )
+            prior_residency = residency_end
+        session_policies = {
+            report.residency_policy
+            for report in reports
+            if report.residency_policy is not None
+        }
+        if len(session_policies) > 1:
+            raise ConversationGateError(
+                "resource residency policy changed within one resident session"
+            )
         runs.append(
             ConversationSeedReport(
                 seed=seed,
                 command=seeded_command,
                 transcript_sha256=hashlib.sha256(transcript.encode()).hexdigest(),
-                warmup=warmup,
-                turns=list(turns),
-                mean_decode_tokens_per_second=mean_decode,
-                mean_prefill_tokens_per_second=mean_prefill,
+                discarded_warmup_sets=reports[:-1],
+                measured_set=reports[-1],
             )
         )
     return ConversationGateReport(
         ok=True,
         minimum_decode_tokens_per_second=minimum_decode_tokens_per_second,
         require_thinking=require_thinking,
+        warmup_conversation_sets=warmup_conversation_sets,
         package=package,
         runs=runs,
     )
@@ -486,6 +629,30 @@ def _parse_seeds(raw: str) -> tuple[int, ...]:
     return seeds
 
 
+def _residency_delta(
+    start: dict[str, int | float] | None,
+    end: dict[str, int | float] | None,
+) -> dict[str, int | float] | None:
+    if end is None:
+        return None
+    if start is None:
+        return dict(end)
+    if start.keys() != end.keys():
+        raise ConversationGateError(
+            "resource residency counter schema changed within one resident session"
+        )
+    delta: dict[str, int | float] = {}
+    for key, end_value in end.items():
+        start_value = start[key]
+        if end_value < start_value:
+            raise ConversationGateError(
+                f"cumulative resource residency counter {key!r} decreased from "
+                f"{start_value} to {end_value}"
+            )
+        delta[key] = end_value - start_value
+    return delta
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -496,6 +663,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seeds", type=_parse_seeds, default=(0,))
     parser.add_argument("--minimum-decode-tps", type=float, default=0.0)
     parser.add_argument("--require-thinking", action="store_true")
+    parser.add_argument(
+        "--warmup-conversation-sets",
+        type=int,
+        default=0,
+        help=(
+            "run and discard this many complete canonical conversations in the "
+            "same resident process before measuring the final conversation"
+        ),
+    )
     parser.add_argument("--report", type=Path)
     parser.add_argument("--transcript-dir", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -507,6 +683,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             seeds=args.seeds,
             minimum_decode_tokens_per_second=args.minimum_decode_tps,
             require_thinking=args.require_thinking,
+            warmup_conversation_sets=args.warmup_conversation_sets,
             transcript_dir=args.transcript_dir,
         )
     except ConversationGateError as error:

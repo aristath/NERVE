@@ -336,11 +336,20 @@ cross-turn recall, or a missed throughput floor. Each invocation runs exactly
 one fixed sampler seed. Repeat the command for other seeds only after verifying
 that every selected GPU returned to its idle baseline:
 
+Demand-resident sparse packages require a stronger steady-state measurement.
+Pass `--warmup-conversation-sets 1` to run the complete canonical six-input
+conversation twice in one uninterrupted model process. The first conversation
+is validated but discarded; only the second conversation is used for the
+throughput gate. The report includes cumulative residency counter snapshots and
+their per-conversation deltas, so a second set that still loads or reloads
+resources is visible rather than mislabeled as fully warm.
+
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \
   --seeds 0 \
   --minimum-decode-tps 20 \
   --require-thinking \
+  --warmup-conversation-sets 1 \
   --transcript-dir /tmp/nerve-conversation-gate \
   --report /tmp/nerve-conversation-gate/report.json \
   -- \

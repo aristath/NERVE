@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from nerve.conversation_gate import (
+    CANONICAL_CONVERSATION_PROMPTS,
     CANONICAL_OUTPUT_TOKEN_ALLOWANCE,
     MEASURED_PROMPTS,
     WARMUP_PROMPT,
@@ -76,6 +77,76 @@ def test_transcript_parser_requires_all_completed_resident_turns() -> None:
 
     assert [turn.prompt for turn in turns] == [WARMUP_PROMPT, *MEASURED_PROMPTS]
     assert turns[-1].stats["decode_tokens_per_second"] == 25.0
+
+
+def test_transcript_parser_requires_every_discarded_and_measured_set() -> None:
+    sections = ["ready\n"]
+    for _ in range(2):
+        for prompt in CANONICAL_CONVERSATION_PROMPTS:
+            sections.append(
+                "you> llm> "
+                f"{_response(f'answer for {prompt}')}\n"
+                "stats:\n"
+                "  prefill_tokens_per_second=100.000\n"
+                "  decode_tokens_per_second=25.000\n"
+                "execution:\n"
+            )
+    sections.append("you> ")
+
+    turns = parse_conversation_transcript(
+        "".join(sections), warmup_conversation_sets=1
+    )
+
+    assert [turn.prompt for turn in turns] == list(
+        CANONICAL_CONVERSATION_PROMPTS * 2
+    )
+
+
+def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
+    sections = ["ready\n"]
+    for index, prompt in enumerate(CANONICAL_CONVERSATION_PROMPTS, start=1):
+        sections.append(
+            "you> llm> "
+            f"{_response(f'answer for {prompt}')}\n"
+            "stats:\n"
+            "  prefill_tokens_per_second=100.000\n"
+            "  decode_tokens_per_second=25.000\n"
+            "execution:\n"
+            "resource_residency:\n"
+            "  policy=demand-paged physical_stores=3\n"
+            f"  gpu_accesses(selections/resident_hits/misses)={index * 2}/{index}/{index}\n"
+            f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={index}/{index}/0/{index}/0/0\n"
+            "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0\n"
+            f"  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={index}/{index * 10}/{index * 10}/{index * 0.5}/{index * 0.25}/{index * 0.75}\n"
+            "determinism:\n"
+        )
+    sections.append("you> ")
+
+    turns = parse_conversation_transcript("".join(sections))
+
+    assert turns[-1].residency_policy == "demand-paged"
+    assert turns[-1].residency_counters == {
+        "gpu_accesses.selections": 12,
+        "gpu_accesses.resident_hits": 6,
+        "gpu_accesses.misses": 6,
+        "residency_requests.directory_hits": 6,
+        "residency_requests.load_required": 6,
+        "residency_requests.deduplicated": 0,
+        "residency_requests.succeeded": 6,
+        "residency_requests.failed": 0,
+        "residency_requests.cancelled": 0,
+        "residency_eviction.cycles": 0,
+        "residency_eviction.units": 0,
+        "residency_eviction.payload_bytes": 0,
+        "residency_eviction.device_bytes": 0,
+        "residency_eviction.reloads": 0,
+        "transfers.reads": 6,
+        "transfers.read_bytes": 60,
+        "transfers.uploaded_bytes": 60,
+        "transfers.read_ms": 3.0,
+        "transfers.upload_ms": 1.5,
+        "transfers.blocking_ms": 4.5,
+    }
 
 
 def test_transcript_parser_does_not_treat_quoted_user_prompt_as_a_turn() -> None:
@@ -323,6 +394,77 @@ for turn in range(7):
 
     assert return_code == 0
     assert len(parse_conversation_transcript(transcript)) == 6
+
+
+def test_gate_discards_one_complete_resident_conversation_and_measures_the_next(
+    tmp_path,
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text("{}")
+    fake_runtime = tmp_path / "two_set_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+answers = (
+    "Hello.",
+    "I am a language model.",
+    "The capital of Greece is Athens.",
+    "There are several cities named Corinth.",
+    "My knowledge cutoff is unavailable.",
+    "The country was Greece.",
+)
+print("ready")
+completed = 0
+while True:
+    print("you> ", end="", flush=True)
+    prompt = sys.stdin.readline().rstrip("\\n")
+    if prompt == "/exit":
+        break
+    answer = answers[completed % len(answers)]
+    set_index = completed // len(answers)
+    completed += 1
+    misses = min(completed, len(answers))
+    decode = 1.0 if set_index == 0 else 30.0
+    print(f"llm> reasoning</think> {answer}")
+    print("stats:")
+    print("  prefill_tokens_per_second=100.000")
+    print(f"  decode_tokens_per_second={decode:.3f}")
+    print("execution:")
+    print("resource_residency:")
+    print("  policy=demand-paged physical_stores=3")
+    print(f"  gpu_accesses(selections/resident_hits/misses)={completed}/{completed - misses}/{misses}")
+    print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={misses}/{misses}/0/{misses}/0/0")
+    print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
+    print(f"  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={misses}/{misses * 10}/{misses * 10}/{misses}.0/{misses}.0/{misses}.0", flush=True)
+""".lstrip()
+    )
+
+    report = run_conversation_gate(
+        [
+            sys.executable,
+            "-u",
+            str(fake_runtime),
+            "--package",
+            str(package),
+            "--chat",
+        ],
+        seeds=(0,),
+        minimum_decode_tokens_per_second=20.0,
+        require_thinking=True,
+        warmup_conversation_sets=1,
+    )
+
+    run = report.runs[0]
+    assert len(run.discarded_warmup_sets) == 1
+    assert report.warmup_conversation_sets == 1
+    assert run.discarded_warmup_sets[0].mean_decode_tokens_per_second == 1.0
+    assert run.measured_set.mean_decode_tokens_per_second == 30.0
+    assert run.measured_set.residency_policy == "demand-paged"
+    assert run.measured_set.residency_delta is not None
+    assert run.measured_set.residency_delta["gpu_accesses.selections"] == 6
+    assert run.measured_set.residency_delta["gpu_accesses.misses"] == 0
+    assert run.measured_set.residency_delta["transfers.blocking_ms"] == 0.0
 
 
 def test_resident_runner_terminates_a_long_multiline_response_cycle(tmp_path) -> None:
