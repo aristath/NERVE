@@ -1,3 +1,5 @@
+const VULKAN_DEVICE_ADDRESS_RETIREMENT_HISTORY_CAPACITY: usize = 65_536;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanDeviceAddressRange {
     owner_id: u64,
@@ -35,6 +37,9 @@ pub struct VulkanDeviceFaultAddressReport {
     pub nearest_allocation_signed_byte_offset: Option<i128>,
     pub nearest_allocation_byte_capacity: Option<usize>,
     pub nearest_allocation_gap_bytes: Option<u128>,
+    pub retired_allocation: Option<String>,
+    pub retired_allocation_byte_offset: Option<usize>,
+    pub retired_allocation_byte_capacity: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +53,8 @@ pub struct VulkanDeviceFaultReport {
 struct VulkanDeviceAddressRegistry {
     ranges: BTreeMap<vk::DeviceAddress, VulkanDeviceAddressRange>,
     annotations: BTreeMap<vk::DeviceAddress, VulkanDeviceAddressRange>,
+    retired_ranges: std::collections::VecDeque<VulkanDeviceAddressRange>,
+    retired_annotations: std::collections::VecDeque<VulkanDeviceAddressRange>,
 }
 
 impl VulkanDeviceAddressRegistry {
@@ -82,7 +89,11 @@ impl VulkanDeviceAddressRegistry {
                 "device-address allocation at 0x{start:x} belongs to another owner"
             )));
         }
-        self.ranges.remove(&start);
+        let range = self
+            .ranges
+            .remove(&start)
+            .expect("validated device-address allocation remained registered");
+        record_retired_device_address_range(&mut self.retired_ranges, range);
         Ok(())
     }
 
@@ -130,7 +141,11 @@ impl VulkanDeviceAddressRegistry {
                 "device-address annotation at 0x{start:x} belongs to another owner"
             )));
         }
-        self.annotations.remove(&start);
+        let range = self
+            .annotations
+            .remove(&start)
+            .expect("validated device-address annotation remained registered");
+        record_retired_device_address_range(&mut self.retired_annotations, range);
         Ok(())
     }
 
@@ -180,21 +195,50 @@ impl VulkanDeviceAddressRegistry {
         match_found
     }
 
+    fn resolve_retired_reported_fault_address(
+        &self,
+        reported_address: vk::DeviceAddress,
+    ) -> Option<(vk::DeviceAddress, VulkanResolvedDeviceAddress)> {
+        let mut match_found = None;
+        for canonical_address in reported_device_address_candidates(reported_address) {
+            let range = self
+                .retired_annotations
+                .iter()
+                .rev()
+                .find(|range| device_address_range_contains(range, canonical_address))
+                .or_else(|| {
+                    self.retired_ranges
+                        .iter()
+                        .rev()
+                        .find(|range| device_address_range_contains(range, canonical_address))
+                });
+            let Some(range) = range else {
+                continue;
+            };
+            let resolved = VulkanResolvedDeviceAddress {
+                label: range.label.clone(),
+                byte_offset: usize::try_from(canonical_address - range.start).ok()?,
+                byte_capacity: range.byte_capacity,
+            };
+            match &match_found {
+                Some((existing_address, existing))
+                    if *existing_address != canonical_address || *existing != resolved =>
+                {
+                    return None;
+                }
+                Some(_) => {}
+                None => match_found = Some((canonical_address, resolved)),
+            }
+        }
+        match_found
+    }
+
     fn nearest_reported_fault_address(
         &self,
         reported_address: vk::DeviceAddress,
     ) -> Option<VulkanNearestDeviceAddress> {
-        let mut candidates = BTreeSet::from([reported_address]);
-        for address_bit_count in 32..64 {
-            let low_mask = (1u64 << address_bit_count) - 1;
-            let high_mask = !low_mask;
-            if reported_address & high_mask == high_mask {
-                candidates.insert(reported_address & low_mask);
-            }
-        }
-
         let mut best = None;
-        for canonical_address in candidates {
+        for canonical_address in reported_device_address_candidates(reported_address) {
             for range in self.annotations.values().chain(self.ranges.values()) {
                 let signed_byte_offset = i128::from(canonical_address)
                     - i128::from(range.start);
@@ -225,6 +269,30 @@ impl VulkanDeviceAddressRegistry {
     }
 }
 
+fn reported_device_address_candidates(
+    reported_address: vk::DeviceAddress,
+) -> BTreeSet<vk::DeviceAddress> {
+    let mut candidates = BTreeSet::from([reported_address]);
+    for address_bit_count in 32..64 {
+        let low_mask = (1u64 << address_bit_count) - 1;
+        let high_mask = !low_mask;
+        if reported_address & high_mask == high_mask {
+            candidates.insert(reported_address & low_mask);
+        }
+    }
+    candidates
+}
+
+fn record_retired_device_address_range(
+    history: &mut std::collections::VecDeque<VulkanDeviceAddressRange>,
+    range: VulkanDeviceAddressRange,
+) {
+    if history.len() == VULKAN_DEVICE_ADDRESS_RETIREMENT_HISTORY_CAPACITY {
+        history.pop_front();
+    }
+    history.push_back(range);
+}
+
 fn checked_device_address_range_end(
     start: vk::DeviceAddress,
     byte_capacity: usize,
@@ -249,6 +317,16 @@ fn resolve_device_address_range(
     let range = ranges.range(..=address).next_back()?.1;
     let byte_offset = usize::try_from(address.checked_sub(range.start)?).ok()?;
     (byte_offset < range.byte_capacity).then_some(range)
+}
+
+fn device_address_range_contains(
+    range: &VulkanDeviceAddressRange,
+    address: vk::DeviceAddress,
+) -> bool {
+    address
+        .checked_sub(range.start)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .is_some_and(|offset| offset < range.byte_capacity)
 }
 
 fn register_device_address_range(
@@ -400,6 +478,9 @@ fn query_vulkan_device_fault(
         .into_iter()
         .map(|address| {
             let resolved = registry.resolve_reported_fault_address(address.reported_address);
+            let retired = resolved.is_none().then(|| {
+                registry.resolve_retired_reported_fault_address(address.reported_address)
+            }).flatten();
             let nearest = resolved.is_none().then(|| {
                 registry.nearest_reported_fault_address(address.reported_address)
             }).flatten();
@@ -421,6 +502,12 @@ fn query_vulkan_device_fault(
                     .as_ref()
                     .map(|range| range.byte_capacity),
                 nearest_allocation_gap_bytes: nearest.map(|range| range.gap_bytes),
+                retired_allocation: retired.as_ref().map(|(_, range)| range.label.clone()),
+                retired_allocation_byte_offset: retired
+                    .as_ref()
+                    .map(|(_, range)| range.byte_offset),
+                retired_allocation_byte_capacity: retired
+                    .map(|(_, range)| range.byte_capacity),
             }
         })
         .collect();

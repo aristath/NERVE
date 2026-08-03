@@ -2268,6 +2268,40 @@ fn device_fault_address_registry_attributes_nearest_sign_extended_range() {
 }
 
 #[test]
+fn device_fault_address_registry_attributes_retired_sign_extended_range() {
+    let mut registry = VulkanDeviceAddressRegistry::default();
+    registry
+        .register(
+            7,
+            0x8000_c740_0000,
+            0x10_0000,
+            "retired addressable allocation",
+        )
+        .unwrap();
+    registry
+        .register_annotation(
+            70,
+            0x8000_c74c_0000,
+            0x20_000,
+            "retired stable resource slot=17",
+        )
+        .unwrap();
+    registry
+        .unregister_annotation(70, 0x8000_c74c_0000)
+        .unwrap();
+    registry.unregister(7, 0x8000_c740_0000).unwrap();
+
+    assert!(registry.resolve(0x8000_c74c_7000).is_none());
+    let (canonical, retired) = registry
+        .resolve_retired_reported_fault_address(0xffff_8000_c74c_7000)
+        .unwrap();
+    assert_eq!(canonical, 0x8000_c74c_7000);
+    assert_eq!(retired.label, "retired stable resource slot=17");
+    assert_eq!(retired.byte_offset, 0x7000);
+    assert_eq!(retired.byte_capacity, 0x20_000);
+}
+
+#[test]
 fn device_fault_error_context_is_shared_by_detached_queue_objects() {
     let registry = Arc::new(Mutex::new(VulkanDeviceAddressRegistry::default()));
 
