@@ -296,18 +296,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "speculative causal target window was not initialized".to_string(),
                 ))
-            })?;
+        })?;
         if decoder.is_parallel_block() {
-            for (lane, input_token_id) in input_token_ids.iter().copied().enumerate() {
-                runner.publish_speculative_source_tap_frame(lane)?;
-                let stream_tick = start_stream_tick
-                    .checked_add(u64::try_from(lane).map_err(|_| {
-                        VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
-                    })?)
-                    .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
-                decoder.run_state_step(draft_device, input_token_id, stream_tick)?;
-            }
-            return Ok(());
+            return runner.run_parallel_speculative_state_ingestion(
+                decoder,
+                draft_device,
+                input_token_ids,
+                start_stream_tick,
+            );
         }
         let normalized_target_frames = &runner
             .speculative_target_output

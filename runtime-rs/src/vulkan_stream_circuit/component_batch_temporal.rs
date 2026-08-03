@@ -3,6 +3,8 @@ struct VulkanResidentPlacedTemporalBlockRunner {
     input_embedding: VulkanResidentBatchedInputEmbeddingRunner,
     output_frame_copies: Vec<VulkanResidentBufferCopyBatch>,
     speculative_source_tap_frame_copies: Vec<Vec<VulkanResidentBufferCopyBatch>>,
+    parallel_speculative_state_ingestions:
+        Vec<VulkanResidentParallelSpeculativeStateIngestion>,
     speculative_target_output: Option<VulkanResidentBatchedOutputProjectionRunner>,
     pipeline: Vec<usize>,
 }

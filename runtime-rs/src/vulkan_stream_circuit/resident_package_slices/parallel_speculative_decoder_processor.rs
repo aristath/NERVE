@@ -59,6 +59,64 @@ fn committed_context_state_node_ids(
         .collect())
 }
 
+fn producer_dependency_node_ids(
+    circuit: &StreamCircuit,
+    output_signal: &str,
+) -> Result<BTreeSet<String>, VulkanError> {
+    let producer_by_signal = circuit
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(index, node)| {
+            node.outputs
+                .iter()
+                .map(move |signal| (signal.as_str(), index))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let producer = producer_by_signal.get(output_signal).copied().ok_or_else(|| {
+        VulkanError(format!(
+            "circuit {:?} has no producer for state-ingestion output signal {output_signal:?}",
+            circuit.source.component_id,
+        ))
+    })?;
+    let mut selected_indices = BTreeSet::new();
+    let mut pending = vec![producer];
+    while let Some(index) = pending.pop() {
+        if !selected_indices.insert(index) {
+            continue;
+        }
+        for input in &circuit.nodes[index].inputs {
+            if let Some(producer) = producer_by_signal.get(input.as_str()) {
+                pending.push(*producer);
+            }
+        }
+    }
+    Ok(selected_indices
+        .into_iter()
+        .map(|index| circuit.nodes[index].id.clone())
+        .collect())
+}
+
+fn selected_boundary_input_ids(
+    circuit: &StreamCircuit,
+    selected_node_ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let boundary_inputs = circuit
+        .boundary
+        .inputs
+        .iter()
+        .map(|port| port.id.as_str())
+        .collect::<BTreeSet<_>>();
+    circuit
+        .nodes
+        .iter()
+        .filter(|node| selected_node_ids.contains(&node.id))
+        .flat_map(|node| node.inputs.iter())
+        .filter(|signal| boundary_inputs.contains(signal.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn offset_stream_tick(stream_tick: u64, offset: i64) -> Result<u64, VulkanError> {
     if offset < 0 {
         stream_tick.checked_sub(offset.unsigned_abs())
@@ -236,6 +294,52 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 )),
             ));
         }
+        let mut input_state_node_ids = BTreeSet::new();
+        for (_, edge) in &committed_context_edges {
+            let output_port = input_component
+                .circuit
+                .boundary
+                .outputs
+                .iter()
+                .find(|port| port.id == edge.source.port_id)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "parallel speculative decoder {:?} committed-context source {}.{} is absent",
+                            model.id, edge.source.component_id, edge.source.port_id,
+                        )),
+                    )
+                })?;
+            let source_signal = output_port.source.as_deref().unwrap_or(&output_port.id);
+            input_state_node_ids.extend(
+                producer_dependency_node_ids(&input_component.circuit, source_signal)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+            );
+        }
+        let state_input_signal_ids =
+            selected_boundary_input_ids(&input_component.circuit, &input_state_node_ids);
+        let state_input_ports = graph
+            .boundary
+            .external_inputs
+            .iter()
+            .filter(|port| {
+                port.endpoint.component_id == input_component.component_id
+                    && state_input_signal_ids.contains(&port.endpoint.port_id)
+            })
+            .collect::<Vec<_>>();
+        if state_input_ports.len() != state_input_signal_ids.len()
+            || state_input_ports.iter().any(|port| port.source_tap.is_none())
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "parallel speculative decoder {:?} committed-context input cone must be supplied entirely by target source taps",
+                    model.id,
+                )),
+            ));
+        }
+        let mut state_ingestion_node_ids_by_component = state_node_ids_by_component.clone();
+        state_ingestion_node_ids_by_component
+            .insert(input_component.component_id.clone(), input_state_node_ids);
         let proposal_node_ids_by_component = processor_components
             .iter()
             .map(|component| {
@@ -266,7 +370,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 &format!("draft:{}:committed-context", model.id),
                 1,
                 VulkanComponentBatchExecutionMode::ParallelBlock,
-                state_node_ids_by_component,
+                state_node_ids_by_component.clone(),
             )?;
 
         let anchor_ports = graph
@@ -307,6 +411,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
         }
 
         let mut source_taps = Vec::new();
+        let mut batch_source_taps = Vec::new();
         for port in graph
             .boundary
             .external_inputs
@@ -348,6 +453,24 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 &destination.buffer,
                 source.frame_byte_capacity,
             )?);
+            if state_input_signal_ids.contains(&port.endpoint.port_id) {
+                batch_source_taps.push(VulkanParallelSpeculativeSourceTapBatchBinding {
+                    source_device_id: source.device_id.to_string(),
+                    source_batch_signal_key: source.batch_signal_key,
+                    destination_signal_id: port.id.clone(),
+                    frame_byte_capacity: source.frame_byte_capacity,
+                });
+            }
+        }
+        if batch_source_taps.len() != state_input_signal_ids.len() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "parallel speculative decoder {:?} mounted {} batched source taps for {} committed-context inputs",
+                    model.id,
+                    batch_source_taps.len(),
+                    state_input_signal_ids.len(),
+                )),
+            ));
         }
 
         let processor_ids = processor_components
@@ -525,6 +648,8 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             state_processor_phase,
             output_phase,
             source_taps,
+            batch_source_taps,
+            state_ingestion_node_ids_by_component,
             ingress_copies,
             state_ingress_copies,
             egress_copies,

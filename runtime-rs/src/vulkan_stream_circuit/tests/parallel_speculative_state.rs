@@ -67,6 +67,64 @@ fn parallel_state_circuit() -> StreamCircuit {
     .expect("synthetic parallel state circuit must deserialize")
 }
 
+fn parallel_input_adapter_circuit() -> StreamCircuit {
+    serde_json::from_value(serde_json::json!({
+        "schema": "nerve.stream_circuit.v1",
+        "id": "draft_input_adapter",
+        "source": {
+            "component_id": "draft_input_adapter",
+            "source_layer_index": null,
+            "source_operator_type": "synthetic"
+        },
+        "runtime_role": "draft_input_adapter",
+        "behavioral_role": "stream_generation_circuit",
+        "implementation": "synthetic",
+        "boundary": {
+            "inputs": [
+                {"id": "anchor_token_id", "signal": "token_id", "shape": [1], "dtype": "U32"},
+                {"id": "target_hidden_0", "signal": "frame", "shape": [8]},
+                {"id": "target_hidden_1", "signal": "frame", "shape": [8]}
+            ],
+            "outputs": [
+                {"id": "query_frames", "signal": "frame", "shape": [8], "source": "query_frames"},
+                {"id": "main_context", "signal": "frame", "shape": [8], "source": "main_context"}
+            ],
+            "controls": []
+        },
+        "state_ports": [],
+        "parameters": {"layout": "none", "storage": "none", "refs": {}},
+        "nodes": [
+            {
+                "id": "query_embedding",
+                "op": "embedding",
+                "inputs": ["anchor_token_id"],
+                "outputs": ["query_frames"]
+            },
+            {
+                "id": "target_hidden_0_projection",
+                "op": "linear",
+                "inputs": ["target_hidden_0"],
+                "outputs": ["target_hidden_0_projected"]
+            },
+            {
+                "id": "target_hidden_1_projection",
+                "op": "linear",
+                "inputs": ["target_hidden_1"],
+                "outputs": ["target_hidden_1_projected"]
+            },
+            {
+                "id": "target_concat",
+                "op": "concat",
+                "inputs": ["target_hidden_0_projected", "target_hidden_1_projected"],
+                "outputs": ["main_context"]
+            }
+        ],
+        "behavioral_error_contract": {},
+        "lowering_notes": []
+    }))
+    .expect("synthetic parallel input adapter must deserialize")
+}
+
 #[test]
 fn parallel_state_ingestion_selects_only_the_committed_context_dependency_cone() {
     let selected = committed_context_state_node_ids(
@@ -107,6 +165,37 @@ fn parallel_proposal_excludes_every_committed_context_state_node() {
         ])
     );
     assert!(committed.is_disjoint(&proposal));
+}
+
+#[test]
+fn parallel_batch_state_ingestion_selects_context_adapter_without_query_work() {
+    let circuit = parallel_input_adapter_circuit();
+    let selected = producer_dependency_node_ids(&circuit, "main_context").unwrap();
+
+    assert_eq!(
+        selected,
+        BTreeSet::from([
+            "target_concat".to_string(),
+            "target_hidden_0_projection".to_string(),
+            "target_hidden_1_projection".to_string(),
+        ])
+    );
+    assert!(!selected.contains("query_embedding"));
+    assert_eq!(
+        selected_boundary_input_ids(&circuit, &selected),
+        BTreeSet::from([
+            "target_hidden_0".to_string(),
+            "target_hidden_1".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn parallel_batch_state_ingestion_rejects_an_unproduced_context_output() {
+    let error = producer_dependency_node_ids(&parallel_input_adapter_circuit(), "missing_context")
+        .unwrap_err();
+
+    assert!(error.0.contains("no producer for state-ingestion output"));
 }
 
 #[test]

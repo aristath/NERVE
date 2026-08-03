@@ -326,6 +326,8 @@ struct VulkanResidentParallelBlockSpeculativeDecoderProcessor {
     state_processor_phase: VulkanResidentPlacedComponentBatchRunner,
     output_phase: VulkanMountedPlacedResidentExecutionGraphRunner,
     source_taps: Vec<VulkanSpeculativeSourceTapTransfer>,
+    batch_source_taps: Vec<VulkanParallelSpeculativeSourceTapBatchBinding>,
+    state_ingestion_node_ids_by_component: BTreeMap<String, BTreeSet<String>>,
     ingress_copies: VulkanResidentBufferCopyBatch,
     state_ingress_copies: VulkanResidentBufferCopyBatch,
     egress_copies: VulkanResidentBufferCopyBatch,
