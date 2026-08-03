@@ -389,8 +389,8 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
             "maximum_quantum_wait_ns": 9_000_000,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": _device_digest(b"idle"),
-        "exclusive_residency": True,
+        "capacity_reservation_digest": _device_digest(b"capacity_reserved"),
+        "residency_scope": "capacity_partition",
     }
     plan_id = stable_contract_id("validation_plan", str(tmp_path))
     implementation = {"implementation_id": f"staged-representation:{candidate_id}"}
@@ -475,8 +475,8 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
     assert result["output_digest"] == _artifact_digest(b"output")
     assert result["default_statistics"]["physical_dispatch_count"] == 1
     assert comparison["metrics"][0]["error"] == 0.0
-    assert mount["device_state_before_digest"] == _device_digest(b"idle")
-    assert unmount["device_state_after_digest"] == _device_digest(b"idle")
+    assert mount["device_state_before_digest"] == _device_digest(b"capacity_reserved")
+    assert unmount["device_state_after_digest"] == _device_digest(b"capacity_reserved")
 
 
 def test_approximate_output_comparator_measures_numeric_and_rank_error() -> None:
@@ -603,8 +603,8 @@ def _requests(
             "maximum_quantum_wait_ns": 9_000_000,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": _device_digest(b"idle"),
-        "exclusive_residency": True,
+        "capacity_reservation_digest": _device_digest(b"capacity_reserved"),
+        "residency_scope": "capacity_partition",
     }
     plan_id = stable_contract_id("benchmark_plan", str(tmp_path))
     implementation_id = f"staged-representation:{candidate_id}"

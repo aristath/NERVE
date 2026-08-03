@@ -213,7 +213,7 @@ class ResidentComponentValidationSession:
             action="mount",
             duration_ns=executor_session.host_mount_ns,
             before=request.matched_conditions[
-                "idle_device_state_digest"
+                "capacity_reservation_digest"
             ],
             after=self.mount_payload["mounted_state_digest"],
             released=False,
@@ -369,7 +369,7 @@ class ResidentComponentValidationSession:
             duration_ns=release.host_release_ns,
             before=self.mount_payload["mounted_state_digest"],
             after=self.request.matched_conditions[
-                "idle_device_state_digest"
+                "capacity_reservation_digest"
             ],
             released=True,
         )

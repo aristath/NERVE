@@ -23,7 +23,8 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    limit. The separate `demand-paged` policy now passes exact reload,
    cohort-eviction, selector-fairness, address-publication, and AMD Vulkan store
    tests. The real 157 GB package mounts target-only across three AMD devices in
-   17.89 seconds and tears down to the exact idle baseline. Its first cold
+   17.89 seconds and releases its acquired capacity back to the recorded
+   pre-run reservations. Its first cold
    prefill then exposed a compiler storage-layout defect: 72,317 independently
    addressable tensors were emitted as 72,317 one-tensor files, forcing a top-6
    expert wave through 36 files per layer. The compiler now derives artifact

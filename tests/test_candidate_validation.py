@@ -326,8 +326,8 @@ class FixtureValidationRoleSession:
         self.adapter = adapter
         self.request = request
         self.closed = False
-        self.idle = request.matched_conditions[
-            "idle_device_state_digest"
+        self.capacity_reservation = request.matched_conditions[
+            "capacity_reservation_digest"
         ]
         self.mounted = device_state_digest(
             {
@@ -339,7 +339,7 @@ class FixtureValidationRoleSession:
         )
         self._mount_event = self._residency_event(
             action="mount",
-            before=self.idle,
+            before=self.capacity_reservation,
             after=self.mounted,
             released=False,
         )
@@ -541,7 +541,7 @@ class FixtureValidationRoleSession:
                 f"leaked:{self.request.stage}".encode()
             )
             if self.adapter.behavior.leak_residency
-            else self.idle
+            else self.capacity_reservation
         )
         return self._residency_event(
             action="unmount",
@@ -660,10 +660,10 @@ def _staged_fixture(tmp_path: Path, *, approximate: bool = False):
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": device_state_digest(
-                {"fixture_state": "idle"}
+            "capacity_reservation_digest": device_state_digest(
+                {"fixture_state": "capacity_available"}
             ),
-            "exclusive_residency": True,
+            "residency_scope": "capacity_partition",
         },
     )
     validation_plan = build_validation_plan(
@@ -892,7 +892,7 @@ def test_proven_exact_candidate_passes_complete_validation_funnel(
         assert all(
             event["device_state_before_digest"]
             == fixture[4].matched_conditions[
-                "idle_device_state_digest"
+                "capacity_reservation_digest"
             ]
             for event in run_document["residency_events"]
             if event["action"] == "mount"

@@ -54,7 +54,7 @@ class DeviceLeaseManager(Protocol):
         self,
         target: OptimizationTarget,
     ) -> AbstractContextManager[None]:
-        """Exclusively lease and verify every device used by the target."""
+        """Reserve target capacity while serializing NERVE optimizers."""
 
 
 class NoDeviceLeaseManager:
@@ -72,15 +72,15 @@ class NoDeviceLeaseManager:
 
 
 @dataclass(frozen=True)
-class VerifiedDeviceLeaseManager:
-    """Cross-process device locks plus attested idle-state probes."""
+class VerifiedCapacityLeaseManager:
+    """NERVE-only locks plus live capacity checks before and after execution."""
 
     lock_root: Path
-    probe_idle_state_digest: Callable[["OptimizationTarget"], str]
+    probe_capacity_reservation_digest: Callable[["OptimizationTarget"], str]
 
     @contextmanager
     def acquire(self, target: OptimizationTarget) -> Iterator[None]:
-        expected = str(target.matched_conditions["idle_device_state_digest"])
+        expected = str(target.matched_conditions["capacity_reservation_digest"])
         if self.lock_root.is_symlink():
             raise ModelCompileError("device lease root must not be a symlink")
         root = self.lock_root.resolve()
@@ -111,20 +111,20 @@ class VerifiedDeviceLeaseManager:
                     os.close(descriptor)
                     raise
                 descriptors.append(descriptor)
-            before = self.probe_idle_state_digest(target)
+            before = self.probe_capacity_reservation_digest(target)
             if before != expected:
                 raise ModelCompileError(
-                    f"target {target.target_id!r} is not at its declared idle "
-                    "device baseline before execution"
+                    f"target {target.target_id!r} does not satisfy its declared "
+                    "device-capacity reservation before execution"
                 )
             try:
                 yield
             finally:
-                after = self.probe_idle_state_digest(target)
+                after = self.probe_capacity_reservation_digest(target)
                 if after != expected:
                     raise ModelCompileError(
-                        f"target {target.target_id!r} did not return to its "
-                        "declared idle device baseline"
+                        f"target {target.target_id!r} did not restore its "
+                        "declared device-capacity reservation"
                     )
         finally:
             for descriptor in reversed(descriptors):
@@ -196,9 +196,9 @@ class OptimizationTarget:
             raise ModelCompileError(
                 "optimization target matched devices do not match its profiles"
             )
-        if self.matched_conditions.get("exclusive_residency") is not True:
+        if self.matched_conditions.get("residency_scope") != "capacity_partition":
             raise ModelCompileError(
-                "optimization target must require exclusive residency"
+                "optimization target must declare capacity-partition residency"
             )
         controls = self.matched_conditions.get("controls")
         if (
@@ -211,8 +211,8 @@ class OptimizationTarget:
                 "qualification regime"
             )
         require_device_state_digest(
-            self.matched_conditions.get("idle_device_state_digest"),
-            "optimization target idle_device_state_digest",
+            self.matched_conditions.get("capacity_reservation_digest"),
+            "optimization target capacity_reservation_digest",
         )
 
     @property

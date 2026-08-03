@@ -637,7 +637,7 @@ def _validate_mount(
         or document["action"] != "mount"
         or document["released"]
         or document["device_state_before_digest"]
-        != request.matched_conditions["idle_device_state_digest"]
+        != request.matched_conditions["capacity_reservation_digest"]
     ):
         raise ModelCompileError(
             "validation adapter returned invalid mount evidence"
@@ -666,7 +666,7 @@ def _validate_unmount(
         or released["device_state_before_digest"]
         != mounted["device_state_after_digest"]
         or released["device_state_after_digest"]
-        != request.matched_conditions["idle_device_state_digest"]
+        != request.matched_conditions["capacity_reservation_digest"]
     ):
         raise ModelCompileError(
             "validation adapter did not prove complete residency release"

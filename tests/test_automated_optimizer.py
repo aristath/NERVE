@@ -17,7 +17,7 @@ from nerve.representation_optimizer.automation import (
     CandidateToolchain,
     OptimizationBudget,
     OptimizationTarget,
-    VerifiedDeviceLeaseManager,
+    VerifiedCapacityLeaseManager,
     run_automated_optimizer,
     validate_report_directory,
 )
@@ -216,8 +216,8 @@ def _target(
             "speculative_draft_tokens": 0,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": device_state_digest({"fixture_state": "idle"}),
-        "exclusive_residency": True,
+        "capacity_reservation_digest": device_state_digest({"fixture_state": "capacity_available"}),
+        "residency_scope": "capacity_partition",
     }
     return (
         OptimizationTarget(
@@ -891,17 +891,17 @@ def test_cancellation_before_publication_never_commits_output(
     assert lease.acquisitions == lease.releases
 
 
-def test_verified_device_lease_checks_idle_before_and_after(
+def test_verified_capacity_lease_checks_reservation_before_and_after(
     tmp_path: Path,
 ) -> None:
     probe_results = [
-        device_state_digest({"fixture_state": "idle"}),
-        device_state_digest({"fixture_state": "idle"}),
+        device_state_digest({"fixture_state": "capacity_available"}),
+        device_state_digest({"fixture_state": "capacity_available"}),
     ]
     target, _ = _target(
-        lease=VerifiedDeviceLeaseManager(
+        lease=VerifiedCapacityLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_idle_state_digest=lambda _target: probe_results.pop(0),
+            probe_capacity_reservation_digest=lambda _target: probe_results.pop(0),
         )
     )
 
@@ -911,29 +911,29 @@ def test_verified_device_lease_checks_idle_before_and_after(
     assert probe_results == []
 
 
-def test_verified_device_lease_reports_post_execution_residency_leak(
+def test_verified_capacity_lease_reports_post_execution_residency_leak(
     tmp_path: Path,
 ) -> None:
     probe_results = [
-        device_state_digest({"fixture_state": "idle"}),
+        device_state_digest({"fixture_state": "capacity_available"}),
         device_state_digest({"fixture_state": "resident"}),
     ]
     target, _ = _target(
-        lease=VerifiedDeviceLeaseManager(
+        lease=VerifiedCapacityLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_idle_state_digest=lambda _target: probe_results.pop(0),
+            probe_capacity_reservation_digest=lambda _target: probe_results.pop(0),
         )
     )
 
-    with pytest.raises(ModelCompileError, match="did not return"):
+    with pytest.raises(ModelCompileError, match="did not restore"):
         with target.lease_manager.acquire(target):
             pass
 
     target, _ = _target(
-        lease=VerifiedDeviceLeaseManager(
+        lease=VerifiedCapacityLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_idle_state_digest=lambda _target: device_state_digest(
-                {"fixture_state": "idle"}
+            probe_capacity_reservation_digest=lambda _target: device_state_digest(
+                {"fixture_state": "capacity_available"}
             ),
         )
     )

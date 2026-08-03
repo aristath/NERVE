@@ -166,7 +166,7 @@ class ResidentComponentExecutionSession:
         self._mount_event = self._residency_event(
             action="mount",
             duration_ns=mount_duration_ns,
-            before=request.matched_conditions["idle_device_state_digest"],
+            before=request.matched_conditions["capacity_reservation_digest"],
             after=required_device_state_digest(
                 mount_payload,
                 "mounted_state_digest",
@@ -307,7 +307,7 @@ class ResidentComponentExecutionSession:
             action="unmount",
             duration_ns=release.host_release_ns,
             before=self.mount_payload["mounted_state_digest"],
-            after=self.request.matched_conditions["idle_device_state_digest"],
+            after=self.request.matched_conditions["capacity_reservation_digest"],
             released=True,
         )
 

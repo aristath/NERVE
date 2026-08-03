@@ -221,10 +221,10 @@ def _qualified_candidate(
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": device_state_digest(
-                {"fixture_state": "idle"}
+            "capacity_reservation_digest": device_state_digest(
+                {"fixture_state": "capacity_available"}
             ),
-            "exclusive_residency": True,
+            "residency_scope": "capacity_partition",
         },
     )
     validation_plan = build_validation_plan(

@@ -434,7 +434,7 @@ def validate_complete_run_against_plan(
             "completed benchmark sampling outcomes do not exactly cover its plan"
         )
 
-    expected_idle = plan_document["matched_conditions"]["idle_device_state_digest"]
+    expected_reservation = plan_document["matched_conditions"]["capacity_reservation_digest"]
     events = run_document["residency_events"]
     if len(events) % 2:
         raise ModelCompileError(
@@ -475,13 +475,13 @@ def validate_complete_run_against_plan(
                 "benchmark residency changed its implementation or conditions"
             )
         if (
-            mount["device_state_before_digest"] != expected_idle
-            or unmount["device_state_after_digest"] != expected_idle
+            mount["device_state_before_digest"] != expected_reservation
+            or unmount["device_state_after_digest"] != expected_reservation
             or mount["device_state_after_digest"]
             != unmount["device_state_before_digest"]
         ):
             raise ModelCompileError(
-                "benchmark device residency did not return to matched idle state"
+                "benchmark device residency did not restore the matched capacity reservation"
             )
         mounts[expected_block] = mount
 
@@ -716,7 +716,7 @@ def _validate_mount(
     request: BenchmarkMountRequest,
 ) -> None:
     document = event.to_json()
-    expected_idle = plan.matched_conditions["idle_device_state_digest"]
+    expected_reservation = plan.matched_conditions["capacity_reservation_digest"]
     if (
         document["action"] != "mount"
         or document["plan_id"] != request.plan_id
@@ -726,7 +726,7 @@ def _validate_mount(
         or document["seed"] != request.seed
         or document["block_index"] != request.block_index
         or document["matched_conditions_digest"] != request.matched_conditions_digest
-        or document["device_state_before_digest"] != expected_idle
+        or document["device_state_before_digest"] != expected_reservation
     ):
         raise ModelCompileError(
             "normal execution adapter returned a mismatched mount event"
@@ -740,7 +740,7 @@ def _validate_unmount(
 ) -> None:
     mounted = mount.to_json()
     released = unmount.to_json()
-    expected_idle = plan.matched_conditions["idle_device_state_digest"]
+    expected_reservation = plan.matched_conditions["capacity_reservation_digest"]
     if (
         released["action"] != "unmount"
         or any(
@@ -757,7 +757,7 @@ def _validate_unmount(
         )
         or released["device_state_before_digest"]
         != mounted["device_state_after_digest"]
-        or released["device_state_after_digest"] != expected_idle
+        or released["device_state_after_digest"] != expected_reservation
     ):
         raise ModelCompileError(
             "normal execution adapter did not release matched residency"
@@ -775,7 +775,7 @@ def _validate_emergency_release(
         or not released["released"]
         or released["matched_conditions_digest"] != contract_digest(conditions)
         or released["device_state_after_digest"]
-        != conditions["idle_device_state_digest"]
+        != conditions["capacity_reservation_digest"]
     ):
         raise ModelCompileError(
             "normal execution adapter did not prove emergency device release"

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.contracts import device_state_digest
@@ -20,87 +18,59 @@ _PCI_ADDRESS = re.compile(
 
 
 @dataclass(frozen=True)
-class DeviceIdlePolicy:
-    """Observable conditions required before accelerator residency is leased."""
+class DeviceCapacityPolicy:
+    """Conservative share of currently free VRAM that NERVE may reserve."""
 
-    maximum_vram_fraction_ppm: int = 10_000
-    maximum_busy_percent: int = 0
-    maximum_background_context_vram_bytes: int = 64 * 1024 * 1024
-    maximum_background_context_gtt_bytes: int = 64 * 1024 * 1024
-    maximum_driver_retained_vram_bytes: int = 1 * 1024 * 1024
-    quiescence_poll_interval_ns: int = 100_000_000
-    quiescence_required_observations: int = 2
-    maximum_quiescence_wait_ns: int = 5_000_000_000
+    reservable_free_vram_fraction_ppm: int = 950_000
+    minimum_reservable_vram_bytes: int = 1
+    material_process_vram_bytes: int = 64 * 1024 * 1024
+    material_process_gtt_bytes: int = 64 * 1024 * 1024
 
     def __post_init__(self) -> None:
-        if not 0 <= self.maximum_vram_fraction_ppm <= 1_000_000:
+        if not 0 < self.reservable_free_vram_fraction_ppm <= 1_000_000:
             raise ModelCompileError(
-                "idle-device VRAM fraction must be between 0 and 1000000 ppm"
-            )
-        if not 0 <= self.maximum_busy_percent <= 100:
-            raise ModelCompileError(
-                "idle-device busy percentage must be between 0 and 100"
+                "reservable free-VRAM fraction must be in (0, 1000000] ppm"
             )
         for field in (
-            "maximum_background_context_vram_bytes",
-            "maximum_background_context_gtt_bytes",
-            "maximum_driver_retained_vram_bytes",
+            "minimum_reservable_vram_bytes",
+            "material_process_vram_bytes",
+            "material_process_gtt_bytes",
         ):
             value = getattr(self, field)
             if value < 0:
-                raise ModelCompileError(
-                    f"idle-device {field} must not be negative"
-                )
-        for field in (
-            "quiescence_poll_interval_ns",
-            "quiescence_required_observations",
-            "maximum_quiescence_wait_ns",
-        ):
-            value = getattr(self, field)
-            if value <= 0:
-                raise ModelCompileError(
-                    f"idle-device {field} must be positive"
-                )
-        if self.quiescence_poll_interval_ns > self.maximum_quiescence_wait_ns:
-            raise ModelCompileError(
-                "idle-device quiescence polling interval exceeds its wait bound"
-            )
+                raise ModelCompileError(f"device-capacity {field} must not be negative")
+
+    def reservable_vram_bytes(self, *, total: int, used: int) -> int:
+        if total <= 0 or used < 0 or used > total:
+            raise ModelCompileError("AMD device returned invalid VRAM capacity counters")
+        return (
+            (total - used)
+            * self.reservable_free_vram_fraction_ppm
+            // 1_000_000
+        )
 
     def to_json(self) -> Json:
         return {
-            "maximum_vram_fraction_ppm": self.maximum_vram_fraction_ppm,
-            "maximum_busy_percent": self.maximum_busy_percent,
-            "maximum_background_context_vram_bytes": (
-                self.maximum_background_context_vram_bytes
+            "reservable_free_vram_fraction_ppm": (
+                self.reservable_free_vram_fraction_ppm
             ),
-            "maximum_background_context_gtt_bytes": (
-                self.maximum_background_context_gtt_bytes
-            ),
-            "maximum_driver_retained_vram_bytes": (
-                self.maximum_driver_retained_vram_bytes
-            ),
-            "quiescence_poll_interval_ns": self.quiescence_poll_interval_ns,
-            "quiescence_required_observations": (
-                self.quiescence_required_observations
-            ),
-            "maximum_quiescence_wait_ns": self.maximum_quiescence_wait_ns,
-            "resident_process_policy": (
-                "no_process_above_background_context_envelope"
-            ),
-            "release_residency_policy": (
-                "stable_zero_activity_no_resident_process_within_"
-                "context_prepared_driver_retention_envelope"
-            ),
+            "minimum_reservable_vram_bytes": self.minimum_reservable_vram_bytes,
+            "material_process_vram_bytes": self.material_process_vram_bytes,
+            "material_process_gtt_bytes": self.material_process_gtt_bytes,
+            "concurrent_workload_policy": "preserve_and_share_unreserved_capacity",
+            "release_policy": "declared_reservable_capacity_restored",
         }
 
 
 @dataclass(frozen=True)
-class DeviceIdleObservation:
+class DeviceCapacityObservation:
     device_id: str
     pci_address: str
     drm_card: str
     vram_total_bytes: int
     vram_used_bytes: int
+    vram_free_bytes: int
+    reservable_vram_bytes: int
     busy_percent: int
     resident_processes: tuple[Json, ...]
 
@@ -111,30 +81,28 @@ class DeviceIdleObservation:
             "drm_card": self.drm_card,
             "vram_total_bytes": self.vram_total_bytes,
             "vram_used_bytes": self.vram_used_bytes,
+            "vram_free_bytes": self.vram_free_bytes,
+            "reservable_vram_bytes": self.reservable_vram_bytes,
             "busy_percent": self.busy_percent,
             "resident_processes": [dict(item) for item in self.resident_processes],
         }
 
 
-class LinuxAmdDeviceStateProbe:
-    """Fail-closed AMD residency probe using PCI, DRM, procfs, and sysfs."""
+class LinuxAmdDeviceCapacityProbe:
+    """Measure shareable AMD VRAM without treating other workloads as exclusion."""
 
     def __init__(
         self,
         *,
         sysfs_drm_root: Path = Path("/sys/class/drm"),
         proc_root: Path = Path("/proc"),
-        policy: DeviceIdlePolicy = DeviceIdlePolicy(),
-        monotonic_ns: Callable[[], int] = time.monotonic_ns,
-        sleep: Callable[[float], None] = time.sleep,
+        policy: DeviceCapacityPolicy = DeviceCapacityPolicy(),
     ) -> None:
         self.sysfs_drm_root = sysfs_drm_root.resolve()
         self.proc_root = proc_root.resolve()
         self.policy = policy
-        self._monotonic_ns = monotonic_ns
-        self._sleep = sleep
 
-    def observe(self, profile: Json) -> DeviceIdleObservation:
+    def observe(self, profile: Json) -> DeviceCapacityObservation:
         identity = profile.get("hardware_identity")
         if not isinstance(identity, dict):
             raise ModelCompileError("hardware profile has no identity")
@@ -171,152 +139,64 @@ class LinuxAmdDeviceStateProbe:
                 f"AMD device {device_id!r} returned invalid residency counters"
             )
         processes = self._material_resident_processes(pci_address)
-        return DeviceIdleObservation(
+        return DeviceCapacityObservation(
             device_id=device_id,
             pci_address=pci_address,
             drm_card=card.name,
             vram_total_bytes=total,
             vram_used_bytes=used,
+            vram_free_bytes=total - used,
+            reservable_vram_bytes=self.policy.reservable_vram_bytes(
+                total=total,
+                used=used,
+            ),
             busy_percent=busy,
             resident_processes=processes,
         )
 
-    def require_idle(self, profiles: tuple[Json, ...]) -> tuple[Json, ...]:
+    def require_capacity(
+        self,
+        profiles: tuple[Json, ...],
+        required_capacity_bytes: dict[str, int] | None = None,
+    ) -> tuple[Json, ...]:
         if not profiles:
-            raise ModelCompileError("idle-device probe requires hardware profiles")
+            raise ModelCompileError("device-capacity probe requires hardware profiles")
         observations = tuple(
             sorted(
                 (self.observe(profile) for profile in profiles),
                 key=lambda item: item.device_id,
             )
         )
-        failures = self._idle_observation_failures(
-            observations,
-            include_busy=True,
-        )
+        requirements = required_capacity_bytes or {
+            observation.device_id: self.policy.minimum_reservable_vram_bytes
+            for observation in observations
+        }
+        observed_ids = {observation.device_id for observation in observations}
+        if set(requirements) != observed_ids:
+            raise ModelCompileError(
+                "capacity reservation does not match the probed AMD devices"
+            )
+        failures = []
+        for observation in observations:
+            required = requirements[observation.device_id]
+            if isinstance(required, bool) or not isinstance(required, int) or required < 0:
+                raise ModelCompileError(
+                    f"device {observation.device_id!r} has an invalid VRAM reservation"
+                )
+            if observation.reservable_vram_bytes < required:
+                failures.append(
+                    f"{observation.device_id} offers "
+                    f"{observation.reservable_vram_bytes} reservable VRAM bytes, "
+                    f"requires {required}"
+                )
         if failures:
             raise ModelCompileError(
-                "AMD device is not at an idle residency baseline: "
+                "AMD device has insufficient unreserved VRAM capacity: "
                 + "; ".join(failures)
             )
         return tuple(item.to_json() for item in observations)
 
-    def capture_stable_idle_baseline(
-        self,
-        profiles: tuple[Json, ...],
-    ) -> tuple[Json, ...]:
-        """Capture the idle floor after execution contexts are prepared."""
-
-        if not profiles:
-            raise ModelCompileError(
-                "stable idle-device baseline requires hardware profiles"
-            )
-        deadline = (
-            self._monotonic_ns()
-            + self.policy.maximum_quiescence_wait_ns
-        )
-        previous_residency: tuple[tuple[str, int], ...] | None = None
-        consecutive_idle = 0
-        last_busy: tuple[tuple[str, int], ...] = ()
-        while True:
-            observations = tuple(
-                sorted(
-                    (self.observe(profile) for profile in profiles),
-                    key=lambda item: item.device_id,
-                )
-            )
-            failures = self._idle_observation_failures(
-                observations,
-                include_busy=False,
-            )
-            if failures:
-                raise ModelCompileError(
-                    "AMD device is not at an idle residency baseline: "
-                    + "; ".join(failures)
-                )
-            last_busy = tuple(
-                (item.device_id, item.busy_percent)
-                for item in observations
-                if item.busy_percent > self.policy.maximum_busy_percent
-            )
-            residency = tuple(
-                (item.device_id, item.vram_used_bytes)
-                for item in observations
-            )
-            if last_busy:
-                consecutive_idle = 0
-                previous_residency = None
-            elif residency == previous_residency:
-                consecutive_idle += 1
-            else:
-                previous_residency = residency
-                consecutive_idle = 1
-            if (
-                consecutive_idle
-                >= self.policy.quiescence_required_observations
-            ):
-                return tuple(item.to_json() for item in observations)
-            now = self._monotonic_ns()
-            if now >= deadline:
-                details = ", ".join(
-                    f"{device_id}={busy}%"
-                    for device_id, busy in last_busy
-                )
-                raise ModelCompileError(
-                    "AMD devices did not establish a stable context-prepared "
-                    "idle baseline within "
-                    f"{self.policy.maximum_quiescence_wait_ns} ns"
-                    + (f": {details}" if details else "")
-                )
-            wait_ns = min(
-                self.policy.quiescence_poll_interval_ns,
-                deadline - now,
-            )
-            self._sleep(wait_ns / 1_000_000_000)
-
-    def _idle_observation_failures(
-        self,
-        observations: tuple[DeviceIdleObservation, ...],
-        *,
-        include_busy: bool,
-    ) -> list[str]:
-        failures: list[str] = []
-        for observation in observations:
-            used_fraction_ppm = (
-                observation.vram_used_bytes * 1_000_000
-                // observation.vram_total_bytes
-            )
-            if observation.resident_processes:
-                owners = ", ".join(
-                    f"{item['pid']}:{item['command']}"
-                    for item in observation.resident_processes
-                )
-                failures.append(
-                    f"{observation.device_id} has resident DRM consumers ({owners})"
-                )
-            if used_fraction_ppm > self.policy.maximum_vram_fraction_ppm:
-                failures.append(
-                    f"{observation.device_id} uses "
-                    f"{observation.vram_used_bytes}/{observation.vram_total_bytes} "
-                    "VRAM bytes"
-                )
-            if (
-                include_busy
-                and observation.busy_percent
-                > self.policy.maximum_busy_percent
-            ):
-                failures.append(
-                    f"{observation.device_id} is {observation.busy_percent}% busy"
-                )
-        return failures
-
-    def idle_state_digest(self, profiles: tuple[Json, ...]) -> str:
-        """Attest current idleness and return its stable semantic identity."""
-
-        self.require_idle(profiles)
-        return declared_idle_state_digest(profiles, self.policy)
-
-    def target_idle_state_digest(self, target: object) -> str:
+    def target_capacity_reservation_digest(self, target: object) -> str:
         raw_profiles = getattr(target, "hardware_profiles", None)
         if not isinstance(raw_profiles, tuple):
             raise ModelCompileError(
@@ -326,146 +206,97 @@ class LinuxAmdDeviceStateProbe:
         matched = getattr(target, "matched_conditions", None)
         if not isinstance(matched, dict):
             raise ModelCompileError(
-                "device-state probe received target conditions without "
-                "an idle baseline"
+                "device-capacity probe received invalid target conditions"
             )
         environment = matched.get("environment")
-        baselines = (
-            environment.get("context_prepared_idle_observations")
+        admission = (
+            environment.get("residency_admission")
             if isinstance(environment, dict)
             else None
         )
-        if not isinstance(baselines, list):
-            raise ModelCompileError(
-                "optimization target has no context-prepared device-idle "
-                "observations"
-            )
-        baseline_by_id = {
-            str(item.get("device_id", "")): item
-            for item in baselines
-            if isinstance(item, dict)
-        }
-        expected_ids = {
-            str(profile["hardware_identity"]["stable_device_id"])
-            for profile in profiles
-        }
-        if set(baseline_by_id) != expected_ids:
-            raise ModelCompileError(
-                "optimization target idle baseline does not match its devices"
-            )
-        deadline = (
-            self._monotonic_ns()
-            + self.policy.maximum_quiescence_wait_ns
+        reservations = (
+            admission.get("reserved_device_capacity_bytes")
+            if isinstance(admission, dict)
+            else None
         )
-        consecutive_idle = 0
-        previous_residency: tuple[tuple[str, int], ...] | None = None
-        last_busy: tuple[tuple[str, int], ...] = ()
-        while True:
-            observations = tuple(
-                self.observe(profile).to_json() for profile in profiles
-            )
-            self._require_target_residency_baseline(
-                observations,
-                baseline_by_id,
-            )
-            last_busy = tuple(
-                (
-                    str(observation["device_id"]),
-                    int(observation["busy_percent"]),
-                )
-                for observation in observations
-                if (
-                    observation["busy_percent"]
-                    > self.policy.maximum_busy_percent
-                )
-            )
-            residency = tuple(
-                (
-                    str(observation["device_id"]),
-                    int(observation["vram_used_bytes"]),
-                )
-                for observation in observations
-            )
-            if last_busy:
-                consecutive_idle = 0
-                previous_residency = None
-            elif residency == previous_residency:
-                consecutive_idle += 1
-            else:
-                previous_residency = residency
-                consecutive_idle = 1
-            if (
-                consecutive_idle
-                >= self.policy.quiescence_required_observations
-            ):
-                return declared_idle_state_digest(profiles, self.policy)
-            now = self._monotonic_ns()
-            if now >= deadline:
-                details = ", ".join(
-                    f"{device_id}={busy}%"
-                    for device_id, busy in last_busy
-                )
-                raise ModelCompileError(
-                    "AMD devices did not reach a stable idle baseline within "
-                    f"{self.policy.maximum_quiescence_wait_ns} ns"
-                    + (f": {details}" if details else "")
-                )
-            wait_ns = min(
-                self.policy.quiescence_poll_interval_ns,
-                deadline - now,
-            )
-            self._sleep(wait_ns / 1_000_000_000)
-
-    def _require_target_residency_baseline(
-        self,
-        observations: tuple[Json, ...],
-        baseline_by_id: dict[str, Json],
-    ) -> None:
-        failures = []
-        for observation in observations:
-            device_id = str(observation["device_id"])
-            baseline = baseline_by_id[device_id]
-            baseline_used = baseline.get("vram_used_bytes")
-            used = observation["vram_used_bytes"]
-            total = observation["vram_total_bytes"]
-            if (
-                isinstance(baseline_used, bool)
-                or not isinstance(baseline_used, int)
-            ):
-                raise ModelCompileError(
-                    "optimization target has an invalid context-prepared VRAM "
-                    "baseline"
-                )
-            if observation["resident_processes"]:
-                owners = ", ".join(
-                    f"{item['pid']}:{item['command']}"
-                    for item in observation["resident_processes"]
-                )
-                failures.append(
-                    f"{device_id} has resident DRM consumers ({owners})"
-                )
-            if (
-                used * 1_000_000 // total
-                > self.policy.maximum_vram_fraction_ppm
-            ):
-                failures.append(
-                    f"{device_id} uses {used}/{total} VRAM bytes"
-                )
-            retained_limit = (
-                baseline_used
-                + self.policy.maximum_driver_retained_vram_bytes
-            )
-            if used > retained_limit:
-                failures.append(
-                    f"{device_id} uses {used} VRAM bytes above its "
-                    f"{retained_limit}-byte context-prepared driver-retention "
-                    "envelope"
-                )
-        if failures:
+        if not isinstance(reservations, dict):
             raise ModelCompileError(
-                "AMD device did not return to its context-prepared idle "
-                "residency envelope: "
-                + "; ".join(failures)
+                "optimization target has no device-capacity reservation"
+            )
+        baseline_observations = (
+            environment.get("capacity_observations")
+            if isinstance(environment, dict)
+            else None
+        )
+        if not isinstance(baseline_observations, list):
+            raise ModelCompileError(
+                "optimization target has no pre-execution capacity observations"
+            )
+        required = {}
+        for device_id, value in reservations.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ModelCompileError(
+                    "optimization target has an invalid device-capacity reservation"
+                )
+            required[str(device_id)] = value
+        current_observations = self.require_capacity(profiles, required)
+        self._require_preexisting_residents(
+            baseline_observations,
+            current_observations,
+        )
+        return declared_capacity_reservation_digest(
+            profiles,
+            required,
+            self.policy,
+        )
+
+    def _require_preexisting_residents(
+        self,
+        baseline_observations: list[object],
+        current_observations: tuple[Json, ...],
+    ) -> None:
+        baseline_by_id = {
+            str(observation.get("device_id", "")): observation
+            for observation in baseline_observations
+            if isinstance(observation, dict)
+        }
+        current_by_id = {
+            str(observation["device_id"]): observation
+            for observation in current_observations
+        }
+        if set(baseline_by_id) != set(current_by_id):
+            raise ModelCompileError(
+                "capacity observations do not match the reserved AMD devices"
+            )
+        missing = []
+        for device_id, baseline in baseline_by_id.items():
+            baseline_processes = baseline.get("resident_processes")
+            if not isinstance(baseline_processes, list):
+                raise ModelCompileError(
+                    "capacity observation has invalid resident-process evidence"
+                )
+            current_processes = current_by_id[device_id]["resident_processes"]
+            current_pids = {
+                process.get("pid")
+                for process in current_processes
+                if isinstance(process, dict)
+            }
+            for process in baseline_processes:
+                if not isinstance(process, dict) or not isinstance(
+                    process.get("pid"),
+                    int,
+                ):
+                    raise ModelCompileError(
+                        "capacity observation has invalid resident-process evidence"
+                    )
+                if process["pid"] not in current_pids:
+                    missing.append(
+                        f"{device_id}:{process['pid']}:{process.get('command', 'unknown')}"
+                    )
+        if missing:
+            raise ModelCompileError(
+                "pre-existing AMD resident allocations are no longer present: "
+                + ", ".join(missing)
             )
 
     def _drm_card(self, pci_address: str) -> Path:
@@ -496,10 +327,10 @@ class LinuxAmdDeviceStateProbe:
         """Return DRM clients too large to be display/driver background state.
 
         DRM engine counters are cumulative over a client's lifetime and cannot
-        establish current activity. Global ``gpu_busy_percent`` provides the
-        live activity gate; this method establishes material residency. File
-        descriptors duplicated from one DRM client share an inode and must be
-        counted once rather than multiplying the client's reported memory.
+        establish current activity. Process records are attribution only: they
+        never exclude a device whose remaining capacity satisfies the requested
+        reservation. File descriptors duplicated from one DRM client share an
+        inode and must be counted once rather than multiplying reported memory.
         """
 
         residents: dict[int, Json] = {}
@@ -562,9 +393,9 @@ class LinuxAmdDeviceStateProbe:
                 )
             if (
                 vram_bytes
-                <= self.policy.maximum_background_context_vram_bytes
+                <= self.policy.material_process_vram_bytes
                 and gtt_bytes
-                <= self.policy.maximum_background_context_gtt_bytes
+                <= self.policy.material_process_gtt_bytes
             ):
                 continue
             try:
@@ -581,9 +412,10 @@ class LinuxAmdDeviceStateProbe:
         return tuple(residents[pid] for pid in sorted(residents))
 
 
-def declared_idle_state_digest(
+def declared_capacity_reservation_digest(
     profiles: tuple[Json, ...],
-    policy: DeviceIdlePolicy,
+    reserved_capacity_bytes: dict[str, int],
+    policy: DeviceCapacityPolicy,
 ) -> str:
     devices = sorted(
         (
@@ -597,10 +429,13 @@ def declared_idle_state_digest(
     )
     return device_state_digest(
         {
-            "schema": "nerve.optimizer.device_idle_attestation.v1",
+            "schema": "nerve.optimizer.device_capacity_reservation.v1",
             "devices": devices,
+            "reserved_capacity_bytes": dict(
+                sorted(reserved_capacity_bytes.items())
+            ),
             "policy": policy.to_json(),
-            "state": "idle",
+            "state": "capacity_reserved",
         }
     )
 

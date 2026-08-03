@@ -368,16 +368,18 @@ guard against degradation, while complete correctness and behavioral
 qualification happen only after the fast screen. Publication is an atomic
 rename of the deterministic plan, ordered raw run, summary, traces, and exact
 integrity manifest. Failed mount validation closes the already-open session,
-and every successful mount must prove that unmount returned the device to the
-matched idle state.
+and every successful mount must prove that unmount restored the matched
+capacity reservation.
 
 Role unmount and executor shutdown are separate protocols. Unmount resets a
 role and may retain immutable residency for the next matched call. Shutdown
 first quiesces every submitted queue, drops the reusable role, then releases
 pooled allocations and destroys Vulkan contexts one physical device at a time.
 The executor acknowledges the ordered release only after no registered device
-or pooled buffer remains; the host performs idle-state attestation only after
-that acknowledgement. Normal completion never treats stdin EOF, process exit,
+or pooled buffer remains; the host re-attests the declared reservable capacity
+only after that acknowledgement. Other processes and their allocations are not
+part of the NERVE lease and are never unloaded to manufacture an idle device.
+Normal completion never treats stdin EOF, process exit,
 destructor order, or an expired experiment deadline as accelerator teardown.
 Mount and execution commands are bounded cancellation quanta: cancellation is
 checked before submission, while a submitted command is allowed to return to
@@ -440,8 +442,8 @@ a convenient small cap is not valid evidence. Full and whole-model checks use
 at least two fixed seeds and an explicit minimum executed horizon.
 
 Each validation-stage mount records device state before and after residency.
-Teardown must restore the exact idle digest even on rejection or execution
-failure. Raw traces, fixtures, plans, runs, records, and integrity manifests
+Teardown must restore the declared capacity-reservation digest even on
+rejection or execution failure. Raw traces, fixtures, plans, runs, records, and integrity manifests
 are streamed into atomically published evidence trees. Unproven exact
 candidates never reach timing; faster approximations that exceed any declared
 error limit are rejected before promotion.

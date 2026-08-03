@@ -17,7 +17,7 @@ from nerve.representation_optimizer.contracts import (
 
 
 BENCHMARK_WORKLOAD_SCHEMA = "nerve.optimizer.benchmark_workload.v1"
-BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v4"
+BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v5"
 BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v2"
 BENCHMARK_RESIDENCY_EVENT_SCHEMA = "nerve.optimizer.benchmark_residency_event.v2"
 BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v4"
@@ -1490,8 +1490,8 @@ def validate_matched_conditions(conditions: Json) -> None:
             "placement",
             "controls",
             "environment",
-            "idle_device_state_digest",
-            "exclusive_residency",
+            "capacity_reservation_digest",
+            "residency_scope",
         },
         "matched_conditions",
     )
@@ -1545,12 +1545,12 @@ def validate_matched_conditions(conditions: Json) -> None:
             "matched placement references an undeclared device"
         )
     _device_state_digest(
-        conditions["idle_device_state_digest"],
-        "matched_conditions.idle_device_state_digest",
+        conditions["capacity_reservation_digest"],
+        "matched_conditions.capacity_reservation_digest",
     )
-    if conditions["exclusive_residency"] is not True:
+    if conditions["residency_scope"] != "capacity_partition":
         raise BenchmarkContractError(
-            "matched benchmark conditions require exclusive device residency"
+            "matched benchmark conditions require capacity-partition residency"
         )
 
 

@@ -159,7 +159,7 @@ class BehavioralValidationAdapter(Protocol):
         execution_scope: str,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> ContextManager[None]:
-        """Own one scope's exclusive execution infrastructure for a stage."""
+        """Own one scope's isolated execution infrastructure for a stage."""
 
     def iter_fixture_artifact(
         self,

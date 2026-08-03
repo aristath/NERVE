@@ -13,12 +13,12 @@ from nerve.compiler_target import (
     synthetic_hardware_profile,
 )
 from nerve.representation_optimizer.automation.device_state import (
-    DeviceIdlePolicy,
-    LinuxAmdDeviceStateProbe,
-    declared_idle_state_digest,
+    DeviceCapacityPolicy,
+    LinuxAmdDeviceCapacityProbe,
+    declared_capacity_reservation_digest,
 )
 from nerve.representation_optimizer.automation.runtime_target import (
-    balanced_component_placement,
+    capacity_weighted_component_placement,
     prepare_runtime_optimization_targets,
     runtime_executor_command,
     runtime_implementation_fingerprint,
@@ -87,85 +87,70 @@ def test_runtime_executor_command_asks_cargo_to_verify_source_freshness(
     ]
 
 
-def test_linux_amd_probe_rejects_residency_and_attests_clean_release(
+def test_linux_amd_probe_reserves_remaining_capacity_without_excluding_workloads(
     tmp_path: Path,
 ) -> None:
-    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
+    profile = _target(
+        ("0000:03:00.0",),
+        capacity_bytes=1_000_000_000,
+    ).hardware_profiles[0].to_json()
     sysfs, proc = _device_filesystem(
         tmp_path,
         pci_address="0000:03:00.0",
-        used_vram=64 * 1024 * 1024,
-        busy_percent=0,
+        used_vram=100_000_000,
+        busy_percent=83,
+        total_vram=1_000_000_000,
     )
-    probe = LinuxAmdDeviceStateProbe(
-        sysfs_drm_root=sysfs,
-        proc_root=proc,
-    )
-
-    observation = probe.require_idle((profile,))
-    expected = declared_idle_state_digest((profile,), probe.policy)
-    assert observation[0]["pci_address"] == "0000:03:00.0"
-    assert probe.idle_state_digest((profile,)) == expected
-
-    target = SimpleNamespace(
-        hardware_profiles=(profile,),
-        matched_conditions={
-            "environment": {
-                "context_prepared_idle_observations": list(observation),
-            }
-        },
-    )
-    device = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
-    device.write_text(f"{64 * 1024 * 1024 + 4_096}\n")
-    assert probe.target_idle_state_digest(target) == expected
-    device.write_text(
-        f"{64 * 1024 * 1024 + probe.policy.maximum_driver_retained_vram_bytes + 1}\n"
-    )
-    with pytest.raises(ModelCompileError, match="driver-retention envelope"):
-        probe.target_idle_state_digest(target)
-    device.write_text(f"{64 * 1024 * 1024}\n")
-    assert probe.target_idle_state_digest(target) == expected
-
-    small_context = proc / "41"
-    (small_context / "fdinfo").mkdir(parents=True)
-    (small_context / "comm").write_text("vulkan-inspector\n")
-    (small_context / "fdinfo" / "5").write_text(
-        "drm-pdev:\t0000:03:00.0\ndrm-memory-vram:\t12 KiB\ndrm-memory-gtt:\t2048 KiB\n"
-    )
-    assert probe.require_idle((profile,))[0]["resident_processes"] == []
-    (small_context / "fdinfo" / "5").write_text(
-        "drm-pdev:\t0000:03:00.0\n"
-        "drm-memory-vram:\t12 KiB\n"
-        "drm-memory-gtt:\t2048 KiB\n"
-        "drm-engine-compute:\t1 ns\n"
-    )
-    # Engine counters are lifetime totals, not evidence of current activity.
-    assert probe.require_idle((profile,))[0]["resident_processes"] == []
-    duplicate_fds = small_context / "fd"
-    duplicate_fds.mkdir()
-    drm_client = small_context / "drm-client"
-    drm_client.write_text("")
-    (duplicate_fds / "5").symlink_to(drm_client)
-    (duplicate_fds / "6").symlink_to(drm_client)
-    duplicated_client = (
-        "drm-pdev:\t0000:03:00.0\ndrm-memory-vram:\t40 MiB\ndrm-memory-gtt:\t4 MiB\n"
-    )
-    (small_context / "fdinfo" / "5").write_text(duplicated_client)
-    (small_context / "fdinfo" / "6").write_text(duplicated_client)
-    assert probe.require_idle((profile,))[0]["resident_processes"] == []
-    (small_context / "fdinfo" / "6").unlink()
-    (small_context / "fdinfo" / "5").unlink()
-
     process = proc / "42"
     (process / "fdinfo").mkdir(parents=True)
     (process / "comm").write_text("resident-model\n")
     (process / "fdinfo" / "7").write_text(
         "drm-pdev:\t0000:03:00.0\ndrm-memory-vram:\t96 MiB\n"
     )
-    with pytest.raises(ModelCompileError, match="resident DRM consumers"):
-        probe.require_idle((profile,))
-    with pytest.raises(ModelCompileError, match="resident DRM consumers"):
-        probe.target_idle_state_digest(target)
+    policy = DeviceCapacityPolicy(
+        reservable_free_vram_fraction_ppm=1_000_000,
+    )
+    probe = LinuxAmdDeviceCapacityProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        policy=policy,
+    )
+    device_id = str(profile["hardware_identity"]["stable_device_id"])
+    reservation = {device_id: 800_000_000}
+
+    observation = probe.require_capacity((profile,), reservation)
+
+    assert observation[0]["busy_percent"] == 83
+    assert observation[0]["vram_free_bytes"] == 900_000_000
+    assert observation[0]["reservable_vram_bytes"] == 900_000_000
+    assert observation[0]["resident_processes"][0]["command"] == "resident-model"
+    expected = declared_capacity_reservation_digest(
+        (profile,),
+        reservation,
+        policy,
+    )
+    target = SimpleNamespace(
+        hardware_profiles=(profile,),
+        matched_conditions={
+            "environment": {
+                "capacity_observations": list(observation),
+                "residency_admission": {
+                    "reserved_device_capacity_bytes": reservation,
+                }
+            }
+        },
+    )
+    assert probe.target_capacity_reservation_digest(target) == expected
+
+    used = (sysfs / "card0" / "device").resolve() / "mem_info_vram_used"
+    used.write_text("250000000\n")
+    with pytest.raises(ModelCompileError, match="insufficient unreserved VRAM"):
+        probe.target_capacity_reservation_digest(target)
+    used.write_text("100000000\n")
+    assert probe.target_capacity_reservation_digest(target) == expected
+    (process / "fdinfo" / "7").unlink()
+    with pytest.raises(ModelCompileError, match="no longer present"):
+        probe.target_capacity_reservation_digest(target)
 
 
 def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
@@ -189,191 +174,36 @@ def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
         return original_iterdir(path)
 
     monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
-    probe = LinuxAmdDeviceStateProbe(
+    probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
     )
 
-    observation = probe.require_idle((profile,))
+    observation = probe.require_capacity((profile,))
     assert observation[0]["resident_processes"] == []
 
 
-def test_target_idle_attestation_waits_for_stable_counter_quiescence(
+def test_capacity_probe_rejects_reservation_for_another_device(
     tmp_path: Path,
 ) -> None:
     profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
     sysfs, proc = _device_filesystem(
         tmp_path,
         pci_address="0000:03:00.0",
-        used_vram=64 * 1024 * 1024,
-        busy_percent=0,
+        used_vram=100,
+        busy_percent=100,
+        total_vram=1_000,
     )
-    busy = next((sysfs / "card0" / "device").resolve().glob("gpu_busy_percent"))
-    clock = [0]
-    sleeps = []
-
-    def advance(seconds: float) -> None:
-        sleeps.append(seconds)
-        clock[0] += round(seconds * 1_000_000_000)
-        if len(sleeps) == 1:
-            busy.write_text("0\n")
-
-    policy = DeviceIdlePolicy(
-        quiescence_poll_interval_ns=10,
-        quiescence_required_observations=2,
-        maximum_quiescence_wait_ns=100,
-    )
-    probe = LinuxAmdDeviceStateProbe(
+    probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
-        policy=policy,
-        monotonic_ns=lambda: clock[0],
-        sleep=advance,
     )
-    baseline = probe.require_idle((profile,))
-    target = SimpleNamespace(
-        hardware_profiles=(profile,),
-        matched_conditions={
-            "environment": {
-                "context_prepared_idle_observations": list(baseline),
-            }
-        },
-    )
-    busy.write_text("73\n")
-
-    assert probe.target_idle_state_digest(target) == (
-        declared_idle_state_digest((profile,), policy)
-    )
-    assert sleeps == [1e-08, 1e-08]
+    other_device = _device_id("0000:07:00.0")
+    with pytest.raises(ModelCompileError, match="does not match the probed"):
+        probe.require_capacity((profile,), {other_device: 100})
 
 
-def test_target_idle_attestation_waits_for_stable_driver_retention_watermark(
-    tmp_path: Path,
-) -> None:
-    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
-    baseline_vram = 64 * 1024 * 1024
-    sysfs, proc = _device_filesystem(
-        tmp_path,
-        pci_address="0000:03:00.0",
-        used_vram=baseline_vram,
-        busy_percent=0,
-    )
-    used = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
-    clock = [0]
-    sleeps = []
-
-    def retain_driver_cache(seconds: float) -> None:
-        sleeps.append(seconds)
-        clock[0] += round(seconds * 1_000_000_000)
-        if len(sleeps) == 1:
-            used.write_text(f"{baseline_vram + 8_192}\n")
-
-    policy = DeviceIdlePolicy(
-        quiescence_poll_interval_ns=10,
-        quiescence_required_observations=2,
-        maximum_quiescence_wait_ns=100,
-    )
-    probe = LinuxAmdDeviceStateProbe(
-        sysfs_drm_root=sysfs,
-        proc_root=proc,
-        policy=policy,
-        monotonic_ns=lambda: clock[0],
-        sleep=retain_driver_cache,
-    )
-    baseline = probe.require_idle((profile,))
-    target = SimpleNamespace(
-        hardware_profiles=(profile,),
-        matched_conditions={
-            "environment": {
-                "context_prepared_idle_observations": list(baseline),
-            }
-        },
-    )
-    used.write_text(f"{baseline_vram + 4_096}\n")
-
-    assert probe.target_idle_state_digest(target) == (
-        declared_idle_state_digest((profile,), policy)
-    )
-    assert sleeps == [1e-08, 1e-08]
-
-
-def test_target_idle_attestation_bounds_nonquiescent_counter_wait(
-    tmp_path: Path,
-) -> None:
-    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
-    sysfs, proc = _device_filesystem(
-        tmp_path,
-        pci_address="0000:03:00.0",
-        used_vram=64 * 1024 * 1024,
-        busy_percent=0,
-    )
-    busy = next((sysfs / "card0" / "device").resolve().glob("gpu_busy_percent"))
-    clock = [0]
-
-    def advance(seconds: float) -> None:
-        clock[0] += round(seconds * 1_000_000_000)
-
-    policy = DeviceIdlePolicy(
-        quiescence_poll_interval_ns=10,
-        quiescence_required_observations=2,
-        maximum_quiescence_wait_ns=25,
-    )
-    probe = LinuxAmdDeviceStateProbe(
-        sysfs_drm_root=sysfs,
-        proc_root=proc,
-        policy=policy,
-        monotonic_ns=lambda: clock[0],
-        sleep=advance,
-    )
-    baseline = probe.require_idle((profile,))
-    target = SimpleNamespace(
-        hardware_profiles=(profile,),
-        matched_conditions={
-            "environment": {
-                "context_prepared_idle_observations": list(baseline),
-            }
-        },
-    )
-    busy.write_text("51\n")
-
-    with pytest.raises(ModelCompileError, match="stable idle baseline"):
-        probe.target_idle_state_digest(target)
-    assert clock[0] == policy.maximum_quiescence_wait_ns
-
-
-def test_context_prepared_idle_baseline_waits_for_stable_vram_floor(
-    tmp_path: Path,
-) -> None:
-    profile = _target(("0000:03:00.0",)).hardware_profiles[0].to_json()
-    baseline_vram = 64 * 1024 * 1024
-    sysfs, proc = _device_filesystem(
-        tmp_path,
-        pci_address="0000:03:00.0",
-        used_vram=baseline_vram,
-        busy_percent=0,
-    )
-    used = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
-    sleeps = 0
-
-    def settle_driver_floor(_seconds: float) -> None:
-        nonlocal sleeps
-        sleeps += 1
-        if sleeps == 1:
-            used.write_text(f"{baseline_vram + 4_096}\n")
-
-    probe = LinuxAmdDeviceStateProbe(
-        sysfs_drm_root=sysfs,
-        proc_root=proc,
-        sleep=settle_driver_floor,
-    )
-
-    observations = probe.capture_stable_idle_baseline((profile,))
-
-    assert sleeps == 2
-    assert observations[0]["vram_used_bytes"] == baseline_vram + 4_096
-
-
-def test_runtime_target_preparation_selects_minimum_idle_amd_group(
+def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
     tmp_path: Path,
 ) -> None:
     pci_addresses = (
@@ -399,7 +229,7 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
             roots=(sysfs, proc),
             total_vram=1_000,
         )
-    probe = LinuxAmdDeviceStateProbe(
+    probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
     )
@@ -416,8 +246,8 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
         validation_executor_bin=validation,
         residency_planner_bin=planner,
         vulkan_driver_files=(driver,),
-        idle_probe=probe,
-        live_target=_target(pci_addresses[1:], capacity_bytes=1_000),
+        capacity_probe=probe,
+        live_target=target,
         speculative_draft_tokens=2,
     )
 
@@ -447,10 +277,17 @@ def test_runtime_target_preparation_selects_minimum_idle_amd_group(
         "residency_admission"
     ]
     assert admission["plan"] == prepared.residency_plans[0]
-    assert set(admission["safe_device_capacity_bytes"]) == {
+    assert set(admission["available_device_capacity_bytes"]) == {
         _device_id("0000:07:00.0"),
         _device_id("0000:0a:00.0"),
     }
+    assert admission["reserved_device_capacity_bytes"] == {
+        _device_id("0000:07:00.0"): 949,
+        _device_id("0000:0a:00.0"): 949,
+    }
+    assert optimization_target.matched_conditions["residency_scope"] == (
+        "capacity_partition"
+    )
 
 
 def test_runtime_target_counts_transient_working_set_before_selecting_topology(
@@ -485,7 +322,7 @@ def test_runtime_target_counts_transient_working_set_before_selecting_topology(
             extra_bytes_per_device_by_count={1: 800, 2: 0},
         ),
         vulkan_driver_files=(_driver(tmp_path),),
-        idle_probe=LinuxAmdDeviceStateProbe(
+        capacity_probe=LinuxAmdDeviceCapacityProbe(
             sysfs_drm_root=sysfs,
             proc_root=proc,
         ),
@@ -528,7 +365,7 @@ def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
             maximum_dynamic_bytes_per_device_by_count={1: 10_000},
         ),
         vulkan_driver_files=(_driver(tmp_path),),
-        idle_probe=LinuxAmdDeviceStateProbe(
+        capacity_probe=LinuxAmdDeviceCapacityProbe(
             sysfs_drm_root=sysfs,
             proc_root=proc,
         ),
@@ -540,15 +377,20 @@ def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
     admission = prepared.targets[0].matched_conditions["environment"][
         "residency_admission"
     ]
-    safe_capacity = next(iter(admission["safe_device_capacity_bytes"].values()))
+    available_capacity = next(
+        iter(admission["available_device_capacity_bytes"].values())
+    )
     assert plan["residency_policy"] == "demand_retained"
     assert device["initial_device_resident_bytes"] == 100
     assert device["parameter_residency"]["maximum_addressable_bytes"] == 10_100
-    assert device["initial_device_resident_bytes"] < safe_capacity
-    assert device["parameter_residency"]["maximum_addressable_bytes"] > safe_capacity
+    assert device["initial_device_resident_bytes"] < available_capacity
+    assert (
+        device["parameter_residency"]["maximum_addressable_bytes"]
+        > available_capacity
+    )
 
 
-def test_runtime_target_records_post_context_idle_floor(
+def test_runtime_target_records_post_context_capacity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -567,23 +409,17 @@ def test_runtime_target_records_post_context_idle_floor(
         busy_percent=0,
     )
     used = next((sysfs / "card0" / "device").resolve().glob("mem_info_vram_used"))
-    probe = LinuxAmdDeviceStateProbe(
+    probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
-        sleep=lambda _seconds: None,
     )
 
-    lifecycle_floors = (
-        initial_vram + 4_096,
-        initial_vram + 12_288,
-        initial_vram + 12_288,
-    )
     discovery_count = 0
 
     def discover_after_context_initialization(**kwargs) -> CompilerTarget:
         nonlocal discovery_count
         assert kwargs["initialize_device_contexts"] is True
-        used.write_text(f"{lifecycle_floors[discovery_count]}\n")
+        used.write_text(f"{initial_vram + 12_288}\n")
         discovery_count += 1
         return target
 
@@ -602,15 +438,15 @@ def test_runtime_target_records_post_context_idle_floor(
         validation_executor_bin=_executable(tmp_path / "validation"),
         residency_planner_bin=_residency_planner(tmp_path / "residency"),
         vulkan_driver_files=(_driver(tmp_path),),
-        idle_probe=probe,
+        capacity_probe=probe,
     )
 
     expected_vram = initial_vram + 12_288
-    assert discovery_count == 3
+    assert discovery_count == 1
     assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
     assert (
         prepared.targets[0].matched_conditions["environment"][
-            "context_prepared_idle_observations"
+            "capacity_observations"
         ][0]["vram_used_bytes"]
         == expected_vram
     )
@@ -632,7 +468,7 @@ def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
         used_vram=64 * 1024 * 1024,
         busy_percent=0,
     )
-    probe = LinuxAmdDeviceStateProbe(
+    probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
     )
@@ -652,14 +488,14 @@ def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
             validation_executor_bin=_executable(tmp_path / "validation"),
             residency_planner_bin=_residency_planner(tmp_path / "residency"),
             vulkan_driver_files=(_driver(tmp_path),),
-            idle_probe=probe,
+            capacity_probe=probe,
             live_target=target,
         )
 
     assert not (tmp_path / "run").exists()
 
 
-def test_explicit_busy_optimizer_device_is_never_substituted(
+def test_explicit_busy_optimizer_device_uses_its_remaining_capacity(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0",))
@@ -671,26 +507,28 @@ def test_explicit_busy_optimizer_device_is_never_substituted(
         busy_percent=8,
         total_vram=1_000_000_000,
     )
-    probe = LinuxAmdDeviceStateProbe(
+    probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
     )
 
-    with pytest.raises(ModelCompileError, match="not at an idle"):
-        prepare_runtime_optimization_targets(
-            package_manifest=package,
-            run_root=tmp_path / "run",
-            selected_device_ids=(_device_id("0000:03:00.0"),),
-            vulkan_driver_files=(_driver(tmp_path),),
-            idle_probe=probe,
-            live_target=target,
-            component_executor_bin=_executable(tmp_path / "component"),
-            validation_executor_bin=_executable(tmp_path / "validation"),
-            residency_planner_bin=_residency_planner(tmp_path / "residency"),
-        )
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        selected_device_ids=(_device_id("0000:03:00.0"),),
+        vulkan_driver_files=(_driver(tmp_path),),
+        capacity_probe=probe,
+        live_target=target,
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(tmp_path / "residency"),
+    )
+
+    assert prepared.selected_devices[0]["busy_percent"] == 8
+    assert prepared.selected_devices[0]["vram_used_bytes"] == 100_000_000
 
 
-def test_balanced_placement_preserves_component_order_and_all_members(
+def test_capacity_weighted_placement_preserves_component_order_and_all_members(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -705,17 +543,44 @@ def test_balanced_placement_preserves_component_order_and_all_members(
         _device_id("0000:07:00.0"),
     )
 
-    placement = balanced_component_placement(
+    placement = capacity_weighted_component_placement(
         package.parent,
         manifest,
-        (first, second),
+        {first: 1_000, second: 1_000},
     )
 
     assigned = [placement[f"component_{index}"] for index in range(4)]
     assert assigned == [first, first, second, second]
 
 
-def test_balanced_placement_excludes_processor_boundary_components(
+def test_capacity_weighted_placement_uses_partially_reserved_vram_proportionally(
+    tmp_path: Path,
+) -> None:
+    target = _target(("0000:03:00.0", "0000:07:00.0"))
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(100, 100, 100, 100),
+    )
+    manifest = json.loads(package.read_bytes())
+    first = _device_id("0000:03:00.0")
+    second = _device_id("0000:07:00.0")
+
+    placement = capacity_weighted_component_placement(
+        package.parent,
+        manifest,
+        {first: 3_000, second: 1_000},
+    )
+
+    assert [placement[f"component_{index}"] for index in range(4)] == [
+        first,
+        first,
+        first,
+        second,
+    ]
+
+
+def test_capacity_weighted_placement_excludes_processor_boundary_components(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -732,10 +597,10 @@ def test_balanced_placement_excludes_processor_boundary_components(
         _device_id("0000:07:00.0"),
     )
 
-    placement = balanced_component_placement(
+    placement = capacity_weighted_component_placement(
         package.parent,
         manifest,
-        (first, second),
+        {first: 1_000, second: 1_000},
     )
 
     assert placement == {
@@ -744,7 +609,7 @@ def test_balanced_placement_excludes_processor_boundary_components(
     }
 
 
-def test_balanced_placement_attaches_output_to_last_processor_device(
+def test_capacity_weighted_placement_attaches_output_to_last_processor_device(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -761,10 +626,10 @@ def test_balanced_placement_attaches_output_to_last_processor_device(
         _device_id("0000:07:00.0"),
     )
 
-    placement = balanced_component_placement(
+    placement = capacity_weighted_component_placement(
         package.parent,
         manifest,
-        (first, second),
+        {first: 1_000, second: 1_000},
     )
 
     assert placement == {

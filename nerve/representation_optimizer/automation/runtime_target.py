@@ -14,8 +14,9 @@ from typing import Callable, Iterable
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
-    LinuxAmdDeviceStateProbe,
-    declared_idle_state_digest,
+    LinuxAmdDeviceCapacityProbe,
+    declared_capacity_reservation_digest,
+    normalize_pci_address,
 )
 from nerve.representation_optimizer.automation.residency_planner import (
     RuntimeResidencyPlanningCase,
@@ -23,7 +24,7 @@ from nerve.representation_optimizer.automation.residency_planner import (
 )
 from nerve.representation_optimizer.automation.target import (
     OptimizationTarget,
-    VerifiedDeviceLeaseManager,
+    VerifiedCapacityLeaseManager,
 )
 from nerve.representation_optimizer.benchmarking.executor_adapter import (
     ResidentComponentExecutionAdapter,
@@ -57,29 +58,11 @@ RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA = (
 
 @dataclass(frozen=True)
 class RuntimeOptimizationPolicy:
-    model_residency_fraction_ppm: int = 850_000
     component_quantum_wait_ns: int = 1_000_000_000
-    context_lifecycle_required_observations: int = 2
-    maximum_context_lifecycle_attempts: int = 5
 
     def __post_init__(self) -> None:
-        if not 0 < self.model_residency_fraction_ppm <= 1_000_000:
-            raise ModelCompileError(
-                "model residency fraction must be in (0, 1000000] ppm"
-            )
         if self.component_quantum_wait_ns <= 0:
             raise ModelCompileError("component execution quantum wait must be positive")
-        if self.context_lifecycle_required_observations < 2:
-            raise ModelCompileError(
-                "context lifecycle requires at least two matching endpoints"
-            )
-        if (
-            self.maximum_context_lifecycle_attempts
-            < self.context_lifecycle_required_observations
-        ):
-            raise ModelCompileError(
-                "context lifecycle attempt bound must cover required endpoints"
-            )
 
 
 @dataclass(frozen=True)
@@ -112,7 +95,8 @@ class _SelectedCapabilityGroup:
     profiles: tuple[Json, ...]
     placement: dict[str, str]
     residency_plan: Json
-    safe_device_capacity_bytes: dict[str, int]
+    available_device_capacity_bytes: dict[str, int]
+    reserved_device_capacity_bytes: dict[str, int]
 
 
 def prepare_runtime_optimization_targets(
@@ -126,7 +110,7 @@ def prepare_runtime_optimization_targets(
     selected_device_ids: Iterable[str] = (),
     vulkan_driver_files: Iterable[Path] = (),
     speculative_draft_tokens: int = 0,
-    idle_probe: LinuxAmdDeviceStateProbe | None = None,
+    capacity_probe: LinuxAmdDeviceCapacityProbe | None = None,
     live_target: CompilerTarget | None = None,
     policy: RuntimeOptimizationPolicy = RuntimeOptimizationPolicy(),
     lease_root: Path | None = None,
@@ -213,20 +197,20 @@ def prepare_runtime_optimization_targets(
             f"optimizer devices are absent from the compiled package: {missing}"
         )
 
-    probe = idle_probe or LinuxAmdDeviceStateProbe()
+    probe = capacity_probe or LinuxAmdDeviceCapacityProbe()
     eligible = (
         tuple(by_id[device_id] for device_id in requested)
         if requested
         else (package_profiles)
     )
-    idle_profiles: list[Json] = []
+    capacity_profiles: list[Json] = []
     selected_records: list[Json] = []
     excluded_records: list[Json] = []
     for profile in eligible:
         check_compile_cancelled(cancel_requested)
         device_id = str(profile["hardware_identity"]["stable_device_id"])
         try:
-            observation = probe.require_idle((profile,))[0]
+            observation = probe.require_capacity((profile,))[0]
         except ModelCompileError as error:
             if requested:
                 raise
@@ -237,79 +221,33 @@ def prepare_runtime_optimization_targets(
                 }
             )
             continue
-        idle_profiles.append(profile)
+        capacity_profiles.append(profile)
         selected_records.append(observation)
-    if not idle_profiles:
-        raise ModelCompileError("no package-compatible AMD GPU is verified idle")
+    if not capacity_profiles:
+        raise ModelCompileError(
+            "no package-compatible AMD GPU has reservable VRAM capacity"
+        )
 
     parameter_bytes = _package_parameter_bytes(
         package_manifest.parent,
         manifest,
     )
-    check_compile_cancelled(cancel_requested)
-    selected_groups = _select_capability_groups(
-        tuple(idle_profiles),
-        package_manifest=package_manifest,
-        manifest=manifest,
-        residency_planner_command=residency_planner_command,
-        explicit_selection=bool(requested),
-        policy=policy,
-        cancel_requested=cancel_requested,
-    )
-    selected_ids = tuple(
-        sorted(
-            str(profile["hardware_identity"]["stable_device_id"])
-            for group in selected_groups
-            for profile in group.profiles
-        )
-    )
-    selected_records = [
-        record for record in selected_records if record["device_id"] in selected_ids
-    ]
-    for profile in idle_profiles:
-        device_id = str(profile["hardware_identity"]["stable_device_id"])
-        if device_id not in selected_ids:
-            excluded_records.append(
-                {
-                    "device_id": device_id,
-                    "reason": (
-                        "verified idle but not required by minimum safe "
-                        "model-residency placement"
-                    ),
-                }
-            )
-
     drivers = discover_amd_vulkan_driver_files(vulkan_driver_files)
     check_compile_cancelled(cancel_requested)
     if live_target is None:
         environment = amd_vulkan_environment(drivers)
-        live_target, selected_records = _discover_stable_context_lifecycle(
+        live_target = discover_compiler_target(
             runtime_bin=(
                 Path(runtime_command[0])
                 if runtime_command is not None and len(runtime_command) == 1
                 else runtime_bin
             ),
-            selected_ids=selected_ids,
-            package_profiles=by_id,
-            idle_probe=probe,
+            allowed_physical_device_ids=tuple(
+                _device_id(profile) for profile in capacity_profiles
+            ),
             environment=environment,
-            policy=policy,
+            initialize_device_contexts=True,
             cancel_requested=cancel_requested,
-        )
-    else:
-        live_profiles_for_baseline = {
-            str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
-                profile.to_json()
-            )
-            for profile in live_target.hardware_profiles
-            if _is_amd_vulkan_gpu(profile.to_json())
-        }
-        selected_records = list(
-            probe.capture_stable_idle_baseline(
-                tuple(
-                    live_profiles_for_baseline[device_id] for device_id in selected_ids
-                )
-            )
         )
     check_compile_cancelled(cancel_requested)
     live_profiles = {
@@ -319,11 +257,57 @@ def prepare_runtime_optimization_targets(
         for profile in live_target.hardware_profiles
         if _is_amd_vulkan_gpu(profile.to_json())
     }
-    if set(live_profiles) != set(selected_ids):
+    eligible_ids = {_device_id(profile) for profile in capacity_profiles}
+    if not eligible_ids.issubset(live_profiles):
+        missing_live = sorted(eligible_ids - set(live_profiles))
         raise ModelCompileError(
-            "live AMD discovery did not return exactly the verified idle devices"
+            "live AMD discovery omitted package-compatible AMD devices: "
+            f"{missing_live}"
         )
-    _require_live_identity_match(by_id, live_profiles, selected_ids)
+    _require_live_identity_match(
+        by_id,
+        live_profiles,
+        tuple(sorted(eligible_ids)),
+    )
+    live_eligible_profiles = tuple(
+        live_profiles[device_id] for device_id in sorted(eligible_ids)
+    )
+    selected_records = list(probe.require_capacity(live_eligible_profiles))
+    available_capacity_by_device = {
+        str(record["device_id"]): int(record["reservable_vram_bytes"])
+        for record in selected_records
+    }
+    selected_groups = _select_capability_groups(
+        live_eligible_profiles,
+        available_capacity_by_device=available_capacity_by_device,
+        package_manifest=package_manifest,
+        manifest=manifest,
+        residency_planner_command=residency_planner_command,
+        explicit_selection=bool(requested),
+        cancel_requested=cancel_requested,
+    )
+    selected_ids = tuple(
+        sorted(
+            _device_id(profile)
+            for group in selected_groups
+            for profile in group.profiles
+        )
+    )
+    selected_records = [
+        record for record in selected_records if record["device_id"] in selected_ids
+    ]
+    for profile in capacity_profiles:
+        device_id = _device_id(profile)
+        if device_id not in selected_ids:
+            excluded_records.append(
+                {
+                    "device_id": device_id,
+                    "reason": (
+                        "compatible capacity not required by the smallest "
+                        "admissible contiguous placement"
+                    ),
+                }
+            )
     live_groups = tuple(
         (
             group,
@@ -342,8 +326,9 @@ def prepare_runtime_optimization_targets(
             profiles=profiles,
             placement=group.placement,
             residency_plan=group.residency_plan,
-            safe_device_capacity_bytes=group.safe_device_capacity_bytes,
-            idle_probe=probe,
+            available_device_capacity_bytes=group.available_device_capacity_bytes,
+            reserved_device_capacity_bytes=group.reserved_device_capacity_bytes,
+            capacity_probe=probe,
             selected_observations=tuple(
                 record
                 for record in selected_records
@@ -552,73 +537,6 @@ def _query_runtime_implementation_fingerprint(
     return fingerprint
 
 
-def _discover_stable_context_lifecycle(
-    *,
-    runtime_bin: Path | None,
-    selected_ids: tuple[str, ...],
-    package_profiles: dict[str, Json],
-    idle_probe: LinuxAmdDeviceStateProbe,
-    environment: dict[str, str],
-    policy: RuntimeOptimizationPolicy,
-    cancel_requested: Callable[[], bool] | None,
-) -> tuple[CompilerTarget, list[Json]]:
-    previous_endpoint: tuple[tuple[str, int], ...] | None = None
-    consecutive_endpoints = 0
-    observed_endpoints: list[tuple[tuple[str, int], ...]] = []
-    last_target: CompilerTarget | None = None
-    last_records: list[Json] = []
-    for _attempt in range(policy.maximum_context_lifecycle_attempts):
-        check_compile_cancelled(cancel_requested)
-        target = discover_compiler_target(
-            runtime_bin=runtime_bin,
-            allowed_physical_device_ids=selected_ids,
-            environment=environment,
-            initialize_device_contexts=True,
-            cancel_requested=cancel_requested,
-        )
-        profiles = {
-            str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
-                profile.to_json()
-            )
-            for profile in target.hardware_profiles
-            if _is_amd_vulkan_gpu(profile.to_json())
-        }
-        if set(profiles) != set(selected_ids):
-            raise ModelCompileError(
-                "live AMD discovery did not return exactly the verified idle devices"
-            )
-        _require_live_identity_match(
-            package_profiles,
-            profiles,
-            selected_ids,
-        )
-        records = list(
-            idle_probe.capture_stable_idle_baseline(
-                tuple(profiles[device_id] for device_id in selected_ids)
-            )
-        )
-        endpoint = tuple(
-            (str(record["device_id"]), int(record["vram_used_bytes"]))
-            for record in records
-        )
-        observed_endpoints.append(endpoint)
-        if endpoint == previous_endpoint:
-            consecutive_endpoints += 1
-        else:
-            previous_endpoint = endpoint
-            consecutive_endpoints = 1
-        last_target = target
-        last_records = records
-        if consecutive_endpoints >= policy.context_lifecycle_required_observations:
-            return last_target, last_records
-    raise ModelCompileError(
-        "independent Vulkan context lifecycles did not converge on a "
-        "repeatable idle residency endpoint within "
-        f"{policy.maximum_context_lifecycle_attempts} attempts: "
-        f"{observed_endpoints}"
-    )
-
-
 def runtime_executor_command(
     binary_name: str,
     *,
@@ -708,13 +626,21 @@ def _build_current_repo_executor(
     return (str(binary),)
 
 
-def balanced_component_placement(
+def capacity_weighted_component_placement(
     package_root: Path,
     manifest: Json,
-    device_ids: tuple[str, ...],
+    device_capacity_bytes: dict[str, int],
 ) -> dict[str, str]:
+    device_ids = tuple(device_capacity_bytes)
     if not device_ids:
         raise ModelCompileError("component placement requires devices")
+    if any(
+        isinstance(capacity, bool)
+        or not isinstance(capacity, int)
+        or capacity <= 0
+        for capacity in device_capacity_bytes.values()
+    ):
+        raise ModelCompileError("component placement requires positive device capacities")
     components = manifest.get("circuit_graph", {}).get("components")
     if not isinstance(components, list) or not components:
         raise ModelCompileError("compiled package has no component graph")
@@ -765,7 +691,10 @@ def balanced_component_placement(
             for component_id, _ in weighted
         }
     else:
-        placement = _contiguous_weighted_partition(weighted, device_ids)
+        placement = _contiguous_capacity_weighted_partition(
+            weighted,
+            device_capacity_bytes,
+        )
     output_device = placement[weighted[-1][0]]
     placement.update(
         (component_id, output_device)
@@ -781,8 +710,9 @@ def _build_target(
     profiles: tuple[Json, ...],
     placement: dict[str, str],
     residency_plan: Json,
-    safe_device_capacity_bytes: dict[str, int],
-    idle_probe: LinuxAmdDeviceStateProbe,
+    available_device_capacity_bytes: dict[str, int],
+    reserved_device_capacity_bytes: dict[str, int],
+    capacity_probe: LinuxAmdDeviceCapacityProbe,
     selected_observations: tuple[Json, ...],
     driver_files: tuple[Path, ...],
     component_command: tuple[str, ...],
@@ -800,14 +730,18 @@ def _build_target(
             "one optimization execution target must have one capability class"
         )
     device_ids = tuple(_device_id(profile) for profile in profiles)
-    if set(device_ids) != set(safe_device_capacity_bytes):
+    if (
+        set(device_ids) != set(available_device_capacity_bytes)
+        or set(device_ids) != set(reserved_device_capacity_bytes)
+    ):
         raise ModelCompileError(
             "residency admission capacities do not match live target devices"
         )
     manifest = _read_json(package_manifest, "compiled package manifest")
-    idle_digest = declared_idle_state_digest(
+    capacity_digest = declared_capacity_reservation_digest(
         profiles,
-        idle_probe.policy,
+        reserved_device_capacity_bytes,
+        capacity_probe.policy,
     )
     matched_conditions = {
         "devices": sorted(
@@ -835,8 +769,8 @@ def _build_target(
                 runtime_implementation_fingerprint
             ),
             "vulkan_driver_manifests": [str(path) for path in driver_files],
-            "device_idle_policy": idle_probe.policy.to_json(),
-            "context_prepared_idle_observations": [
+            "device_capacity_policy": capacity_probe.policy.to_json(),
+            "capacity_observations": [
                 dict(item)
                 for item in sorted(
                     selected_observations,
@@ -845,16 +779,16 @@ def _build_target(
             ],
             "residency_admission": {
                 "plan": residency_plan,
-                "safe_device_capacity_bytes": dict(
-                    sorted(safe_device_capacity_bytes.items())
+                "available_device_capacity_bytes": dict(
+                    sorted(available_device_capacity_bytes.items())
                 ),
-                "residency_fraction_ppm": (
-                    policy.model_residency_fraction_ppm
+                "reserved_device_capacity_bytes": dict(
+                    sorted(reserved_device_capacity_bytes.items())
                 ),
             },
         },
-        "idle_device_state_digest": idle_digest,
-        "exclusive_residency": True,
+        "capacity_reservation_digest": capacity_digest,
+        "residency_scope": "capacity_partition",
     }
     target_id = stable_contract_id(
         "optimization_target",
@@ -902,9 +836,11 @@ def _build_target(
                 ),
             )
         ),
-        lease_manager=VerifiedDeviceLeaseManager(
+        lease_manager=VerifiedCapacityLeaseManager(
             lock_root=lease_root,
-            probe_idle_state_digest=idle_probe.target_idle_state_digest,
+            probe_capacity_reservation_digest=(
+                capacity_probe.target_capacity_reservation_digest
+            ),
         ),
         estimate_execution_nanoseconds=lambda _plan, _policy: None,
     )
@@ -913,13 +849,19 @@ def _build_target(
 def _select_capability_groups(
     profiles: tuple[Json, ...],
     *,
+    available_capacity_by_device: dict[str, int],
     package_manifest: Path,
     manifest: Json,
     residency_planner_command: tuple[str, ...],
     explicit_selection: bool,
-    policy: RuntimeOptimizationPolicy,
     cancel_requested: Callable[[], bool] | None,
 ) -> tuple[_SelectedCapabilityGroup, ...]:
+    if {_device_id(profile) for profile in profiles} != set(
+        available_capacity_by_device
+    ):
+        raise ModelCompileError(
+            "live device capacities do not match optimization profiles"
+        )
     by_capability: dict[str, list[Json]] = defaultdict(list)
     for profile in profiles:
         by_capability[str(profile["capability_class"])].append(profile)
@@ -935,14 +877,32 @@ def _select_capability_groups(
             "compiled package max_context_activations is invalid"
         )
     mount_speculative_decoders = bool(manifest.get("speculative_decoders"))
+    components = manifest.get("circuit_graph", {}).get("components")
+    if not isinstance(components, list):
+        raise ModelCompileError("compiled package has no component graph")
+    placeable_component_count = sum(
+        isinstance(component, dict)
+        and component.get("runtime_role") == "signal_processor"
+        for component in components
+    )
     for capability, raw_group in sorted(by_capability.items()):
-        group = sorted(raw_group, key=_device_id)
+        group = sorted(raw_group, key=_device_topology_key)
+        ranked = sorted(
+            group,
+            key=lambda profile: (
+                -available_capacity_by_device[_device_id(profile)],
+                _device_id(profile),
+            ),
+        )
         candidate_groups = (
             (tuple(group),)
             if explicit_selection
             else tuple(
-                tuple(group[:device_count])
-                for device_count in range(1, len(group) + 1)
+                tuple(sorted(ranked[:device_count], key=_device_topology_key))
+                for device_count in range(
+                    1,
+                    min(len(group), placeable_component_count) + 1,
+                )
             )
         )
         cases = []
@@ -952,10 +912,14 @@ def _select_capability_groups(
             device_ids = tuple(
                 _device_id(profile) for profile in candidate_profiles
             )
-            placement = balanced_component_placement(
+            capacities = {
+                device_id: available_capacity_by_device[device_id]
+                for device_id in device_ids
+            }
+            placement = capacity_weighted_component_placement(
                 package_manifest.parent,
                 manifest,
-                device_ids,
+                capacities,
             )
             case_id = f"{capability}:{index}"
             placements[case_id] = placement
@@ -983,10 +947,9 @@ def _select_capability_groups(
         for case in cases:
             candidate_profiles = profiles_by_case[case.case_id]
             capacities = {
-                _device_id(profile): _safe_profile_capacity(
-                    profile,
-                    policy=policy,
-                )
+                _device_id(profile): available_capacity_by_device[
+                    _device_id(profile)
+                ]
                 for profile in candidate_profiles
             }
             plan = plans[case.case_id]
@@ -1004,7 +967,7 @@ def _select_capability_groups(
             oversized = {
                 device_id: {
                     "planned": planned_devices[device_id],
-                    "safe_capacity": capacities[device_id],
+                    "available_capacity": capacities[device_id],
                 }
                 for device_id in sorted(capacities)
                 if planned_devices[device_id] > capacities[device_id]
@@ -1018,7 +981,8 @@ def _select_capability_groups(
                 profiles=candidate_profiles,
                 placement=placements[case.case_id],
                 residency_plan=plan,
-                safe_device_capacity_bytes=capacities,
+                available_device_capacity_bytes=capacities,
+                reserved_device_capacity_bytes=capacities,
             )
             break
         if selected_group is None:
@@ -1034,28 +998,6 @@ def _select_capability_groups(
             + "; ".join(failures)
         )
     return tuple(groups)
-
-
-def _safe_profile_capacity(
-    profile: Json,
-    *,
-    policy: RuntimeOptimizationPolicy,
-) -> int:
-    heaps: dict[tuple[str, str], int] = {}
-    for domain in profile["memory_domains"]:
-        if not domain.get("device_local"):
-            continue
-        properties = domain.get("properties", {})
-        key = (
-            str(properties.get("capacity_scope", domain["name"])),
-            str(properties.get("heap_index", domain["name"])),
-        )
-        heaps[key] = max(heaps.get(key, 0), int(domain["capacity_bytes"]))
-    if not heaps:
-        raise ModelCompileError(
-            f"AMD profile {_device_id(profile)!r} has no device-local memory heap"
-        )
-    return sum(heaps.values()) * policy.model_residency_fraction_ppm // 1_000_000
 
 
 def _package_parameter_bytes(package_root: Path, manifest: Json) -> int:
@@ -1084,15 +1026,25 @@ def _tensor_index(package_root: Path, manifest: Json) -> Json:
     return document
 
 
-def _contiguous_weighted_partition(
+def _contiguous_capacity_weighted_partition(
     components: list[tuple[str, int]],
-    device_ids: tuple[str, ...],
+    device_capacity_bytes: dict[str, int],
 ) -> dict[str, str]:
+    device_ids = tuple(sorted(device_capacity_bytes))
+    if len(components) < len(device_ids):
+        raise ModelCompileError(
+            "contiguous placement cannot assign more devices than components"
+        )
     placement: dict[str, str] = {}
     cursor = 0
     remaining_weight = sum(weight for _, weight in components)
     for device_index, device_id in enumerate(device_ids):
         remaining_devices = len(device_ids) - device_index
+        remaining_capacity = sum(
+            device_capacity_bytes[remaining_device_id]
+            for remaining_device_id in device_ids[device_index:]
+        )
+        device_capacity = device_capacity_bytes[device_id]
         if device_index == len(device_ids) - 1:
             for component_id, _ in components[cursor:]:
                 placement[component_id] = device_id
@@ -1104,9 +1056,15 @@ def _contiguous_weighted_partition(
             if components_after < devices_after:
                 break
             component_id, weight = components[cursor]
-            if current_weight > 0 and abs(
-                remaining_weight - current_weight * remaining_devices
-            ) <= abs(remaining_weight - (current_weight + weight) * remaining_devices):
+            before_error = abs(
+                current_weight * remaining_capacity
+                - remaining_weight * device_capacity
+            )
+            after_error = abs(
+                (current_weight + weight) * remaining_capacity
+                - remaining_weight * device_capacity
+            )
+            if current_weight > 0 and before_error <= after_error:
                 break
             placement[component_id] = device_id
             current_weight += weight
@@ -1118,7 +1076,9 @@ def _contiguous_weighted_partition(
             cursor += 1
         remaining_weight -= current_weight
     if set(placement) != {component_id for component_id, _ in components}:
-        raise ModelCompileError("balanced placement omitted compiled components")
+        raise ModelCompileError(
+            "capacity-weighted placement omitted compiled components"
+        )
     return placement
 
 
@@ -1157,6 +1117,24 @@ def _is_amd_vulkan_gpu(profile: Json) -> bool:
 
 def _device_id(profile: Json) -> str:
     return str(profile["hardware_identity"]["stable_device_id"])
+
+
+def _device_topology_key(profile: Json) -> tuple[int, int, int, int, str]:
+    location = str(profile["hardware_identity"].get("physical_location", ""))
+    if not location.startswith("pci:"):
+        return (1 << 16, 1 << 8, 1 << 8, 8, _device_id(profile))
+    domain_bus, device_function = normalize_pci_address(
+        location.removeprefix("pci:")
+    ).rsplit(":", 1)
+    domain, bus = domain_bus.split(":", 1)
+    device, function = device_function.split(".", 1)
+    return (
+        int(domain, 16),
+        int(bus, 16),
+        int(device, 16),
+        int(function),
+        _device_id(profile),
+    )
 
 
 def _read_json(path: Path, label: str) -> Json:

@@ -479,8 +479,8 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
             "maximum_quantum_wait_ns": 9_000_000,
         },
         "environment": {"power_profile": "matched"},
-        "idle_device_state_digest": _device_digest(b"idle"),
-        "exclusive_residency": True,
+        "capacity_reservation_digest": _device_digest(b"capacity_reserved"),
+        "residency_scope": "capacity_partition",
     }
     plan_id = stable_contract_id(
         "validation_plan",
@@ -632,8 +632,8 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         "status": "completed",
     }
     assert comparison["metrics"][0]["error"] == 0.0
-    assert mount["device_state_before_digest"] == _device_digest(b"idle")
-    assert unmount["device_state_after_digest"] == _device_digest(b"idle")
+    assert mount["device_state_before_digest"] == _device_digest(b"capacity_reserved")
+    assert unmount["device_state_after_digest"] == _device_digest(b"capacity_reserved")
     assert executor.closed is True
     assert executor.aborted is False
     assert factory_calls == 1

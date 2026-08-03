@@ -17,7 +17,7 @@ from nerve.representation_optimizer.automation.target import (
     DeviceLeaseManager,
     NoDeviceLeaseManager,
     OptimizationTarget,
-    VerifiedDeviceLeaseManager,
+    VerifiedCapacityLeaseManager,
 )
 
 __all__ = [
@@ -29,7 +29,7 @@ __all__ = [
     "NoDeviceLeaseManager",
     "OptimizationBudget",
     "OptimizationTarget",
-    "VerifiedDeviceLeaseManager",
+    "VerifiedCapacityLeaseManager",
     "run_automated_optimizer",
     "validate_report_directory",
 ]

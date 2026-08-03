@@ -628,7 +628,7 @@ class ResidentWholeModelValidationSession:
             action="mount",
             duration_ns=mount_duration_ns,
             before=request.matched_conditions[
-                "idle_device_state_digest"
+                "capacity_reservation_digest"
             ],
             after=mount_payload["mounted_state_digest"],
             released=False,
@@ -921,7 +921,7 @@ class ResidentWholeModelValidationSession:
             duration_ns=max(1, time.monotonic_ns() - started),
             before=self.mount_payload["mounted_state_digest"],
             after=self.request.matched_conditions[
-                "idle_device_state_digest"
+                "capacity_reservation_digest"
             ],
             released=True,
         )

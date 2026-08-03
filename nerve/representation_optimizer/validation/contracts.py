@@ -23,7 +23,7 @@ BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
 )
 VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v2"
-VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v3"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v4"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
 VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v2"
 VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v3"
@@ -1762,7 +1762,7 @@ def validate_validation_run(document: Json) -> None:
         for role in _IMPLEMENTATION_ROLES
     }
     observed_residencies: set[tuple[str, int, str, str]] = set()
-    idle_digest: str | None = None
+    capacity_reservation_digest: str | None = None
     for block_index, event_index in enumerate(
         range(0, len(parsed_events), 2)
     ):
@@ -1804,11 +1804,11 @@ def validate_validation_run(document: Json) -> None:
             raise ValidationContractError(
                 "validation role residency does not prove complete release"
             )
-        if idle_digest is None:
-            idle_digest = mount["device_state_before_digest"]
-        elif mount["device_state_before_digest"] != idle_digest:
+        if capacity_reservation_digest is None:
+            capacity_reservation_digest = mount["device_state_before_digest"]
+        elif mount["device_state_before_digest"] != capacity_reservation_digest:
             raise ValidationContractError(
-                "validation role mounts do not share one idle baseline"
+                "validation role mounts do not share one capacity reservation"
             )
     if observed_residencies != expected_residencies:
         raise ValidationContractError(

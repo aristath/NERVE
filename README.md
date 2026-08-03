@@ -282,8 +282,18 @@ python -m nerve \
 
 The output model is the deployable artifact. The run directory contains
 rejected and failed experiment evidence and is not a runtime dependency.
-Device allowlisting, idle-state verification, sequential execution, and clean
-release remain mandatory.
+Device allowlisting, live reservable-capacity verification, sequential
+execution, and clean release remain mandatory. Existing AMD workloads are
+recorded reservations, not device-level exclusions: NERVE may use the measured
+unreserved VRAM while preserving those workloads.
+
+Automatic optimizer placement measures each compatible AMD device's current
+VRAM usage, reserves a conservative share of what remains, selects the smallest
+admissible device set, and partitions the ordered component stream
+proportionally to those per-device capacities. Components stay contiguous to
+minimize cross-device edges, while devices are ordered by physical PCI topology.
+The lease lock serializes NERVE optimizers only; it never claims exclusive
+ownership of a physical GPU or evicts another process.
 
 ### Adding a representation provider
 
@@ -310,9 +320,9 @@ invariants are in
 
 Tests in this repository must run sequentially. The Python suite disables xdist,
 and Rust test invocations must always include `-- --test-threads=1`. Vulkan tests
-must be selected individually after binding an explicitly verified idle AMD
-device; an explicit device that cannot be opened is a test failure, never a
-passing skip.
+must be selected individually after binding an explicitly verified AMD device
+with sufficient unreserved capacity; an explicit device that cannot be opened
+is a test failure, never a passing skip.
 
 Compiler/package tests:
 
@@ -334,7 +344,8 @@ recognizes both closing-tag and decoded-channel reasoning protocols. It fails on
 malformed thinking output, repeated output, turn contamination, incorrect
 cross-turn recall, or a missed throughput floor. Each invocation runs exactly
 one fixed sampler seed. Repeat the command for other seeds only after verifying
-that every selected GPU returned to its idle baseline:
+that NERVE released the capacity it acquired and the recorded pre-existing
+allocations remain present:
 
 Demand-resident sparse packages require a stronger steady-state measurement.
 Pass `--warmup-conversation-sets 1` to run the complete canonical six-input
@@ -418,7 +429,8 @@ turn. The five measured turns averaged:
 | Load failures | 0 |
 
 Both stores acknowledged teardown, released all 9,360 resources and 29.448 GB
-of payload, and both GPUs returned to their exact pre-run idle baseline. This
+of payload, and both GPUs returned to their recorded pre-run capacity
+reservations with no NERVE allocation remaining. This
 proves demand-triggered loading and retained reuse; it does not claim that every
 prompt will touch a bounded subset. Workloads whose cumulative working set
 exceeds capacity need a future explicit bounded-residency policy.

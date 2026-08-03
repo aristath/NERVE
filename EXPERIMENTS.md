@@ -2681,8 +2681,8 @@ averaged 42.420 generated tok/s and 49.152 decode tok/s. The final turn correctl
 recalled the country from an earlier question. Initial device allocation was
 6.701 GB; selected payload grew to 29.448 GB (9,360 of 10,496 resources) against
 33.022 GB of addressable dynamic payload. Every load succeeded, explicit
-teardown released every resource on both devices, and both devices returned to
-their exact idle baselines.
+teardown released every resource on both devices, and both devices restored
+their recorded pre-run capacity reservations with no NERVE allocation left.
 
 The experiment proves that access-triggered parameter residency can coexist
 with a useful, retained-state execution stream and need not impose

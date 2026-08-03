@@ -159,7 +159,7 @@ class FixtureExecutionSession:
         )
         self._mount_event = self._event(
             action="mount",
-            before=request.matched_conditions["idle_device_state_digest"],
+            before=request.matched_conditions["capacity_reservation_digest"],
             after=self.mounted_state,
             released=False,
         )
@@ -338,7 +338,7 @@ class FixtureExecutionSession:
         return self._event(
             action="unmount",
             before=self.mounted_state,
-            after=self.request.matched_conditions["idle_device_state_digest"],
+            after=self.request.matched_conditions["capacity_reservation_digest"],
             released=True,
         )
 
@@ -499,8 +499,8 @@ def _fixture(
             "placement": {"fixture_scope": "vulkan:fixture"},
             "controls": {"scheduler": "normal"},
             "environment": {"power_profile": "matched"},
-            "idle_device_state_digest": device_state_digest({"fixture_state": "idle"}),
-            "exclusive_residency": True,
+            "capacity_reservation_digest": device_state_digest({"fixture_state": "capacity_available"}),
+            "residency_scope": "capacity_partition",
         },
     )
     return (
@@ -1154,7 +1154,7 @@ def test_mismatched_unmount_evidence_fails_after_releasing_session(
     def mismatched_unmount(self):
         document = original(self)
         document["device_state_after_digest"] = device_state_digest(
-            {"fixture_state": "not_idle"}
+            {"fixture_state": "capacity_unavailable"}
         )
         document["event_id"] = benchmark_residency_event_id(document)
         return document

@@ -27,7 +27,7 @@ BEHAVIORAL_ERROR_CONTRACT_SCHEMA = (
     "nerve.optimizer.behavioral_error_contract.v1"
 )
 VALIDATION_REQUIREMENTS_SCHEMA = "nerve.optimizer.validation_requirements.v2"
-VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v3"
+VALIDATION_PLAN_SCHEMA = "nerve.optimizer.validation_plan.v4"
 PROOF_RESULT_SCHEMA = "nerve.optimizer.proof_result.v1"
 VALIDATION_ROLE_RESULT_SCHEMA = "nerve.optimizer.validation_role_result.v2"
 VALIDATION_OBSERVATION_SCHEMA = "nerve.optimizer.validation_observation.v3"
