@@ -697,7 +697,36 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
 
         if !self.speculative_decoders.is_empty() {
-            runner.publish_speculative_source_tap_frame(input_token_ids.len() - 1)?;
+            for (lane, input_token_id) in input_token_ids.iter().copied().enumerate() {
+                if self
+                    .speculative_decoders
+                    .iter()
+                    .any(VulkanResidentSpeculativeDecoderProcessor::is_parallel_block)
+                {
+                    runner.publish_speculative_source_tap_frame(lane)?;
+                    let stream_tick = start_stream_tick
+                        .checked_add(u64::try_from(lane).map_err(|_| {
+                            VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
+                        })?)
+                        .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+                    for decoder in self
+                        .speculative_decoders
+                        .iter()
+                        .filter(|decoder| decoder.is_parallel_block())
+                    {
+                        let draft_device = devices.get(&decoder.device_id).ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                                device_id: decoder.device_id.clone(),
+                            }
+                        })?;
+                        decoder.run_state_step(
+                            draft_device,
+                            input_token_id,
+                            stream_tick,
+                        )?;
+                    }
+                }
+            }
             let target_output = runner.speculative_target_output.as_ref().ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "temporal speculative target normalization is not mounted".to_string(),

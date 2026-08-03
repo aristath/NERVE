@@ -1,6 +1,7 @@
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum VulkanComponentBatchSignalKey {
     Activation { component_id: String, signal_id: String },
+    ProducedPort { component_id: String, port_id: String },
     ModelInput(String),
     ModelOutput(String),
     LocalEdge(usize),
@@ -120,41 +121,21 @@ fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
                 VulkanComponentBatchSignalKey::ModelInput(_)
                     | VulkanComponentBatchSignalKey::IncomingEdge(_)
             );
-            let external_sink = matches!(
-                key,
-                VulkanComponentBatchSignalKey::ModelOutput(_)
-                    | VulkanComponentBatchSignalKey::OutgoingEdge(_)
-            );
+            let external_sink = component_batch_signal_is_external_sink(mounted, &key);
             let first_dispatch = if external_source { 0 } else { dispatch_index };
             let last_dispatch = if external_sink {
                 dispatch_count
             } else {
                 dispatch_index
             };
-            match lifetimes.entry(key.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert((
-                        frame_byte_capacity,
-                        host_visible,
-                        first_dispatch,
-                        last_dispatch,
-                    ));
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let (existing_capacity, existing_visibility, first, last) = entry.get_mut();
-                    if *existing_capacity != frame_byte_capacity
-                        || *existing_visibility != host_visible
-                    {
-                        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                            VulkanError(format!(
-                                "component batch signal {key:?} has incompatible physical requirements"
-                            )),
-                        ));
-                    }
-                    *first = (*first).min(first_dispatch);
-                    *last = (*last).max(last_dispatch);
-                }
-            }
+            merge_component_batch_signal_lifetime(
+                &mut lifetimes,
+                key,
+                frame_byte_capacity,
+                host_visible,
+                first_dispatch,
+                last_dispatch,
+            )?;
         }
     }
     let mut lifetimes = lifetimes
@@ -171,15 +152,163 @@ fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
             },
         )
         .collect::<Vec<_>>();
+    let canonical_retained_signal_keys = retained_signal_keys
+        .iter()
+        .map(|key| canonical_component_batch_signal_key(mounted, key))
+        .collect::<Result<BTreeSet<_>, _>>()?;
     retain_component_batch_signal_lifetimes(
         &mut lifetimes,
-        retained_signal_keys,
+        &canonical_retained_signal_keys,
         dispatch_count,
     )
     .map_err(|error| {
         VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error)
     })?;
-    Ok(allocate_component_batch_signal_lifetimes(lifetimes))
+    let (mut signal_buffer_indices, buffer_plan) =
+        allocate_component_batch_signal_lifetimes(lifetimes);
+    install_component_batch_edge_aliases(mounted, &mut signal_buffer_indices)?;
+    Ok((signal_buffer_indices, buffer_plan))
+}
+
+fn merge_component_batch_signal_lifetime(
+    lifetimes: &mut BTreeMap<VulkanComponentBatchSignalKey, (usize, bool, usize, usize)>,
+    key: VulkanComponentBatchSignalKey,
+    frame_byte_capacity: usize,
+    host_visible: bool,
+    first_dispatch: usize,
+    last_dispatch: usize,
+) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+    match lifetimes.entry(key.clone()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert((
+                frame_byte_capacity,
+                host_visible,
+                first_dispatch,
+                last_dispatch,
+            ));
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let (existing_capacity, existing_visibility, first, last) = entry.get_mut();
+            if *existing_capacity != frame_byte_capacity
+                || *existing_visibility != host_visible
+            {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "component batch signal {key:?} has incompatible physical requirements"
+                    )),
+                ));
+            }
+            *first = (*first).min(first_dispatch);
+            *last = (*last).max(last_dispatch);
+        }
+    }
+    Ok(())
+}
+
+fn produced_port_signal_key(
+    component_id: &str,
+    port_id: &str,
+) -> VulkanComponentBatchSignalKey {
+    VulkanComponentBatchSignalKey::ProducedPort {
+        component_id: component_id.to_string(),
+        port_id: port_id.to_string(),
+    }
+}
+
+fn canonical_component_batch_signal_key(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    key: &VulkanComponentBatchSignalKey,
+) -> Result<VulkanComponentBatchSignalKey, VulkanResidentInProcessPlacedRuntimeError> {
+    let resident_plan = &mounted.placed_plan.placed_resident_plan;
+    match key {
+        VulkanComponentBatchSignalKey::LocalEdge(edge_index) => {
+            let edge = resident_plan
+                .local_edges
+                .iter()
+                .find(|edge| edge.edge_index == *edge_index)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "component batch local edge alias references absent edge {edge_index}"
+                    )))
+                })?;
+            Ok(produced_port_signal_key(
+                &edge.source_component_id,
+                &edge.source_port_id,
+            ))
+        }
+        VulkanComponentBatchSignalKey::OutgoingEdge(edge_index) => {
+            let edge = resident_plan
+                .outgoing_edges
+                .iter()
+                .find(|edge| edge.edge_index == *edge_index)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "component batch outgoing edge alias references absent edge {edge_index}"
+                    )))
+                })?;
+            Ok(produced_port_signal_key(
+                &edge.source_component_id,
+                &edge.source_port_id,
+            ))
+        }
+        _ => Ok(key.clone()),
+    }
+}
+
+fn component_batch_signal_is_external_sink(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    key: &VulkanComponentBatchSignalKey,
+) -> bool {
+    match key {
+        VulkanComponentBatchSignalKey::ModelOutput(_) => true,
+        VulkanComponentBatchSignalKey::ProducedPort {
+            component_id,
+            port_id,
+        } => mounted
+            .placed_plan
+            .placed_resident_plan
+            .outgoing_edges
+            .iter()
+            .any(|edge| {
+                edge.source_component_id == *component_id
+                    && edge.source_port_id == *port_id
+            }),
+        _ => false,
+    }
+}
+
+fn install_component_batch_edge_aliases(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    signal_buffer_indices: &mut BTreeMap<VulkanComponentBatchSignalKey, usize>,
+) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+    let mut aliases = Vec::new();
+    for edge in &mounted.placed_plan.placed_resident_plan.local_edges {
+        aliases.push((
+            VulkanComponentBatchSignalKey::LocalEdge(edge.edge_index),
+            produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
+        ));
+    }
+    for edge in &mounted.placed_plan.placed_resident_plan.outgoing_edges {
+        aliases.push((
+            VulkanComponentBatchSignalKey::OutgoingEdge(edge.edge_index),
+            produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
+        ));
+    }
+    for (alias, canonical) in aliases {
+        let Some(buffer_index) = signal_buffer_indices.get(&canonical).copied() else {
+            continue;
+        };
+        if let Some(existing) = signal_buffer_indices.insert(alias.clone(), buffer_index)
+            && existing != buffer_index
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "component batch signal alias {alias:?} maps to incompatible physical buffers {existing} and {buffer_index}"
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn retain_component_batch_signal_lifetimes(

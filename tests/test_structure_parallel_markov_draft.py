@@ -344,6 +344,7 @@ def test_lowers_proposal_execution_mode_from_graph_semantics() -> None:
     assert lowered["execution_contract"] == {
         "mode": "parallel_block",
         "block_width": 5,
+        "source_context_tick_offset": -1,
         "processor_schedule": "parallel_lanes",
         "output_schedule": "compiled_component_graph",
     }
@@ -468,13 +469,37 @@ def test_compiles_source_owned_recommended_parallel_draft_width(
 
     structure = discover_model_structure(tmp_path, config, tensors)
     [draft] = structure.draft_execution_graphs
-    graph = make_model_graph(structure, Path("transpiled"), {"source": {}})["graph"][
-        "draft_execution_graphs"
-    ][0]
+    model = make_model_graph(structure, Path("transpiled"), {"source": {}})
+    graph = model["graph"]["draft_execution_graphs"][0]
 
     assert draft.attributes["proposal_contract"]["minimum_draft_tokens"] == 5
     assert draft.attributes["proposal_contract"]["default_draft_tokens"] == 7
-    assert graph["query_block"]["block_size"] == 7
+    assert graph["query_block"]["block_size"] == 5
+
+    input_circuit, output_circuit = build_draft_system_circuits(model, graph)
+    assert input_circuit["boundary"]["outputs"][0]["shape"] == [5, 4, 8]
+    assert output_circuit["boundary"]["outputs"][0]["shape"] == [5]
+
+    lowered = lower_parallel_markov_draft_graph(
+        graph,
+        layer_refs=[
+            {
+                "id": f"draft_00_layer_{index:02d}",
+                "runtime_role": "draft_processor",
+            }
+            for index in range(3)
+        ],
+        input_ref={
+            "id": "draft_00_input_adapter",
+            "runtime_role": "draft_input_adapter",
+        },
+        output_ref={
+            "id": "draft_00_output_transducer",
+            "runtime_role": "draft_output_transducer",
+        },
+    )
+    assert lowered["execution_contract"]["block_width"] == 5
+    assert lowered["proposal_contract"]["default_draft_tokens"] == 7
 
 
 def test_lowers_explicit_query_context_and_target_feature_wiring() -> None:

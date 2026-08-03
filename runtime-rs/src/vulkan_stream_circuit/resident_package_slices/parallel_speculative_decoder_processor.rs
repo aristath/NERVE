@@ -1,3 +1,96 @@
+fn committed_context_state_node_ids(
+    circuit: &StreamCircuit,
+    context_signal: &str,
+) -> Result<BTreeSet<String>, VulkanError> {
+    let producer_by_signal = circuit
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(index, node)| {
+            node.outputs
+                .iter()
+                .map(move |signal| (signal.as_str(), index))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut depends_on_context = BTreeMap::<String, bool>::new();
+    depends_on_context.insert(context_signal.to_string(), true);
+    for node in &circuit.nodes {
+        let depends = node.inputs.iter().any(|signal| {
+            depends_on_context.get(signal).copied().unwrap_or(false)
+        });
+        for output in &node.outputs {
+            depends_on_context.insert(output.clone(), depends);
+        }
+    }
+    let state_sinks = circuit
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            !node.state_writes.is_empty()
+                && node.inputs.iter().any(|signal| {
+                    depends_on_context.get(signal).copied().unwrap_or(false)
+                })
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if state_sinks.is_empty() {
+        return Err(VulkanError(format!(
+            "circuit {:?} has no state update derived from committed context signal {context_signal:?}",
+            circuit.source.component_id
+        )));
+    }
+
+    let mut selected_indices = BTreeSet::new();
+    let mut pending = state_sinks;
+    while let Some(index) = pending.pop() {
+        if !selected_indices.insert(index) {
+            continue;
+        }
+        for input in &circuit.nodes[index].inputs {
+            if let Some(producer) = producer_by_signal.get(input.as_str()) {
+                pending.push(*producer);
+            }
+        }
+    }
+    Ok(selected_indices
+        .into_iter()
+        .map(|index| circuit.nodes[index].id.clone())
+        .collect())
+}
+
+fn offset_stream_tick(stream_tick: u64, offset: i64) -> Result<u64, VulkanError> {
+    if offset < 0 {
+        stream_tick.checked_sub(offset.unsigned_abs())
+    } else {
+        stream_tick.checked_add(offset as u64)
+    }
+    .ok_or_else(|| {
+        VulkanError(format!(
+            "stream tick {stream_tick} cannot apply compiled source-context offset {offset}"
+        ))
+    })
+}
+
+fn proposal_node_ids(
+    circuit: &StreamCircuit,
+    committed_context_node_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, VulkanError> {
+    let proposal_nodes = circuit
+        .nodes
+        .iter()
+        .filter(|node| !committed_context_node_ids.contains(&node.id))
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    if proposal_nodes.is_empty() {
+        return Err(VulkanError(format!(
+            "circuit {:?} has no proposal nodes outside its committed-context cone",
+            circuit.source.component_id
+        )));
+    }
+    Ok(proposal_nodes)
+}
+
 impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
     fn from_model<'a, F>(
         device: &VulkanComputeDevice,
@@ -9,8 +102,10 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
     where
         F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
     {
-        let VulkanResidentSpeculativeDecoderModelExecution::ParallelBlock { block_width } =
-            &model.execution
+        let VulkanResidentSpeculativeDecoderModelExecution::ParallelBlock {
+            block_width,
+            source_context_tick_offset,
+        } = &model.execution
         else {
             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
@@ -75,16 +170,103 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 model.device_slice.loaded_manifest(),
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
-        let processor_phase = VulkanResidentPlacedComponentBatchRunner::
-            new_single_device_for_components(
+        let committed_context_edges = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| {
+                matches!(
+                    &edge.connection,
+                    StreamCircuitConnection::SharedContext { state_update }
+                        if state_update == "committed_target_only"
+                )
+            })
+            .collect::<Vec<_>>();
+        if committed_context_edges.is_empty()
+            || committed_context_edges.iter().any(|(_, edge)| {
+                edge.source.component_id != input_component.component_id
+                    || !processor_components.iter().any(|component| {
+                        component.component_id == edge.destination.component_id
+                    })
+            })
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "parallel speculative decoder {:?} has an invalid committed-context state topology",
+                    model.id
+                )),
+            ));
+        }
+        let mut state_node_ids_by_component = BTreeMap::new();
+        for (_, edge) in &committed_context_edges {
+            let component = processor_components
+                .iter()
+                .copied()
+                .find(|component| component.component_id == edge.destination.component_id)
+                .expect("validated committed-context destination exists");
+            let context_port = component
+                .circuit
+                .boundary
+                .inputs
+                .iter()
+                .find(|port| port.id == edge.destination.port_id)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "parallel speculative decoder {:?} committed-context destination {}.{} is absent",
+                            model.id, edge.destination.component_id, edge.destination.port_id
+                        )),
+                    )
+                })?;
+            let node_ids = committed_context_state_node_ids(
+                &component.circuit,
+                &context_port.id,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            state_node_ids_by_component
+                .entry(component.component_id.clone())
+                .or_insert_with(BTreeSet::new)
+                .extend(node_ids);
+        }
+        if state_node_ids_by_component.len() != processor_components.len() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "parallel speculative decoder {:?} does not update committed context in every processor component",
+                    model.id
+                )),
+            ));
+        }
+        let proposal_node_ids_by_component = processor_components
+            .iter()
+            .map(|component| {
+                let committed_only = state_node_ids_by_component
+                    .get(&component.component_id)
+                    .expect("every processor has a validated committed-context cone");
+                let proposal_nodes = proposal_node_ids(&component.circuit, committed_only)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                Ok::<_, VulkanResidentInProcessPlacedRuntimeError>((
+                    component.component_id.clone(),
+                    proposal_nodes,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let processor_phase =
+            VulkanResidentPlacedComponentBatchRunner::new_single_device_for_nodes(
                 device,
                 &device_slice,
                 &format!("draft:{}:parallel", model.id),
                 *block_width,
                 VulkanComponentBatchExecutionMode::ParallelBlock,
-                processor_components
-                    .iter()
-                    .map(|component| component.component_id.clone()),
+                proposal_node_ids_by_component,
+            )?;
+        let state_processor_phase =
+            VulkanResidentPlacedComponentBatchRunner::new_single_device_for_nodes(
+                device,
+                &device_slice,
+                &format!("draft:{}:committed-context", model.id),
+                1,
+                VulkanComponentBatchExecutionMode::ParallelBlock,
+                state_node_ids_by_component,
             )?;
 
         let anchor_ports = graph
@@ -173,6 +355,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             .map(|component| component.component_id.as_str())
             .collect::<BTreeSet<_>>();
         let mut ingress_ranges = Vec::new();
+        let mut state_ingress_ranges = Vec::new();
         let mut egress_ranges = Vec::new();
         for (edge_index, edge) in graph.edges.iter().enumerate() {
             let source_is_processor = processor_ids.contains(edge.source.component_id.as_str());
@@ -193,10 +376,11 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                         )),
                     )
                 })?;
-            let batch_edge = processor_phase.single_device_edge_signal_buffer(edge_index)?;
             if !source_is_processor && destination_is_processor {
                 match edge.connection {
                     StreamCircuitConnection::ParallelBlockScatter { width } => {
+                        let batch_edge =
+                            processor_phase.single_device_edge_signal_buffer(edge_index)?;
                         if width != *block_width
                             || mounted_edge.byte_capacity != batch_edge.buffer.byte_capacity()
                         {
@@ -219,26 +403,26 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                         );
                     }
                     StreamCircuitConnection::SharedContext { .. } => {
-                        if mounted_edge.byte_capacity != batch_edge.frame_byte_capacity {
+                        let state_edge = state_processor_phase
+                            .single_device_edge_signal_buffer(edge_index)?;
+                        if mounted_edge.byte_capacity != state_edge.frame_byte_capacity {
                             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                                 VulkanResidentTokenModelPackageError::new(format!(
-                                    "parallel speculative decoder {:?} shared-context edge {edge_index} has incompatible storage",
+                                    "parallel speculative decoder {:?} committed-context edge {edge_index} has incompatible state-ingestion storage",
                                     model.id
                                 )),
                             ));
                         }
-                        for lane in 0..*block_width {
-                            ingress_ranges.push(
-                                VulkanResidentBufferRangeCopy::new(
-                                    &mounted_edge.buffer,
-                                    &batch_edge.buffer,
-                                    0,
-                                    lane * batch_edge.frame_byte_capacity,
-                                    batch_edge.frame_byte_capacity,
-                                )
-                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                            );
-                        }
+                        state_ingress_ranges.push(
+                            VulkanResidentBufferRangeCopy::new(
+                                &mounted_edge.buffer,
+                                &state_edge.buffer,
+                                0,
+                                0,
+                                state_edge.frame_byte_capacity,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        );
                     }
                     _ => {
                         return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -250,6 +434,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                     }
                 }
             } else {
+                let batch_edge = processor_phase.single_device_edge_signal_buffer(edge_index)?;
                 if !matches!(
                     edge.connection,
                     StreamCircuitConnection::ParallelBlockGather { width } if width == *block_width
@@ -274,7 +459,10 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 );
             }
         }
-        if ingress_ranges.is_empty() || egress_ranges.len() != 1 {
+        if ingress_ranges.is_empty()
+            || state_ingress_ranges.len() != committed_context_edges.len()
+            || egress_ranges.len() != 1
+        {
             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
                     "parallel speculative decoder {:?} has incomplete phase boundaries",
@@ -284,6 +472,9 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
         }
         let ingress_copies = device
             .create_resident_buffer_copy_batch(&ingress_ranges)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let state_ingress_copies = device
+            .create_resident_buffer_copy_batch(&state_ingress_ranges)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let egress_copies = device
             .create_resident_buffer_copy_batch(&egress_ranges)
@@ -331,14 +522,17 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             device_slice,
             input_phase,
             processor_phase,
+            state_processor_phase,
             output_phase,
             source_taps,
             ingress_copies,
+            state_ingress_copies,
             egress_copies,
             anchor_input_signal_id: anchor_port.id.clone(),
             draft_tokens_output_signal_id,
             confidence_output_signal_id,
             block_width: *block_width,
+            source_context_tick_offset: *source_context_tick_offset,
             state_transaction,
         })
     }
@@ -357,6 +551,52 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
         self.state_transaction
             .restore_baseline(&self.mounted().buffers)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+    }
+
+    fn run_state_step(
+        &self,
+        device: &VulkanComputeDevice,
+        input_token_id: u32,
+        stream_tick: u64,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let anchor = self
+            .mounted()
+            .boundary_io
+            .input_buffer(&self.anchor_input_signal_id)
+            .expect("validated parallel anchor remains mounted");
+        anchor
+            .buffer
+            .write_bytes(&input_token_id.to_le_bytes())
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        for tap in &self.source_taps {
+            tap.run()?;
+        }
+        let dynamic_state_capacity_activations = u32::try_from(
+            self.mounted().buffers.dynamic_state_capacity_activations,
+        )
+        .map_err(|_| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "parallel speculative state capacity exceeds u32".to_string(),
+            ))
+        })?;
+        let control = VulkanMountedPlacedStreamControl {
+            stream_tick,
+            control_flags: 0,
+            dynamic_state_capacity_activations,
+        };
+        self.input_phase
+            .run_with_stream_control(device, control)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
+        self.state_ingress_copies
+            .run()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        self.state_processor_phase.run_parallel_block_single_device(
+            device,
+            &self.device_slice.device_id,
+            &[input_token_id],
+            stream_tick,
+            dynamic_state_capacity_activations,
+        )
     }
 
     fn run_draft_window(
@@ -391,8 +631,13 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 "parallel speculative state capacity exceeds u32".to_string(),
             ))
         })?;
+        let source_context_tick = offset_stream_tick(
+            start_stream_tick,
+            self.source_context_tick_offset,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let control = VulkanMountedPlacedStreamControl {
-            stream_tick: start_stream_tick,
+            stream_tick: source_context_tick,
             control_flags: 0,
             dynamic_state_capacity_activations,
         };
@@ -406,7 +651,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             device,
             &self.device_slice.device_id,
             &vec![initial_token_id; self.block_width],
-            start_stream_tick,
+            source_context_tick,
             dynamic_state_capacity_activations,
         )?;
         self.egress_copies

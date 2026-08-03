@@ -421,7 +421,7 @@ def lower_parallel_markov_draft_graph(
     input_ref: Json,
     output_ref: Json,
 ) -> Json:
-    block_width = int(draft["proposal_contract"]["default_draft_tokens"])
+    block_width = int(draft["proposal_contract"]["configured_block_size"])
     query_chain = [*layer_refs, output_ref]
     query_edges = []
     for index, destination in enumerate(query_chain):
@@ -531,6 +531,7 @@ def lower_parallel_markov_draft_graph(
         "execution_contract": {
             "mode": "parallel_block",
             "block_width": block_width,
+            "source_context_tick_offset": -1,
             "processor_schedule": "parallel_lanes",
             "output_schedule": "compiled_component_graph",
         },

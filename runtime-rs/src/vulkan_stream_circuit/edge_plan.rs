@@ -221,6 +221,59 @@ impl VulkanPlacedEdgeIoPlan {
             }
         }
 
+        let mut local_fanout_requirements =
+            BTreeMap::<(String, String), (usize, Option<Arc<VulkanResidentBuffer>>)>::new();
+        for edge in &self.local_edges {
+            let byte_capacity = edge.byte_capacity.ok_or_else(|| {
+                VulkanError(format!(
+                    "{} local edge {} has unknown byte capacity",
+                    self.device_id, edge.edge_index
+                ))
+            })?;
+            let key = (
+                edge.source_component_id.clone(),
+                edge.source_port_id.clone(),
+            );
+            let edge_override = local_override_by_edge
+                .get(&edge.edge_index)
+                .map(|override_| Arc::clone(&override_.buffer));
+            match local_fanout_requirements.entry(key.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((byte_capacity, edge_override));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (group_capacity, group_override) = entry.get_mut();
+                    if *group_capacity != byte_capacity {
+                        return Err(VulkanError(format!(
+                            "local fan-out from {}.{} has incompatible edge capacities {} and {byte_capacity}",
+                            key.0, key.1, *group_capacity
+                        )));
+                    }
+                    if let Some(edge_override) = edge_override {
+                        if let Some(group_override) = group_override {
+                            if !Arc::ptr_eq(group_override, &edge_override) {
+                                return Err(VulkanError(format!(
+                                    "local fan-out from {}.{} has incompatible physical buffer overrides",
+                                    key.0, key.1
+                                )));
+                            }
+                        } else {
+                            *group_override = Some(edge_override);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut local_fanout_buffers = BTreeMap::new();
+        for (key, (byte_capacity, buffer_override)) in local_fanout_requirements {
+            let buffer = match buffer_override {
+                Some(buffer) => buffer,
+                None => Arc::new(device.create_resident_buffer(byte_capacity)?),
+            };
+            local_fanout_buffers.insert(key, buffer);
+        }
+
         for edge in &self.local_edges {
             let byte_capacity = edge.byte_capacity.ok_or_else(|| {
                 VulkanError(format!(
@@ -236,13 +289,14 @@ impl VulkanPlacedEdgeIoPlan {
             local_buffers.push(VulkanPlacedLocalEdgeBufferAllocation {
                 edge: edge.clone(),
                 byte_capacity,
-                buffer: if let Some(local_override) =
-                    local_override_by_edge.get(&edge.edge_index)
-                {
-                    Arc::clone(&local_override.buffer)
-                } else {
-                    Arc::new(device.create_resident_buffer(byte_capacity)?)
-                },
+                buffer: Arc::clone(
+                    local_fanout_buffers
+                        .get(&(
+                            edge.source_component_id.clone(),
+                            edge.source_port_id.clone(),
+                        ))
+                        .expect("every local edge has a validated fan-out allocation"),
+                ),
             });
         }
 

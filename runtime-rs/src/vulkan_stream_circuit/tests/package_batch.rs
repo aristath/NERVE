@@ -130,6 +130,119 @@ fn component_batch_signal_liveness_reuses_only_compatible_dead_buffers() {
 }
 
 #[test]
+fn component_batch_fanout_owns_one_lifetime_through_its_last_consumer() {
+    let fanout = produced_port_signal_key("input_adapter", "shared_context");
+    let scratch = VulkanComponentBatchSignalKey::Activation {
+        component_id: "draft_00".to_string(),
+        signal_id: "scratch".to_string(),
+    };
+    let lifetimes = vec![
+        VulkanComponentBatchSignalLifetime {
+            key: fanout.clone(),
+            frame_byte_capacity: 8_192,
+            host_visible: false,
+            first_dispatch: 0,
+            last_dispatch: 6,
+        },
+        VulkanComponentBatchSignalLifetime {
+            key: scratch.clone(),
+            frame_byte_capacity: 8_192,
+            host_visible: false,
+            first_dispatch: 1,
+            last_dispatch: 5,
+        },
+    ];
+
+    let (indices, buffers) = allocate_component_batch_signal_lifetimes(lifetimes);
+
+    assert_eq!(buffers.len(), 2);
+    assert_ne!(indices[&fanout], indices[&scratch]);
+}
+
+#[test]
+fn component_batch_sibling_edges_resolve_to_one_produced_port() {
+    let descriptor = |edge_index: usize, destination_component_id: &str| {
+        VulkanMountedPlacedBoundDescriptor {
+            binding: 0,
+            usage: VulkanKernelDescriptorUsage::OutputSignal,
+            name: "shared_context".to_string(),
+            target: VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer {
+                edge: VulkanPlacedLocalEdgeBufferBinding {
+                    buffer_index: edge_index,
+                    edge: VulkanPlacedLocalEdge {
+                        buffer_index: edge_index,
+                        edge_id: format!("edge_{edge_index}_local"),
+                        edge_index,
+                        connection: StreamCircuitConnection::Forward,
+                        signal: "shared_context".to_string(),
+                        shape: vec![4_096],
+                        element_count: 4_096,
+                        byte_capacity: Some(8_192),
+                        device_id: "gpu0".to_string(),
+                        source_component_id: "input_adapter".to_string(),
+                        source_port_id: "shared_context".to_string(),
+                        source_component_port: Some("shared_context".to_string()),
+                        destination_component_id: destination_component_id.to_string(),
+                        destination_port_id: "shared_context".to_string(),
+                        destination_component_port: Some("shared_context".to_string()),
+                        transport: EdgeTransport::LocalBuffer {
+                            device_id: "gpu0".to_string(),
+                        },
+                    },
+                    byte_capacity: 8_192,
+                },
+            },
+        }
+    };
+
+    let (first_key, first_capacity) =
+        component_batch_signal_target(&descriptor(4, "draft_00"))
+            .unwrap()
+            .unwrap();
+    let (second_key, second_capacity) =
+        component_batch_signal_target(&descriptor(5, "draft_01"))
+            .unwrap()
+            .unwrap();
+
+    assert_eq!(first_key, second_key);
+    assert_eq!(
+        first_key,
+        produced_port_signal_key("input_adapter", "shared_context")
+    );
+    assert_eq!(first_capacity, 8_192);
+    assert_eq!(second_capacity, 8_192);
+}
+
+#[test]
+fn component_batch_fanout_rejects_incompatible_sibling_edge_frames() {
+    let fanout = produced_port_signal_key("producer", "output");
+    let mut lifetimes = BTreeMap::new();
+    merge_component_batch_signal_lifetime(
+        &mut lifetimes,
+        fanout.clone(),
+        8_192,
+        false,
+        0,
+        1,
+    )
+    .unwrap();
+
+    let error = merge_component_batch_signal_lifetime(
+        &mut lifetimes,
+        fanout,
+        4_096,
+        false,
+        0,
+        2,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("incompatible physical requirements"));
+}
+
+#[test]
 fn speculative_source_tap_signal_liveness_survives_the_complete_batch() {
     let key = |signal_id: &str| VulkanComponentBatchSignalKey::Activation {
         component_id: "component".to_string(),
@@ -194,30 +307,6 @@ fn speculative_source_tap_retention_rejects_an_unproduced_signal() {
     assert!(error
         .to_string()
         .contains("has no physical lifetime"));
-}
-
-#[test]
-fn component_batch_execution_scope_is_exact_and_rejects_absent_components() {
-    let scope = VulkanComponentBatchExecutionScope::components([
-        "draft_00".to_string(),
-        "draft_01".to_string(),
-    ])
-    .unwrap();
-
-    assert!(scope.includes("draft_00"));
-    assert!(scope.includes("draft_01"));
-    assert!(!scope.includes("input_adapter"));
-    scope
-        .validate_component_ids(["input_adapter", "draft_00", "draft_01", "output_adapter"])
-        .unwrap();
-    assert!(
-        scope
-            .validate_component_ids(["draft_00", "output_adapter"])
-            .unwrap_err()
-            .0
-            .contains("draft_01")
-    );
-    assert!(VulkanComponentBatchExecutionScope::components(Vec::new()).is_err());
 }
 
 #[test]
@@ -591,6 +680,9 @@ fn speculative_decode_stats_report_rollbacks_and_total_cost() {
     assert_eq!(stats.accepted_draft_token_count, 1);
     assert_eq!(stats.emitted_token_count, 2);
     assert_eq!(stats.total_time_ns, 100);
+    assert_eq!(stats.cycle_traces.len(), 1);
+    assert_eq!(stats.cycle_traces[0].draft_token_ids, vec![2, 3]);
+    assert_eq!(stats.cycle_traces[0].target_token_ids, vec![2, 9, 4]);
 }
 
 #[test]

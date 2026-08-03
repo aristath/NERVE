@@ -390,6 +390,7 @@ fn print_runtime_speculative_stats(
     target_verification_time_ns: u64,
     draft_catch_up_time_ns: u64,
     total_time_ns: u64,
+    cycle_traces: &[VulkanSpeculativeCycleTrace],
 ) {
     if cycle_count == 0 {
         return;
@@ -418,6 +419,16 @@ fn print_runtime_speculative_stats(
         nanos_to_millis(draft_catch_up_time_ns)
     );
     println!("  total_ms={:.3}", nanos_to_millis(total_time_ns));
+    for (index, trace) in cycle_traces.iter().enumerate() {
+        println!(
+            "  trace_{index}=tick:{} anchor:{} accepted:{} draft:{:?} target:{:?}",
+            trace.start_stream_tick,
+            trace.initial_token_id,
+            trace.accepted_draft_count,
+            trace.draft_token_ids,
+            trace.target_token_ids,
+        );
+    }
 }
 
 fn print_placed_component_timing_profile(

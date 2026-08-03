@@ -19,6 +19,15 @@ pub struct VulkanSpeculativeCycleRun {
     pub total_time_ns: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanSpeculativeCycleTrace {
+    pub start_stream_tick: u64,
+    pub initial_token_id: u32,
+    pub draft_token_ids: Vec<u32>,
+    pub target_token_ids: Vec<u32>,
+    pub accepted_draft_count: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VulkanSpeculativeDecodeStats {
     pub cycle_count: usize,
@@ -30,7 +39,10 @@ pub struct VulkanSpeculativeDecodeStats {
     pub target_verification_time_ns: u64,
     pub draft_catch_up_time_ns: u64,
     pub total_time_ns: u64,
+    pub cycle_traces: Vec<VulkanSpeculativeCycleTrace>,
 }
+
+const SPECULATIVE_CYCLE_TRACE_LIMIT: usize = 8;
 
 fn speculative_confident_prefix_len(
     confidence_logits: &[f32],
@@ -83,6 +95,19 @@ impl VulkanSpeculativeDecodeStats {
             .draft_catch_up_time_ns
             .saturating_add(cycle.draft_catch_up_time_ns);
         self.total_time_ns = self.total_time_ns.saturating_add(cycle.total_time_ns);
+        if self.cycle_traces.len() < SPECULATIVE_CYCLE_TRACE_LIMIT {
+            self.cycle_traces.push(VulkanSpeculativeCycleTrace {
+                start_stream_tick: cycle.start_stream_tick,
+                initial_token_id: cycle.initial_token_id,
+                draft_token_ids: cycle.draft_token_ids.clone(),
+                target_token_ids: cycle
+                    .target_tokens
+                    .iter()
+                    .map(|token| token.token_id)
+                    .collect(),
+                accepted_draft_count: cycle.verification.accepted_draft_count,
+            });
+        }
     }
 }
 

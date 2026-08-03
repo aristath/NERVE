@@ -376,10 +376,21 @@ def validate_compiled_speculative_decoders(
                 isinstance(block_width, int)
                 and not isinstance(block_width, bool)
                 and block_width > 0
+                and isinstance(
+                    execution_contract.get("source_context_tick_offset"), int
+                )
+                and not isinstance(
+                    execution_contract.get("source_context_tick_offset"), bool
+                )
                 and execution_contract.get("processor_schedule") == "parallel_lanes"
                 and output_schedule == "compiled_component_graph"
                 and isinstance(proposal_contract, dict)
-                and proposal_contract.get("default_draft_tokens") == block_width
+                and proposal_contract.get("configured_block_size") == block_width
+                and isinstance(proposal_contract.get("default_draft_tokens"), int)
+                and not isinstance(
+                    proposal_contract.get("default_draft_tokens"), bool
+                )
+                and proposal_contract.get("default_draft_tokens") >= block_width
                 and proposal_contract.get("confidence_prefix")
                 == "first_sigmoid_below_runtime_threshold"
             )

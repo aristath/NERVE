@@ -252,7 +252,9 @@ impl VulkanResidentComponentBatchSliceRunner {
             .mounted_bound
             .dispatches
             .iter()
-            .filter(|dispatch| execution_scope.includes(&dispatch.component_id))
+            .filter(|dispatch| {
+                execution_scope.includes_dispatch(&dispatch.component_id, &dispatch.node_id)
+            })
             .collect::<Vec<_>>();
         let (signal_buffer_indices, signal_buffer_plan) =
             component_batch_signal_buffer_plan_for_dispatches_retaining(

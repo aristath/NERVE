@@ -16,15 +16,15 @@ impl VulkanResidentPlacedComponentBatchRunner {
         )
     }
 
-    fn new_single_device_for_components(
+    fn new_single_device_for_nodes(
         device: &VulkanComputeDevice,
         slice: &VulkanResidentInProcessPlacedStreamProcessorDevice,
         runtime_execution_identity: &str,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
-        component_ids: impl IntoIterator<Item = String>,
+        node_ids_by_component: BTreeMap<String, BTreeSet<String>>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let execution_scope = VulkanComponentBatchExecutionScope::components(component_ids)
+        let execution_scope = VulkanComponentBatchExecutionScope::nodes(node_ids_by_component)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         Self::new_single_device_with_scope(
             device,
@@ -220,6 +220,13 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     .dispatches
                     .iter()
                     .map(|dispatch| dispatch.component_id.as_str())
+            }))
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        execution_scope
+            .validate_dispatch_ids(placed_slices.iter().flat_map(|slice| {
+                slice.mounted_bound.dispatches.iter().map(|dispatch| {
+                    (dispatch.component_id.as_str(), dispatch.node_id.as_str())
+                })
             }))
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let phase_execution_plan = execution_scope
@@ -632,7 +639,10 @@ fn component_batch_signal_target(
         | VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { .. } => None,
         VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge }
         | VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeOutputBuffer { edge } => Some((
-            VulkanComponentBatchSignalKey::LocalEdge(edge.edge.edge_index),
+            produced_port_signal_key(
+                &edge.edge.source_component_id,
+                &edge.edge.source_port_id,
+            ),
             component_batch_edge_frame_byte_capacity(
                 &edge.edge.connection,
                 edge.byte_capacity,
@@ -643,7 +653,10 @@ fn component_batch_signal_target(
             endpoint.byte_capacity,
         )),
         VulkanMountedPlacedBoundDescriptorTarget::OutgoingEdgeBuffer { endpoint } => Some((
-            VulkanComponentBatchSignalKey::OutgoingEdge(endpoint.endpoint.edge_index),
+            produced_port_signal_key(
+                &endpoint.endpoint.local_component_id,
+                &endpoint.endpoint.local_port_id,
+            ),
             endpoint.byte_capacity,
         )),
     };

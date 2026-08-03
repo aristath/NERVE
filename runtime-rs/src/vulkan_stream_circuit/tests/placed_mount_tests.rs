@@ -31,6 +31,94 @@ fn mounted_remote_middle_slices(
     )
 }
 
+fn local_fanout_edge(edge_index: usize, destination_component_id: &str) -> VulkanPlacedLocalEdge {
+    VulkanPlacedLocalEdge {
+        buffer_index: edge_index,
+        edge_id: format!("edge_{edge_index}_local"),
+        edge_index,
+        connection: StreamCircuitConnection::Forward,
+        signal: "shared_context".to_string(),
+        shape: vec![4_096],
+        element_count: 4_096,
+        byte_capacity: Some(8_192),
+        device_id: "gpu0".to_string(),
+        source_component_id: "input_adapter".to_string(),
+        source_port_id: "shared_context".to_string(),
+        source_component_port: Some("shared_context".to_string()),
+        destination_component_id: destination_component_id.to_string(),
+        destination_port_id: "shared_context".to_string(),
+        destination_component_port: Some("shared_context".to_string()),
+        transport: EdgeTransport::LocalBuffer {
+            device_id: "gpu0".to_string(),
+        },
+    }
+}
+
+fn local_fanout_edge_plan() -> VulkanPlacedEdgeIoPlan {
+    VulkanPlacedEdgeIoPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        signal_element_bytes: Some(2),
+        local_edges: vec![
+            local_fanout_edge(4, "draft_00"),
+            local_fanout_edge(5, "draft_01"),
+            local_fanout_edge(6, "draft_02"),
+        ],
+        endpoints: Vec::new(),
+        local_edge_count: 3,
+        incoming_endpoint_count: 0,
+        outgoing_endpoint_count: 0,
+        total_buffer_count: 3,
+        total_endpoint_count: 0,
+        total_byte_capacity: Some(3 * 8_192),
+        unresolved_byte_edges: Vec::new(),
+    }
+}
+
+#[test]
+fn placed_edge_allocation_aliases_every_local_fanout_consumer() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let buffers = local_fanout_edge_plan().allocate_buffers(&device).unwrap();
+
+    assert_eq!(buffers.local_buffers.len(), 3);
+    assert!(Arc::ptr_eq(
+        &buffers.local_buffers[0].buffer,
+        &buffers.local_buffers[1].buffer
+    ));
+    assert!(Arc::ptr_eq(
+        &buffers.local_buffers[0].buffer,
+        &buffers.local_buffers[2].buffer
+    ));
+}
+
+#[test]
+fn placed_edge_allocation_rejects_distinct_overrides_for_one_local_fanout() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let first = Arc::new(device.create_resident_buffer(8_192).unwrap());
+    let second = Arc::new(device.create_resident_buffer(8_192).unwrap());
+    let error = match local_fanout_edge_plan().allocate_buffers_with_overrides(
+            &device,
+            &[
+                VulkanPlacedLocalEdgeBufferOverride {
+                    edge_index: 4,
+                    buffer: first,
+                },
+                VulkanPlacedLocalEdgeBufferOverride {
+                    edge_index: 5,
+                    buffer: second,
+                },
+            ],
+            &[],
+        ) {
+        Ok(_) => panic!("distinct local fan-out overrides must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(error
+        .to_string()
+        .contains("incompatible physical buffer overrides"));
+}
+
 #[test]
 fn mounted_colocated_stream_circuit_binds_local_edges_between_component_instances() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");

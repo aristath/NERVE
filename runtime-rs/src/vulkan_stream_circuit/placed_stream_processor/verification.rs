@@ -91,7 +91,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         normalized_target_frames: &VulkanResidentBuffer,
         frame_byte_capacity: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        for decoder in &self.speculative_decoders {
+        for decoder in self
+            .speculative_decoders
+            .iter()
+            .filter(|decoder| !decoder.is_parallel_block())
+        {
             let draft_device = devices.get(&decoder.device_id).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                     device_id: decoder.device_id.clone(),
@@ -286,13 +290,26 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let verification_capacity =
             self.causal_block_lane_capacity(target_tick_count)?;
         let causal_verification = self.temporal_block_executions.borrow();
-        let normalized_target_frames = &causal_verification
+        let runner = causal_verification
             .get(&(verification_capacity, true))
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "speculative causal target window was not initialized".to_string(),
                 ))
-            })?
+            })?;
+        if decoder.is_parallel_block() {
+            for (lane, input_token_id) in input_token_ids.iter().copied().enumerate() {
+                runner.publish_speculative_source_tap_frame(lane)?;
+                let stream_tick = start_stream_tick
+                    .checked_add(u64::try_from(lane).map_err(|_| {
+                        VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
+                    })?)
+                    .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+                decoder.run_state_step(draft_device, input_token_id, stream_tick)?;
+            }
+            return Ok(());
+        }
+        let normalized_target_frames = &runner
             .speculative_target_output
             .as_ref()
             .ok_or_else(|| {

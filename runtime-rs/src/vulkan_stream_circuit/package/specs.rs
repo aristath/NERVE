@@ -344,10 +344,16 @@ impl VulkanResidentSpeculativeDecoderPackageSpec {
                         self.id
                     )
                 })?;
+            let block_width = u64::try_from(*block_width).ok();
             if proposal
-                .get("default_draft_tokens")
+                .get("configured_block_size")
                 .and_then(Value::as_u64)
-                != u64::try_from(*block_width).ok()
+                != block_width
+                || proposal
+                    .get("default_draft_tokens")
+                    .and_then(Value::as_u64)
+                    .zip(block_width)
+                    .is_none_or(|(recommended, physical)| recommended < physical)
                 || proposal.get("confidence_prefix").and_then(Value::as_str)
                     != Some("first_sigmoid_below_runtime_threshold")
             {
@@ -370,6 +376,7 @@ pub enum VulkanResidentSpeculativeExecutionContract {
     },
     ParallelBlock {
         block_width: usize,
+        source_context_tick_offset: i64,
         processor_schedule: String,
         output_schedule: String,
     },
@@ -387,6 +394,7 @@ impl VulkanResidentSpeculativeExecutionContract {
             }
             Self::ParallelBlock {
                 block_width,
+                source_context_tick_offset: _,
                 processor_schedule,
                 output_schedule,
             } => {

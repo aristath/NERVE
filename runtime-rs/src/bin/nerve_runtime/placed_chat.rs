@@ -361,6 +361,7 @@ fn run_placed_chat(
                 speculative_draft_catch_up_time_ns:
                     speculative_decode.draft_catch_up_time_ns,
                 speculative_total_time_ns: speculative_decode.total_time_ns,
+                speculative_cycle_traces: speculative_decode.cycle_traces,
                 resident_feedback,
                 sparse_moe: sparse_moe_contract.work_report(
                     prefill_activation_count,
@@ -603,6 +604,7 @@ fn execute_placed_prompt_run(
         speculative_target_verification_time_ns: run.speculative_decode.target_verification_time_ns,
         speculative_draft_catch_up_time_ns: run.speculative_decode.draft_catch_up_time_ns,
         speculative_total_time_ns: run.speculative_decode.total_time_ns,
+        speculative_cycle_traces: run.speculative_decode.cycle_traces.clone(),
         resident_feedback: runtime_feedback_execution_report(run.resident_feedback),
         sparse_moe: sparse_moe_contract.work_report(
             prefill_activation_count,
@@ -729,6 +731,7 @@ fn print_speculative_profile(report: &RuntimePlacedPromptRunReport) {
         report.speculative_target_verification_time_ns,
         report.speculative_draft_catch_up_time_ns,
         report.speculative_total_time_ns,
+        &report.speculative_cycle_traces,
     );
 }
 

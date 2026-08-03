@@ -68,6 +68,13 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         }
     }
 
+    fn is_parallel_block(&self) -> bool {
+        matches!(
+            self.execution,
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_)
+        )
+    }
+
     fn capture_baseline(&self) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         match &self.execution {
             VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
@@ -129,7 +136,9 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
                 processor.run_state_step(device, input_token_id, stream_tick)
             }
-            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => Ok(()),
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(processor) => {
+                processor.run_state_step(device, input_token_id, stream_tick)
+            }
         }
     }
 
@@ -151,7 +160,12 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     frame_byte_capacity,
                 )
             }
-            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => Ok(()),
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => Err(
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "parallel speculative state catch-up requires retained source-tap frames"
+                        .to_string(),
+                )),
+            ),
         }
     }
 

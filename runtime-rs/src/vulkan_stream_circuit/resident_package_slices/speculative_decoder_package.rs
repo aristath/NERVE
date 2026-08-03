@@ -18,7 +18,10 @@ enum VulkanResidentSpeculativeDecoderModelExecution {
         output_norm_spirv_words: Vec<u32>,
         output_projection_spirv_words: Vec<u32>,
     },
-    ParallelBlock { block_width: usize },
+    ParallelBlock {
+        block_width: usize,
+        source_context_tick_offset: i64,
+    },
 }
 
 struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
@@ -196,9 +199,14 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
                     output_projection_spirv_words,
                 }
             }
-            VulkanResidentSpeculativeExecutionContract::ParallelBlock { block_width, .. } => {
+            VulkanResidentSpeculativeExecutionContract::ParallelBlock {
+                block_width,
+                source_context_tick_offset,
+                ..
+            } => {
                 VulkanResidentSpeculativeDecoderModelExecution::ParallelBlock {
                     block_width: *block_width,
+                    source_context_tick_offset: *source_context_tick_offset,
                 }
             }
         };

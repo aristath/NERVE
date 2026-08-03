@@ -844,6 +844,7 @@
             speculative_target_verification_time_ns: 0,
             speculative_draft_catch_up_time_ns: 0,
             speculative_total_time_ns: 0,
+            speculative_cycle_traces: Vec::new(),
             resident_feedback: RuntimeFeedbackExecutionReport {
                 window_count: 1,
                 planned_tick_count: 7,

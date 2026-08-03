@@ -518,7 +518,7 @@ def build_parallel_markov_draft_system_circuits(model: Json, draft: Json) -> lis
         )
     ]
     minimum_block_size = int(draft["proposal_contract"]["minimum_draft_tokens"])
-    block_size = int(draft["proposal_contract"]["default_draft_tokens"])
+    block_size = int(draft["proposal_contract"]["configured_block_size"])
     noise_token_id = int(draft["proposal_contract"]["noise_token_id"])
     norm_attrs = {
         "eps": float(adapter["attrs"]["eps"]),

@@ -323,14 +323,17 @@ struct VulkanResidentParallelBlockSpeculativeDecoderProcessor {
     device_slice: VulkanResidentInProcessPlacedStreamProcessorDevice,
     input_phase: VulkanMountedPlacedResidentExecutionGraphRunner,
     processor_phase: VulkanResidentPlacedComponentBatchRunner,
+    state_processor_phase: VulkanResidentPlacedComponentBatchRunner,
     output_phase: VulkanMountedPlacedResidentExecutionGraphRunner,
     source_taps: Vec<VulkanSpeculativeSourceTapTransfer>,
     ingress_copies: VulkanResidentBufferCopyBatch,
+    state_ingress_copies: VulkanResidentBufferCopyBatch,
     egress_copies: VulkanResidentBufferCopyBatch,
     anchor_input_signal_id: String,
     draft_tokens_output_signal_id: String,
     confidence_output_signal_id: String,
     block_width: usize,
+    source_context_tick_offset: i64,
     state_transaction: VulkanResidentStateTransactionBank,
 }
 
