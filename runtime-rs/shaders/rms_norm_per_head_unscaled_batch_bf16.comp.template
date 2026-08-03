@@ -1,0 +1,67 @@
+#version 450
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputFrames { uint words[]; } input_frames;
+layout(set = 0, binding = 1) buffer OutputFrames { uint words[]; } output_frames;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint HEAD_COUNT = {{HEAD_COUNT}}u;
+const uint HEAD_WIDTH = {{HEAD_WIDTH}}u;
+const uint FRAME_WIDTH = HEAD_COUNT * HEAD_WIDTH;
+const uint FRAME_WORDS = FRAME_WIDTH / 2u;
+const float NORM_EPS = {{NORM_EPS}};
+
+shared float reduction[64];
+
+float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16); }
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16;
+}
+float read_input(uint batch_index, uint index) {
+    uint packed = input_frames.words[batch_index * FRAME_WORDS + (index >> 1u)];
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (head >= HEAD_COUNT) { return; }
+    uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
+    uint base = head * HEAD_WIDTH;
+
+    for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; ++batch_lane) {
+        uint batch_index = batch_start + batch_lane;
+        if (batch_index >= batch_control.batch_width) { break; }
+        float sum_squares = 0.0;
+        for (uint dim = lane; dim < HEAD_WIDTH; dim += 64u) {
+            float value = read_input(batch_index, base + dim);
+            sum_squares = fma(value, value, sum_squares);
+        }
+        sum_squares = subgroupAdd(sum_squares);
+        if (gl_SubgroupInvocationID == 0u) {
+            reduction[gl_SubgroupID] = sum_squares;
+        }
+        barrier();
+        sum_squares = 0.0;
+        for (uint subgroup = 0u; subgroup < gl_NumSubgroups; ++subgroup) {
+            sum_squares += reduction[subgroup];
+        }
+        float inv_rms = inversesqrt(sum_squares / float(HEAD_WIDTH) + NORM_EPS);
+        for (uint dim = lane * 2u; dim < HEAD_WIDTH; dim += 128u) {
+            uint lo = f32_to_bf16(read_input(batch_index, base + dim) * inv_rms);
+            uint hi = f32_to_bf16(read_input(batch_index, base + dim + 1u) * inv_rms);
+            output_frames.words[
+                batch_index * FRAME_WORDS + ((base + dim) >> 1u)
+            ] = (hi << 16u) | lo;
+        }
+        barrier();
+    }
+}

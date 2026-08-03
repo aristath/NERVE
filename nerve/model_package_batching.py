@@ -263,7 +263,11 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
             else 2
             if causal_scan_shader.startswith(
-                ("rotary_temporal_", "rotary_qdq_fp8_e4m3_")
+                (
+                    "rotary_temporal_",
+                    "inverse_rotary_temporal_",
+                    "rotary_qdq_fp8_e4m3_",
+                )
             )
             else None
         )
@@ -684,7 +688,7 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
             shader_file.replace("_bf16_", "_temporal_bf16_", 1),
         )
     if re.fullmatch(
-        r"rotary_bf16_\d+x\d+_r\d+_theta[0-9eE+.-]+"
+        r"(?:inverse_)?rotary_bf16_\d+x\d+_r\d+_theta[0-9eE+.-]+"
         r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
         r"_(?:half|interleaved|proportional)(?:_tail)?(?:_po-?\d+)?__sc\d+\.comp",
         shader_file,
@@ -722,7 +726,7 @@ def causal_scan_workgroup_count_x(shader_file: str) -> int:
     if head_norm_rope is not None:
         return int(head_norm_rope.group(1)) + int(head_norm_rope.group(2))
     rotary = re.fullmatch(
-        r"(?:rotary_bf16_|rotary_qdq_fp8_e4m3_(?:spow2|sexact)_b\d+_bf16_)"
+        r"(?:(?:inverse_)?rotary_bf16_|rotary_qdq_fp8_e4m3_(?:spow2|sexact)_b\d+_bf16_)"
         r"(\d+)x\d+_r\d+_theta[0-9eE+.-]+"
         r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
         r"_(?:half|interleaved|proportional)(?:_tail)?(?:_po-?\d+)?__sc\d+\.comp",
@@ -739,6 +743,50 @@ def weight_shared_batch_shader_file(
     if tile_width <= 0:
         raise ValueError("batch tile width must be positive")
     tile = tile_width
+    hyper_pre = re.fullmatch(
+        r"(hyper_connection_pre|hyper_connection_post_pre)_m\d+_h\d+_i\d+_"
+        r"neps[0-9eE+.-]+_heps[0-9eE+.-]+\.comp",
+        shader_file,
+    )
+    if hyper_pre is not None:
+        return shader_file.replace(
+            hyper_pre.group(1) + "_",
+            hyper_pre.group(1) + f"_batch{tile}_",
+            1,
+        )
+    if re.fullmatch(r"hyper_connection_post_m\d+_h\d+\.comp", shader_file):
+        return shader_file.replace(
+            "hyper_connection_post_",
+            f"hyper_connection_post_batch{tile}_",
+            1,
+        )
+    if re.fullmatch(
+        r"rms_norm_per_head_unscaled_bf16_\d+x\d+_eps[0-9eE+.-]+\.comp",
+        shader_file,
+    ):
+        return shader_file.replace(
+            "rms_norm_per_head_unscaled_bf16_",
+            f"rms_norm_per_head_unscaled_batch{tile}_bf16_",
+            1,
+        )
+    if re.fullmatch(
+        r"grouped_linear_fp8_e4m3_(?:se8m0_)?b\d+x\d+_g\d+_\d+x\d+\.comp",
+        shader_file,
+    ):
+        return shader_file.replace(
+            "grouped_linear_fp8_e4m3_",
+            f"grouped_linear_batch{tile}_fp8_e4m3_",
+            1,
+        )
+    if re.fullmatch(
+        r"bounded_silu_multiply_bf16_\d+_limit[0-9eE+.-]+\.comp",
+        shader_file,
+    ):
+        return shader_file.replace(
+            "bounded_silu_multiply_bf16_",
+            f"bounded_silu_multiply_batch{tile}_bf16_",
+            1,
+        )
     if re.fullmatch(r"quantize_int8_symmetric_b32_h\d+\.comp", shader_file):
         return shader_file.replace(
             "quantize_int8_symmetric_",
@@ -1217,6 +1265,17 @@ def weight_shared_batch_workgroup_count_x(
     lane_parallel = (
         re.fullmatch(r"add_bf16_\d+\.comp", shader_file) is not None
         or re.fullmatch(r"silu_multiply_bf16_\d+\.comp", shader_file) is not None
+        or re.fullmatch(
+            r"bounded_silu_multiply_bf16_\d+_limit[0-9eE+.-]+\.comp",
+            shader_file,
+        )
+        is not None
+        or re.fullmatch(
+            r"(?:hyper_connection_pre|hyper_connection_post_pre)_m\d+_h\d+_i\d+_"
+            r"neps[0-9eE+.-]+_heps[0-9eE+.-]+\.comp",
+            shader_file,
+        )
+        is not None
         or re.fullmatch(
             r"sigmoid_scalar_multiply_bf16_\d+\.comp",
             shader_file,

@@ -1,5 +1,6 @@
 from model_package_layout_common import *
 from nerve.model_package_validation import valid_indirect_dispatch_pipeline
+from nerve.model_package_shader_compiler import compile_shader_artifacts
 
 
 def test_indirect_batch_dispatch_requires_an_earlier_writable_producer() -> None:
@@ -183,6 +184,39 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         weight_shared_batch_shader_file("add_bf16_2048.comp")
         == "add_batch16_bf16_2048.comp"
     )
+    assert weight_shared_batch_shader_file(
+        "hyper_connection_pre_m4_h4096_i20_neps1e-06_heps1e-06.comp",
+        tile_width=8,
+    ) == (
+        "hyper_connection_pre_batch8_m4_h4096_i20_"
+        "neps1e-06_heps1e-06.comp"
+    )
+    assert weight_shared_batch_shader_file(
+        "hyper_connection_post_pre_m4_h4096_i20_neps1e-06_heps1e-06.comp",
+        tile_width=8,
+    ) == (
+        "hyper_connection_post_pre_batch8_m4_h4096_i20_"
+        "neps1e-06_heps1e-06.comp"
+    )
+    assert weight_shared_batch_shader_file(
+        "hyper_connection_post_m4_h4096.comp",
+        tile_width=8,
+    ) == "hyper_connection_post_batch8_m4_h4096.comp"
+    assert weight_shared_batch_shader_file(
+        "rms_norm_per_head_unscaled_bf16_64x512_eps1e-06.comp",
+        tile_width=8,
+    ) == "rms_norm_per_head_unscaled_batch8_bf16_64x512_eps1e-06.comp"
+    assert weight_shared_batch_shader_file(
+        "grouped_linear_fp8_e4m3_se8m0_b128x128_g8_32768x8192.comp",
+        tile_width=8,
+    ) == (
+        "grouped_linear_batch8_fp8_e4m3_se8m0_"
+        "b128x128_g8_32768x8192.comp"
+    )
+    assert weight_shared_batch_shader_file(
+        "bounded_silu_multiply_bf16_2048_limit10.comp",
+        tile_width=8,
+    ) == "bounded_silu_multiply_batch8_bf16_2048_limit10.comp"
     for lane_parallel_shader in (
         "linear_bf16_2048x1.comp",
         "split_bf16_2x512.comp",
@@ -445,6 +479,13 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         )
         == "rotary_temporal_bf16_16x256_r64_theta10000000_half.comp"
     )
+    assert causal_scan_batch_shader_file(
+        "inverse_rotary_bf16_64x512_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_tail_po1__sc2.comp"
+    ) == (
+        "inverse_rotary_temporal_bf16_64x512_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_tail_po1.comp"
+    )
     assert causal_scan_batch_shader_file("linear_bf16_4096x4096.comp") is None
     assert causal_scan_workgroup_count_x("causal_conv1d_silu_bf16_c8192_k4.comp") == 64
     assert (
@@ -466,6 +507,10 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         )
         == 16
     )
+    assert causal_scan_workgroup_count_x(
+        "inverse_rotary_bf16_64x512_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_tail__sc2.comp"
+    ) == 64
 
     attention_local_size = attention_workgroup_shape(256)[0]
     assert causal_scan_batch_stages(
@@ -540,6 +585,27 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
             ),
             "local_size_x": 64,
             "workgroup_count_x": 16,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 16,
+                "binding": 2,
+                "payload": "temporal",
+            },
+        }
+    ]
+    inverse_rope_stages = causal_scan_batch_stages(
+        "inverse_rotary_bf16_64x512_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_tail__sc2.comp",
+        64,
+    )
+    assert inverse_rope_stages == [
+        {
+            "shader_path": (
+                "shaders/inverse_rotary_temporal_bf16_64x512_r64_theta160000_"
+                "yarn_f16_lo15_hi25_a1_interleaved_tail__pbc2.comp"
+            ),
+            "local_size_x": 64,
+            "workgroup_count_x": 64,
             "control": {
                 "kind": "storage_buffer",
                 "byte_count": 16,
@@ -646,6 +712,48 @@ def test_compiler_renders_standalone_temporal_rope(tmp_path: Path) -> None:
     assert "batch_control.start_stream_tick_low + position" in source
     assert "position * FRAME_WORDS" in source
     assert "{{" not in source
+
+
+def test_compiler_renders_deepseek_stateless_causal_batch_kernels(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        "hyper_connection_pre_batch8_m4_h4096_i20_"
+        "neps1e-06_heps1e-06__pbc31.comp",
+        "hyper_connection_post_pre_batch8_m4_h4096_i20_"
+        "neps1e-06_heps1e-06__pbc31.comp",
+        "hyper_connection_post_batch8_m4_h4096__pbc31.comp",
+        "rms_norm_per_head_unscaled_batch8_bf16_64x512_"
+        "eps1e-06__pbc31.comp",
+        "grouped_linear_batch8_fp8_e4m3_se8m0_"
+        "b128x128_g8_32768x8192__pbc31.comp",
+        "bounded_silu_multiply_batch8_bf16_2048_limit10__pbc31.comp",
+        "inverse_rotary_temporal_bf16_64x512_r64_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_tail_po1__pbc2.comp",
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+
+    sources = {
+        path.name: path.read_text()
+        for path in tmp_path.glob("*.comp")
+    }
+    assert sources.keys() == shader_files
+    assert all("{{" not in source for source in sources.values())
+    assert all("layout(push_constant) uniform BatchControl" not in source for source in sources.values())
+    assert all("batch_control.batch_width" in source for source in sources.values())
+    assert "ROPE_DIRECTION = -1.0" in next(
+        source for name, source in sources.items() if name.startswith("inverse_rotary_")
+    )
+    assert "batch_index * HYPER_WORDS" in next(
+        source for name, source in sources.items() if name.startswith("hyper_connection_pre_batch")
+    )
+    assert "batch_index * TOTAL_INPUT_WORDS" in next(
+        source for name, source in sources.items() if name.startswith("grouped_linear_batch")
+    )
+    compile_shader_artifacts(tmp_path)
+    assert len(list(tmp_path.glob("*.spv"))) == len(shader_files)
 
 
 def test_compiler_lowers_component_batch_width_to_a_persistent_buffer(

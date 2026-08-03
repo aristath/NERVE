@@ -1,0 +1,214 @@
+#version 460
+
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+{{SOURCE_BUFFERS}}
+layout(set = 0, binding = {{REDUCED_OUTPUT_BINDING}}) buffer ReducedOutput {
+    uint words[];
+} reduced_output;
+layout(set = 0, binding = {{POST_OUTPUT_BINDING}}) buffer PostOutput {
+    float values[];
+} post_output;
+layout(set = 0, binding = {{COMBINATION_OUTPUT_BINDING}}) buffer CombinationOutput {
+    float values[];
+} combination_output;
+layout(set = 0, binding = {{FUNCTION_BINDING}}) readonly buffer FunctionWeight {
+    float values[];
+} function_weight;
+layout(set = 0, binding = {{SCALE_BINDING}}) readonly buffer HyperScale {
+    float values[];
+} hyper_scale;
+layout(set = 0, binding = {{BASE_BINDING}}) readonly buffer HyperBase {
+    float values[];
+} hyper_base;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint MULTIPLICITY = {{MULTIPLICITY}}u;
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
+const uint HYPER_SIZE = MULTIPLICITY * HIDDEN_SIZE;
+const uint HYPER_WORDS = HYPER_SIZE / 2u;
+const uint MIX_COUNT = (2u + MULTIPLICITY) * MULTIPLICITY;
+const uint SINKHORN_ITERATIONS = {{SINKHORN_ITERATIONS}}u;
+const uint REDUCTION_WIDTH = 64u;
+const uint ROWS_PER_REDUCTION_BATCH = 16u;
+const float NORMALIZATION_EPSILON = {{NORMALIZATION_EPSILON}};
+const float SINKHORN_EPSILON = {{SINKHORN_EPSILON}};
+
+shared uint hyper_input[HYPER_WORDS];
+shared float reduction[ROWS_PER_REDUCTION_BATCH * REDUCTION_WIDTH];
+shared float mixes[MIX_COUNT];
+shared float pre_mix[MULTIPLICITY];
+shared float combination[MULTIPLICITY * MULTIPLICITY];
+shared float normalization_factor;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float read_bf16(uint packed, uint half_index) {
+    return bf16_to_f32(packed >> (half_index * 16u));
+}
+
+uint pack_bf16(float low, float high) {
+    return f32_to_bf16(low) | (f32_to_bf16(high) << 16u);
+}
+
+uint source_hyper_word(uint batch_index, uint word_index) {
+    {{SOURCE_HYPER_WORD}}
+}
+
+float read_hyper_value(uint index) {
+    return read_bf16(hyper_input[index >> 1u], index & 1u);
+}
+
+void reduce_lane_sum(uint lane, uint logical_lane) {
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (logical_lane < stride) {
+            reduction[lane] += reduction[lane + stride];
+        }
+        barrier();
+    }
+}
+
+float sigmoid(float value) {
+    return 1.0 / (1.0 + exp(-value));
+}
+
+void main() {
+    uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
+    uint batch_lane = gl_WorkGroupID.x;
+    uint batch_index = batch_start + batch_lane;
+    if (batch_lane >= BATCH_TILE_WIDTH || batch_index >= batch_control.batch_width) {
+        return;
+    }
+
+    uint lane = gl_LocalInvocationID.x;
+    uint logical_lane = lane % REDUCTION_WIDTH;
+    uint row_slot = lane / REDUCTION_WIDTH;
+    for (uint word = lane; word < HYPER_WORDS; word += 1024u) {
+        hyper_input[word] = source_hyper_word(batch_index, word);
+    }
+    barrier();
+
+    float square_sum = 0.0;
+    if (row_slot == 0u) {
+        for (uint index = logical_lane; index < HYPER_SIZE; index += REDUCTION_WIDTH) {
+            float value = read_hyper_value(index);
+            square_sum += value * value;
+        }
+    }
+    reduction[lane] = square_sum;
+    barrier();
+    reduce_lane_sum(lane, logical_lane);
+    if (lane == 0u) {
+        normalization_factor = inversesqrt(
+            reduction[0] / float(HYPER_SIZE) + NORMALIZATION_EPSILON
+        );
+    }
+    barrier();
+
+    for (uint row_base = 0u; row_base < MIX_COUNT;
+         row_base += ROWS_PER_REDUCTION_BATCH) {
+        uint row = row_base + row_slot;
+        float value = 0.0;
+        if (row < MIX_COUNT) {
+            uint weight_base = row * HYPER_SIZE;
+            for (uint column = logical_lane; column < HYPER_SIZE;
+                 column += REDUCTION_WIDTH) {
+                value += read_hyper_value(column) *
+                    function_weight.values[weight_base + column];
+            }
+        }
+        reduction[lane] = value;
+        barrier();
+        reduce_lane_sum(lane, logical_lane);
+        if (logical_lane == 0u && row < MIX_COUNT) {
+            mixes[row] = reduction[row_slot * REDUCTION_WIDTH] * normalization_factor;
+        }
+        barrier();
+    }
+
+    if (lane == 0u) {
+        uint post_base = batch_index * MULTIPLICITY;
+        uint combination_batch_base = batch_index * MULTIPLICITY * MULTIPLICITY;
+        for (uint stream = 0u; stream < MULTIPLICITY; ++stream) {
+            pre_mix[stream] = sigmoid(
+                mixes[stream] * hyper_scale.values[0] + hyper_base.values[stream]
+            ) + SINKHORN_EPSILON;
+            post_output.values[post_base + stream] = 2.0 * sigmoid(
+                mixes[MULTIPLICITY + stream] * hyper_scale.values[1] +
+                hyper_base.values[MULTIPLICITY + stream]
+            );
+        }
+        uint combination_offset = 2u * MULTIPLICITY;
+        for (uint row = 0u; row < MULTIPLICITY; ++row) {
+            float row_max = -3.402823466e+38;
+            for (uint column = 0u; column < MULTIPLICITY; ++column) {
+                uint index = row * MULTIPLICITY + column;
+                float value = mixes[combination_offset + index] *
+                    hyper_scale.values[2] + hyper_base.values[combination_offset + index];
+                combination[index] = value;
+                row_max = max(row_max, value);
+            }
+            float row_sum = 0.0;
+            for (uint column = 0u; column < MULTIPLICITY; ++column) {
+                uint index = row * MULTIPLICITY + column;
+                combination[index] = exp(combination[index] - row_max);
+                row_sum += combination[index];
+            }
+            for (uint column = 0u; column < MULTIPLICITY; ++column) {
+                uint index = row * MULTIPLICITY + column;
+                combination[index] = combination[index] / row_sum + SINKHORN_EPSILON;
+            }
+        }
+        for (uint iteration = 0u; iteration < SINKHORN_ITERATIONS; ++iteration) {
+            for (uint column = 0u; column < MULTIPLICITY; ++column) {
+                float column_sum = 0.0;
+                for (uint row = 0u; row < MULTIPLICITY; ++row) {
+                    column_sum += combination[row * MULTIPLICITY + column];
+                }
+                for (uint row = 0u; row < MULTIPLICITY; ++row) {
+                    uint index = row * MULTIPLICITY + column;
+                    combination[index] /= column_sum + SINKHORN_EPSILON;
+                }
+            }
+            if (iteration + 1u < SINKHORN_ITERATIONS) {
+                for (uint row = 0u; row < MULTIPLICITY; ++row) {
+                    float row_sum = 0.0;
+                    for (uint column = 0u; column < MULTIPLICITY; ++column) {
+                        row_sum += combination[row * MULTIPLICITY + column];
+                    }
+                    for (uint column = 0u; column < MULTIPLICITY; ++column) {
+                        uint index = row * MULTIPLICITY + column;
+                        combination[index] /= row_sum + SINKHORN_EPSILON;
+                    }
+                }
+            }
+        }
+        for (uint index = 0u; index < MULTIPLICITY * MULTIPLICITY; ++index) {
+            combination_output.values[combination_batch_base + index] = combination[index];
+        }
+    }
+    barrier();
+
+    uint reduced_base = batch_index * HIDDEN_WORDS;
+    for (uint word = lane; word < HIDDEN_WORDS; word += 1024u) {
+        float low = 0.0;
+        float high = 0.0;
+        for (uint stream = 0u; stream < MULTIPLICITY; ++stream) {
+            uint input_word = hyper_input[stream * HIDDEN_WORDS + word];
+            low += pre_mix[stream] * read_bf16(input_word, 0u);
+            high += pre_mix[stream] * read_bf16(input_word, 1u);
+        }
+        reduced_output.words[reduced_base + word] = pack_bf16(low, high);
+    }
+}

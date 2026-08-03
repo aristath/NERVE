@@ -1,0 +1,84 @@
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer OperatorFrames {
+    uint words[];
+} operator_frames;
+layout(set = 0, binding = 1) readonly buffer ResidualStreams {
+    uint words[];
+} residual_streams;
+layout(set = 0, binding = 2) readonly buffer PostMix {
+    float values[];
+} post_mix;
+layout(set = 0, binding = 3) readonly buffer CombinationMix {
+    float values[];
+} combination_mix;
+layout(set = 0, binding = 4) buffer OutputStreams {
+    uint words[];
+} output_streams;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint BATCH_TILE_WIDTH = {{BATCH_TILE_WIDTH}}u;
+const uint MULTIPLICITY = {{MULTIPLICITY}}u;
+const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
+const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
+const uint OUTPUT_WORDS = MULTIPLICITY * HIDDEN_WORDS;
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float read_bf16(uint packed, uint half_index) {
+    return bf16_to_f32(packed >> (half_index * 16u));
+}
+
+uint pack_bf16(float low, float high) {
+    return f32_to_bf16(low) | (f32_to_bf16(high) << 16u);
+}
+
+void main() {
+    uint output_word = gl_GlobalInvocationID.x;
+    if (output_word >= OUTPUT_WORDS) {
+        return;
+    }
+    uint output_stream = output_word / HIDDEN_WORDS;
+    uint hidden_word = output_word % HIDDEN_WORDS;
+    uint batch_start = gl_WorkGroupID.y * BATCH_TILE_WIDTH;
+    for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; ++batch_lane) {
+        uint batch_index = batch_start + batch_lane;
+        if (batch_index >= batch_control.batch_width) {
+            break;
+        }
+        uint operator_pair = operator_frames.words[
+            batch_index * HIDDEN_WORDS + hidden_word
+        ];
+        float low = post_mix.values[
+            batch_index * MULTIPLICITY + output_stream
+        ] * read_bf16(operator_pair, 0u);
+        float high = post_mix.values[
+            batch_index * MULTIPLICITY + output_stream
+        ] * read_bf16(operator_pair, 1u);
+        uint combination_base = batch_index * MULTIPLICITY * MULTIPLICITY;
+        uint residual_base = batch_index * OUTPUT_WORDS;
+        for (uint source_stream = 0u; source_stream < MULTIPLICITY; ++source_stream) {
+            float coefficient = combination_mix.values[
+                combination_base + source_stream * MULTIPLICITY + output_stream
+            ];
+            uint residual_pair = residual_streams.words[
+                residual_base + source_stream * HIDDEN_WORDS + hidden_word
+            ];
+            low += coefficient * read_bf16(residual_pair, 0u);
+            high += coefficient * read_bf16(residual_pair, 1u);
+        }
+        output_streams.words[batch_index * OUTPUT_WORDS + output_word] =
+            pack_bf16(low, high);
+    }
+}

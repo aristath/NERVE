@@ -76,13 +76,19 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    decode tok/s; its retained-process second response reached 2.11 tok/s. In the
    second response, 202 draft cycles cost 10.87 seconds while target verification
    cost 125.93 seconds, and the execution report showed no physical multi-stream
-   batches. The current verification path is therefore expanding the compiled
-   block into effectively serial target work instead of one hardware-efficient
-   causal block. It also loaded another 37.80 GB of experts during the second
-   request, so one short warmup is not a steady-state proof. Make causal target
-   verification a real width-N resident batch with one dependency-aware submit,
-   preserve rollback/commit semantics, and then make the common decode execution
-   graph submission-resident. Continue with structurally selected MXFP4/FP8
+   batches. Stateless target operators now have exact width-N implementations:
+   hyper-connection pre/post, per-head normalization, inverse RoPE, grouped FP8
+   projection, and bounded activation. In the complete DeepSeek package this
+   reduced causal serial fallbacks from 706 to 384 and the six-lane verifier's
+   compiled dispatch count from 5,213 to 3,603 per window. A retained-process
+   smoke gate remained coherent and improved accepted decode from 2.11 to 2.24
+   tok/s, but its truth turn still loaded another 32.18 GB of experts and target
+   verification took 62.45 seconds for 95 cycles (657 ms/cycle), so it is not a
+   steady-state or material throughput win yet. All 384 remaining fallbacks are
+   stateful rolling-memory, compression/indexing, and sparse-attention kernels.
+   Implement their dependency-preserving causal scans, then make the resulting
+   width-N graph one dependency-aware resident submission while preserving
+   rollback/commit semantics. Continue with structurally selected MXFP4/FP8
    parallel-linear paths, adaptive-tier exchange, and acceptance improvement.
    Benchmark complete warmup plus repeated short real requests and report
    prefill, raw target passes, accepted tokens, and acceptance by default; do not
@@ -91,10 +97,11 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
 5. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. The latest current-schema packages pass the full sampled,
-   thinking-enabled five-turn gate with correct Greece recall: Qwen3.6-35B-A3B
-   averages 109.91 decode tok/s and 213.95 prefill tok/s, while Qwen3.5-9B
-   averages 60.10 decode tok/s and 185.95 prefill tok/s. Run both gates again
-   before every runtime-performance commit.
+   thinking-enabled five-turn gate with correct Greece recall. The latest
+   causal-batch regression gate averaged 108.33 decode tok/s and 213.38 prefill
+   tok/s for Qwen3.6-35B-A3B, while Qwen3.5-9B averaged 59.97 decode tok/s and
+   181.85 prefill tok/s. Run both gates again before every runtime-performance
+   commit.
    Keep the live gate's repetition and conversation checks active so throughput
    alone cannot pass. Do not use faulted AMD devices merely to satisfy this
    gate; defer a model when no verified-healthy placement exists.

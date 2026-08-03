@@ -114,6 +114,109 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     if latent_compression is not None:
         return latent_compression
 
+    hyper_pre_batch = re.fullmatch(
+        r"(hyper_connection_pre|hyper_connection_post_pre)_batch(\d+)_"
+        r"m(\d+)_h(\d+)_i(\d+)_neps([^_]+)_heps([^_]+)\.comp",
+        shader_file,
+    )
+    if hyper_pre_batch is not None:
+        operation = hyper_pre_batch.group(1)
+        batch_tile_width, multiplicity, hidden_size, sinkhorn_iterations = map(
+            int, hyper_pre_batch.groups()[1:5]
+        )
+        normalization_epsilon = float(hyper_pre_batch.group(6))
+        sinkhorn_epsilon = float(hyper_pre_batch.group(7))
+        if (
+            batch_tile_width <= 0
+            or multiplicity <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+            or sinkhorn_iterations <= 0
+            or normalization_epsilon <= 0.0
+            or sinkhorn_epsilon <= 0.0
+        ):
+            raise ModelCompileError(
+                f"invalid batched hyper-connection shader shape {shader_file!r}"
+            )
+        if operation == "hyper_connection_pre":
+            source_buffers = (
+                "layout(set = 0, binding = 0) readonly buffer InputStreams {\n"
+                "    uint words[];\n"
+                "} input_streams;"
+            )
+            source_word = (
+                "return input_streams.words[batch_index * HYPER_WORDS + word_index];"
+            )
+            output_binding = 1
+        else:
+            source_buffers = "\n".join(
+                (
+                    "layout(set = 0, binding = 0) readonly buffer OperatorFrames {\n"
+                    "    uint words[];\n"
+                    "} operator_frames;",
+                    "layout(set = 0, binding = 1) readonly buffer ResidualStreams {\n"
+                    "    uint words[];\n"
+                    "} residual_streams;",
+                    "layout(set = 0, binding = 2) readonly buffer PriorPost {\n"
+                    "    float values[];\n"
+                    "} prior_post;",
+                    "layout(set = 0, binding = 3) readonly buffer PriorCombination {\n"
+                    "    float values[];\n"
+                    "} prior_combination;",
+                    "layout(set = 0, binding = 4) buffer PreservedStreams {\n"
+                    "    uint words[];\n"
+                    "} preserved_streams;",
+                )
+            )
+            source_word = "\n".join(
+                (
+                    "uint stream_index = word_index / HIDDEN_WORDS;",
+                    "uint hidden_word = word_index % HIDDEN_WORDS;",
+                    "uint operator_base = batch_index * HIDDEN_WORDS;",
+                    "uint residual_batch_base = batch_index * HYPER_WORDS;",
+                    "uint prior_post_base = batch_index * MULTIPLICITY;",
+                    "uint prior_combination_base = batch_index * MULTIPLICITY * MULTIPLICITY;",
+                    "float low = prior_post.values[prior_post_base + stream_index] *",
+                    "    read_bf16(operator_frames.words[operator_base + hidden_word], 0u);",
+                    "float high = prior_post.values[prior_post_base + stream_index] *",
+                    "    read_bf16(operator_frames.words[operator_base + hidden_word], 1u);",
+                    "for (uint source_stream = 0u; source_stream < MULTIPLICITY; ++source_stream) {",
+                    "    float coefficient = prior_combination.values[",
+                    "        prior_combination_base + source_stream * MULTIPLICITY + stream_index",
+                    "    ];",
+                    "    uint residual_base = residual_batch_base +",
+                    "        source_stream * HIDDEN_WORDS + hidden_word;",
+                    "    uint residual_pair = residual_streams.words[residual_base];",
+                    "    low += coefficient * read_bf16(residual_pair, 0u);",
+                    "    high += coefficient * read_bf16(residual_pair, 1u);",
+                    "}",
+                    "uint packed = pack_bf16(low, high);",
+                    "preserved_streams.words[batch_index * HYPER_WORDS + word_index] = packed;",
+                    "return packed;",
+                )
+            )
+            output_binding = 5
+        return render_shader_template(
+            source_dir,
+            "hyper_connection_pre_batch.comp.template",
+            {
+                "SOURCE_BUFFERS": source_buffers,
+                "SOURCE_HYPER_WORD": source_word,
+                "REDUCED_OUTPUT_BINDING": str(output_binding),
+                "POST_OUTPUT_BINDING": str(output_binding + 1),
+                "COMBINATION_OUTPUT_BINDING": str(output_binding + 2),
+                "FUNCTION_BINDING": str(output_binding + 3),
+                "SCALE_BINDING": str(output_binding + 4),
+                "BASE_BINDING": str(output_binding + 5),
+                "BATCH_TILE_WIDTH": str(batch_tile_width),
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+                "SINKHORN_ITERATIONS": str(sinkhorn_iterations),
+                "NORMALIZATION_EPSILON": shader_float_glsl(normalization_epsilon),
+                "SINKHORN_EPSILON": shader_float_glsl(sinkhorn_epsilon),
+            },
+        )
+
     hyper_pre = re.fullmatch(
         r"(hyper_connection_pre|hyper_connection_post_pre)_m(\d+)_h(\d+)_i(\d+)_"
         r"neps([^_]+)_heps([^_]+)\.comp",
@@ -224,6 +327,33 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             source_dir,
             "hyper_connection_post.comp.template",
             {
+                "MULTIPLICITY": str(multiplicity),
+                "HIDDEN_SIZE": str(hidden_size),
+            },
+        )
+
+    hyper_post_batch = re.fullmatch(
+        r"hyper_connection_post_batch(\d+)_m(\d+)_h(\d+)\.comp",
+        shader_file,
+    )
+    if hyper_post_batch is not None:
+        batch_tile_width, multiplicity, hidden_size = map(
+            int, hyper_post_batch.groups()
+        )
+        if (
+            batch_tile_width <= 0
+            or multiplicity <= 0
+            or hidden_size <= 0
+            or hidden_size % 2
+        ):
+            raise ModelCompileError(
+                f"invalid batched hyper-connection post shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "hyper_connection_post_batch.comp.template",
+            {
+                "BATCH_TILE_WIDTH": str(batch_tile_width),
                 "MULTIPLICITY": str(multiplicity),
                 "HIDDEN_SIZE": str(hidden_size),
             },
@@ -2362,6 +2492,63 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    grouped_fp8_linear_batch = re.fullmatch(
+        r"grouped_linear_batch(\d+)_fp8_e4m3_(?:(se8m0)_)?b(\d+)x(\d+)_"
+        r"g(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if grouped_fp8_linear_batch is not None:
+        batch_tile_width = int(grouped_fp8_linear_batch.group(1))
+        scale_dtype = grouped_fp8_linear_batch.group(2) or "bf16"
+        block_rows, block_columns, groups, total_input_size, output_size = map(
+            int, grouped_fp8_linear_batch.groups()[2:]
+        )
+        if (
+            batch_tile_width <= 0
+            or block_rows <= 0
+            or block_columns != 128
+            or groups <= 0
+            or total_input_size <= 0
+            or total_input_size % groups
+            or output_size <= 0
+            or output_size % groups
+        ):
+            raise ModelCompileError(
+                f"invalid grouped batched FP8 linear shader shape {shader_file!r}"
+            )
+        input_size = total_input_size // groups
+        outputs_per_group = output_size // groups
+        output_tile_rows = fp8_linear_tile_rows(output_size)
+        if input_size % block_columns or outputs_per_group % output_tile_rows:
+            raise ModelCompileError(
+                f"grouped batched FP8 linear shader {shader_file!r} crosses group tiles"
+            )
+        return render_shader_template(
+            source_dir,
+            "grouped_linear_batch_fp8_e4m3.comp.template",
+            {
+                "BATCH_TILE_WIDTH": str(batch_tile_width),
+                "BLOCK_ROWS": str(block_rows),
+                "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
+                "TOTAL_INPUT_SIZE": str(total_input_size),
+                "OUTPUT_SIZE": str(output_size),
+                "GROUP_COUNT": str(groups),
+                "OUTPUTS_PER_GROUP": str(outputs_per_group),
+                "OUTPUT_TILE_ROWS": str(output_tile_rows),
+                "WEIGHT_SCALE_READ": (
+                    "uint packed = weight_scale_inv.words[index >> 2u];\n"
+                    "    uint e8m0 = (packed >> ((index & 3u) * 8u)) & 0xffu;\n"
+                    "    return uintBitsToFloat(e8m0 << 23u);"
+                    if scale_dtype == "se8m0"
+                    else (
+                        "return read_bf16_word("
+                        "weight_scale_inv.words[index >> 1u], index);"
+                    )
+                ),
+            },
+        )
+
     grouped_fp8_linear = re.fullmatch(
         r"grouped_linear_fp8_e4m3_(?:(se8m0)_)?b(\d+)x(\d+)_"
         r"g(\d+)_(\d+)x(\d+)\.comp",
@@ -2835,6 +3022,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("ELEMENT_COUNT", "LIMIT"),
         ),
         (
+            r"bounded_silu_multiply_batch(\d+)_bf16_(\d+)_limit([0-9eE+.-]+)\.comp",
+            "bounded_silu_multiply_batch_bf16.comp.template",
+            ("BATCH_TILE_WIDTH", "ELEMENT_COUNT", "LIMIT"),
+        ),
+        (
             r"silu_multiply_batch(\d+)_bf16_(\d+)\.comp",
             "silu_multiply_batch_bf16.comp.template",
             ("BATCH_TILE_WIDTH", "ELEMENT_COUNT"),
@@ -2978,6 +3170,12 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ("HEAD_COUNT", "HEAD_WIDTH", "NORM_EPS"),
         ),
         (
+            r"rms_norm_per_head_unscaled_batch(\d+)_bf16_(\d+)x(\d+)_"
+            r"eps([0-9eE+.-]+)\.comp",
+            "rms_norm_per_head_unscaled_batch_bf16.comp.template",
+            ("BATCH_TILE_WIDTH", "HEAD_COUNT", "HEAD_WIDTH", "NORM_EPS"),
+        ),
+        (
             r"parallel_head_norm_rope_2way_temporal_bf16_h(\d+)_(\d+)_d(\d+)_r(\d+)"
             r"_eps([0-9eE+.-]+)_offset([0-9eE+.-]+)_theta([0-9eE+.-]+)"
             r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
@@ -3092,12 +3290,13 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
-            r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"(inverse_)?rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
             r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
             r"_a([0-9eE+.-]+)_(half|interleaved|proportional)"
             r"(?:_(tail))?(?:_po(-?\d+))?\.comp",
             "rotary_temporal_bf16.comp.template",
             (
+                "INVERSE_PREFIX",
                 "HEAD_COUNT",
                 "HEAD_WIDTH",
                 "ROTARY_WIDTH",
@@ -3112,9 +3311,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
-            r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
+            r"(inverse_)?rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)_(half|interleaved|proportional)\.comp",
             "rotary_temporal_bf16.comp.template",
             (
+                "INVERSE_PREFIX",
                 "HEAD_COUNT",
                 "HEAD_WIDTH",
                 "ROTARY_WIDTH",
@@ -3123,10 +3323,11 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
-            r"rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
+            r"(inverse_)?rotary_temporal_bf16_(\d+)x(\d+)_r(\d+)_theta([0-9eE+.-]+)"
             r"_(half|interleaved|proportional)_(tail)(?:_po(-?\d+))?\.comp",
             "rotary_temporal_bf16.comp.template",
             (
+                "INVERSE_PREFIX",
                 "HEAD_COUNT",
                 "HEAD_WIDTH",
                 "ROTARY_WIDTH",
@@ -3444,6 +3645,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             }:
                 replacements["POSITION_OFFSET"] = (
                     replacements.get("POSITION_OFFSET") or "0"
+                )
+            if template == "rotary_temporal_bf16.comp.template":
+                replacements["ROPE_DIRECTION"] = (
+                    "-1.0" if replacements.pop("INVERSE_PREFIX", None) else "1.0"
                 )
             temporal_control_bindings = {
                 "parallel_head_norm_rope_2way_temporal_bf16.comp.template": "6",

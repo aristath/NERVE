@@ -31,6 +31,7 @@ const float ROPE_FACTOR = {{ROPE_FACTOR}};
 const float ROPE_CORRECTION_LOW = {{ROPE_CORRECTION_LOW}};
 const float ROPE_CORRECTION_HIGH = {{ROPE_CORRECTION_HIGH}};
 const float ROPE_ATTENTION_FACTOR = {{ROPE_ATTENTION_FACTOR}};
+const float ROPE_DIRECTION = {{ROPE_DIRECTION}};
 const int POSITION_OFFSET = {{POSITION_OFFSET}};
 
 float bf16_to_f32(uint value) {
@@ -104,7 +105,7 @@ float rope_angle(uint dim, uint position) {
         return (
             float(batch_control.start_stream_tick_low + position)
             + float(POSITION_OFFSET)
-        ) * inv_freq;
+        ) * inv_freq * ROPE_DIRECTION;
     }
     uint rotary_dim = dim - ROTARY_OFFSET;
     uint frequency_index = ROPE_INTERLEAVED
@@ -114,7 +115,7 @@ float rope_angle(uint dim, uint position) {
     return (
         float(batch_control.start_stream_tick_low + position)
         + float(POSITION_OFFSET)
-    ) * inv_freq;
+    ) * inv_freq * ROPE_DIRECTION;
 }
 
 float rotate(uint position, uint base, uint dim) {
