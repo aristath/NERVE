@@ -548,6 +548,67 @@ fn demand_batch_replay_rejects_dynamic_push_constants_in_its_remaining_commands(
 }
 
 #[test]
+fn local_demand_batch_guards_only_commands_after_its_direct_gate() {
+    let commands = vec![
+        VulkanDemandResidencyBatchCommand::Step(0),
+        VulkanDemandResidencyBatchCommand::Gate(0),
+        VulkanDemandResidencyBatchCommand::Step(1),
+        VulkanDemandResidencyBatchCommand::Gate(1),
+        VulkanDemandResidencyBatchCommand::Step(2),
+    ];
+
+    assert_eq!(
+        demand_batch_conditional_regions(&commands, 0, 1, false, false).unwrap(),
+        vec![None, None, Some(1), Some(1), Some(2)]
+    );
+}
+
+#[test]
+fn shared_demand_batch_guards_its_entire_initial_submission() {
+    let commands = vec![
+        VulkanDemandResidencyBatchCommand::Step(0),
+        VulkanDemandResidencyBatchCommand::Gate(0),
+        VulkanDemandResidencyBatchCommand::Step(1),
+        VulkanDemandResidencyBatchCommand::Gate(1),
+        VulkanDemandResidencyBatchCommand::Step(2),
+    ];
+
+    assert_eq!(
+        demand_batch_conditional_regions(&commands, 0, 1, true, false).unwrap(),
+        vec![Some(1), Some(1), Some(2), Some(2), Some(3)]
+    );
+}
+
+#[test]
+fn shared_demand_batch_resume_executes_its_gate_before_guarding_the_suffix() {
+    let commands = vec![
+        VulkanDemandResidencyBatchCommand::Step(0),
+        VulkanDemandResidencyBatchCommand::Gate(0),
+        VulkanDemandResidencyBatchCommand::Step(1),
+        VulkanDemandResidencyBatchCommand::Gate(1),
+        VulkanDemandResidencyBatchCommand::Step(2),
+    ];
+
+    assert_eq!(
+        demand_batch_conditional_regions(&commands, 1, 1, true, true).unwrap(),
+        vec![None, Some(1), Some(1), Some(2)]
+    );
+}
+
+#[test]
+fn demand_batch_conditional_layout_rejects_an_invalid_direct_gate() {
+    let commands = vec![
+        VulkanDemandResidencyBatchCommand::Step(0),
+        VulkanDemandResidencyBatchCommand::Gate(0),
+        VulkanDemandResidencyBatchCommand::Step(1),
+    ];
+
+    assert!(demand_batch_conditional_regions(&commands, 0, 0, true, false).is_err());
+    assert!(demand_batch_conditional_regions(&commands, 2, 1, true, true).is_err());
+    assert!(demand_batch_conditional_regions(&commands, 0, commands.len(), true, false).is_err());
+}
+
+#[test]
 fn component_batch_execution_rejects_noncontiguous_dispatch_steps() {
     let spans = vec![
         VulkanComponentBatchDispatchSpan {

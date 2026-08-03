@@ -1,8 +1,10 @@
 struct VulkanResidentPlacedComponentBatchRunner {
     distributed_dispatches: VulkanDistributedComponentBatchRunners,
     lane_capacity: usize,
+    device_ids: Vec<String>,
     slices: Vec<VulkanResidentComponentBatchSliceRunner>,
     edge_transfers: Vec<VulkanComponentBatchEdgeTransfer>,
+    demand_pipeline_predicates: Option<Vec<Arc<VulkanResidentBuffer>>>,
 }
 
 struct VulkanDistributedComponentBatchRunners {

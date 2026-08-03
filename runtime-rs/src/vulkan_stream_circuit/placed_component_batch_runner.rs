@@ -65,6 +65,22 @@ impl VulkanResidentPlacedComponentBatchRunner {
             total_byte_capacity: 0,
         };
         let lane_mounteds = vec![&slice.mounted; lane_capacity];
+        let pipeline_continuation_predicate = if execution_mode
+            == VulkanComponentBatchExecutionMode::CausalSequence
+            && slice.demand_residency_context.is_some()
+        {
+            let predicate = Arc::new(
+                device
+                    .create_conditional_resident_buffer(size_of::<u32>())
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+            );
+            predicate
+                .write_bytes(&1u32.to_le_bytes())
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            Some(predicate)
+        } else {
+            None
+        };
         let batch_slice = VulkanResidentComponentBatchSliceRunner::new(
             &devices,
             device,
@@ -77,6 +93,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &BTreeSet::new(),
             false,
             &distributed_execution_plan,
+            pipeline_continuation_predicate.clone(),
             Rc::new(RefCell::new(RuntimeExecutionQuantumCalibrator::default())),
         )?;
         let slices = vec![batch_slice];
@@ -92,8 +109,10 @@ impl VulkanResidentPlacedComponentBatchRunner {
         Ok(Self {
             distributed_dispatches,
             lane_capacity,
+            device_ids: vec![slice.device_id.clone()],
             slices,
             edge_transfers: Vec::new(),
+            demand_pipeline_predicates: pipeline_continuation_predicate.map(|buffer| vec![buffer]),
         })
     }
 
@@ -232,11 +251,56 @@ impl VulkanResidentPlacedComponentBatchRunner {
         let phase_execution_plan = execution_scope
             .filter_distributed_plan(distributed_execution_plan)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let demand_pipeline_predicates = if execution_mode
+            == VulkanComponentBatchExecutionMode::CausalSequence
+            && !placed_slices.is_empty()
+            && placed_slices
+                .iter()
+                .all(|slice| slice.demand_residency_context.is_some())
+            && phase_execution_plan.dispatches.is_empty()
+        {
+            let slice_devices = placed_slices
+                .iter()
+                .map(|slice| {
+                    devices
+                        .get(&slice.device_id)
+                        .map(|device| device.as_ref())
+                        .ok_or_else(|| VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: slice.device_id.clone(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (owner, peers) = slice_devices
+                .split_first()
+                .expect("non-empty placed slices contain an owner device");
+            let shared = owner
+                .create_shared_conditional_resident_buffers(peers, size_of::<u32>())
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if shared.buffers.len() != placed_slices.len() {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    format!(
+                        "shared demand predicate produced {} device views for {} placed slices",
+                        shared.buffers.len(),
+                        placed_slices.len(),
+                    ),
+                )));
+            }
+            shared
+                .buffers
+                .first()
+                .expect("shared demand predicate contains its owner view")
+                .write_bytes(&1u32.to_le_bytes())
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            Some(shared.buffers)
+        } else {
+            None
+        };
         let no_retained_signal_keys = BTreeSet::new();
         let slices = placed_slices
             .iter()
             .zip(lane_mounteds_by_slice)
-            .map(|slice| {
+            .enumerate()
+            .map(|(slice_index, slice)| {
                 let (slice, lane_mounteds) = slice;
                 let device = devices.get(&slice.device_id).ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -265,6 +329,10 @@ impl VulkanResidentPlacedComponentBatchRunner {
                         .unwrap_or(&no_retained_signal_keys),
                     capture_causal_state_snapshots,
                     &phase_execution_plan,
+                    demand_pipeline_predicates
+                        .as_ref()
+                        .and_then(|predicates| predicates.get(slice_index))
+                        .cloned(),
                     quantum_calibrator,
                 )
             })
@@ -427,8 +495,13 @@ impl VulkanResidentPlacedComponentBatchRunner {
         Ok(Self {
             distributed_dispatches,
             lane_capacity,
+            device_ids: placed_slices
+                .iter()
+                .map(|slice| slice.device_id.clone())
+                .collect(),
             slices,
             edge_transfers,
+            demand_pipeline_predicates,
         })
     }
 
@@ -492,6 +565,117 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 .edge_transfers
                 .iter()
                 .all(VulkanComponentBatchEdgeTransfer::supports_deferred_completion)
+    }
+
+    fn has_deferred_demand_pipeline(&self) -> bool {
+        self.demand_pipeline_predicates
+            .as_ref()
+            .is_some_and(|predicates| {
+                !self.slices.is_empty()
+                    && predicates.len() == self.slices.len()
+                    && self
+                        .slices
+                        .iter()
+                        .all(VulkanResidentComponentBatchSliceRunner::has_pipeline_deferred_demand_segment)
+            })
+    }
+
+    fn reset_deferred_demand_pipeline_predicate(
+        &self,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let predicate = self
+            .demand_pipeline_predicates
+            .as_ref()
+            .and_then(|predicates| predicates.first())
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "component batch has no shared demand-pipeline predicate".to_string(),
+                ))
+            })?;
+        predicate
+            .write_bytes(&1u32.to_le_bytes())
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+    }
+
+    fn begin_deferred_demand_pipeline_executions<'a>(
+        &'a self,
+        pipeline: &[usize],
+    ) -> Result<
+        Vec<VulkanCompiledResourceExecutionGuard<'a>>,
+        VulkanResidentInProcessPlacedRuntimeError,
+    > {
+        if !self.has_deferred_demand_pipeline() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError("component batch has no deferred demand pipeline".to_string()),
+            ));
+        }
+        pipeline
+            .iter()
+            .copied()
+            .map(|device_index| self.slice(device_index)?.begin_pipeline_demand_execution())
+            .collect()
+    }
+
+    fn complete_deferred_demand_pipeline_submissions(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        pipeline: &[usize],
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let (&last_device_index, preceding) = pipeline.split_last().ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "deferred demand pipeline is empty".to_string(),
+            ))
+        })?;
+        let last_slice = self.slice(last_device_index)?;
+        let last_device_id = self.device_ids.get(last_device_index).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "component batch has no device identity for slice {last_device_index}"
+            )))
+        })?;
+        let last_device = devices.get(last_device_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: last_device_id.clone(),
+            }
+        })?;
+        last_slice.wait_pipeline_demand_submission(last_device, batch_width)?;
+        for device_index in preceding {
+            self.slice(*device_index)?
+                .mark_pipeline_demand_submission_completed(batch_width)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_deferred_demand_pipeline_submissions(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        pipeline: &[usize],
+        batch_width: usize,
+        stream_ticks: &[u64],
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<Option<usize>, VulkanResidentInProcessPlacedRuntimeError> {
+        for (pipeline_position, device_index) in pipeline.iter().copied().enumerate() {
+            let slice = self.slice(device_index)?;
+            let device_id = self.device_ids.get(device_index).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch has no device identity for slice {device_index}"
+                )))
+            })?;
+            let device = devices.get(device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.clone(),
+                }
+            })?;
+            if slice.resolve_pipeline_demand_submission(
+                device,
+                batch_width,
+                stream_ticks,
+                dynamic_state_capacity_activations,
+            )? {
+                return Ok(Some(pipeline_position));
+            }
+        }
+        Ok(None)
     }
 
     fn transfer_edge(

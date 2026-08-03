@@ -12,6 +12,7 @@ struct VulkanResidentComponentBatchSliceRunner {
     execution_units: Vec<VulkanComponentBatchExecutionUnit>,
     demand_residency:
         BTreeMap<usize, VulkanDemandResidencyBatchExecutionSegment>,
+    pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
     submission_template_catalog:
         RefCell<BTreeMap<(usize, usize), VulkanResidentQueueSubmissionTemplate>>,
     execution_shape_class_catalog: RefCell<BTreeMap<usize, String>>,
@@ -255,14 +256,84 @@ fn component_batch_state_buffer_index_at_binding(
 }
 
 impl VulkanResidentComponentBatchSliceRunner {
+    fn has_pipeline_deferred_demand_segment(&self) -> bool {
+        self.pipeline_continuation_predicate.is_some()
+            && self.demand_residency.len() == 1
+            && self
+                .demand_residency
+                .get(&0)
+                .is_some_and(|segment| segment.unit_end == self.execution_units.len())
+            && self.execution_units.iter().all(|unit| {
+                matches!(unit, VulkanComponentBatchExecutionUnit::LocalComponent { .. })
+            })
+    }
+
     fn supports_deferred_completion(&self) -> bool {
-        self.demand_residency.is_empty()
+        (self.demand_residency.is_empty() || self.has_pipeline_deferred_demand_segment())
             && !self.execution_units.iter().any(|unit| {
                 matches!(
                     unit,
                     VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
                 )
             })
+    }
+
+    fn pipeline_demand_segment(
+        &self,
+    ) -> Result<&VulkanDemandResidencyBatchSegment, VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.has_pipeline_deferred_demand_segment() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "component batch has no pipeline-wide deferred demand segment".to_string(),
+                ),
+            ));
+        }
+        Ok(&self
+            .demand_residency
+            .get(&0)
+            .expect("pipeline demand segment eligibility was validated")
+            .segment)
+    }
+
+    fn begin_pipeline_demand_execution(
+        &self,
+    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanResidentInProcessPlacedRuntimeError>
+    {
+        self.pipeline_demand_segment()?.begin_execution()
+    }
+
+    fn wait_pipeline_demand_submission(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.pipeline_demand_segment()?
+            .wait_initial_submission(device, batch_width)
+    }
+
+    fn mark_pipeline_demand_submission_completed(
+        &self,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.pipeline_demand_segment()?
+            .mark_initial_submission_completed(batch_width)
+    }
+
+    fn resolve_pipeline_demand_submission(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+        stream_ticks: &[u64],
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        self.pipeline_demand_segment()?.resolve_completed_submission(
+            device,
+            &self.steps,
+            &self.batch_control_buffers,
+            batch_width,
+            stream_ticks,
+            dynamic_state_capacity_activations,
+        )
     }
 
     fn new(
@@ -277,6 +348,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
+        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
         quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         if lane_capacity == 0 {
@@ -785,6 +857,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                             *step_start,
                             *step_end,
                             lane_capacity,
+                            pipeline_continuation_predicate.clone(),
                             context.clone(),
                         )?
                     {
@@ -814,6 +887,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             steps,
             execution_units,
             demand_residency,
+            pipeline_continuation_predicate,
             submission_template_catalog: RefCell::new(BTreeMap::new()),
             execution_shape_class_catalog: RefCell::new(BTreeMap::new()),
             sequence_catalog: RefCell::new(BTreeMap::new()),
@@ -1090,13 +1164,8 @@ impl VulkanResidentComponentBatchSliceRunner {
         let mut measurements = Vec::new();
         let mut local_submission_batch = VulkanResidentQueueSubmissionBatch::new();
         let completion_mode = if completion_mode == VulkanComponentBatchCompletionMode::Deferred
-            && self.demand_residency.is_empty()
-            && !self.execution_units.iter().any(|unit| {
-                matches!(
-                    unit,
-                    VulkanComponentBatchExecutionUnit::DistributedDispatch { .. }
-                )
-            }) {
+            && self.supports_deferred_completion()
+        {
             VulkanComponentBatchCompletionMode::Deferred
         } else {
             VulkanComponentBatchCompletionMode::Blocking
@@ -1170,14 +1239,25 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 )?,
                                 _ => Vec::new(),
                             };
-                        demand_residency.segment.run(
-                            device,
-                            &self.steps,
-                            &self.batch_control_buffers,
-                            batch_width,
-                            stream_ticks,
-                            dynamic_state_capacity_activations,
-                        )?;
+                        if completion_mode == VulkanComponentBatchCompletionMode::Deferred {
+                            demand_residency.segment.submit_initial(
+                                device,
+                                &self.steps,
+                                &self.batch_control_buffers,
+                                batch_width,
+                                stream_ticks,
+                                dynamic_state_capacity_activations,
+                            )?;
+                        } else {
+                            demand_residency.segment.run(
+                                device,
+                                &self.steps,
+                                &self.batch_control_buffers,
+                                batch_width,
+                                stream_ticks,
+                                dynamic_state_capacity_activations,
+                            )?;
+                        }
                         if !signal_points.is_empty() {
                             device
                                 .submit_timeline_semaphore_bridge(&[], &signal_points)

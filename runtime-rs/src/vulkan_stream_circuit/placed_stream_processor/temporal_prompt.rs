@@ -131,6 +131,66 @@ fn mount_speculative_source_tap_frame_copies(
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {
+    fn transfer_causal_component_block_edge(
+        &self,
+        runner: &VulkanResidentPlacedTemporalBlockRunner,
+        source_device_index: usize,
+        destination_device_index: usize,
+        batch_width: usize,
+        transport_stats: &mut VulkanPlacedEdgeTransportStats,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let source_slice = self.device_slices.get(source_device_index).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "causal component batch has no source device slice {source_device_index}"
+            )))
+        })?;
+        let [outgoing] = source_slice.mounted.edge_io.outgoing_buffers.as_slice() else {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "causal component batch device {:?} has {} outgoing edges; expected one",
+                    source_slice.device_id,
+                    source_slice.mounted.edge_io.outgoing_buffers.len()
+                )),
+            ));
+        };
+        let route = runner.execution_graph.transfer_edge(
+            source_device_index,
+            destination_device_index,
+            outgoing.endpoint.edge_index,
+        )?;
+        let transferred_bytes = outgoing.byte_capacity.saturating_mul(batch_width);
+        transport_stats.direct_copy_count = transport_stats.direct_copy_count.saturating_add(1);
+        transport_stats.direct_copy_byte_count = transport_stats
+            .direct_copy_byte_count
+            .saturating_add(transferred_bytes);
+        transport_stats.direct_receive_count =
+            transport_stats.direct_receive_count.saturating_add(1);
+        transport_stats.direct_receive_byte_count = transport_stats
+            .direct_receive_byte_count
+            .saturating_add(transferred_bytes);
+        transport_stats
+            .edges
+            .push(VulkanPlacedEdgeTransportEdgeStats {
+                key: VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint),
+                signal: outgoing.endpoint.signal.clone(),
+                route,
+                byte_capacity: outgoing.byte_capacity,
+                publish_count: 1,
+                receive_count: 1,
+                transferred_byte_count: transferred_bytes,
+                queue_signal_count: usize::from(
+                    route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                ),
+                queue_wait_count: usize::from(
+                    route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                ),
+                host_wait_count: usize::from(route == VulkanPlacedEdgeTransferRoute::HostStaging),
+                queue_overlap_eligible: route.supports_queue_overlap(),
+                overlap_submission_count: usize::from(route.supports_queue_overlap()),
+            });
+        Ok(())
+    }
+
     fn linear_pipeline_device_indices(
         &self,
     ) -> Result<Vec<usize>, VulkanResidentInProcessPlacedRuntimeError> {
@@ -570,6 +630,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         } else {
             VulkanComponentBatchCompletionMode::Blocking
         };
+        let deferred_demand_pipeline = completion_mode
+            == VulkanComponentBatchCompletionMode::Deferred
+            && runner.execution_graph.has_deferred_demand_pipeline();
         let input_device = devices.get(&self.model.input_device_id).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                 device_id: self.model.input_device_id.clone(),
@@ -584,6 +647,16 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         }
 
         let mut transport_stats = VulkanPlacedEdgeTransportStats::default();
+        let demand_execution_guards = if deferred_demand_pipeline {
+            runner
+                .execution_graph
+                .reset_deferred_demand_pipeline_predicate()?;
+            runner
+                .execution_graph
+                .begin_deferred_demand_pipeline_executions(&runner.pipeline)?
+        } else {
+            Vec::new()
+        };
         for (pipeline_index, device_index) in runner.pipeline.iter().copied().enumerate() {
             let slice = &self.device_slices[device_index];
             runner.execution_graph.run_causal_sequence(
@@ -597,56 +670,103 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 completion_mode,
             )?;
             if let Some(next_device_index) = runner.pipeline.get(pipeline_index + 1).copied() {
-                let [outgoing] = slice.mounted.edge_io.outgoing_buffers.as_slice() else {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(format!(
-                            "causal component batch device {:?} has {} outgoing edges; expected one",
-                            slice.device_id,
-                            slice.mounted.edge_io.outgoing_buffers.len()
-                        )),
-                    ));
-                };
-                let route = runner.execution_graph.transfer_edge(
+                self.transfer_causal_component_block_edge(
+                    runner,
                     device_index,
                     next_device_index,
-                    outgoing.endpoint.edge_index,
+                    input_token_ids.len(),
+                    &mut transport_stats,
                 )?;
-                let transferred_bytes =
-                    outgoing.byte_capacity.saturating_mul(input_token_ids.len());
-                transport_stats.direct_copy_count =
-                    transport_stats.direct_copy_count.saturating_add(1);
-                transport_stats.direct_copy_byte_count = transport_stats
-                    .direct_copy_byte_count
-                    .saturating_add(transferred_bytes);
-                transport_stats.direct_receive_count =
-                    transport_stats.direct_receive_count.saturating_add(1);
-                transport_stats.direct_receive_byte_count = transport_stats
-                    .direct_receive_byte_count
-                    .saturating_add(transferred_bytes);
-                transport_stats
-                    .edges
-                    .push(VulkanPlacedEdgeTransportEdgeStats {
-                        key: VulkanPlacedEdgePacketKey::from_outgoing_endpoint(
-                            &outgoing.endpoint,
-                        ),
-                        signal: outgoing.endpoint.signal.clone(),
-                        route,
-                        byte_capacity: outgoing.byte_capacity,
-                        publish_count: 1,
-                        receive_count: 1,
-                        transferred_byte_count: transferred_bytes,
-                        queue_signal_count: usize::from(
-                            route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
-                        ),
-                        queue_wait_count: usize::from(
-                            route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
-                        ),
-                        host_wait_count: usize::from(
-                            route == VulkanPlacedEdgeTransferRoute::HostStaging,
-                        ),
-                        queue_overlap_eligible: route.supports_queue_overlap(),
-                        overlap_submission_count: usize::from(route.supports_queue_overlap()),
-                    });
+            }
+        }
+        if deferred_demand_pipeline {
+            let stream_ticks = consecutive_component_batch_stream_ticks(
+                start_stream_tick,
+                input_token_ids.len(),
+            )?;
+            runner
+                .execution_graph
+                .complete_deferred_demand_pipeline_submissions(
+                    devices,
+                    &runner.pipeline,
+                    input_token_ids.len(),
+                )?;
+            drop(demand_execution_guards);
+
+            let mut unresolved_pipeline_start = 0usize;
+            loop {
+                let submitted_pipeline = &runner.pipeline[unresolved_pipeline_start..];
+                let Some(relative_miss_position) = runner
+                    .execution_graph
+                    .resolve_deferred_demand_pipeline_submissions(
+                        devices,
+                        submitted_pipeline,
+                        input_token_ids.len(),
+                        &stream_ticks,
+                        capacity,
+                    )?
+                else {
+                    break;
+                };
+                let miss_position = unresolved_pipeline_start
+                    .checked_add(relative_miss_position)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "deferred demand pipeline miss position overflowed".to_string(),
+                        ))
+                    })?;
+                let retry_start = miss_position + 1;
+                if retry_start >= runner.pipeline.len() {
+                    break;
+                }
+
+                runner
+                    .execution_graph
+                    .reset_deferred_demand_pipeline_predicate()?;
+                let retry_pipeline = &runner.pipeline[retry_start..];
+                let retry_execution_guards = runner
+                    .execution_graph
+                    .begin_deferred_demand_pipeline_executions(retry_pipeline)?;
+                self.transfer_causal_component_block_edge(
+                    runner,
+                    runner.pipeline[miss_position],
+                    runner.pipeline[retry_start],
+                    input_token_ids.len(),
+                    &mut transport_stats,
+                )?;
+                for (retry_offset, device_index) in retry_pipeline.iter().copied().enumerate() {
+                    let slice = &self.device_slices[device_index];
+                    runner.execution_graph.run_causal_sequence(
+                        devices,
+                        device_index,
+                        &slice.device_id,
+                        &slice.mounted,
+                        input_token_ids,
+                        start_stream_tick,
+                        capacity,
+                        VulkanComponentBatchCompletionMode::Deferred,
+                    )?;
+                    if let Some(next_device_index) =
+                        retry_pipeline.get(retry_offset + 1).copied()
+                    {
+                        self.transfer_causal_component_block_edge(
+                            runner,
+                            device_index,
+                            next_device_index,
+                            input_token_ids.len(),
+                            &mut transport_stats,
+                        )?;
+                    }
+                }
+                runner
+                    .execution_graph
+                    .complete_deferred_demand_pipeline_submissions(
+                        devices,
+                        retry_pipeline,
+                        input_token_ids.len(),
+                    )?;
+                drop(retry_execution_guards);
+                unresolved_pipeline_start = retry_start;
             }
         }
         Ok(transport_stats)

@@ -53,6 +53,8 @@ struct VulkanDemandResidencyBatchChain {
     full_sequence: VulkanResidentKernelSequence,
     resume_sequences: Vec<VulkanResidentKernelSequence>,
     observed_notification_epoch: Cell<u32>,
+    shared_pipeline_guard: bool,
+    initial_submission_pending: Cell<bool>,
 }
 
 struct VulkanDemandResidencyBatchSegment {
@@ -63,6 +65,7 @@ struct VulkanDemandResidencyBatchSegment {
     step_start: usize,
     step_end: usize,
     lane_capacity: usize,
+    pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
     chains: RefCell<BTreeMap<usize, VulkanDemandResidencyBatchChain>>,
 }
 
@@ -77,6 +80,7 @@ impl VulkanDemandResidencyBatchSegment {
         step_start: usize,
         step_end: usize,
         lane_capacity: usize,
+        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
         context: VulkanDemandResidencyExecutionContext,
     ) -> Result<Option<Self>, VulkanResidentInProcessPlacedRuntimeError> {
         if schedule.execution_scope != context.execution_scope {
@@ -263,8 +267,20 @@ impl VulkanDemandResidencyBatchSegment {
             step_start,
             step_end,
             lane_capacity,
+            pipeline_continuation_predicate,
             chains: RefCell::new(BTreeMap::new()),
         }))
+    }
+
+    fn begin_execution(
+        &self,
+    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanResidentInProcessPlacedRuntimeError>
+    {
+        self.context.store.begin_execution().map_err(|error| {
+            demand_batch_error(format!(
+                "failed to enter compiled-resource deferred batch execution epoch: {error}"
+            ))
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,6 +312,7 @@ impl VulkanDemandResidencyBatchSegment {
                 &self.gate_specs,
                 Arc::clone(&self.address_table),
                 self.address_table_slot_count,
+                self.pipeline_continuation_predicate.clone(),
             )?;
             self.chains.borrow_mut().insert(batch_width, chain);
         }
@@ -304,6 +321,104 @@ impl VulkanDemandResidencyBatchSegment {
             .get(&batch_width)
             .expect("demand batch width was initialized")
             .run(
+                device,
+                steps,
+                batch_control_buffers,
+                batch_width,
+                stream_ticks,
+                dynamic_state_capacity_activations,
+                &self.context,
+            )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_initial(
+        &self,
+        device: &VulkanComputeDevice,
+        steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
+        batch_width: usize,
+        stream_ticks: &[u64],
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if batch_width == 0 || batch_width > self.lane_capacity {
+            return Err(demand_batch_error(format!(
+                "deferred demand batch width {batch_width} is outside 1..={}",
+                self.lane_capacity
+            )));
+        }
+        if !self.chains.borrow().contains_key(&batch_width) {
+            let chain = VulkanDemandResidencyBatchChain::new(
+                device,
+                steps,
+                self.step_start,
+                self.step_end,
+                batch_width,
+                &self.gate_specs,
+                Arc::clone(&self.address_table),
+                self.address_table_slot_count,
+                self.pipeline_continuation_predicate.clone(),
+            )?;
+            self.chains.borrow_mut().insert(batch_width, chain);
+        }
+        self.chains
+            .borrow()
+            .get(&batch_width)
+            .expect("deferred demand batch width was initialized")
+            .submit_initial(
+                device,
+                steps,
+                batch_control_buffers,
+                batch_width,
+                stream_ticks,
+                dynamic_state_capacity_activations,
+            )
+    }
+
+    fn wait_initial_submission(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.chains
+            .borrow()
+            .get(&batch_width)
+            .ok_or_else(|| demand_batch_error("deferred demand batch was not submitted"))?
+            .wait_initial_submission(device)
+    }
+
+    fn mark_initial_submission_completed(
+        &self,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.chains
+            .borrow()
+            .get(&batch_width)
+            .ok_or_else(|| demand_batch_error("deferred demand batch was not submitted"))?
+            .mark_initial_submission_completed()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_completed_submission(
+        &self,
+        device: &VulkanComputeDevice,
+        steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
+        batch_width: usize,
+        stream_ticks: &[u64],
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        self.chains
+            .borrow()
+            .get(&batch_width)
+            .ok_or_else(|| demand_batch_error("deferred demand batch was not submitted"))?
+            .resolve_completed_submission(
                 device,
                 steps,
                 batch_control_buffers,
@@ -326,6 +441,7 @@ impl VulkanDemandResidencyBatchChain {
         gate_specs: &[VulkanDemandResidencyBatchGateSpec],
         address_table: Arc<VulkanResidentBuffer>,
         address_table_slot_count: usize,
+        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let mut gates_before_step = BTreeMap::<usize, Vec<usize>>::new();
         for (gate_index, gate) in gate_specs.iter().enumerate() {
@@ -380,14 +496,21 @@ impl VulkanDemandResidencyBatchChain {
                 "demand batch gate has no selected computation after it",
             ));
         }
-        let continuation_predicate = Arc::new(
-            device
-                .create_conditional_resident_buffer(size_of::<u32>())
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-        );
-        continuation_predicate
-            .write_bytes(&1u32.to_le_bytes())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let shared_pipeline_guard = pipeline_continuation_predicate.is_some();
+        let continuation_predicate = match pipeline_continuation_predicate {
+            Some(predicate) => predicate,
+            None => {
+                let predicate = Arc::new(
+                    device
+                        .create_conditional_resident_buffer(size_of::<u32>())
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                );
+                predicate
+                    .write_bytes(&1u32.to_le_bytes())
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                predicate
+            }
+        };
         let missing_capacity = gate_specs
             .iter()
             .map(|gate| {
@@ -491,6 +614,8 @@ impl VulkanDemandResidencyBatchChain {
             full_sequence,
             resume_sequences,
             observed_notification_epoch: Cell::new(0),
+            shared_pipeline_guard,
+            initial_submission_pending: Cell::new(false),
         })
     }
 
@@ -527,8 +652,100 @@ impl VulkanDemandResidencyBatchChain {
                 batch_width,
                 stream_ticks,
                 dynamic_state_capacity_activations,
+                true,
             )?;
         }
+        self.resolve_completed_submission(
+            device,
+            steps,
+            batch_control_buffers,
+            batch_width,
+            stream_ticks,
+            dynamic_state_capacity_activations,
+            context,
+        )
+        .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_initial(
+        &self,
+        device: &VulkanComputeDevice,
+        steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
+        batch_width: usize,
+        stream_ticks: &[u64],
+        dynamic_state_capacity_activations: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if self.initial_submission_pending.get() {
+            return Err(demand_batch_error(
+                "deferred demand batch submission is already pending",
+            ));
+        }
+        self.run_from_gate(
+            device,
+            None,
+            steps,
+            batch_control_buffers,
+            batch_width,
+            stream_ticks,
+            dynamic_state_capacity_activations,
+            false,
+        )?;
+        self.initial_submission_pending.set(true);
+        Ok(())
+    }
+
+    fn wait_initial_submission(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.initial_submission_pending.get() {
+            return Err(demand_batch_error(
+                "deferred demand batch has no pending initial submission",
+            ));
+        }
+        device
+            .wait_resident_kernel_sequence(&self.full_sequence)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        self.initial_submission_pending.set(false);
+        Ok(())
+    }
+
+    fn mark_initial_submission_completed(
+        &self,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.initial_submission_pending.replace(false) {
+            return Err(demand_batch_error(
+                "deferred demand batch has no pending initial submission",
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_completed_submission(
+        &self,
+        device: &VulkanComputeDevice,
+        steps: &[VulkanComponentBatchDispatchStep],
+        batch_control_buffers: &BTreeMap<
+            VulkanResidentComponentBatchControlPayload,
+            VulkanResidentBuffer,
+        >,
+        batch_width: usize,
+        stream_ticks: &[u64],
+        dynamic_state_capacity_activations: u32,
+        context: &VulkanDemandResidencyExecutionContext,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        if self.initial_submission_pending.get() {
+            return Err(demand_batch_error(
+                "deferred demand batch completion was not established before miss resolution",
+            ));
+        }
+        let mut observed_miss = false;
         let mut resume_count = 0usize;
         loop {
             let notification_epoch = self
@@ -537,8 +754,9 @@ impl VulkanDemandResidencyBatchChain {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             if notification_epoch == self.observed_notification_epoch.get() {
                 self.continuation_enabled.set(true);
-                return Ok(());
+                return Ok(observed_miss);
             }
+            observed_miss = true;
             self.continuation_enabled.set(false);
             let missing = self
                 .missing_queue
@@ -642,6 +860,7 @@ impl VulkanDemandResidencyBatchChain {
                 batch_width,
                 stream_ticks,
                 dynamic_state_capacity_activations,
+                true,
             )?;
         }
     }
@@ -658,6 +877,7 @@ impl VulkanDemandResidencyBatchChain {
         batch_width: usize,
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
+        wait_for_completion: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let (start_command_index, direct_gate_command_index, sequence) =
             match resume_gate_index {
@@ -695,9 +915,12 @@ impl VulkanDemandResidencyBatchChain {
                 },
             );
         if can_replay_recorded_commands {
-            return device
-                .run_recorded_resident_kernel_sequence(sequence)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop);
+            return if wait_for_completion {
+                device.run_recorded_resident_kernel_sequence(sequence)
+            } else {
+                device.submit_recorded_resident_kernel_sequence(sequence)
+            }
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop);
         }
         let step_push_constants = steps
             .iter()
@@ -730,9 +953,14 @@ impl VulkanDemandResidencyBatchChain {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let mut sequence_steps =
-            Vec::with_capacity(self.commands.len() - start_command_index);
-        let mut conditional_region_id = 1u32;
+        let conditional_regions = demand_batch_conditional_regions(
+            &self.commands,
+            start_command_index,
+            direct_gate_command_index,
+            self.shared_pipeline_guard,
+            resume_gate_index.is_some(),
+        )?;
+        let mut sequence_steps = Vec::with_capacity(self.commands.len() - start_command_index);
         for (command_index, command) in self
             .commands
             .iter()
@@ -817,50 +1045,82 @@ impl VulkanDemandResidencyBatchChain {
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
             };
-            if command_index <= direct_gate_command_index {
-                sequence_steps.push(sequence_step);
-            } else {
-                let region_id = if matches!(
-                    command,
-                    VulkanDemandResidencyBatchCommand::Gate(_)
-                ) {
-                    conditional_region_id =
-                        conditional_region_id.checked_add(1).ok_or_else(|| {
-                            demand_batch_error(
-                                "demand batch conditional region count exceeds u32",
-                            )
-                        })?;
-                    let gate_region = conditional_region_id;
-                    conditional_region_id =
-                        conditional_region_id.checked_add(1).ok_or_else(|| {
-                            demand_batch_error(
-                                "demand batch conditional region count exceeds u32",
-                            )
-                        })?;
-                    gate_region
-                } else {
-                    conditional_region_id
-                };
+            let conditional_region = conditional_regions
+                .get(command_index - start_command_index)
+                .copied()
+                .flatten();
+            if let Some(region_id) = conditional_region {
                 sequence_steps.push(
-                    sequence_step.with_condition(
-                        &self.continuation_predicate,
-                        0,
-                        false,
-                        region_id,
-                    )
-                    .map_err(
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-                    )?,
+                    sequence_step
+                        .with_condition(
+                            &self.continuation_predicate,
+                            0,
+                            false,
+                            region_id,
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                 );
+            } else {
+                sequence_steps.push(sequence_step);
             }
         }
         device
             .record_resident_kernel_sequence(sequence, &sequence_steps)
             .and_then(|_| {
-                device.run_recorded_resident_kernel_sequence(sequence)
+                if wait_for_completion {
+                    device.run_recorded_resident_kernel_sequence(sequence)
+                } else {
+                    device.submit_recorded_resident_kernel_sequence(sequence)
+                }
             })
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
+}
+
+fn demand_batch_conditional_regions(
+    commands: &[VulkanDemandResidencyBatchCommand],
+    start_command_index: usize,
+    direct_gate_command_index: usize,
+    shared_pipeline_guard: bool,
+    resuming: bool,
+) -> Result<Vec<Option<u32>>, VulkanResidentInProcessPlacedRuntimeError> {
+    if direct_gate_command_index < start_command_index
+        || direct_gate_command_index >= commands.len()
+        || !matches!(
+            commands[direct_gate_command_index],
+            VulkanDemandResidencyBatchCommand::Gate(_)
+        )
+    {
+        return Err(demand_batch_error(format!(
+            "demand batch direct gate {direct_gate_command_index} is not a gate in the remaining command range {start_command_index}..{}",
+            commands.len(),
+        )));
+    }
+    if resuming && direct_gate_command_index != start_command_index {
+        return Err(demand_batch_error(
+            "demand batch resume must start at its direct gate",
+        ));
+    }
+    let commands = commands.get(start_command_index..).ok_or_else(|| {
+        demand_batch_error("demand batch conditional layout starts outside its command list")
+    })?;
+    let mut region_id = 1u32;
+    let mut previous_was_conditional_gate = false;
+    let mut regions = Vec::with_capacity(commands.len());
+    for (offset, command) in commands.iter().copied().enumerate() {
+        let command_index = start_command_index + offset;
+        let conditional = command_index > direct_gate_command_index
+            || (shared_pipeline_guard && !resuming && command_index <= direct_gate_command_index);
+        if conditional && previous_was_conditional_gate {
+            region_id = region_id.checked_add(1).ok_or_else(|| {
+                demand_batch_error("demand batch conditional region count exceeds u32")
+            })?;
+        }
+        regions.push(conditional.then_some(region_id));
+        previous_was_conditional_gate = conditional
+            && matches!(command, VulkanDemandResidencyBatchCommand::Gate(_));
+    }
+    Ok(regions)
 }
 
 fn demand_batch_step_push_constants(

@@ -90,14 +90,30 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    orchestration and residency synchronization dominate target verification even
    when nearly every selected expert is already resident.
 
-   Replace per-selection host mediation with a GPU-resident expert indirection
-   table, presence map, and compact miss queue. Resident hits must remain entirely
-   device-side; only a real miss may synchronize the owning placement, fill or
-   retier a slot, patch the table, and retry the affected work. Make the causal
-   graph a dependency-aware resident submission and allow deferred completion on
-   demand-resident slices whenever the current execution has no miss, rather than
-   disabling it merely because a demand-residency directory exists. Reduce queue,
-   fence, and copy waits without weakening rollback/commit semantics. Then add
+   The resident-hit path now uses the GPU address table, presence map, compact
+   miss queue, and one cross-device continuation predicate. A contiguous causal
+   pipeline submits every demand-resident device slice before waiting only for
+   the terminal slice; the first real miss suppresses downstream work, the owning
+   slice resolves it, and only the affected suffix is resubmitted. Exact tests
+   cover local guarding, shared initial guarding, resume ordering, and invalid
+   gate layouts. The complete five-GPU gate remained coherent and cleanly
+   released every NERVE allocation, but its truth result was 3.908 decode tok/s
+   and 7.175 prefill tok/s versus 3.933 and 7.251 before: correct but
+   performance-neutral. On the final truth turn, sequence submissions fell from
+   5,767 to 5,580, sequence waits from 6,137 to 5,546, copy submissions from
+   4,733 to 4,495, and copy waits from 3,831 to 3,657. Yet 79 target-verification
+   cycles still consumed 43.695 seconds (about 553 ms per cycle), while DSpark
+   accepted only 25.84% of proposals. The remaining synchronization is above the
+   layer pipeline rather than inside it.
+
+   Compile and submit the complete speculative cycle as a device-resident
+   transaction: generate the full demand-resident draft window without a host
+   wait per proposal, append target projection and sampling to the target lane,
+   compare draft and target tokens on-device, produce the committed-prefix count,
+   select and commit causal state snapshots indirectly, publish the retained
+   source frame, and catch the draft state up without per-token host mediation.
+   The host should regain control only for a real residency miss or a completed
+   block of emitted tokens. Preserve exact rollback/commit semantics. Then add
    structurally selected MXFP4/FP8 parallel-linear implementations, improve the
    retained-frame DSpark schedule and acceptance, and use adaptive tier exchange
    so hot experts remain in VRAM while cold experts use the smallest viable lower
@@ -109,11 +125,13 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
 5. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. The latest current-schema packages pass the full sampled,
-   thinking-enabled five-turn gate with correct Greece recall. The latest
-   stateful-causal regression gate averaged 109.88 decode tok/s and 216.45 prefill
-   tok/s for Qwen3.6-35B-A3B, while Qwen3.5-9B averaged 59.81 decode tok/s and
-   184.31 prefill tok/s. Run both gates again before every runtime-performance
-   commit.
+   thinking-enabled five-turn gate with correct Greece recall. After the
+   cross-device deferred-demand milestone, Qwen3.6-35B-A3B averaged 109.29 decode
+   tok/s and 211.66 prefill tok/s versus 109.88 and 216.45 before, while
+   Qwen3.5-9B averaged 59.58 decode tok/s and 180.20 prefill tok/s versus 59.81
+   and 184.31 before. Both decode deltas are below 0.6%, both gates passed, and
+   both released their NERVE GPU reservations exactly. Run both gates again
+   before every runtime-performance commit.
    Keep the live gate's repetition and conversation checks active so throughput
    alone cannot pass. Do not use faulted AMD devices merely to satisfy this
    gate; defer a model when no verified-healthy placement exists.
