@@ -83,6 +83,34 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    seconds across 691 speculative cycles, versus 14.28 seconds drafting and
    0.58 seconds of draft catch-up, and is now the dominant measured cost.
 
+   A fresh equivalent llama.cpp build-10257 reference now exercises the
+   package's DSpark sidecar rather than plain target decoding. With the Q2
+   target at 131,072 context, five-token trained draft blocks, thinking enabled,
+   65,536 allowed output tokens, and the same warmup plus five real conversation
+   turns, llama.cpp averaged 10.762 decode tok/s (11.331 weighted aggregate),
+   83.152 prefill tok/s, and accepted 1,733 of 5,175 drafted tokens (33.49%).
+   The conversation remained coherent and recalled Greece correctly. This is a
+   stronger direct reference than the earlier non-speculative 9.50 tok/s Q2
+   run, but it also demonstrates that the original 25--30 tok/s expectation is
+   not delivered by current llama.cpp DSpark on this Vulkan workstation. NERVE
+   must nevertheless continue toward the product target: first close the
+   semantic acceptance gap from 23.55% to at least the reference's 33.49%, then
+   surpass the reference through cheaper target verification and transaction
+   fusion rather than assuming DSpark alone supplies 30 tok/s.
+
+   The exact six-lane target-verification MXFP4 microbenchmark now matches the
+   anchor plus five trained DSpark proposals. On an AMD device it measured
+   1.654 ms for gate/up and 0.907 ms for down, or 2.561 ms per 36-route layer.
+   Across 43 target layers that is roughly 110 ms before attention, routing,
+   synchronization, or transport, so the structurally generic MXFP4 sparse
+   expert kernels are independently material and require optimization. A
+   temporal-history dispatch-width experiment was rejected after a complete
+   gate fell from 4.419 to 4.178 decode tok/s; an attempted replay shortcut also
+   produced a repeated-answer quality failure. Both implementation paths and
+   the invalid compiled package were removed. Do not revive partial command
+   signatures: future replay work must prove equivalence against every field in
+   the recorded Vulkan sequence and pass the complete conversation gate.
+
    Compile and submit the complete speculative cycle as a device-resident
    transaction: generate the full demand-resident draft window without a host
    wait per proposal, append target projection and sampling to the target lane,

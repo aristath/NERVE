@@ -252,7 +252,7 @@ mod mxfp4_tests {
     }
 
     #[test]
-    fn native_mxfp4_batch_width_four_matches_real_sparse_geometry() {
+    fn native_mxfp4_batch_width_six_matches_and_times_real_sparse_geometry() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!(
                 "skipping native MXFP4 real batch geometry: explicit Vulkan device index unset"
@@ -267,7 +267,10 @@ mod mxfp4_tests {
         let intermediate_size = 2048usize;
         let num_experts = 256usize;
         let experts_per_token = 6usize;
-        let batch_width = 4usize;
+        // Target verification evaluates the anchor plus DeepSeek's five trained
+        // DSpark proposals as one causal block.  Keep this conformance and
+        // microbenchmark geometry equal to that real six-lane workload.
+        let batch_width = 6usize;
         let selected_experts = [2usize, 17, 63, 127, 191, 255];
         let gate_shader = render_mxfp4_shader_geometry(
             "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
@@ -501,6 +504,46 @@ mod mxfp4_tests {
         assert!(
             outputs.read_bytes(outputs.byte_capacity()).unwrap().iter().any(|byte| *byte != 0),
             "real-geometry batched MXFP4 execution must produce routed expert output"
+        );
+
+        let gate_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &gate_sequence,
+                &[VulkanResidentKernelSequenceStep::new(&gate_dispatch, &[])],
+            )
+            .unwrap();
+        let down_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &down_sequence,
+                &[VulkanResidentKernelSequenceStep::new(&down_dispatch, &[])],
+            )
+            .unwrap();
+        let timeout = Duration::from_secs(10);
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(&gate_sequence, timeout)
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(&down_sequence, timeout)
+            .unwrap();
+        let gate_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(&gate_sequence, timeout)
+            .unwrap();
+        let down_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(&down_sequence, timeout)
+            .unwrap();
+        eprintln!(
+            "native_mxfp4_batch_real_geometry width={batch_width} routes={} gate_ms={:.6} down_ms={:.6} total_ms={:.6} elapsed_ms={:.3}",
+            batch_width * experts_per_token,
+            gate_ns as f64 / 1_000_000.0,
+            down_ns as f64 / 1_000_000.0,
+            (gate_ns + down_ns) as f64 / 1_000_000.0,
+            started.elapsed().as_secs_f64() * 1_000.0,
         );
         assert!(
             started.elapsed() < Duration::from_secs(60),
