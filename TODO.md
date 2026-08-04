@@ -86,6 +86,13 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    host-visible spill by default; do not optimize synthetic scores at the expense
    of behavior.
 
+   Before another whole-model optimizer run, reduce kernel migration pressure
+   by suballocating permanent immutable parameters from bounded device-local
+   arenas instead of allocating one Vulkan memory object per tensor. Prove
+   range binding and shared-arena lifetime with exact sequential tests before a
+   deliberately short AMD workload, then retry full validation only after
+   pre/post VRAM and kernel-log checks pass.
+
 4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. The latest current-schema packages pass the full sampled,
