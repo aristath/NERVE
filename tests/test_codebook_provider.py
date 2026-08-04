@@ -64,6 +64,9 @@ from nerve.representation_optimizer.staging.workspace import (
     CandidateConstructionContext,
 )
 from nerve.representation_optimizer.validation.protocols import ProofRequest
+from nerve.representation_optimizer.validation.conversation_semantics import (
+    validate_semantic_expectations,
+)
 from tests.test_representation_optimizer_contracts import (
     hardware_profile_contract,
 )
@@ -546,8 +549,12 @@ def _run_embedded_parameter_program(problem: ProviderProblem):
     ).run(problem)
 
 
-def test_conversation_validation_accepts_generic_assistant_identity_only() -> None:
+def test_conversation_fixture_satisfies_its_semantic_contract() -> None:
     fixture = conversation_fixture()
+    assert validate_semantic_expectations(
+        fixture,
+        turn_count=len(fixture["turns"]),
+    ) == fixture["semantic_expectations"]
     identity = fixture["semantic_expectations"]["turns"][1]["required_concepts"][0]
 
     assert identity == {
@@ -555,9 +562,9 @@ def test_conversation_validation_accepts_generic_assistant_identity_only() -> No
         "any_terms": [
             "ai assistant",
             "artificial intelligence",
+            "assistant",
             "chatbot",
             "language model",
-            "assistant",
         ],
     }
 

@@ -128,9 +128,9 @@ def conversation_fixture() -> Json:
                             "any_terms": [
                                 "ai assistant",
                                 "artificial intelligence",
+                                "assistant",
                                 "chatbot",
                                 "language model",
-                                "assistant",
                             ],
                         }
                     ],
