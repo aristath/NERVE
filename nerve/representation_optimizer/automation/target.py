@@ -72,11 +72,37 @@ class NoDeviceLeaseManager:
 
 
 @dataclass(frozen=True)
+class CapacityLeaseState:
+    """Live device state associated with one declared capacity reservation."""
+
+    reservation_digest: str
+    observations: tuple[Json, ...]
+    release_vram_tolerance_bytes: int
+
+    def __post_init__(self) -> None:
+        require_device_state_digest(
+            self.reservation_digest,
+            "capacity lease reservation_digest",
+        )
+        if (
+            isinstance(self.release_vram_tolerance_bytes, bool)
+            or not isinstance(self.release_vram_tolerance_bytes, int)
+            or self.release_vram_tolerance_bytes < 0
+        ):
+            raise ModelCompileError(
+                "capacity lease release tolerance must be a nonnegative integer"
+            )
+        _capacity_observations_by_device(self.observations)
+
+
+@dataclass(frozen=True)
 class VerifiedCapacityLeaseManager:
     """NERVE-only locks plus live capacity checks before and after execution."""
 
     lock_root: Path
-    probe_capacity_reservation_digest: Callable[["OptimizationTarget"], str]
+    probe_capacity_reservation_state: Callable[
+        ["OptimizationTarget"], CapacityLeaseState
+    ]
 
     @contextmanager
     def acquire(self, target: OptimizationTarget) -> Iterator[None]:
@@ -111,8 +137,8 @@ class VerifiedCapacityLeaseManager:
                     os.close(descriptor)
                     raise
                 descriptors.append(descriptor)
-            before = self.probe_capacity_reservation_digest(target)
-            if before != expected:
+            before = self.probe_capacity_reservation_state(target)
+            if before.reservation_digest != expected:
                 raise ModelCompileError(
                     f"target {target.target_id!r} does not satisfy its declared "
                     "device-capacity reservation before execution"
@@ -120,16 +146,108 @@ class VerifiedCapacityLeaseManager:
             try:
                 yield
             finally:
-                after = self.probe_capacity_reservation_digest(target)
-                if after != expected:
+                after = self.probe_capacity_reservation_state(target)
+                if after.reservation_digest != expected:
                     raise ModelCompileError(
                         f"target {target.target_id!r} did not restore its "
                         "declared device-capacity reservation"
                     )
+                _require_capacity_released(before, after, target.target_id)
         finally:
             for descriptor in reversed(descriptors):
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
+
+
+def _require_capacity_released(
+    before: CapacityLeaseState,
+    after: CapacityLeaseState,
+    target_id: str,
+) -> None:
+    if (
+        before.release_vram_tolerance_bytes
+        != after.release_vram_tolerance_bytes
+    ):
+        raise ModelCompileError(
+            f"target {target_id!r} changed its device-release tolerance"
+        )
+    before_by_id = _capacity_observations_by_device(before.observations)
+    after_by_id = _capacity_observations_by_device(after.observations)
+    if set(before_by_id) != set(after_by_id):
+        raise ModelCompileError(
+            f"target {target_id!r} did not restore the same device set"
+        )
+    tolerance = before.release_vram_tolerance_bytes
+    failures = []
+    for device_id in sorted(before_by_id):
+        prior = before_by_id[device_id]
+        current = after_by_id[device_id]
+        if current["vram_total_bytes"] != prior["vram_total_bytes"]:
+            failures.append(f"{device_id} changed total VRAM")
+            continue
+        growth = current["vram_used_bytes"] - prior["vram_used_bytes"]
+        if growth > tolerance:
+            failures.append(
+                f"{device_id} retained {growth} VRAM bytes above its "
+                f"pre-execution allocation (tolerance {tolerance})"
+            )
+        prior_pids = {
+            process["pid"]
+            for process in prior["resident_processes"]
+        }
+        current_pids = {
+            process["pid"]
+            for process in current["resident_processes"]
+        }
+        missing = sorted(prior_pids - current_pids)
+        if missing:
+            failures.append(
+                f"{device_id} lost pre-existing resident process(es) {missing}"
+            )
+    if failures:
+        raise ModelCompileError(
+            f"target {target_id!r} did not restore its pre-execution AMD "
+            "device state: " + "; ".join(failures)
+        )
+
+
+def _capacity_observations_by_device(
+    observations: tuple[Json, ...],
+) -> dict[str, Json]:
+    by_device: dict[str, Json] = {}
+    for observation in observations:
+        if not isinstance(observation, dict):
+            raise ModelCompileError("capacity lease observation must be an object")
+        device_id = observation.get("device_id")
+        total = observation.get("vram_total_bytes")
+        used = observation.get("vram_used_bytes")
+        processes = observation.get("resident_processes")
+        if (
+            not isinstance(device_id, str)
+            or not device_id
+            or isinstance(total, bool)
+            or not isinstance(total, int)
+            or total <= 0
+            or isinstance(used, bool)
+            or not isinstance(used, int)
+            or used < 0
+            or used > total
+            or not isinstance(processes, list)
+            or any(
+                not isinstance(process, dict)
+                or isinstance(process.get("pid"), bool)
+                or not isinstance(process.get("pid"), int)
+                or process["pid"] < 0
+                for process in processes
+            )
+            or len({process["pid"] for process in processes}) != len(processes)
+            or device_id in by_device
+        ):
+            raise ModelCompileError("capacity lease observation is invalid")
+        by_device[device_id] = observation
+    if not by_device:
+        raise ModelCompileError("capacity lease requires device observations")
+    return by_device
 
 
 def stable_device_lock_name(device_id: str) -> str:

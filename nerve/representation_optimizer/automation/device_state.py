@@ -6,6 +6,7 @@ from pathlib import Path
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.contracts import device_state_digest
+from nerve.representation_optimizer.automation.target import CapacityLeaseState
 
 
 AMD_PCI_VENDOR_ID = "0x1002"
@@ -25,6 +26,7 @@ class DeviceCapacityPolicy:
     minimum_reservable_vram_bytes: int = 1
     material_process_vram_bytes: int = 64 * 1024 * 1024
     material_process_gtt_bytes: int = 64 * 1024 * 1024
+    release_vram_tolerance_bytes: int = 16 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not 0 < self.reservable_free_vram_fraction_ppm <= 1_000_000:
@@ -35,6 +37,7 @@ class DeviceCapacityPolicy:
             "minimum_reservable_vram_bytes",
             "material_process_vram_bytes",
             "material_process_gtt_bytes",
+            "release_vram_tolerance_bytes",
         ):
             value = getattr(self, field)
             if value < 0:
@@ -57,6 +60,9 @@ class DeviceCapacityPolicy:
             "minimum_reservable_vram_bytes": self.minimum_reservable_vram_bytes,
             "material_process_vram_bytes": self.material_process_vram_bytes,
             "material_process_gtt_bytes": self.material_process_gtt_bytes,
+            "release_vram_tolerance_bytes": (
+                self.release_vram_tolerance_bytes
+            ),
             "concurrent_workload_policy": "preserve_and_share_unreserved_capacity",
             "release_policy": "declared_reservable_capacity_restored",
         }
@@ -196,7 +202,10 @@ class LinuxAmdDeviceCapacityProbe:
             )
         return tuple(item.to_json() for item in observations)
 
-    def target_capacity_reservation_digest(self, target: object) -> str:
+    def target_capacity_reservation_state(
+        self,
+        target: object,
+    ) -> CapacityLeaseState:
         raw_profiles = getattr(target, "hardware_profiles", None)
         if not isinstance(raw_profiles, tuple):
             raise ModelCompileError(
@@ -244,10 +253,16 @@ class LinuxAmdDeviceCapacityProbe:
             baseline_observations,
             current_observations,
         )
-        return declared_capacity_reservation_digest(
-            profiles,
-            required,
-            self.policy,
+        return CapacityLeaseState(
+            reservation_digest=declared_capacity_reservation_digest(
+                profiles,
+                required,
+                self.policy,
+            ),
+            observations=current_observations,
+            release_vram_tolerance_bytes=(
+                self.policy.release_vram_tolerance_bytes
+            ),
         )
 
     def _require_preexisting_residents(

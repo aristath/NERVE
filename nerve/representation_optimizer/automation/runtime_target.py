@@ -838,8 +838,8 @@ def _build_target(
         ),
         lease_manager=VerifiedCapacityLeaseManager(
             lock_root=lease_root,
-            probe_capacity_reservation_digest=(
-                capacity_probe.target_capacity_reservation_digest
+            probe_capacity_reservation_state=(
+                capacity_probe.target_capacity_reservation_state
             ),
         ),
         estimate_execution_nanoseconds=lambda _plan, _policy: None,
@@ -982,7 +982,7 @@ def _select_capability_groups(
                 placement=placements[case.case_id],
                 residency_plan=plan,
                 available_device_capacity_bytes=capacities,
-                reserved_device_capacity_bytes=capacities,
+                reserved_device_capacity_bytes=planned_devices,
             )
             break
         if selected_group is None:

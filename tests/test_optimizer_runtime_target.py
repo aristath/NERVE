@@ -140,17 +140,20 @@ def test_linux_amd_probe_reserves_remaining_capacity_without_excluding_workloads
             }
         },
     )
-    assert probe.target_capacity_reservation_digest(target) == expected
+    state = probe.target_capacity_reservation_state(target)
+    assert state.reservation_digest == expected
+    assert state.observations == observation
+    assert state.release_vram_tolerance_bytes == policy.release_vram_tolerance_bytes
 
     used = (sysfs / "card0" / "device").resolve() / "mem_info_vram_used"
     used.write_text("250000000\n")
     with pytest.raises(ModelCompileError, match="insufficient unreserved VRAM"):
-        probe.target_capacity_reservation_digest(target)
+        probe.target_capacity_reservation_state(target)
     used.write_text("100000000\n")
-    assert probe.target_capacity_reservation_digest(target) == expected
+    assert probe.target_capacity_reservation_state(target).reservation_digest == expected
     (process / "fdinfo" / "7").unlink()
     with pytest.raises(ModelCompileError, match="no longer present"):
-        probe.target_capacity_reservation_digest(target)
+        probe.target_capacity_reservation_state(target)
 
 
 def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
@@ -282,8 +285,8 @@ def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
         _device_id("0000:0a:00.0"),
     }
     assert admission["reserved_device_capacity_bytes"] == {
-        _device_id("0000:07:00.0"): 949,
-        _device_id("0000:0a:00.0"): 949,
+        _device_id("0000:07:00.0"): 600,
+        _device_id("0000:0a:00.0"): 600,
     }
     assert optimization_target.matched_conditions["residency_scope"] == (
         "capacity_partition"
@@ -380,6 +383,7 @@ def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
     available_capacity = next(
         iter(admission["available_device_capacity_bytes"].values())
     )
+    assert next(iter(admission["reserved_device_capacity_bytes"].values())) == 100
     assert plan["residency_policy"] == "demand_retained"
     assert device["initial_device_resident_bytes"] == 100
     assert device["parameter_residency"]["maximum_addressable_bytes"] == 10_100

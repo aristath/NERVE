@@ -14,6 +14,7 @@ from nerve.compilation import (
 )
 from nerve.model_package_validation import validate_compiled_package
 from nerve.representation_optimizer.automation import (
+    CapacityLeaseState,
     CandidateToolchain,
     OptimizationBudget,
     OptimizationTarget,
@@ -894,14 +895,15 @@ def test_cancellation_before_publication_never_commits_output(
 def test_verified_capacity_lease_checks_reservation_before_and_after(
     tmp_path: Path,
 ) -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
     probe_results = [
-        device_state_digest({"fixture_state": "capacity_available"}),
-        device_state_digest({"fixture_state": "capacity_available"}),
+        _capacity_lease_state(digest=digest, used_vram_bytes=100),
+        _capacity_lease_state(digest=digest, used_vram_bytes=105),
     ]
     target, _ = _target(
         lease=VerifiedCapacityLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_capacity_reservation_digest=lambda _target: probe_results.pop(0),
+            probe_capacity_reservation_state=lambda _target: probe_results.pop(0),
         )
     )
 
@@ -914,14 +916,15 @@ def test_verified_capacity_lease_checks_reservation_before_and_after(
 def test_verified_capacity_lease_reports_post_execution_residency_leak(
     tmp_path: Path,
 ) -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
     probe_results = [
-        device_state_digest({"fixture_state": "capacity_available"}),
-        device_state_digest({"fixture_state": "resident"}),
+        _capacity_lease_state(digest=digest, used_vram_bytes=100),
+        _capacity_lease_state(digest=digest, used_vram_bytes=111),
     ]
     target, _ = _target(
         lease=VerifiedCapacityLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_capacity_reservation_digest=lambda _target: probe_results.pop(0),
+            probe_capacity_reservation_state=lambda _target: probe_results.pop(0),
         )
     )
 
@@ -932,10 +935,62 @@ def test_verified_capacity_lease_reports_post_execution_residency_leak(
     target, _ = _target(
         lease=VerifiedCapacityLeaseManager(
             lock_root=tmp_path / "device-locks",
-            probe_capacity_reservation_digest=lambda _target: device_state_digest(
-                {"fixture_state": "capacity_available"}
+            probe_capacity_reservation_state=lambda _target: _capacity_lease_state(
+                digest=digest,
+                used_vram_bytes=100,
             ),
         )
     )
     with target.lease_manager.acquire(target):
         pass
+
+
+def test_verified_capacity_lease_preserves_workloads_present_at_acquisition(
+    tmp_path: Path,
+) -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
+    probe_results = [
+        _capacity_lease_state(
+            digest=digest,
+            used_vram_bytes=500,
+            resident_pids=(42,),
+        ),
+        _capacity_lease_state(
+            digest=digest,
+            used_vram_bytes=100,
+            resident_pids=(),
+        ),
+    ]
+    target, _ = _target(
+        lease=VerifiedCapacityLeaseManager(
+            lock_root=tmp_path / "device-locks",
+            probe_capacity_reservation_state=lambda _target: probe_results.pop(0),
+        )
+    )
+
+    with pytest.raises(ModelCompileError, match="lost pre-existing resident"):
+        with target.lease_manager.acquire(target):
+            pass
+
+
+def _capacity_lease_state(
+    *,
+    digest: str,
+    used_vram_bytes: int,
+    resident_pids: tuple[int, ...] = (),
+) -> CapacityLeaseState:
+    return CapacityLeaseState(
+        reservation_digest=digest,
+        observations=(
+            {
+                "device_id": "fixture-device",
+                "vram_total_bytes": 1_000,
+                "vram_used_bytes": used_vram_bytes,
+                "resident_processes": [
+                    {"pid": pid}
+                    for pid in resident_pids
+                ],
+            },
+        ),
+        release_vram_tolerance_bytes=10,
+    )

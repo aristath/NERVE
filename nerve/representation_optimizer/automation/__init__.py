@@ -12,6 +12,7 @@ from nerve.representation_optimizer.automation.report import (
     validate_report_directory,
 )
 from nerve.representation_optimizer.automation.target import (
+    CapacityLeaseState,
     CandidateToolchain,
     CandidateToolchainResolver,
     DeviceLeaseManager,
@@ -22,6 +23,7 @@ from nerve.representation_optimizer.automation.target import (
 
 __all__ = [
     "AutomatedOptimizationOutcome",
+    "CapacityLeaseState",
     "CandidateResourceCost",
     "CandidateToolchain",
     "CandidateToolchainResolver",
