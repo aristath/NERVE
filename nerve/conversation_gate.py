@@ -28,6 +28,8 @@ _PROMPT_MARKER = b"you> "
 _RESPONSE_PREFIX = "llm> "
 _TURN_START = _PROMPT_MARKER.decode() + _RESPONSE_PREFIX
 _TURN_ERROR_MARKER = b"\nturn_error: "
+_NEW_CONVERSATION_COMMAND = "/new"
+_SESSION_RESET_MARKER = b"session_reset: "
 _STATS_MARKER = "\nstats:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
 _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
@@ -416,13 +418,12 @@ def run_resident_conversation(
         _terminate(process)
         raise ConversationGateError("could not open runtime process pipes")
 
-    prompts = (
-        *(
-            CANONICAL_CONVERSATION_PROMPTS
-            * (warmup_conversation_sets + 1)
-        ),
-        "/exit",
-    )
+    prompts: list[str] = []
+    for set_index in range(warmup_conversation_sets + 1):
+        prompts.extend(CANONICAL_CONVERSATION_PROMPTS)
+        if set_index < warmup_conversation_sets:
+            prompts.append(_NEW_CONVERSATION_COMMAND)
+    prompts.append("/exit")
     transcript = bytearray()
     search_from = 0
     accepted_marker_end = 0
@@ -455,10 +456,17 @@ def run_resident_conversation(
                     search_from = max(0, len(transcript) - len(_PROMPT_MARKER) + 1)
                     break
                 search_from = marker + len(_PROMPT_MARKER)
-                if sent > 0 and _STATS_MARKER.encode() not in transcript[
-                    accepted_marker_end:marker
-                ]:
-                    continue
+                if sent > 0:
+                    previous_output = transcript[accepted_marker_end:marker]
+                    if prompts[sent - 1] == _NEW_CONVERSATION_COMMAND:
+                        if _SESSION_RESET_MARKER not in previous_output:
+                            live_error = (
+                                "runtime did not acknowledge the required "
+                                "new-conversation reset"
+                            )
+                            break
+                    elif _STATS_MARKER.encode() not in previous_output:
+                        continue
                 if sent >= len(prompts):
                     live_error = "runtime requested more chat turns than the gate supplied"
                     break

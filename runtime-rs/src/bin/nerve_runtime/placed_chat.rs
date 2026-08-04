@@ -73,12 +73,16 @@ fn run_placed_chat(
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
 
-    let chat_result = run_chat_repl(
-        initial_prompt,
-        chat_session,
-        codec,
-        &transcript_codec,
-        |turn_index, chat_session, input_text, prepared| {
+    let chat_result = (|| -> Result<(), Box<dyn Error>> {
+        let mut chat_session = chat_session;
+        let mut pending_initial_prompt = initial_prompt;
+        loop {
+            let outcome = run_chat_repl(
+                pending_initial_prompt.take(),
+                chat_session,
+                codec,
+                &transcript_codec,
+                |turn_index, chat_session, input_text, prepared| {
             print!("llm> ");
             io::stdout().flush()?;
             let mut decoder = codec.decode_stream();
@@ -374,8 +378,24 @@ fn run_placed_chat(
                 transport_edges,
                 resource_residency,
             })
-        },
-    );
+                },
+            )?;
+            match outcome {
+                RuntimeChatReplOutcome::Exit => return Ok(()),
+                RuntimeChatReplOutcome::NewConversation => {
+                    let zeroed = engine
+                        .reset_stream_for_new_session("main", args.random_seed)?;
+                    chat_session = RuntimeChatSession::from_tokenizer_dir(
+                        tokenizer_dir,
+                        &args.chat_template_variables,
+                    )?;
+                    println!(
+                        "session_reset: zeroed_state_buffers={zeroed}"
+                    );
+                }
+            }
+        }
+    })();
     let shutdown = engine.shutdown();
     print_runtime_shutdown(&shutdown);
     match (chat_result, shutdown.complete) {

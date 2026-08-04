@@ -515,16 +515,25 @@ answers = (
 )
 print("ready")
 completed = 0
+conversation_turn = 0
+conversation_set = 0
 while True:
     print("you> ", end="", flush=True)
     prompt = sys.stdin.readline().rstrip("\\n")
     if prompt == "/exit":
         break
-    answer = answers[completed % len(answers)]
-    set_index = completed // len(answers)
+    if prompt == "/new":
+        if conversation_turn != len(answers):
+            raise SystemExit(91)
+        conversation_turn = 0
+        conversation_set += 1
+        print("session_reset: zeroed_state_buffers=17", flush=True)
+        continue
+    answer = answers[conversation_turn]
+    conversation_turn += 1
     completed += 1
     misses = min(completed, len(answers))
-    decode = 1.0 if set_index == 0 else 30.0
+    decode = 1.0 if conversation_set == 0 else 30.0
     print(f"llm> reasoning</think> {answer}")
     print("stats:")
     print("  prefill_tokens_per_second=100.000")
@@ -574,6 +583,41 @@ while True:
     assert run.measured_set.residency_gauges_end == (
         run.measured_set.residency_gauges_start
     )
+
+
+def test_resident_runner_rejects_a_runtime_that_does_not_acknowledge_session_reset(
+    tmp_path,
+) -> None:
+    fake_runtime = tmp_path / "missing_reset_ack.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+print("ready")
+completed = 0
+while True:
+    print("you> ", end="", flush=True)
+    prompt = sys.stdin.readline().rstrip("\\n")
+    if prompt == "/exit":
+        break
+    if prompt == "/new":
+        continue
+    completed += 1
+    print("llm> reasoning</think> answer")
+    print("stats:")
+    print("  prefill_tokens_per_second=100.000")
+    print("  decode_tokens_per_second=25.000", flush=True)
+""".lstrip()
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="did not acknowledge the required new-conversation reset",
+    ):
+        run_resident_conversation(
+            [sys.executable, "-u", str(fake_runtime)],
+            warmup_conversation_sets=1,
+        )
 
 
 def test_resident_runner_terminates_a_long_multiline_response_cycle(tmp_path) -> None:

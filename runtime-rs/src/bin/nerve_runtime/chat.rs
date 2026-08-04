@@ -105,13 +105,35 @@ impl RuntimeSustainedDecodeReport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeChatReplOutcome {
+    Exit,
+    NewConversation,
+}
+
+const RUNTIME_CHAT_NEW_CONVERSATION_COMMAND: &str = "/new";
+
+fn runtime_chat_repl_control(command: &str) -> Option<RuntimeChatReplOutcome> {
+    if command.eq_ignore_ascii_case("exit")
+        || command.eq_ignore_ascii_case("quit")
+        || command.eq_ignore_ascii_case("/exit")
+        || command.eq_ignore_ascii_case("/quit")
+    {
+        Some(RuntimeChatReplOutcome::Exit)
+    } else if command.eq_ignore_ascii_case(RUNTIME_CHAT_NEW_CONVERSATION_COMMAND) {
+        Some(RuntimeChatReplOutcome::NewConversation)
+    } else {
+        None
+    }
+}
+
 fn run_chat_repl<C, T, F>(
     initial_prompt: Option<&str>,
     mut chat_session: RuntimeChatSession,
     codec: &C,
     transcript_codec: &T,
     mut submit: F,
-) -> Result<(), Box<dyn Error>>
+) -> Result<RuntimeChatReplOutcome, Box<dyn Error>>
 where
     C: VulkanResidentTokenTextCodec,
     T: VulkanResidentTokenTextCodec,
@@ -123,7 +145,7 @@ where
     ) -> Result<RuntimeChatTurn, Box<dyn Error>>,
 {
     println!(
-        "Type a message and press Enter. Type /exit, /quit, exit, or quit to stop."
+        "Type a message and press Enter. Type /new to start a new conversation. Type /exit, /quit, exit, or quit to stop."
     );
     let mut turn_index = 0usize;
     if let Some(initial_prompt) = initial_prompt
@@ -150,16 +172,12 @@ where
         line.clear();
         if stdin.read_line(&mut line)? == 0 {
             println!();
-            break;
+            return Ok(RuntimeChatReplOutcome::Exit);
         }
         let input_text = line.trim_end_matches(['\r', '\n']);
         let command = input_text.trim();
-        if command.eq_ignore_ascii_case("exit")
-            || command.eq_ignore_ascii_case("quit")
-            || command.eq_ignore_ascii_case("/exit")
-            || command.eq_ignore_ascii_case("/quit")
-        {
-            break;
+        if let Some(outcome) = runtime_chat_repl_control(command) {
+            return Ok(outcome);
         }
         if command.is_empty() {
             continue;
@@ -177,7 +195,6 @@ where
             turn_index = turn_index.saturating_add(1);
         }
     }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

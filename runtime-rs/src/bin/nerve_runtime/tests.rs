@@ -20,13 +20,13 @@ mod tests {
     };
 
     use super::{
-        Args, RuntimeChatTurnOutcome, RuntimeSustainedDecodeReport,
+        Args, RuntimeChatReplOutcome, RuntimeChatTurnOutcome, RuntimeSustainedDecodeReport,
         RuntimeSustainedDecodeSample,
         parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
         parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
         resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
-        runtime_physical_device_bindings_in, submit_chat_turn, usage,
+        runtime_chat_repl_control, runtime_physical_device_bindings_in, submit_chat_turn, usage,
         validate_explicit_logical_device_bindings,
     };
 
@@ -40,6 +40,26 @@ mod tests {
                 .unwrap(),
             compiled_codec: None,
         }
+    }
+
+    #[test]
+    fn chat_repl_distinguishes_new_conversation_from_process_exit() {
+        assert_eq!(
+            runtime_chat_repl_control("/new"),
+            Some(RuntimeChatReplOutcome::NewConversation),
+        );
+        assert_eq!(
+            runtime_chat_repl_control("/NEW"),
+            Some(RuntimeChatReplOutcome::NewConversation),
+        );
+        for command in ["exit", "quit", "/exit", "/quit"] {
+            assert_eq!(
+                runtime_chat_repl_control(command),
+                Some(RuntimeChatReplOutcome::Exit),
+            );
+        }
+        assert_eq!(runtime_chat_repl_control("new"), None);
+        assert_eq!(runtime_chat_repl_control("/new topic"), None);
     }
 
     #[derive(Clone, Copy)]
