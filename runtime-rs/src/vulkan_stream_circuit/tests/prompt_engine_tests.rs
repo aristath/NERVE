@@ -404,9 +404,11 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
     );
 }
 
+#[cfg(feature = "tokenizers")]
 #[derive(Clone, Copy)]
 struct RejectingGeneratedChatCodec;
 
+#[cfg(feature = "tokenizers")]
 impl crate::VulkanResidentTokenTextCodec for RejectingGeneratedChatCodec {
     fn encode_text(
         &self,
@@ -425,9 +427,11 @@ impl crate::VulkanResidentTokenTextCodec for RejectingGeneratedChatCodec {
     }
 }
 
+#[cfg(feature = "tokenizers")]
 #[derive(Clone, Copy)]
 struct FixedGeneratedChatCodec;
 
+#[cfg(feature = "tokenizers")]
 impl crate::VulkanResidentTokenTextCodec for FixedGeneratedChatCodec {
     fn encode_text(
         &self,
@@ -447,6 +451,7 @@ impl crate::VulkanResidentTokenTextCodec for FixedGeneratedChatCodec {
     }
 }
 
+#[cfg(feature = "tokenizers")]
 #[test]
 fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
     let device = match selected_test_vulkan_device() {
