@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::RuntimeChatMessage;
+use crate::VulkanResidentTokenTextCodec;
 
 pub const COMPILED_CHAT_CODEC_FILE: &str = "chat_codec.json";
 const COMPILED_CHAT_CODEC_SCHEMA: &str = "nerve.chat_codec.v1";
@@ -68,6 +69,81 @@ struct CompiledChatTools {
 struct CompiledResponseParser {
     kind: String,
     reject_special_tokens_in_content: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeAssistantStreamProtocolTokenKind {
+    Forbidden(&'static str),
+    ThinkingEnd,
+    ToolMarkup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeAssistantStreamProtocolToken {
+    token_ids: Vec<u32>,
+    kind: RuntimeAssistantStreamProtocolTokenKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAssistantStreamProtocolValidator {
+    thinking: bool,
+    saw_thinking_end: bool,
+    observed_token_count: usize,
+    recent_token_ids: Vec<u32>,
+    maximum_protocol_token_length: usize,
+    protocol_tokens: Vec<RuntimeAssistantStreamProtocolToken>,
+}
+
+impl RuntimeAssistantStreamProtocolValidator {
+    pub fn observe(&mut self, token_id: u32) -> io::Result<()> {
+        self.observed_token_count = self.observed_token_count.saturating_add(1);
+        self.recent_token_ids.push(token_id);
+        if self.recent_token_ids.len() > self.maximum_protocol_token_length {
+            let discard = self
+                .recent_token_ids
+                .len()
+                .saturating_sub(self.maximum_protocol_token_length);
+            self.recent_token_ids.drain(..discard);
+        }
+        let matched = self
+            .protocol_tokens
+            .iter()
+            .find(|protocol| self.recent_token_ids.ends_with(&protocol.token_ids))
+            .map(|protocol| protocol.kind);
+        match matched {
+            Some(RuntimeAssistantStreamProtocolTokenKind::Forbidden(name)) => {
+                Err(invalid_data(format!(
+                    "generated assistant emitted reserved {name} token ending at generated token {}",
+                    self.observed_token_count,
+                )))
+            }
+            Some(RuntimeAssistantStreamProtocolTokenKind::ThinkingEnd) => {
+                if !self.thinking {
+                    return Err(invalid_data(format!(
+                        "generated assistant emitted reserved thinking_end token in non-thinking content ending at generated token {}",
+                        self.observed_token_count,
+                    )));
+                }
+                if self.saw_thinking_end {
+                    return Err(invalid_data(format!(
+                        "generated assistant emitted a second thinking_end token ending at generated token {}",
+                        self.observed_token_count,
+                    )));
+                }
+                self.saw_thinking_end = true;
+                Ok(())
+            }
+            Some(RuntimeAssistantStreamProtocolTokenKind::ToolMarkup)
+                if self.thinking && !self.saw_thinking_end =>
+            {
+                Err(invalid_data(format!(
+                    "generated assistant emitted reserved tool markup inside reasoning ending at generated token {}",
+                    self.observed_token_count,
+                )))
+            }
+            Some(RuntimeAssistantStreamProtocolTokenKind::ToolMarkup) | None => Ok(()),
+        }
+    }
 }
 
 impl CompiledChatCodec {
@@ -142,6 +218,69 @@ impl CompiledChatCodec {
             .and_then(Value::as_bool)
             .unwrap_or(true);
         self.parse_completion(&completion, thinking)
+    }
+
+    pub fn assistant_stream_protocol_validator<C>(
+        &self,
+        codec: &C,
+        variables: &Map<String, Value>,
+    ) -> io::Result<Option<RuntimeAssistantStreamProtocolValidator>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        if !self.response_parser.reject_special_tokens_in_content {
+            return Ok(None);
+        }
+        let mut protocol_tokens = Vec::new();
+        for (token, kind) in [
+            (
+                self.tokens.bos.as_str(),
+                RuntimeAssistantStreamProtocolTokenKind::Forbidden("bos"),
+            ),
+            (
+                self.tokens.thinking_start.as_str(),
+                RuntimeAssistantStreamProtocolTokenKind::Forbidden("thinking_start"),
+            ),
+            (
+                self.tokens.thinking_end.as_str(),
+                RuntimeAssistantStreamProtocolTokenKind::ThinkingEnd,
+            ),
+            (
+                self.tokens.tool_markup.as_str(),
+                RuntimeAssistantStreamProtocolTokenKind::ToolMarkup,
+            ),
+        ] {
+            if token.is_empty() {
+                continue;
+            }
+            let token_ids = codec.encode_text(token).map_err(|error| {
+                invalid_data(format!(
+                    "could not encode compiled assistant protocol token {token:?}: {error}",
+                ))
+            })?;
+            if token_ids.is_empty() {
+                return Err(invalid_data(format!(
+                    "compiled assistant protocol token {token:?} encoded to no tokens",
+                )));
+            }
+            protocol_tokens.push(RuntimeAssistantStreamProtocolToken { token_ids, kind });
+        }
+        let maximum_protocol_token_length = protocol_tokens
+            .iter()
+            .map(|protocol| protocol.token_ids.len())
+            .max()
+            .unwrap_or(1);
+        Ok(Some(RuntimeAssistantStreamProtocolValidator {
+            thinking: variables
+                .get("enable_thinking")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            saw_thinking_end: false,
+            observed_token_count: 0,
+            recent_token_ids: Vec::with_capacity(maximum_protocol_token_length),
+            maximum_protocol_token_length,
+            protocol_tokens,
+        }))
     }
 
     pub fn format_messages(
@@ -517,15 +656,25 @@ impl CompiledChatCodec {
             (content, Vec::new())
         };
         if self.response_parser.reject_special_tokens_in_content {
-            for token in [
-                &self.tokens.bos,
-                &self.tokens.assistant_stop,
-                &self.tokens.thinking_start,
-                &self.tokens.thinking_end,
-                &self.tokens.tool_markup,
+            for (name, token) in [
+                ("bos", &self.tokens.bos),
+                ("assistant_stop", &self.tokens.assistant_stop),
+                ("thinking_start", &self.tokens.thinking_start),
+                ("thinking_end", &self.tokens.thinking_end),
+                ("tool_markup", &self.tokens.tool_markup),
             ] {
-                if (!token.is_empty()) && (content.contains(token) || reasoning.contains(token)) {
-                    return Err(invalid_data("assistant content contains a reserved token"));
+                if token.is_empty() {
+                    continue;
+                }
+                if let Some(offset) = content.find(token) {
+                    return Err(invalid_data(format!(
+                        "assistant content contains reserved {name} token at byte {offset}",
+                    )));
+                }
+                if let Some(offset) = reasoning.find(token) {
+                    return Err(invalid_data(format!(
+                        "assistant reasoning contains reserved {name} token at byte {offset}",
+                    )));
                 }
             }
         }
@@ -820,7 +969,33 @@ mod tests {
         CompiledChatReasoning, CompiledChatTemplates, CompiledChatTokens, CompiledChatTools,
         CompiledResponseParser, STRUCTURED_CODEC_KIND,
     };
-    use crate::{RuntimeChatFormatter, RuntimeChatMessage};
+    use crate::{
+        RuntimeChatFormatter, RuntimeChatMessage, VulkanResidentTokenTextCodec,
+        VulkanResidentTokenTextCodecError,
+    };
+
+    struct ByteCodec;
+
+    impl VulkanResidentTokenTextCodec for ByteCodec {
+        fn encode_text(&self, text: &str) -> Result<Vec<u32>, VulkanResidentTokenTextCodecError> {
+            Ok(text.bytes().map(u32::from).collect())
+        }
+
+        fn decode_tokens(
+            &self,
+            token_ids: &[u32],
+        ) -> Result<String, VulkanResidentTokenTextCodecError> {
+            let bytes = token_ids
+                .iter()
+                .map(|token_id| {
+                    u8::try_from(*token_id)
+                        .map_err(|_| VulkanResidentTokenTextCodecError::new("token is not a byte"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            String::from_utf8(bytes)
+                .map_err(|error| VulkanResidentTokenTextCodecError::new(error.to_string()))
+        }
+    }
 
     fn fixture_codec() -> CompiledChatCodec {
         CompiledChatCodec {
@@ -872,6 +1047,78 @@ mod tests {
                 reject_special_tokens_in_content: true,
             },
         }
+    }
+
+    fn observe_text(
+        validator: &mut super::RuntimeAssistantStreamProtocolValidator,
+        text: &str,
+    ) -> std::io::Result<()> {
+        for token_id in ByteCodec.encode_text(text).unwrap() {
+            validator.observe(token_id)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_codec_stream_validator_rejects_a_second_reasoning_boundary_immediately() {
+        let mut validator = fixture_codec()
+            .assistant_stream_protocol_validator(
+                &ByteCodec,
+                &Map::from_iter([("enable_thinking".to_string(), Value::Bool(true))]),
+            )
+            .unwrap()
+            .unwrap();
+
+        observe_text(&mut validator, "reasoning</T>answer").unwrap();
+        let error = observe_text(&mut validator, "again</T>").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("emitted a second thinking_end token")
+        );
+    }
+
+    #[test]
+    fn compiled_codec_stream_validator_enforces_reserved_tokens_across_token_boundaries() {
+        let mut thinking = fixture_codec()
+            .assistant_stream_protocol_validator(
+                &ByteCodec,
+                &Map::from_iter([("enable_thinking".to_string(), Value::Bool(true))]),
+            )
+            .unwrap()
+            .unwrap();
+        observe_text(&mut thinking, "rea").unwrap();
+        let tool_error = observe_text(&mut thinking, "soningX").unwrap_err();
+        assert!(
+            tool_error
+                .to_string()
+                .contains("reserved tool markup inside reasoning")
+        );
+
+        let mut chat = fixture_codec()
+            .assistant_stream_protocol_validator(
+                &ByteCodec,
+                &Map::from_iter([("enable_thinking".to_string(), Value::Bool(false))]),
+            )
+            .unwrap()
+            .unwrap();
+        let boundary_error = observe_text(&mut chat, "answer</T>").unwrap_err();
+        assert!(
+            boundary_error
+                .to_string()
+                .contains("in non-thinking content")
+        );
+
+        let mut forbidden = fixture_codec()
+            .assistant_stream_protocol_validator(&ByteCodec, &Map::new())
+            .unwrap()
+            .unwrap();
+        let start_error = observe_text(&mut forbidden, "reasoning<T>").unwrap_err();
+        assert!(
+            start_error
+                .to_string()
+                .contains("reserved thinking_start token")
+        );
     }
 
     #[test]
@@ -999,10 +1246,12 @@ mod tests {
                 .is_err()
         );
         assert!(codec.parse_completion("reasoning</T>answer", true).is_err());
-        assert!(
-            codec
-                .parse_completion("reasoning</T>answer<T><E>", true)
-                .is_err()
+        let reserved = codec
+            .parse_completion("reasoning</T>answer<T><E>", true)
+            .unwrap_err();
+        assert_eq!(
+            reserved.to_string(),
+            "assistant content contains reserved thinking_start token at byte 6"
         );
     }
 

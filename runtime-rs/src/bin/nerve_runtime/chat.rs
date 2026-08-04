@@ -1,6 +1,7 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeChatTurn {
     generated_token_ids: Vec<u32>,
+    assistant_message: serde_json::Value,
     canonical_committed_token_ids: Vec<u32>,
     generated_token_digest: String,
     selection_counter_digest: String,
@@ -25,9 +26,9 @@ struct RuntimeChatTurn {
     transport_edges: Vec<RuntimePlacedTransportEdgeReport>,
     sparse_moe: RuntimeSparseMoeWorkReport,
     selection_user_coverage: RuntimeSelectionCoverageReport,
-    selection_generation_coverage: RuntimeSelectionCoverageReport,
-    selection_commit_coverage: RuntimeSelectionCoverageReport,
-    selection_post_generation_cumulative: RuntimeSelectionCoverageReport,
+    selection_generation_branch_coverage: RuntimeSelectionCoverageReport,
+    selection_canonical_commit_coverage: RuntimeSelectionCoverageReport,
+    selection_post_branch_cumulative: RuntimeSelectionCoverageReport,
     selection_coverage: RuntimeSelectionCoverageReport,
     cumulative_selection_coverage: RuntimeSelectionCoverageReport,
     resource_residency: VulkanCompiledResourceResidencyReport,
@@ -109,7 +110,6 @@ fn run_chat_repl<C, T, F>(
     mut chat_session: RuntimeChatSession,
     codec: &C,
     transcript_codec: &T,
-    stop_token_ids: &[u32],
     mut submit: F,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -129,18 +129,17 @@ where
     if let Some(initial_prompt) = initial_prompt
         && !initial_prompt.trim().is_empty()
     {
-        if !submit_chat_turn(
+        if submit_chat_turn(
             &mut chat_session,
             codec,
             transcript_codec,
-            stop_token_ids,
             &mut submit,
             turn_index,
             initial_prompt,
-        )? {
-            return Ok(());
+        )? == RuntimeChatTurnOutcome::Committed
+        {
+            turn_index = turn_index.saturating_add(1);
         }
-        turn_index = turn_index.saturating_add(1);
     }
 
     let stdin = io::stdin();
@@ -166,31 +165,35 @@ where
             continue;
         }
 
-        if !submit_chat_turn(
+        if submit_chat_turn(
             &mut chat_session,
             codec,
             transcript_codec,
-            stop_token_ids,
             &mut submit,
             turn_index,
             input_text,
-        )? {
-            break;
+        )? == RuntimeChatTurnOutcome::Committed
+        {
+            turn_index = turn_index.saturating_add(1);
         }
-        turn_index = turn_index.saturating_add(1);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeChatTurnOutcome {
+    Committed,
+    Rejected,
 }
 
 fn submit_chat_turn<C, T, F>(
     chat_session: &mut RuntimeChatSession,
     codec: &C,
     transcript_codec: &T,
-    stop_token_ids: &[u32],
     submit: &mut F,
     turn_index: usize,
     input_text: &str,
-) -> Result<bool, Box<dyn Error>>
+) -> Result<RuntimeChatTurnOutcome, Box<dyn Error>>
 where
     C: VulkanResidentTokenTextCodec,
     T: VulkanResidentTokenTextCodec,
@@ -201,18 +204,22 @@ where
         &RuntimePreparedChatTurn,
     ) -> Result<RuntimeChatTurn, Box<dyn Error>>,
 {
-    let prepared =
-        chat_session.prepare_user_turn(input_text, transcript_codec)?;
+    let prepared = match chat_session.prepare_user_turn(input_text, transcript_codec) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            println!("turn_error: preparing the user turn failed before execution: {error}");
+            return Ok(RuntimeChatTurnOutcome::Rejected);
+        }
+    };
     match submit(turn_index, chat_session, input_text, &prepared) {
         Ok(turn) => {
+            chat_session.commit_assistant_turn(
+                input_text,
+                &turn.assistant_message,
+                turn.canonical_committed_token_ids,
+            );
             let generated_text =
                 codec.decode_tokens(&turn.generated_token_ids)?;
-            let assistant_content_ids = assistant_content_token_ids(
-                &turn.generated_token_ids,
-                stop_token_ids,
-            );
-            let assistant_content =
-                transcript_codec.decode_tokens(assistant_content_ids)?;
             if turn.streamed {
                 println!();
             } else {
@@ -246,11 +253,17 @@ where
             print_runtime_selection_phase_coverage_stats(
                 &[
                     ("user", &turn.selection_user_coverage),
-                    ("generation", &turn.selection_generation_coverage),
-                    ("commit", &turn.selection_commit_coverage),
                     (
-                        "post_generation_cumulative",
-                        &turn.selection_post_generation_cumulative,
+                        "generation_branch",
+                        &turn.selection_generation_branch_coverage,
+                    ),
+                    (
+                        "canonical_commit",
+                        &turn.selection_canonical_commit_coverage,
+                    ),
+                    (
+                        "post_branch_cumulative",
+                        &turn.selection_post_branch_cumulative,
                     ),
                 ],
             );
@@ -276,12 +289,12 @@ where
                 turn.selection_counter_digest
             );
             println!("  resident_state={}", turn.resident_state_digest);
-            chat_session.commit_assistant_turn(
-                input_text,
-                &assistant_content,
-                turn.canonical_committed_token_ids,
-            );
-            Ok(true)
+            Ok(RuntimeChatTurnOutcome::Committed)
+        }
+        Err(error) if error.downcast_ref::<RuntimeRecoverableChatTurnError>().is_some() => {
+            println!();
+            println!("turn_error: {error}");
+            Ok(RuntimeChatTurnOutcome::Rejected)
         }
         Err(error) => Err(error),
     }
@@ -459,21 +472,6 @@ fn token_id_digest(token_ids: &[u32]) -> String {
         "nerve.runtime.token_ids_sha256.v1:{:x}",
         digest.finalize()
     )
-}
-
-fn assistant_content_token_ids<'a>(
-    generated_token_ids: &'a [u32],
-    stop_token_ids: &[u32],
-) -> &'a [u32] {
-    let mut content_len = generated_token_ids.len();
-    while content_len > 0
-        && stop_token_ids.contains(
-            &generated_token_ids[content_len - 1],
-        )
-    {
-        content_len -= 1;
-    }
-    &generated_token_ids[..content_len]
 }
 
 fn print_chat_response(text: &str) {

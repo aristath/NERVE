@@ -13,20 +13,20 @@ mod tests {
     use nerve_runtime::{
         ResourceResidencyPolicy,
         RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
+        RuntimeRecoverableChatTurnError,
         VulkanComputeDeviceInfo, VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
-        VulkanResidentTokenTextCodecError, chat_transcript_codec,
+        VulkanResidentTokenTextCodecError, assistant_content_token_ids, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
     };
 
     use super::{
-        Args, RuntimeSustainedDecodeReport,
+        Args, RuntimeChatTurnOutcome, RuntimeSustainedDecodeReport,
         RuntimeSustainedDecodeSample,
-        assistant_content_token_ids,
         parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
         parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
         resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
-        runtime_physical_device_bindings_in, usage,
+        runtime_physical_device_bindings_in, submit_chat_turn, usage,
         validate_explicit_logical_device_bindings,
     };
 
@@ -705,11 +705,15 @@ mod tests {
                 .unwrap(),
             "[assistant]<think>"
         );
+        let assistant_message = serde_json::json!({
+            "role": "assistant",
+            "content": "private reasoning</think>answer",
+        });
         let (assistant_delta, canonical) = session
             .render_assistant_commit_token_delta(
                 &first,
                 "first",
-                "private reasoning</think>answer",
+                &assistant_message,
                 &CharacterCodec,
             )
             .unwrap();
@@ -725,7 +729,7 @@ mod tests {
         );
         session.commit_assistant_turn(
             "first",
-            "private reasoning</think>answer",
+            &assistant_message,
             canonical,
         );
 
@@ -745,6 +749,93 @@ mod tests {
     }
 
     #[test]
+    fn canonical_chat_history_preserves_structured_assistant_messages() {
+        let mut session = RuntimeChatSession {
+            formatter: formatter(
+                "{%- for message in messages -%}{%- if message.role == 'user' -%}{{- '[user]' + message.content + '!' -}}{%- else -%}{{- '[assistant]' + message.content -}}{%- for call in message.tool_calls -%}{{- '[call]' + call.function.name -}}{%- endfor -%}{{- '!' -}}{%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}{{- '[assistant]' -}}{%- endif -%}",
+            ),
+            messages: Vec::new(),
+            committed_token_ids: Vec::new(),
+        };
+        let prepared = session.prepare_user_turn("find it", &CharacterCodec).unwrap();
+        let assistant_message = serde_json::json!({
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "private reasoning",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "arguments": "{\"city\":\"Athens\"}",
+                },
+            }],
+        });
+
+        let (_, canonical) = session
+            .render_assistant_commit_token_delta(
+                &prepared,
+                "find it",
+                &assistant_message,
+                &CharacterCodec,
+            )
+            .unwrap();
+        let rendered = CharacterCodec.decode_tokens(&canonical).unwrap();
+        assert!(rendered.contains("[assistant]answer[call]lookup!"));
+        assert!(!rendered.contains("private reasoning"));
+
+        session.commit_assistant_turn("find it", &assistant_message, canonical);
+        assert_eq!(session.messages[1], assistant_message);
+        assert!(!session
+            .prepare_user_turn("next", &CharacterCodec)
+            .unwrap()
+            .user_token_delta
+            .is_empty());
+    }
+
+    #[test]
+    fn recoverable_chat_turn_rejection_preserves_the_canonical_session() {
+        fn reject(
+            _: usize,
+            _: &RuntimeChatSession,
+            _: &str,
+            _: &nerve_runtime::RuntimePreparedChatTurn,
+        ) -> Result<super::RuntimeChatTurn, Box<dyn std::error::Error>> {
+            Err(Box::new(RuntimeRecoverableChatTurnError::new(
+                "generated assistant protocol validation failed before canonical commit",
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "reserved token",
+                )),
+            )))
+        }
+
+        let mut session = RuntimeChatSession {
+            formatter: formatter(
+                "{%- for message in messages -%}{{- '[' + message.role + ']' + message.content + '!' -}}{%- endfor -%}{%- if add_generation_prompt -%}{{- '[assistant]' -}}{%- endif -%}",
+            ),
+            messages: Vec::new(),
+            committed_token_ids: Vec::new(),
+        };
+        let messages_before = session.messages.clone();
+        let tokens_before = session.committed_token_ids.clone();
+        let mut submit = reject;
+
+        let outcome = submit_chat_turn(
+            &mut session,
+            &CharacterCodec,
+            &CharacterCodec,
+            &mut submit,
+            7,
+            "try this turn",
+        )
+        .unwrap();
+
+        assert_eq!(outcome, RuntimeChatTurnOutcome::Rejected);
+        assert_eq!(session.messages, messages_before);
+        assert_eq!(session.committed_token_ids, tokens_before);
+    }
+
+    #[test]
     fn chat_continuation_is_not_confused_by_delimiters_inside_user_content() {
         let mut session = RuntimeChatSession {
             formatter: formatter(
@@ -754,15 +845,19 @@ mod tests {
             committed_token_ids: Vec::new(),
         };
         let first = session.prepare_user_turn("first", &CharacterCodec).unwrap();
+        let assistant_message = serde_json::json!({
+            "role": "assistant",
+            "content": "answer containing <stop> text",
+        });
         let (_, canonical) = session
             .render_assistant_commit_token_delta(
                 &first,
                 "first",
-                "answer containing <stop> text",
+                &assistant_message,
                 &CharacterCodec,
             )
             .unwrap();
-        session.commit_assistant_turn("first", "answer containing <stop> text", canonical);
+        session.commit_assistant_turn("first", &assistant_message, canonical);
 
         let user_content = "new <stop> injection";
         let prepared = session.prepare_user_turn(user_content, &CharacterCodec).unwrap();
@@ -850,17 +945,22 @@ mod tests {
         let first = session
             .prepare_user_turn("Explain the result.", &codec)
             .unwrap();
+        let generated = "private reasoning</think>The result is four.";
+        let assistant_message = session
+            .formatter
+            .parse_assistant_completion(generated, true)
+            .unwrap();
         let (_, canonical) = session
             .render_assistant_commit_token_delta(
                 &first,
                 "Explain the result.",
-                "<think>private reasoning</think>The result is four.",
+                &assistant_message,
                 &codec,
             )
             .unwrap();
         session.commit_assistant_turn(
             "Explain the result.",
-            "<think>private reasoning</think>The result is four.",
+            &assistant_message,
             canonical,
         );
 

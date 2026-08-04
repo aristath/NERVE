@@ -244,6 +244,22 @@ impl VulkanResidentInProcessPlacedPromptStream {
         Ok(zeroed)
     }
 
+    fn restore_initial_transaction_state(
+        &mut self,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.is_idle() || self.pending_scheduler_activation.is_some() {
+            return Err(placed_scheduler_divergence(
+                "cannot restore initial transaction state while placed prompt work is pending",
+            ));
+        }
+        let initialized = self
+            .processor
+            .restore_initial_transaction_state(&self.devices)?;
+        self.transient_state_pages.clear();
+        self.session.next_stream_tick = 0;
+        Ok(initialized)
+    }
+
     pub fn reset_for_new_session(
         &mut self,
         random_seed: u32,

@@ -484,6 +484,56 @@ fn scheduler_stream_checkpoint_restores_state_after_a_completed_branch() {
 }
 
 #[test]
+fn scheduler_stream_checkpoint_commit_releases_snapshot_and_keeps_live_state() {
+    let mut scheduler = RuntimeStreamScheduler::new();
+    scheduler
+        .add_stream_with_state_declarations("stream", [(state_key(), state_shape())])
+        .unwrap();
+    scheduler
+        .enqueue_input_event(
+            "stream",
+            RuntimeStreamInputEvent::new("canonical", [1, 2], 0),
+        )
+        .unwrap();
+    let canonical = scheduler.schedule_step(budget(1)).unwrap().activations[0].clone();
+    scheduler
+        .complete_activation(
+            canonical.id,
+            RuntimeStreamActivationOutcome::generated_tokens([], false),
+        )
+        .unwrap();
+
+    let checkpoint = scheduler.checkpoint_stream_state("stream").unwrap();
+    scheduler
+        .enqueue_input_event(
+            "stream",
+            RuntimeStreamInputEvent::new("committed_branch", [3, 4], 0),
+        )
+        .unwrap();
+    let branch = scheduler.schedule_step(budget(1)).unwrap().activations[0].clone();
+    scheduler
+        .complete_activation(
+            branch.id,
+            RuntimeStreamActivationOutcome::generated_tokens([], false),
+        )
+        .unwrap();
+
+    scheduler
+        .discard_stream_state_checkpoint(checkpoint)
+        .unwrap();
+
+    assert_eq!(
+        scheduler
+            .stream_transient_state_snapshot("stream")
+            .unwrap()
+            .logical_activation_count,
+        4,
+    );
+    let arena = scheduler.transient_state_arena_snapshot().unwrap();
+    assert!(arena.blocks.iter().all(|block| block.ref_count == 1));
+}
+
+#[test]
 fn scheduler_stream_checkpoint_aborts_in_flight_branch_work() {
     let mut scheduler = RuntimeStreamScheduler::new();
     scheduler

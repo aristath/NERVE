@@ -12,10 +12,10 @@ use nerve_runtime::{
     VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
-    VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
-    VulkanResidentTokenTextCodec, chat_stop_token_ids_from_manifest, chat_transcript_codec,
-    execute_vulkan_resident_chat_transaction, reset_vulkan_resident_execution_counters,
-    vulkan_resident_execution_counters,
+    VulkanResidentOutputControl, VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig,
+    VulkanResidentTokenInputEvent, VulkanResidentTokenTextCodec, chat_stop_token_ids_from_manifest,
+    chat_transcript_codec, execute_vulkan_resident_chat_transaction,
+    reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -746,17 +746,21 @@ where
     for (user_content, assistant_content) in turns.iter().zip(assistant_turns) {
         let prepared = simulated_chat.prepare_user_turn(user_content, transcript_codec)?;
         required = required.max(prepared.canonical_user_token_ids.len());
+        let assistant_message = json!({
+            "role": "assistant",
+            "content": assistant_content,
+        });
         let (_, canonical_committed_token_ids) = simulated_chat
             .render_assistant_commit_token_delta(
                 &prepared,
                 user_content,
-                assistant_content,
+                &assistant_message,
                 transcript_codec,
             )?;
         required = required.max(canonical_committed_token_ids.len());
         simulated_chat.commit_assistant_turn(
             user_content,
-            assistant_content,
+            &assistant_message,
             canonical_committed_token_ids,
         );
     }
@@ -896,6 +900,7 @@ impl MountedValidation {
                             progress_error = Some(error);
                         }
                     }
+                    Ok(())
                 },
                 |_, _| Ok(()),
             )?;
@@ -905,7 +910,7 @@ impl MountedValidation {
             let engine_runs = [
                 &transaction.user_run.engine_run,
                 &transaction.generation_run.engine_run,
-                &transaction.commit_run.engine_run,
+                &transaction.canonical_commit_run.engine_run,
             ];
             let model_activations = engine_runs
                 .iter()
@@ -1010,7 +1015,7 @@ impl MountedValidation {
             }));
             self.chat.commit_assistant_turn(
                 user_content,
-                &transaction.assistant_content,
+                &transaction.assistant_message,
                 transaction.canonical_committed_token_ids,
             );
             on_progress(json!({
@@ -1072,32 +1077,29 @@ impl MountedValidation {
             let prepared = self
                 .chat
                 .prepare_user_turn(user_content, &self.transcript_codec)?;
-            let user_run = self.engine.submit_input_event_until_idle(
-                STREAM_ID,
-                VulkanResidentTokenInputEvent::new(
-                    format!("teacher_{turn_index}_user"),
-                    prepared.user_token_delta.clone(),
-                    0,
-                )
-                .with_origin("validation_teacher_forced_user"),
-            )?;
-            let (assistant_commit_token_ids, canonical_committed_token_ids) =
+            let assistant_message = json!({
+                "role": "assistant",
+                "content": assistant_content,
+            });
+            let (assistant_token_delta, canonical_committed_token_ids) =
                 self.chat.render_assistant_commit_token_delta(
                     &prepared,
                     user_content,
-                    assistant_content,
+                    &assistant_message,
                     &self.transcript_codec,
                 )?;
-            let commit_run = self.engine.submit_input_event_until_idle(
+            let mut canonical_turn_token_delta = prepared.user_token_delta.clone();
+            canonical_turn_token_delta.extend_from_slice(&assistant_token_delta);
+            let canonical_commit_run = self.engine.submit_input_event_until_idle(
                 STREAM_ID,
                 VulkanResidentTokenInputEvent::new(
-                    format!("teacher_{turn_index}_assistant"),
-                    assistant_commit_token_ids,
+                    format!("teacher_{turn_index}_canonical_turn"),
+                    canonical_turn_token_delta,
                     0,
                 )
-                .with_origin("validation_teacher_forced_assistant"),
+                .with_origin("validation_teacher_forced_canonical_turn"),
             )?;
-            let engine_runs = [&user_run.engine_run, &commit_run.engine_run];
+            let engine_runs = [&canonical_commit_run.engine_run];
             let model_activations = engine_runs
                 .iter()
                 .map(|run| {
@@ -1143,7 +1145,7 @@ impl MountedValidation {
             }));
             self.chat.commit_assistant_turn(
                 user_content,
-                assistant_content,
+                &assistant_message,
                 canonical_committed_token_ids,
             );
             on_progress(json!({
@@ -1207,7 +1209,7 @@ impl MountedValidation {
                 STREAM_ID,
                 VulkanResidentTokenInputEvent::new("validation_rollback", vec![replay_token], 1)
                     .with_origin("validation_transaction_rollback"),
-                |_| {},
+                |_| VulkanResidentOutputControl::Continue,
             )?;
         let after_rollback = self.engine.stream_resident_state_digest(STREAM_ID)?;
         if before_rollback != after_rollback {

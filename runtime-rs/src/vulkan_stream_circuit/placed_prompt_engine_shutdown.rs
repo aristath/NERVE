@@ -126,7 +126,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 ));
             }
         }
-        self.active_transaction_stream_ids.clear();
+        self.active_transaction_depths.clear();
         self.multi_stream_batch_runners.clear();
 
         let scheduler = self.runtime_scheduler.snapshot();
@@ -159,14 +159,17 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             report.resource_teardowns.push(teardown);
         }
 
+        // Remove the shutdown-only package references before dropping streams.
+        // A stream owns the Rc<VulkanComputeDevice> instances needed to destroy
+        // every package and processor buffer. Keeping these package clones past
+        // `streams.clear()` would let buffers outlive their logical device.
+        drop(packages);
         self.streams.clear();
         self.stream_histories.clear();
         self.latest_prefix_checkpoint_by_stream.clear();
         self.resident_prefix_state_cache =
             VulkanResidentPlacedPrefixStateCache::default();
         self.multi_stream_batch_runners.clear();
-        drop(packages);
-
         report.complete = report.errors.is_empty()
             && report.scheduler_in_flight_activation_count == 0
             && report

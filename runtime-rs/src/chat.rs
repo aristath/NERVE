@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -13,9 +14,9 @@ use crate::{
     VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun, VulkanResidentModelPackageManifest,
-    VulkanResidentTokenInputEvent, VulkanResidentTokenRuntimeSchedulerOutputEvent,
-    VulkanResidentTokenTextCodec, reset_vulkan_resident_execution_counters,
-    vulkan_resident_execution_counters,
+    VulkanResidentOutputControl, VulkanResidentTokenInputEvent,
+    VulkanResidentTokenRuntimeSchedulerOutputEvent, VulkanResidentTokenTextCodec,
+    reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 
 mod compiled_codec;
@@ -30,7 +31,7 @@ pub struct RuntimeChatMessage {
 #[derive(Clone, Debug)]
 pub struct RuntimeChatSession {
     pub formatter: RuntimeChatFormatter,
-    pub messages: Vec<RuntimeChatMessage>,
+    pub messages: Vec<serde_json::Value>,
     pub committed_token_ids: Vec<u32>,
 }
 
@@ -46,11 +47,12 @@ pub struct VulkanResidentChatTransactionRun {
     pub assistant_content: String,
     pub assistant_message: serde_json::Value,
     pub canonical_committed_token_ids: Vec<u32>,
-    pub assistant_commit_token_ids: Vec<u32>,
+    pub assistant_token_delta: Vec<u32>,
+    pub canonical_turn_token_delta: Vec<u32>,
     pub generation_event_id: String,
     pub user_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub generation_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
-    pub commit_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+    pub canonical_commit_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub execution_counters: VulkanResidentExecutionCounters,
     pub elapsed_ns: u64,
 }
@@ -58,8 +60,36 @@ pub struct VulkanResidentChatTransactionRun {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VulkanResidentChatTransactionPhase {
     UserCommitted,
-    GenerationCompleted,
-    AssistantCommitted,
+    GenerationBranchCompleted,
+    CanonicalTurnCommitted,
+}
+
+#[derive(Debug)]
+pub struct RuntimeRecoverableChatTurnError {
+    stage: &'static str,
+    source: Box<dyn Error>,
+}
+
+impl RuntimeRecoverableChatTurnError {
+    pub fn new(stage: &'static str, source: Box<dyn Error>) -> Self {
+        Self { stage, source }
+    }
+}
+
+impl fmt::Display for RuntimeRecoverableChatTurnError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.stage, self.source)
+    }
+}
+
+impl Error for RuntimeRecoverableChatTurnError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn recoverable_chat_turn_error(stage: &'static str, source: Box<dyn Error>) -> Box<dyn Error> {
+    Box::new(RuntimeRecoverableChatTurnError::new(stage, source))
 }
 
 pub fn execute_vulkan_resident_chat_transaction<T, F, P>(
@@ -77,7 +107,7 @@ pub fn execute_vulkan_resident_chat_transaction<T, F, P>(
 ) -> Result<VulkanResidentChatTransactionRun, Box<dyn Error>>
 where
     T: VulkanResidentTokenTextCodec,
-    F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
+    F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent) -> Result<(), Box<dyn Error>>,
     P: FnMut(
         VulkanResidentChatTransactionPhase,
         &VulkanResidentInProcessPlacedPromptEngine,
@@ -85,81 +115,138 @@ where
 {
     reset_vulkan_resident_execution_counters();
     let started = Instant::now();
-    let user_run = engine.submit_input_event_until_idle(
-        stream_id,
-        VulkanResidentTokenInputEvent::new(
-            format!("chat_{turn_index}_user"),
-            prepared.user_token_delta.clone(),
-            0,
-        )
-        .with_origin("runtime_chat_canonical_user"),
-    )?;
-    on_phase_completed(VulkanResidentChatTransactionPhase::UserCommitted, engine)?;
-    let mut generation_event = VulkanResidentTokenInputEvent::new(
-        format!("chat_{turn_index}_generation"),
-        prepared.generation_prompt_token_delta.clone(),
-        max_new_tokens,
-    )
-    .with_origin("runtime_chat_generation_branch");
-    let generation_event_id = generation_event.id.clone();
-    if !stop_token_ids.is_empty() {
-        generation_event = generation_event.with_stop_tokens(stop_token_ids.to_vec());
-    }
-    let generation_run = engine.submit_input_event_transactionally_until_idle_with_output(
-        stream_id,
-        generation_event,
-        &mut on_output_event,
-    )?;
-    on_phase_completed(
-        VulkanResidentChatTransactionPhase::GenerationCompleted,
-        engine,
-    )?;
-    let assistant_stopped = generation_run
-        .generated_token_ids
-        .last()
-        .is_some_and(|token_id| stop_token_ids.contains(token_id));
-    let assistant_content = transcript_codec.decode_tokens(assistant_content_token_ids(
-        &generation_run.generated_token_ids,
-        stop_token_ids,
-    ))?;
-    let assistant_message = chat_session
-        .formatter
-        .parse_assistant_completion(&assistant_content, assistant_stopped)?;
-    let (assistant_commit_token_ids, canonical_committed_token_ids) = chat_session
-        .render_assistant_commit_token_delta(
-            prepared,
-            user_content,
-            &assistant_content,
-            transcript_codec,
+    let outer_transaction = engine.begin_stream_transaction(stream_id)?;
+    let transaction = (|| -> Result<VulkanResidentChatTransactionRun, Box<dyn Error>> {
+        let user_run = engine.submit_input_event_until_idle(
+            stream_id,
+            VulkanResidentTokenInputEvent::new(
+                format!("chat_{turn_index}_user"),
+                prepared.user_token_delta.clone(),
+                0,
+            )
+            .with_origin("runtime_chat_canonical_user"),
         )?;
-    let commit_run = engine.submit_input_event_until_idle(
-        stream_id,
-        VulkanResidentTokenInputEvent::new(
-            format!("chat_{turn_index}_assistant_commit"),
-            assistant_commit_token_ids.clone(),
-            0,
+        on_phase_completed(VulkanResidentChatTransactionPhase::UserCommitted, engine)?;
+
+        let mut generation_event = VulkanResidentTokenInputEvent::new(
+            format!("chat_{turn_index}_generation_branch"),
+            prepared.generation_prompt_token_delta.clone(),
+            max_new_tokens,
         )
-        .with_origin("runtime_chat_canonical_assistant"),
-    )?;
-    on_phase_completed(
-        VulkanResidentChatTransactionPhase::AssistantCommitted,
-        engine,
-    )?;
-    Ok(VulkanResidentChatTransactionRun {
-        generated_token_ids: generation_run.generated_token_ids.clone(),
-        assistant_content,
-        assistant_message,
-        canonical_committed_token_ids,
-        assistant_commit_token_ids,
-        generation_event_id,
-        user_run,
-        generation_run,
-        commit_run,
-        execution_counters: vulkan_resident_execution_counters(),
-        elapsed_ns: u64::try_from(started.elapsed().as_nanos())
-            .unwrap_or(u64::MAX)
-            .max(1),
-    })
+        .with_origin("runtime_chat_generation_branch");
+        let generation_event_id = generation_event.id.clone();
+        if !stop_token_ids.is_empty() {
+            generation_event = generation_event.with_stop_tokens(stop_token_ids.to_vec());
+        }
+        let mut output_error = None;
+        let generation_run = engine.submit_input_event_transactionally_until_idle_with_output(
+            stream_id,
+            generation_event,
+            |event| {
+                if output_error.is_some() {
+                    return VulkanResidentOutputControl::Abort;
+                }
+                if let Err(error) = on_output_event(event) {
+                    output_error = Some(error);
+                    VulkanResidentOutputControl::Abort
+                } else {
+                    VulkanResidentOutputControl::Continue
+                }
+            },
+        )?;
+        on_phase_completed(
+            VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
+            engine,
+        )?;
+        if let Some(error) = output_error {
+            return Err(recoverable_chat_turn_error(
+                "streaming generated assistant output failed before canonical commit",
+                error,
+            ));
+        }
+        let assistant_stopped = generation_run
+            .generated_token_ids
+            .last()
+            .is_some_and(|token_id| stop_token_ids.contains(token_id));
+        let assistant_content = transcript_codec
+            .decode_tokens(assistant_content_token_ids(
+                &generation_run.generated_token_ids,
+                stop_token_ids,
+            ))
+            .map_err(|error| {
+                recoverable_chat_turn_error(
+                    "decoding generated assistant output failed before canonical commit",
+                    Box::new(error),
+                )
+            })?;
+        let assistant_message = chat_session
+            .formatter
+            .parse_assistant_completion(&assistant_content, assistant_stopped)
+            .map_err(|error| {
+                recoverable_chat_turn_error(
+                    "generated assistant protocol validation failed before canonical commit",
+                    error,
+                )
+            })?;
+        let (assistant_token_delta, canonical_committed_token_ids) = chat_session
+            .render_assistant_commit_token_delta(
+                prepared,
+                user_content,
+                &assistant_message,
+                transcript_codec,
+            )
+            .map_err(|error| {
+                recoverable_chat_turn_error(
+                    "rendering the canonical assistant turn failed before commit",
+                    error,
+                )
+            })?;
+        let mut canonical_turn_token_delta = prepared.user_token_delta.clone();
+        canonical_turn_token_delta.extend_from_slice(&assistant_token_delta);
+        let canonical_commit_run = engine.submit_input_event_until_idle(
+            stream_id,
+            VulkanResidentTokenInputEvent::new(
+                format!("chat_{turn_index}_canonical_assistant"),
+                assistant_token_delta.clone(),
+                0,
+            )
+            .with_origin("runtime_chat_canonical_assistant"),
+        )?;
+        on_phase_completed(
+            VulkanResidentChatTransactionPhase::CanonicalTurnCommitted,
+            engine,
+        )?;
+        Ok(VulkanResidentChatTransactionRun {
+            generated_token_ids: generation_run.generated_token_ids.clone(),
+            assistant_content,
+            assistant_message,
+            canonical_committed_token_ids,
+            assistant_token_delta,
+            canonical_turn_token_delta,
+            generation_event_id,
+            user_run,
+            generation_run,
+            canonical_commit_run,
+            execution_counters: vulkan_resident_execution_counters(),
+            elapsed_ns: 0,
+        })
+    })();
+
+    match transaction {
+        Ok(mut transaction) => {
+            engine.commit_stream_transaction(outer_transaction)?;
+            transaction.elapsed_ns = u64::try_from(started.elapsed().as_nanos())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            Ok(transaction)
+        }
+        Err(error) => match engine.restore_stream_transaction(outer_transaction) {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(Box::new(io::Error::other(format!(
+                "chat turn failed ({error}) and canonical state rollback also failed ({restore_error})",
+            )))),
+        },
+    }
 }
 
 pub fn assistant_content_token_ids<'a>(
@@ -204,12 +291,14 @@ impl RuntimeChatSession {
         C: VulkanResidentTokenTextCodec,
     {
         let mut messages = self.messages.clone();
-        messages.push(RuntimeChatMessage {
-            role: "user".to_string(),
-            content: user_content.to_string(),
-        });
-        let canonical_user_text = self.formatter.format_messages(&messages, false)?;
-        let generation_prompt_text = self.formatter.format_messages(&messages, true)?;
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": user_content,
+        }));
+        let canonical_user_text = self
+            .formatter
+            .format_structured_messages(&messages, false)?;
+        let generation_prompt_text = self.formatter.format_structured_messages(&messages, true)?;
         let canonical_user_token_ids = codec.encode_text(&canonical_user_text)?;
         let generation_prompt_token_ids = codec.encode_text(&generation_prompt_text)?;
         if !canonical_user_token_ids.starts_with(&self.committed_token_ids) {
@@ -253,28 +342,37 @@ impl RuntimeChatSession {
         &self,
         prepared: &RuntimePreparedChatTurn,
         user_content: &str,
-        assistant_content: &str,
+        assistant_message: &serde_json::Value,
         codec: &C,
     ) -> Result<(Vec<u32>, Vec<u32>), Box<dyn Error>>
     where
         C: VulkanResidentTokenTextCodec,
     {
+        if assistant_message
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            != Some("assistant")
+        {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "parsed assistant message must have role assistant",
+            )));
+        }
         let mut messages = self.messages.clone();
-        messages.push(RuntimeChatMessage {
-            role: "user".to_string(),
-            content: user_content.to_string(),
-        });
-        messages.push(RuntimeChatMessage {
-            role: "assistant".to_string(),
-            content: assistant_content.to_string(),
-        });
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": user_content,
+        }));
+        messages.push(assistant_message.clone());
         let render_with_next_user_probe = |probe: &str| -> Result<Vec<u32>, Box<dyn Error>> {
             let mut probed_messages = messages.clone();
-            probed_messages.push(RuntimeChatMessage {
-                role: "user".to_string(),
-                content: probe.to_string(),
-            });
-            let rendered = self.formatter.format_messages(&probed_messages, false)?;
+            probed_messages.push(serde_json::json!({
+                "role": "user",
+                "content": probe,
+            }));
+            let rendered = self
+                .formatter
+                .format_structured_messages(&probed_messages, false)?;
             Ok(codec.encode_text(&rendered)?)
         };
         let left_probe = render_with_next_user_probe("NERVE_NEXT_USER_LEFT_PROBE_3EAF96A1")?;
@@ -305,17 +403,20 @@ impl RuntimeChatSession {
     pub fn commit_assistant_turn(
         &mut self,
         user_content: &str,
-        assistant_content: &str,
+        assistant_message: &serde_json::Value,
         canonical_token_ids: Vec<u32>,
     ) {
-        self.messages.push(RuntimeChatMessage {
-            role: "user".to_string(),
-            content: user_content.to_string(),
-        });
-        self.messages.push(RuntimeChatMessage {
-            role: "assistant".to_string(),
-            content: assistant_content.to_string(),
-        });
+        debug_assert_eq!(
+            assistant_message
+                .get("role")
+                .and_then(serde_json::Value::as_str),
+            Some("assistant"),
+        );
+        self.messages.push(serde_json::json!({
+            "role": "user",
+            "content": user_content,
+        }));
+        self.messages.push(assistant_message.clone());
         self.committed_token_ids = canonical_token_ids;
     }
 }
@@ -445,6 +546,19 @@ impl RuntimeChatFormatter {
             "role": "assistant",
             "content": assistant_content,
         }))
+    }
+
+    pub fn assistant_stream_protocol_validator<C>(
+        &self,
+        codec: &C,
+    ) -> Result<Option<RuntimeAssistantStreamProtocolValidator>, Box<dyn Error>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        let Some(compiled_codec) = &self.compiled_codec else {
+            return Ok(None);
+        };
+        Ok(compiled_codec.assistant_stream_protocol_validator(codec, &self.template_variables)?)
     }
 }
 

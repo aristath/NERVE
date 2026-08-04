@@ -78,12 +78,13 @@ fn run_placed_chat(
         chat_session,
         codec,
         &transcript_codec,
-        &stop_token_ids,
         |turn_index, chat_session, input_text, prepared| {
             print!("llm> ");
             io::stdout().flush()?;
             let mut decoder = codec.decode_stream();
-            let mut output_error = None;
+            let mut protocol_validator = chat_session
+                .formatter
+                .assistant_stream_protocol_validator(&transcript_codec)?;
             let generation_context_start = chat_session
                 .committed_token_ids
                 .len()
@@ -103,8 +104,8 @@ fn run_placed_chat(
                 })?
                 .selection_telemetry_snapshot()?;
             let mut selection_after_user = None;
-            let mut selection_after_generation = None;
-            let mut selection_after_commit = None;
+            let mut selection_after_generation_branch = None;
+            let mut selection_after_canonical_commit = None;
             let transaction = execute_vulkan_resident_chat_transaction(
                 &mut engine,
                 "main",
@@ -116,6 +117,9 @@ fn run_placed_chat(
                 prepared,
                 args.max_new_tokens,
                 |output_event| {
+                    if let Some(validator) = protocol_validator.as_mut() {
+                        validator.observe(output_event.output_event.token_id)?;
+                    }
                     let output_at = Instant::now();
                     if let Some(previous) = previous_output_at {
                         sustained_decode_samples.push(
@@ -142,19 +146,15 @@ fn run_placed_chat(
                         );
                     }
                     previous_output_at = Some(output_at);
-                    if output_error.is_some() {
-                        return;
-                    }
                     match decoder.step(output_event.output_event.token_id) {
                         Ok(Some(text)) => {
                             print!("{text}");
-                            if let Err(error) = io::stdout().flush() {
-                                output_error = Some(error.to_string());
-                            }
+                            io::stdout().flush()?;
                         }
                         Ok(None) => {}
-                        Err(error) => output_error = Some(error.to_string()),
+                        Err(error) => return Err(Box::new(error)),
                     }
+                    Ok(())
                 },
                 |phase, engine| {
                     let snapshot = engine
@@ -164,17 +164,17 @@ fn run_placed_chat(
                                 io::ErrorKind::NotFound,
                                 "placed chat engine lost its main stream",
                             )
-                        })?
+                    })?
                         .selection_telemetry_snapshot()?;
                     match phase {
                         VulkanResidentChatTransactionPhase::UserCommitted => {
                             selection_after_user = Some(snapshot);
                         }
-                        VulkanResidentChatTransactionPhase::GenerationCompleted => {
-                            selection_after_generation = Some(snapshot);
+                        VulkanResidentChatTransactionPhase::GenerationBranchCompleted => {
+                            selection_after_generation_branch = Some(snapshot);
                         }
-                        VulkanResidentChatTransactionPhase::AssistantCommitted => {
-                            selection_after_commit = Some(snapshot);
+                        VulkanResidentChatTransactionPhase::CanonicalTurnCommitted => {
+                            selection_after_canonical_commit = Some(snapshot);
                         }
                     }
                     Ok(())
@@ -185,28 +185,28 @@ fn run_placed_chat(
                     "placed chat transaction did not report its user phase",
                 )
             })?;
-            let selection_after_generation =
-                selection_after_generation.ok_or_else(|| {
+            let selection_after_generation_branch =
+                selection_after_generation_branch.ok_or_else(|| {
                     io::Error::other(
-                        "placed chat transaction did not report its generation phase",
+                        "placed chat transaction did not report its generation-branch phase",
                     )
                 })?;
-            let selection_after = selection_after_commit.ok_or_else(|| {
+            let selection_after = selection_after_canonical_commit.ok_or_else(|| {
                 io::Error::other(
-                    "placed chat transaction did not report its commit phase",
+                    "placed chat transaction did not report its canonical-commit phase",
                 )
             })?;
             let selection_user_coverage = selection_after_user
                 .delta_since(&selection_before)?
                 .report();
-            let selection_generation_coverage = selection_after_generation
+            let selection_generation_branch_coverage = selection_after_generation_branch
                 .delta_since(&selection_after_user)?
                 .report();
-            let selection_commit_coverage = selection_after
-                .delta_since(&selection_after_generation)?
+            let selection_canonical_commit_coverage = selection_after
+                .delta_since(&selection_after_generation_branch)?
                 .report();
-            let selection_post_generation_cumulative =
-                selection_after_generation.report();
+            let selection_post_branch_cumulative =
+                selection_after_generation_branch.report();
             let selection_coverage =
                 selection_after.delta_since(&selection_before)?.report();
             let selection_counter_digest = selection_after.digest();
@@ -232,7 +232,7 @@ fn run_placed_chat(
             let engine_runs = [
                 &transaction.user_run.engine_run,
                 &transaction.generation_run.engine_run,
-                &transaction.commit_run.engine_run,
+                &transaction.canonical_commit_run.engine_run,
             ];
             let prefill_activation_count = engine_runs
                 .iter()
@@ -249,7 +249,7 @@ fn run_placed_chat(
                     .user_token_delta
                     .len()
                     .saturating_add(prepared.generation_prompt_token_delta.len())
-                    .saturating_add(transaction.assistant_commit_token_ids.len()),
+                    .saturating_add(transaction.assistant_token_delta.len()),
                 transaction.generated_token_ids.len(),
                 engine_runs.iter().map(|run| run.scheduler_step_count).sum(),
                 engine_runs
@@ -295,10 +295,7 @@ fn run_placed_chat(
                     .scheduler_turn_count,
             );
             let prefix_state_cache =
-                transaction.commit_run.engine_run.prefix_state_cache.clone();
-            if let Some(error) = output_error {
-                return Err(Box::new(io::Error::new(io::ErrorKind::InvalidData, error)));
-            }
+                transaction.canonical_commit_run.engine_run.prefix_state_cache.clone();
             let speculative_decode =
                 submitted_run.submitted_run.session_run.run.speculative_decode.clone();
             let resident_feedback = runtime_feedback_execution_report(
@@ -332,6 +329,7 @@ fn run_placed_chat(
                 )?;
             Ok(RuntimeChatTurn {
                 generated_token_ids: transaction.generated_token_ids,
+                assistant_message: transaction.assistant_message,
                 canonical_committed_token_ids:
                     transaction.canonical_committed_token_ids,
                 generated_token_digest,
@@ -368,9 +366,9 @@ fn run_placed_chat(
                     decode_activation_count,
                 ),
                 selection_user_coverage,
-                selection_generation_coverage,
-                selection_commit_coverage,
-                selection_post_generation_cumulative,
+                selection_generation_branch_coverage,
+                selection_canonical_commit_coverage,
+                selection_post_branch_cumulative,
                 selection_coverage,
                 cumulative_selection_coverage,
                 transport_edges,

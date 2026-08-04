@@ -638,6 +638,23 @@ impl RuntimeStreamScheduler {
         Ok(stream.snapshot())
     }
 
+    pub fn discard_stream_state_checkpoint(
+        &mut self,
+        mut checkpoint: RuntimeStreamStateCheckpoint,
+    ) -> Result<(), RuntimeStreamSchedulerError> {
+        let stream = self.stream(&checkpoint.stream_id)?;
+        if stream.execution_class_id != checkpoint.execution_class_id {
+            return Err(RuntimeStreamSchedulerError(format!(
+                "cannot discard stream checkpoint for execution class {:?} from {:?}",
+                checkpoint.execution_class_id, stream.execution_class_id,
+            )));
+        }
+        checkpoint
+            .transient_state_table
+            .reset_all(&mut self.transient_state_arena)?;
+        Ok(())
+    }
+
     pub fn prefix_state_cache_snapshot(&self) -> RuntimePrefixStateCacheSnapshot {
         self.prefix_state_cache.snapshot()
     }

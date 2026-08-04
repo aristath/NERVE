@@ -255,6 +255,18 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         Ok(initialized)
     }
 
+    fn restore_initial_transaction_state(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        let initialized = self.initialize_transient_state_buffers(devices)?;
+        self.sampler
+            .reset_token_state()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        self.verification_state_transactions.borrow_mut().take();
+        Ok(initialized)
+    }
+
     fn set_random_seed(
         &self,
         random_seed: u32,

@@ -15,7 +15,7 @@ pub struct VulkanResidentInProcessPlacedPromptEngine {
     latest_prefix_checkpoint_by_stream: BTreeMap<String, RuntimePrefixStateCacheKey>,
     multi_stream_batch_runners:
         BTreeMap<VulkanResidentInProcessPlacedPromptEngineBatchKey, VulkanResidentPlacedMultiStreamBatchRunner>,
-    active_transaction_stream_ids: BTreeSet<String>,
+    active_transaction_depths: BTreeMap<String, usize>,
     pending_wait_group_cursor: usize,
     shutdown_attempted: bool,
 }
@@ -43,7 +43,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             resident_prefix_state_cache: VulkanResidentPlacedPrefixStateCache::default(),
             latest_prefix_checkpoint_by_stream: BTreeMap::new(),
             multi_stream_batch_runners: BTreeMap::new(),
-            active_transaction_stream_ids: BTreeSet::new(),
+            active_transaction_depths: BTreeMap::new(),
             pending_wait_group_cursor: 0,
             shutdown_attempted: false,
         }
@@ -190,7 +190,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         stream_id: &str,
         random_seed: u32,
     ) -> Result<usize, VulkanResidentInProcessPlacedPromptEngineError> {
-        if self.active_transaction_stream_ids.contains(stream_id) {
+        if self.active_transaction_depths.contains_key(stream_id) {
             return Err(placed_scheduler_divergence(
                 "cannot reset a stream with an active transaction",
             )
@@ -432,9 +432,35 @@ impl VulkanResidentInProcessPlacedPromptEngine {
     where
         F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
     {
+        let abort_requested = std::cell::Cell::new(false);
+        self.submit_input_event_until_idle_abortable_with_output(
+            stream_id,
+            event,
+            &abort_requested,
+            on_output_event,
+        )
+    }
+
+    pub(crate) fn submit_input_event_until_idle_abortable_with_output<F>(
+        &mut self,
+        stream_id: &str,
+        event: VulkanResidentTokenInputEvent,
+        abort_requested: &std::cell::Cell<bool>,
+        on_output_event: F,
+    ) -> Result<
+        VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+        VulkanResidentInProcessPlacedPromptEngineError,
+    >
+    where
+        F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
+    {
         let input_event_id = event.id.clone();
         let queued_input_event = self.enqueue_input_event(stream_id, event)?;
-        let engine_run = self.run_until_idle_bounded_with_output(usize::MAX, on_output_event)?;
+        let engine_run = self.run_until_idle_bounded_abortable_with_output(
+            usize::MAX,
+            abort_requested,
+            on_output_event,
+        )?;
         let output_events = engine_run
             .output_events
             .iter()
@@ -499,6 +525,26 @@ impl VulkanResidentInProcessPlacedPromptEngine {
     pub fn run_until_idle_bounded_with_output<F>(
         &mut self,
         max_input_events: usize,
+        on_output_event: F,
+    ) -> Result<
+        VulkanResidentInProcessPlacedPromptEngineRun,
+        VulkanResidentInProcessPlacedPromptEngineError,
+    >
+    where
+        F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
+    {
+        let abort_requested = std::cell::Cell::new(false);
+        self.run_until_idle_bounded_abortable_with_output(
+            max_input_events,
+            &abort_requested,
+            on_output_event,
+        )
+    }
+
+    fn run_until_idle_bounded_abortable_with_output<F>(
+        &mut self,
+        max_input_events: usize,
+        abort_requested: &std::cell::Cell<bool>,
         mut on_output_event: F,
     ) -> Result<
         VulkanResidentInProcessPlacedPromptEngineRun,
@@ -526,7 +572,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             BTreeMap::<u64, VulkanResidentInProcessPlacedPromptEnginePendingActivation>::new();
         let scheduler_activation_capacity = self.streams.len().max(1);
 
-        while input_runs.len() < max_input_events {
+        while input_runs.len() < max_input_events && !abort_requested.get() {
             let completed_pending = self.poll_pending_scheduler_activations_with_output(
                 &mut pending_activations,
                 &mut on_output_event,
@@ -538,6 +584,9 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 if let Some(input_run) = completed.input_run {
                     input_runs.push(input_run);
                 }
+            }
+            if abort_requested.get() {
+                break;
             }
             if input_runs.len() >= max_input_events {
                 break;
@@ -606,6 +655,9 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 decode_time_ns = decode_time_ns.saturating_add(batch_run.decode_time_ns);
                 output_events.extend(batch_run.output_events);
                 input_runs.extend(batch_run.input_runs);
+                if abort_requested.get() {
+                    break;
+                }
             }
         }
 
@@ -1053,7 +1105,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         stream_id: &str,
         remaining_prompt_token_count: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedPromptEngineError> {
-        if self.active_transaction_stream_ids.contains(stream_id) {
+        if self.active_transaction_depths.contains_key(stream_id) {
             return Ok(());
         }
         let state = self

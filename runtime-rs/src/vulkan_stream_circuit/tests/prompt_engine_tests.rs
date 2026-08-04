@@ -294,6 +294,30 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
     .unwrap();
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     engine.add_stream("main", stream).unwrap();
+    let empty_stream_before = engine.snapshot().streams[0].clone();
+    let empty_state_before = engine
+        .runtime_scheduler
+        .stream_transient_state_snapshot("main")
+        .unwrap();
+    let empty_history_before = engine.stream_histories["main"].clone();
+    let empty_transaction = engine
+        .submit_input_event_transactionally_until_idle_with_output(
+            "main",
+            VulkanResidentTokenInputEvent::new("empty_branch", vec![6], 2),
+            |_| VulkanResidentOutputControl::Continue,
+        )
+        .unwrap();
+    assert_eq!(empty_transaction.generated_token_ids.len(), 2);
+    assert_eq!(engine.snapshot().streams[0], empty_stream_before);
+    assert_eq!(
+        engine
+            .runtime_scheduler
+            .stream_transient_state_snapshot("main")
+            .unwrap(),
+        empty_state_before,
+    );
+    assert_eq!(engine.stream_histories["main"], empty_history_before);
+
     engine
         .submit_input_event_until_idle(
             "main",
@@ -315,7 +339,7 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
         .submit_input_event_transactionally_until_idle_with_output(
             "main",
             VulkanResidentTokenInputEvent::new("branch", vec![6], 3),
-            |_| {},
+            |_| VulkanResidentOutputControl::Continue,
         )
         .unwrap();
 
@@ -337,6 +361,37 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
         arena_before.live_block_count
     );
 
+    let mut observed = 0usize;
+    let aborted = engine
+        .submit_input_event_transactionally_until_idle_with_output(
+            "main",
+            VulkanResidentTokenInputEvent::new("aborted_branch", vec![6], 256),
+            |_| {
+                observed = observed.saturating_add(1);
+                if observed >= 2 {
+                    VulkanResidentOutputControl::Abort
+                } else {
+                    VulkanResidentOutputControl::Continue
+                }
+            },
+        )
+        .unwrap();
+    assert!(observed >= 2);
+    assert!(
+        aborted.generated_token_ids.len() < 256,
+        "abort callback observed {observed} token(s) after the engine had already generated {}",
+        aborted.generated_token_ids.len(),
+    );
+    assert_eq!(engine.snapshot().streams[0], stream_before);
+    assert_eq!(
+        engine
+            .runtime_scheduler
+            .stream_transient_state_snapshot("main")
+            .unwrap(),
+        state_before,
+    );
+    assert_eq!(engine.stream_histories["main"], history_before);
+
     let committed = engine
         .submit_input_event_until_idle(
             "main",
@@ -346,6 +401,203 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
     assert_eq!(
         transactional.generated_token_ids,
         committed.generated_token_ids
+    );
+}
+
+#[derive(Clone, Copy)]
+struct RejectingGeneratedChatCodec;
+
+impl crate::VulkanResidentTokenTextCodec for RejectingGeneratedChatCodec {
+    fn encode_text(
+        &self,
+        _: &str,
+    ) -> Result<Vec<u32>, crate::VulkanResidentTokenTextCodecError> {
+        Ok(vec![1])
+    }
+
+    fn decode_tokens(
+        &self,
+        _: &[u32],
+    ) -> Result<String, crate::VulkanResidentTokenTextCodecError> {
+        Err(crate::VulkanResidentTokenTextCodecError::new(
+            "deliberately malformed generated protocol",
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FixedGeneratedChatCodec;
+
+impl crate::VulkanResidentTokenTextCodec for FixedGeneratedChatCodec {
+    fn encode_text(
+        &self,
+        text: &str,
+    ) -> Result<Vec<u32>, crate::VulkanResidentTokenTextCodecError> {
+        Ok(text
+            .bytes()
+            .map(|byte| u32::from(byte % 29).saturating_add(1))
+            .collect())
+    }
+
+    fn decode_tokens(
+        &self,
+        _: &[u32],
+    ) -> Result<String, crate::VulkanResidentTokenTextCodecError> {
+        Ok("answer".to_string())
+    }
+}
+
+#[test]
+fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for rejected chat transaction was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping rejected chat transaction test: {error}");
+            return;
+        }
+    };
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(64),
+        7,
+        0,
+    )
+    .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    let stream_before = engine.snapshot().streams[0].clone();
+    let scheduler_before = engine
+        .runtime_scheduler
+        .stream_transient_state_snapshot("main")
+        .unwrap();
+    let history_before = engine.stream_histories["main"].clone();
+    let chat_session = crate::RuntimeChatSession {
+        formatter: crate::RuntimeChatFormatter {
+            template_source: String::new(),
+            template_variables: serde_json::Map::new(),
+            render_time: chrono::Local::now().fixed_offset(),
+            compiled_codec: None,
+        },
+        messages: Vec::new(),
+        committed_token_ids: Vec::new(),
+    };
+    let prepared = crate::RuntimePreparedChatTurn {
+        canonical_user_token_ids: vec![4],
+        user_token_delta: vec![4],
+        generation_prompt_token_delta: vec![5],
+    };
+    let mut phases = Vec::new();
+
+    let error = match crate::execute_vulkan_resident_chat_transaction(
+        &mut engine,
+        "main",
+        &chat_session,
+        &RejectingGeneratedChatCodec,
+        &[],
+        0,
+        "first",
+        &prepared,
+        2,
+        |_| Ok(()),
+        |phase, _| {
+            phases.push(phase);
+            Ok(())
+        },
+    ) {
+        Ok(_) => panic!("malformed generated chat output was committed"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .downcast_ref::<crate::RuntimeRecoverableChatTurnError>()
+            .is_some(),
+        "unexpected chat transaction error: {error}",
+    );
+    assert_eq!(
+        phases,
+        vec![
+            crate::VulkanResidentChatTransactionPhase::UserCommitted,
+            crate::VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
+        ],
+    );
+    assert_eq!(engine.snapshot().streams[0], stream_before);
+    assert_eq!(
+        engine
+            .runtime_scheduler
+            .stream_transient_state_snapshot("main")
+            .unwrap(),
+        scheduler_before,
+    );
+    assert_eq!(engine.stream_histories["main"], history_before);
+    assert!(engine.active_transaction_depths.is_empty());
+
+    let retry_session = crate::RuntimeChatSession {
+        formatter: crate::RuntimeChatFormatter {
+            template_source: "{%- for message in messages -%}{{- ('U' if message.role == 'user' else 'A') + message.content -}}{%- endfor -%}{%- if add_generation_prompt -%}{{- 'A' -}}{%- endif -%}".to_string(),
+            template_variables: serde_json::Map::new(),
+            render_time: chrono::Local::now().fixed_offset(),
+            compiled_codec: None,
+        },
+        messages: Vec::new(),
+        committed_token_ids: Vec::new(),
+    };
+    let retry_prepared = retry_session
+        .prepare_user_turn("first", &FixedGeneratedChatCodec)
+        .unwrap();
+    let mut retry_phases = Vec::new();
+    let retry = crate::execute_vulkan_resident_chat_transaction(
+        &mut engine,
+        "main",
+        &retry_session,
+        &FixedGeneratedChatCodec,
+        &[],
+        0,
+        "first",
+        &retry_prepared,
+        2,
+        |_| Ok(()),
+        |phase, _| {
+            retry_phases.push(phase);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        retry_phases,
+        vec![
+            crate::VulkanResidentChatTransactionPhase::UserCommitted,
+            crate::VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
+            crate::VulkanResidentChatTransactionPhase::CanonicalTurnCommitted,
+        ],
+    );
+    assert_eq!(
+        retry.canonical_turn_token_delta,
+        [
+            retry_prepared.user_token_delta.as_slice(),
+            retry.assistant_token_delta.as_slice(),
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        engine.stream_histories["main"].committed_state_token_ids,
+        retry.canonical_turn_token_delta,
+    );
+    assert_eq!(
+        engine.snapshot().streams[0].next_stream_tick,
+        retry.canonical_turn_token_delta.len() as u64,
     );
 }
 
@@ -487,7 +739,7 @@ fn placed_prompt_engine_transaction_restores_after_backend_failure() {
         .submit_input_event_transactionally_until_idle_with_output(
             "main",
             VulkanResidentTokenInputEvent::new("failing_branch", vec![6], 0),
-            |_| {},
+            |_| VulkanResidentOutputControl::Continue,
         )
         .unwrap_err();
 
@@ -504,7 +756,7 @@ fn placed_prompt_engine_transaction_restores_after_backend_failure() {
         scheduler_before
     );
     assert!(engine.snapshot().idle);
-    assert!(engine.active_transaction_stream_ids.is_empty());
+    assert!(engine.active_transaction_depths.is_empty());
 }
 
 #[test]
