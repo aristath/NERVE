@@ -696,6 +696,7 @@
         );
     }
 
+    #[cfg(feature = "vulkan")]
     #[test]
     fn runtime_prompt_run_reports_serialize_execution_contracts() {
         let bindings = RuntimeDeviceBindings::from_vulkan_targets(

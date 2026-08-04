@@ -545,6 +545,7 @@ pub struct RuntimeSelectedResourceCountReport {
     pub selection_count: u64,
 }
 
+#[cfg(feature = "vulkan")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePlacedPromptRunReport {
     pub ok: bool,
