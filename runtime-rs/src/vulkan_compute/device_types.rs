@@ -30,6 +30,8 @@ pub struct VulkanComputeDevice {
     min_storage_buffer_offset_alignment: usize,
     device_local_memory_bytes: u64,
     memory_budget_supported: bool,
+    device_local_memory_budget: VulkanDeviceLocalMemoryBudget,
+    device_local_memory_budget_tracker: Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
     timestamp_period_ns: f32,
     conditional_rendering: Option<ash::ext::conditional_rendering::Device>,
     device_fault: Option<ash::ext::device_fault::Device>,
@@ -180,6 +182,8 @@ pub(crate) fn record_vulkan_execution_quantum_measurement(
 struct VulkanInstanceContext {
     _entry: Entry,
     instance: ash::Instance,
+    device_local_memory_budget_trackers:
+        Mutex<BTreeMap<String, std::sync::Weak<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>>>,
 }
 
 impl Drop for VulkanInstanceContext {
@@ -267,6 +271,7 @@ pub struct VulkanResidentBuffer {
     persistent_mapping_requires_unmap: bool,
     _shared_host_allocation: Option<Arc<VulkanSharedHostAllocation>>,
     _shared_device_memory_identity: Option<Arc<VulkanSharedDeviceMemoryIdentity>>,
+    _device_local_memory_reservation: Option<Arc<VulkanDeviceLocalMemoryReservation>>,
 }
 
 /// Page-aligned host memory imported into multiple Vulkan devices. GPUs access

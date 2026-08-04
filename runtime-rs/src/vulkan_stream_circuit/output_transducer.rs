@@ -142,12 +142,9 @@ impl VulkanResidentOutputTransducerRunner {
                 spec.normalized_frame_byte_capacity,
             )
             .with_access(VulkanResidentKernelBufferAccess::Write),
-            VulkanResidentKernelBufferBinding::new(
-                2,
-                &embedding_norm_weight.buffer,
-                embedding_norm_weight.byte_capacity,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            embedding_norm_weight
+                .kernel_binding(2)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
         ];
         let embedding_norm_dispatch = device.create_resident_kernel_dispatch(
             embedding_norm_spirv_words,
@@ -168,18 +165,16 @@ impl VulkanResidentOutputTransducerRunner {
                 spec.normalized_frame_byte_capacity,
             )
             .with_access(VulkanResidentKernelBufferAccess::Read),
-            VulkanResidentKernelBufferBinding::new(
-                1,
-                &embedding_weight.buffer,
-                embedding_weight.byte_capacity,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            embedding_weight
+                .kernel_binding(1)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
             VulkanResidentKernelBufferBinding::new(2, &logits_buffer, spec.logits_byte_capacity)
                 .with_access(VulkanResidentKernelBufferAccess::Write),
         ];
         if let Some(scale) = embedding_scale {
             tied_projection_bindings.push(
-                VulkanResidentKernelBufferBinding::new(3, &scale.buffer, scale.byte_capacity)
+                scale
+                    .kernel_binding(3)
                     .with_access(VulkanResidentKernelBufferAccess::Read),
             );
         }

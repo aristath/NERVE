@@ -231,6 +231,7 @@ pub fn upload_loaded_compiled_resource_group_to_stable_address_space(
                 resource_slots,
             }],
             alignment,
+            None,
         )?;
     Ok(uploads
         .pop()
@@ -244,6 +245,7 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
     address_table: &mut VulkanStableResourceAddressTable,
     requests: &[VulkanStableCompiledResourceUploadRequest<'_>],
     alignment: usize,
+    capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
 ) -> Result<Vec<VulkanStableCompiledResourceUpload>, VulkanError> {
     if requests.is_empty() {
         return Err(VulkanError(
@@ -307,8 +309,15 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
             (request.resource_slots, byte_counts.as_slice())
         })
         .collect::<Vec<_>>();
-    let allocation_groups =
-        arena.allocate_groups(device, &allocation_requests, alignment)?;
+    let allocation_groups = match capacity_permit {
+        Some(permit) => arena.allocate_groups_with_capacity_permit(
+            device,
+            &allocation_requests,
+            alignment,
+            permit,
+        )?,
+        None => arena.allocate_groups(device, &allocation_requests, alignment)?,
+    };
     let mut prepared_groups = Vec::with_capacity(requests.len());
     for ((request, group_allocations), byte_counts) in requests
         .iter()

@@ -32,6 +32,30 @@ fn compiled_resource_backing_workers_follow_wave_width_without_oversubscribing_c
 }
 
 #[test]
+fn device_capacity_settlement_waits_for_the_driver_acknowledgement() {
+    let mut remaining = VecDeque::from([1usize, 7, 32]);
+    let acknowledged = wait_for_compiled_resource_device_capacity(
+        16,
+        Duration::from_secs(1),
+        || Ok(remaining.pop_front().unwrap()),
+    )
+    .unwrap();
+
+    assert_eq!(acknowledged, 32);
+    assert!(remaining.is_empty());
+}
+
+#[test]
+fn device_capacity_settlement_never_invents_capacity_at_the_deadline() {
+    let error = wait_for_compiled_resource_device_capacity(16, Duration::ZERO, || Ok(15))
+        .expect_err("unacknowledged or externally consumed capacity must remain unavailable");
+
+    assert!(error.to_string().contains("did not settle"));
+    assert!(error.to_string().contains("needs 16 bytes"));
+    assert!(error.to_string().contains("only 15 bytes"));
+}
+
+#[test]
 fn exact_tiered_resource_plan_never_exceeds_either_memory_budget() {
     let groups = BTreeMap::from([
         ("identity-0".to_string(), 40usize),
@@ -281,14 +305,138 @@ fn paged_eviction_reclaims_complete_unprotected_allocation_cohorts() {
         &candidates,
         &group_chunks,
         &chunk_groups,
+        &BTreeMap::new(),
         &BTreeSet::from(["protected".to_string()]),
         60,
+        0,
     )
     .unwrap();
 
     assert_eq!(
         selected,
         BTreeSet::from(["next-a".to_string(), "next-b".to_string()])
+    );
+}
+
+#[test]
+fn physical_device_pressure_evicts_device_local_not_host_visible_cohorts() {
+    let cohort = |tier, chunk_id| VulkanCompiledResourceAllocationCohort { tier, chunk_id };
+    let host = cohort(VulkanCompiledResourceMemoryTier::HostVisible, 10);
+    let device = cohort(VulkanCompiledResourceMemoryTier::Device, 20);
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "host-oldest".to_string(),
+            byte_count: 80,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "device-newer".to_string(),
+            byte_count: 60,
+            last_access_epoch: 2,
+        },
+    ];
+    let group_chunks = BTreeMap::from([
+        ("host-oldest".to_string(), BTreeSet::from([host])),
+        ("device-newer".to_string(), BTreeSet::from([device])),
+    ]);
+    let chunk_groups = BTreeMap::from([
+        (host, BTreeSet::from(["host-oldest".to_string()])),
+        (device, BTreeSet::from(["device-newer".to_string()])),
+    ]);
+    let capacities = BTreeMap::from([(host, 96), (device, 64)]);
+
+    let selected = compiled_resource_lru_eviction_groups(
+        &candidates,
+        &group_chunks,
+        &chunk_groups,
+        &capacities,
+        &BTreeSet::new(),
+        0,
+        64,
+    )
+    .unwrap();
+
+    assert_eq!(selected, BTreeSet::from(["device-newer".to_string()]));
+}
+
+#[test]
+fn global_capacity_reclamation_returns_all_available_device_cohorts_when_one_store_is_insufficient()
+{
+    let cohort = VulkanCompiledResourceAllocationCohort {
+        tier: VulkanCompiledResourceMemoryTier::Device,
+        chunk_id: 20,
+    };
+    let candidates = vec![DeviceResourceResidencyEvictionCandidate {
+        group_id: "available".to_string(),
+        byte_count: 60,
+        last_access_epoch: 2,
+    }];
+    let group_chunks =
+        BTreeMap::from([("available".to_string(), BTreeSet::from([cohort]))]);
+    let chunk_groups =
+        BTreeMap::from([(cohort, BTreeSet::from(["available".to_string()]))]);
+    let capacities = BTreeMap::from([(cohort, 64)]);
+
+    let selection = compiled_resource_lru_eviction_selection(
+        &candidates,
+        &group_chunks,
+        &chunk_groups,
+        &capacities,
+        &BTreeSet::new(),
+        0,
+        128,
+    )
+    .unwrap();
+
+    assert_eq!(selection.group_ids, BTreeSet::from(["available".to_string()]));
+    assert_eq!(selection.device_bytes, 64);
+    assert_eq!(selection.payload_bytes, 60);
+}
+
+#[test]
+fn eviction_closes_transitively_over_shared_allocation_chunks() {
+    let cohort = |chunk_id| VulkanCompiledResourceAllocationCohort {
+        tier: VulkanCompiledResourceMemoryTier::Device,
+        chunk_id,
+    };
+    let first = cohort(10);
+    let bridge = cohort(20);
+    let last = cohort(30);
+    let candidates = ["a", "b", "c"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, group_id)| DeviceResourceResidencyEvictionCandidate {
+            group_id: group_id.to_string(),
+            byte_count: 16,
+            last_access_epoch: index as u64,
+        })
+        .collect::<Vec<_>>();
+    let group_chunks = BTreeMap::from([
+        ("a".to_string(), BTreeSet::from([first, bridge])),
+        ("b".to_string(), BTreeSet::from([bridge, last])),
+        ("c".to_string(), BTreeSet::from([last])),
+    ]);
+    let chunk_groups = BTreeMap::from([
+        (first, BTreeSet::from(["a".to_string()])),
+        (bridge, BTreeSet::from(["a".to_string(), "b".to_string()])),
+        (last, BTreeSet::from(["b".to_string(), "c".to_string()])),
+    ]);
+    let capacities = BTreeMap::from([(first, 16), (bridge, 32), (last, 32)]);
+
+    let selected = compiled_resource_lru_eviction_groups(
+        &candidates,
+        &group_chunks,
+        &chunk_groups,
+        &capacities,
+        &BTreeSet::new(),
+        1,
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(
+        selected,
+        BTreeSet::from(["a".to_string(), "b".to_string(), "c".to_string()])
     );
 }
 
@@ -546,7 +694,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     );
     drop(over_capacity_store);
 
-    let paged_store = VulkanCompiledResourceDeviceStore::new(
+    let paged_store = Arc::new(VulkanCompiledResourceDeviceStore::new(
         &device,
         ResourceResidencyPolicy::DemandPaged,
         "amd-paged-test",
@@ -564,7 +712,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         64,
         layout.address_table_byte_count().unwrap(),
     )
-    .unwrap();
+    .unwrap());
+    paged_store
+        .register_device_memory_reclaimer(&device)
+        .unwrap();
     let paged_buffers = paged_store
         .dynamic_buffers_for_components(
             &device,
@@ -617,11 +768,28 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(paged.evicted_payload_bytes, 16);
     assert!(paged.released_device_bytes >= 16);
     assert_eq!(paged.reload_count, 1);
+    let remaining = usize::try_from(
+        device
+            .device_local_memory_accounting()
+            .unwrap()
+            .admissible_remaining_bytes,
+    )
+    .unwrap();
+    let competing_allocation = device.reserve_device_local_memory_capacity(remaining).unwrap();
+    let fixed_runtime_buffer = device
+        .create_resident_buffer(1)
+        .expect("a fixed runtime allocation must reclaim inactive paged resources globally");
+    let reclaimed = paged_store.residency_report().unwrap();
+    assert_eq!(reclaimed.current_payload_bytes, 0);
+    assert_eq!(reclaimed.resident_unit_count, 0);
+    assert!(reclaimed.eviction_count > paged.eviction_count);
+    drop(fixed_runtime_buffer);
+    drop(competing_allocation);
     assert_eq!(
         paged_store.unload().unwrap(),
         DeviceResourceResidencyRelease {
-            group_count: 1,
-            byte_count: 8,
+            group_count: 0,
+            byte_count: 0,
             cancelled_load_count: 0,
         }
     );

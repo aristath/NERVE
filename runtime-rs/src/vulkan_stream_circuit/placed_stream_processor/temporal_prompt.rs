@@ -298,7 +298,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             })
                     })?;
             if signal_bytes_per_lane > 0 {
-                let available = device.available_device_local_memory_bytes();
+                let available = device.remaining_reservable_device_local_memory_bytes();
                 let headroom = (device.device_local_memory_bytes() / 32)
                     .max(MINIMUM_DEVICE_HEADROOM_BYTES)
                     .min(available / 2);

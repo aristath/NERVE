@@ -578,3 +578,54 @@ fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
     .unwrap_err();
     assert!(current_error.to_string().contains("outside the planned range"));
 }
+
+#[test]
+fn initial_runtime_residency_aggregates_logical_slices_on_one_physical_device() {
+    let plan = VulkanRuntimeResidencyPlan {
+        schema: VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA.to_string(),
+        package_id: "package".to_string(),
+        residency_policy: ResourceResidencyPolicy::DemandRetained,
+        context_capacity_activations: 1,
+        speculative_decoders_mounted: false,
+        device_plans: vec![
+            VulkanRuntimeDeviceResidencyPlan {
+                device_id: "logical-a".to_string(),
+                parameter_residency: VulkanRuntimeParameterResidencyBytes::default(),
+                working_set: VulkanRuntimeWorkingSetBytes::default(),
+                breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+                initial_device_resident_bytes: 600,
+            },
+            VulkanRuntimeDeviceResidencyPlan {
+                device_id: "logical-b".to_string(),
+                parameter_residency: VulkanRuntimeParameterResidencyBytes::default(),
+                working_set: VulkanRuntimeWorkingSetBytes::default(),
+                breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+                initial_device_resident_bytes: 401,
+            },
+        ],
+        total_initial_device_resident_bytes: 1_001,
+        total_current_resident_parameter_bytes: 0,
+        total_maximum_addressable_parameter_bytes: 0,
+    };
+    let physical = BTreeMap::from([
+        ("logical-a".to_string(), "physical".to_string()),
+        ("logical-b".to_string(), "physical".to_string()),
+    ]);
+
+    let admitted = admit_vulkan_runtime_initial_residency_by_physical_device(
+        &plan,
+        &physical,
+        &BTreeMap::from([("physical".to_string(), 1_001)]),
+    )
+    .unwrap();
+    assert_eq!(admitted["physical"], 1_001);
+
+    let error = admit_vulkan_runtime_initial_residency_by_physical_device(
+        &plan,
+        &physical,
+        &BTreeMap::from([("physical".to_string(), 1_000)]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("needs 1001 initial device bytes"));
+    assert!(error.to_string().contains("stable safe capacity is 1000"));
+}

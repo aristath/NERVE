@@ -529,16 +529,13 @@ impl VulkanDistributedComponentBatchRunners {
                             ))
                         })?;
                     bindings.push(
-                        VulkanResidentKernelBufferBinding::new(
-                            u32::try_from(fragment.binding).map_err(|_| {
+                        allocation
+                            .kernel_binding(u32::try_from(fragment.binding).map_err(|_| {
                                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                                     "distributed component batch binding exceeds u32".to_string(),
                                 ))
-                            })?,
-                            &allocation.buffer,
-                            fragment.byte_count,
-                        )
-                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                            })?)
+                            .with_access(VulkanResidentKernelBufferAccess::Read),
                     );
                 }
                 let mut resident_dispatches = Vec::with_capacity(artifact.stages.len());

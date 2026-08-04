@@ -1029,6 +1029,7 @@ unsafe fn write_device_local_bytes(
     device: &ash::Device,
     destination: vk::Buffer,
     access: &VulkanResidentMemoryAccess,
+    destination_offset: vk::DeviceSize,
     byte_len: vk::DeviceSize,
     input: &[u8],
 ) -> Result<(), VulkanError> {
@@ -1053,6 +1054,8 @@ unsafe fn write_device_local_bytes(
                 access.queue_family_index,
                 staging_buffer,
                 destination,
+                0,
+                destination_offset,
                 byte_len,
             )
         }
@@ -1069,6 +1072,7 @@ unsafe fn read_device_local_bytes(
     device: &ash::Device,
     source: vk::Buffer,
     access: &VulkanResidentMemoryAccess,
+    source_offset: vk::DeviceSize,
     byte_len: vk::DeviceSize,
 ) -> Result<Vec<u8>, VulkanError> {
     access.activity_lease_health.require_healthy()?;
@@ -1090,6 +1094,8 @@ unsafe fn read_device_local_bytes(
             access.queue_family_index,
             source,
             staging_buffer,
+            source_offset,
+            0,
             byte_len,
         )?;
         read_byte_memory(device, staging_memory, byte_len, byte_len as usize)
@@ -1152,6 +1158,8 @@ unsafe fn copy_buffer_immediately(
     queue_family_index: u32,
     source: vk::Buffer,
     destination: vk::Buffer,
+    source_offset: vk::DeviceSize,
+    destination_offset: vk::DeviceSize,
     byte_len: vk::DeviceSize,
 ) -> Result<(), VulkanError> {
     let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -1179,8 +1187,8 @@ unsafe fn copy_buffer_immediately(
             VulkanError(format!("failed to begin staging command buffer: {error:?}"))
         })?;
         let regions = [vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
+            src_offset: source_offset,
+            dst_offset: destination_offset,
             size: byte_len,
         }];
         unsafe { device.cmd_copy_buffer(command_buffer, source, destination, &regions) };
@@ -1204,12 +1212,24 @@ unsafe fn write_byte_memory(
     byte_len: vk::DeviceSize,
     input: &[u8],
 ) -> Result<(), VulkanError> {
+    unsafe { write_byte_memory_at(device, memory, byte_len, 0, input) }
+}
+
+unsafe fn write_byte_memory_at(
+    device: &ash::Device,
+    memory: vk::DeviceMemory,
+    mapped_byte_len: vk::DeviceSize,
+    byte_offset: usize,
+    input: &[u8],
+) -> Result<(), VulkanError> {
     let ptr = unsafe {
         device
-            .map_memory(memory, 0, byte_len, vk::MemoryMapFlags::empty())
+            .map_memory(memory, 0, mapped_byte_len, vk::MemoryMapFlags::empty())
             .map_err(|error| VulkanError(format!("failed to map input memory: {error:?}")))?
     };
-    let mapped = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), input.len()) };
+    let mapped = unsafe {
+        std::slice::from_raw_parts_mut(ptr.cast::<u8>().add(byte_offset), input.len())
+    };
     mapped.copy_from_slice(input);
     unsafe { device.unmap_memory(memory) };
     Ok(())
@@ -1221,12 +1241,25 @@ unsafe fn read_byte_memory(
     byte_len: vk::DeviceSize,
     len: usize,
 ) -> Result<Vec<u8>, VulkanError> {
+    unsafe { read_byte_memory_at(device, memory, byte_len, 0, len) }
+}
+
+unsafe fn read_byte_memory_at(
+    device: &ash::Device,
+    memory: vk::DeviceMemory,
+    mapped_byte_len: vk::DeviceSize,
+    byte_offset: usize,
+    len: usize,
+) -> Result<Vec<u8>, VulkanError> {
     let ptr = unsafe {
         device
-            .map_memory(memory, 0, byte_len, vk::MemoryMapFlags::empty())
+            .map_memory(memory, 0, mapped_byte_len, vk::MemoryMapFlags::empty())
             .map_err(|error| VulkanError(format!("failed to map output memory: {error:?}")))?
     };
-    let output = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }.to_vec();
+    let output = unsafe {
+        std::slice::from_raw_parts(ptr.cast::<u8>().add(byte_offset), len)
+    }
+    .to_vec();
     unsafe { device.unmap_memory(memory) };
     Ok(output)
 }

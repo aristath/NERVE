@@ -628,7 +628,7 @@ impl VulkanMountedPlacedStreamCircuit {
                 binding: descriptor.binding,
             }
         })?;
-        let (buffer, byte_len) = match &descriptor.target {
+        let (buffer, byte_offset, byte_len) = match &descriptor.target {
             VulkanMountedPlacedBoundDescriptorTarget::Resident { target } => {
                 self.resident_kernel_buffer_for_resident_target(dispatch, descriptor, target)?
             }
@@ -641,7 +641,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         signal_id: signal_id.clone(),
                     }
                 })?;
-                (allocation.buffer.as_ref(), allocation.byte_capacity)
+                (allocation.buffer.as_ref(), 0, allocation.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { signal_id } => {
                 let allocation = self.boundary_io.output_buffer(signal_id).ok_or_else(|| {
@@ -652,7 +652,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         signal_id: signal_id.clone(),
                     }
                 })?;
-                (allocation.buffer.as_ref(), allocation.byte_capacity)
+                (allocation.buffer.as_ref(), 0, allocation.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::LocalEdgeInputBuffer { edge } => {
                 let allocation = self
@@ -667,7 +667,7 @@ impl VulkanMountedPlacedStreamCircuit {
                             buffer_index: edge.buffer_index,
                         }
                     })?;
-                (allocation.buffer.as_ref(), edge.byte_capacity)
+                (allocation.buffer.as_ref(), 0, edge.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { endpoint } => {
                 let allocation = self
@@ -682,7 +682,7 @@ impl VulkanMountedPlacedStreamCircuit {
                             buffer_index: endpoint.buffer_index,
                         }
                     })?;
-                (allocation.buffer.as_ref(), endpoint.byte_capacity)
+                (allocation.buffer.as_ref(), 0, endpoint.byte_capacity)
             }
             VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
                 let allocation = port.buffer(&self.edge_io).ok_or_else(|| {
@@ -693,7 +693,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         buffer_index: 0,
                     }
                 })?;
-                (allocation.as_ref(), port.byte_capacity)
+                (allocation.as_ref(), 0, port.byte_capacity)
             }
         };
 
@@ -712,7 +712,9 @@ impl VulkanMountedPlacedStreamCircuit {
             }
         };
 
-        Ok(VulkanResidentKernelBufferBinding::new(binding, buffer, byte_len).with_access(access))
+        Ok(VulkanResidentKernelBufferBinding::new(binding, buffer, byte_len)
+            .with_byte_offset(byte_offset)
+            .with_access(access))
     }
 
     fn resident_kernel_buffer_for_resident_target<'a>(
@@ -720,7 +722,10 @@ impl VulkanMountedPlacedStreamCircuit {
         dispatch: &VulkanMountedPlacedBoundDispatch,
         descriptor: &VulkanMountedPlacedBoundDescriptor,
         target: &VulkanBoundDescriptorTarget,
-    ) -> Result<(&'a VulkanResidentBuffer, usize), VulkanMountedPlacedResidentKernelDispatchError>
+    ) -> Result<
+        (&'a VulkanResidentBuffer, usize, usize),
+        VulkanMountedPlacedResidentKernelDispatchError,
+    >
     {
         match target {
             VulkanBoundDescriptorTarget::RuntimeControl {
@@ -737,7 +742,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         },
                     );
                 }
-                Ok((&self.stream_control_buffer, *byte_capacity))
+                Ok((&self.stream_control_buffer, 0, *byte_capacity))
             }
             VulkanBoundDescriptorTarget::PermanentParameter {
                 param_id,
@@ -757,6 +762,7 @@ impl VulkanMountedPlacedStreamCircuit {
                 )?;
                 Ok((
                     allocation.buffer.as_ref(),
+                    allocation.byte_offset,
                     allocation.byte_capacity,
                 ))
             }
@@ -771,7 +777,7 @@ impl VulkanMountedPlacedStreamCircuit {
                         },
                 )?;
                 let buffer = resources.address_table();
-                Ok((buffer, buffer.byte_capacity()))
+                Ok((buffer, 0, buffer.byte_capacity()))
             }
             VulkanBoundDescriptorTarget::DynamicResourceParameterSlots {
                 component_id,
@@ -802,7 +808,7 @@ impl VulkanMountedPlacedStreamCircuit {
                                 selection_signal: selection_signal.clone(),
                             }
                     })?;
-                Ok((buffer, buffer.byte_capacity()))
+                Ok((buffer, 0, buffer.byte_capacity()))
             }
             VulkanBoundDescriptorTarget::BoundaryInput { signal_id }
             | VulkanBoundDescriptorTarget::BoundaryOutput { signal_id } => Err(
@@ -829,7 +835,7 @@ impl VulkanMountedPlacedStreamCircuit {
                             buffer_index: *buffer_index,
                         }
                     })?;
-                Ok((&allocation.buffer, *byte_capacity))
+                Ok((&allocation.buffer, 0, *byte_capacity))
             }
             VulkanBoundDescriptorTarget::StreamStateBuffer {
                 buffer_index,
@@ -853,7 +859,7 @@ impl VulkanMountedPlacedStreamCircuit {
                                 buffer_index: *buffer_index,
                             }
                         })?;
-                Ok((&allocation.buffer, *byte_capacity))
+                Ok((&allocation.buffer, 0, *byte_capacity))
             }
             VulkanBoundDescriptorTarget::SelectionTelemetry {
                 buffer_index,
@@ -872,7 +878,7 @@ impl VulkanMountedPlacedStreamCircuit {
                             buffer_index: *buffer_index,
                         }
                     })?;
-                Ok((&allocation.buffer, *byte_capacity))
+                Ok((&allocation.buffer, 0, *byte_capacity))
             }
         }
     }

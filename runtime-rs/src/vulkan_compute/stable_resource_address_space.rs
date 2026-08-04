@@ -50,6 +50,7 @@ pub struct VulkanStableResourceArena {
     config: VulkanStableResourceArenaConfig,
     device_handle: vk::Device,
     layouts: Arc<VulkanStableResourceArenaLayouts>,
+    allocation_requirement_byte_counts: std::sync::Mutex<BTreeMap<usize, usize>>,
     state: Arc<std::sync::Mutex<VulkanStableResourceArenaState>>,
 }
 
@@ -107,6 +108,13 @@ struct VulkanStableResourceChunk {
 struct VulkanStableResourceAllocationRecord {
     byte_count: usize,
     chunk_id: u64,
+}
+
+struct VulkanStableResourceGroupAllocationPlan {
+    placements: Vec<(VulkanStableResourcePlacement, Vec<usize>, Vec<usize>)>,
+    chunk_byte_capacity: usize,
+    payload_byte_count: usize,
+    resource_count: usize,
 }
 
 pub struct VulkanStableResourceAllocation {
@@ -248,6 +256,7 @@ impl VulkanStableResourceArena {
                 partitioned: partitioned_placements,
                 maximum_byte_capacity,
             }),
+            allocation_requirement_byte_counts: std::sync::Mutex::new(BTreeMap::new()),
             state: Arc::new(std::sync::Mutex::new(VulkanStableResourceArenaState {
                 active_groups: BTreeMap::new(),
                 chunks: BTreeMap::new(),
@@ -280,6 +289,43 @@ impl VulkanStableResourceArena {
         Ok(self.layouts.maximum_byte_capacity)
     }
 
+    pub fn additional_committed_byte_capacity_for_groups(
+        &self,
+        device: &VulkanComputeDevice,
+        groups: &[(&[usize], &[usize])],
+        alignment: usize,
+    ) -> Result<usize, VulkanError> {
+        let state = self.state.lock().map_err(|_| {
+            VulkanError("stable resource arena state lock was poisoned".to_string())
+        })?;
+        let plan = plan_stable_resource_groups(
+            &self.layouts,
+            &state,
+            &self.config,
+            groups,
+            alignment,
+        )?;
+        self.physical_allocation_byte_count(device, plan.chunk_byte_capacity)
+    }
+
+    pub fn committed_byte_capacity_for_chunk(
+        &self,
+        chunk_id: u64,
+    ) -> Result<usize, VulkanError> {
+        let state = self.state.lock().map_err(|_| {
+            VulkanError("stable resource arena state lock was poisoned".to_string())
+        })?;
+        state
+            .chunks
+            .get(&chunk_id)
+            .map(|chunk| chunk.byte_capacity)
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "stable resource arena has no committed chunk {chunk_id}"
+                ))
+            })
+    }
+
     pub fn allocate_groups(
         &self,
         device: &VulkanComputeDevice,
@@ -297,8 +343,50 @@ impl VulkanStableResourceArena {
             &self.state,
             device,
             &self.config,
+            &self.allocation_requirement_byte_counts,
             groups,
             alignment,
+            None,
+        )
+    }
+
+    pub fn allocate_groups_with_capacity_permit(
+        &self,
+        device: &VulkanComputeDevice,
+        groups: &[(&[usize], &[usize])],
+        alignment: usize,
+        capacity_permit: VulkanDeviceLocalMemoryPermit,
+    ) -> Result<Vec<Vec<Arc<VulkanStableResourceAllocation>>>, VulkanError> {
+        if self.config.memory_domain != VulkanStableResourceMemoryDomain::Device {
+            return Err(VulkanError(
+                "device-local capacity permit cannot back a host-visible stable arena"
+                    .to_string(),
+            ));
+        }
+        allocate_stable_resource_groups(
+            self.device_handle,
+            &self.layouts,
+            &self.state,
+            device,
+            &self.config,
+            &self.allocation_requirement_byte_counts,
+            groups,
+            alignment,
+            Some(capacity_permit),
+        )
+    }
+
+
+    fn physical_allocation_byte_count(
+        &self,
+        device: &VulkanComputeDevice,
+        requested_byte_count: usize,
+    ) -> Result<usize, VulkanError> {
+        physical_stable_resource_allocation_byte_count(
+            self.device_handle,
+            &self.allocation_requirement_byte_counts,
+            device,
+            requested_byte_count,
         )
     }
 
@@ -420,14 +508,58 @@ fn stable_resource_placement_for_slots(
     ))
 }
 
+fn physical_stable_resource_allocation_byte_count(
+    device_handle: vk::Device,
+    cached_byte_counts: &std::sync::Mutex<BTreeMap<usize, usize>>,
+    device: &VulkanComputeDevice,
+    requested_byte_count: usize,
+) -> Result<usize, VulkanError> {
+    if device.device.handle() != device_handle {
+        return Err(VulkanError(
+            "stable resource allocation requirement was requested from another logical device"
+                .to_string(),
+        ));
+    }
+    if let Some(byte_count) = cached_byte_counts
+        .lock()
+        .map_err(|_| {
+            VulkanError(
+                "stable resource allocation-requirement cache was poisoned".to_string(),
+            )
+        })?
+        .get(&requested_byte_count)
+        .copied()
+    {
+        return Ok(byte_count);
+    }
+    let physical_byte_count =
+        device.addressable_resident_buffer_memory_requirement_bytes(requested_byte_count)?;
+    if physical_byte_count < requested_byte_count {
+        return Err(VulkanError(format!(
+            "Vulkan reported {physical_byte_count} physical bytes for a {requested_byte_count}-byte stable resource chunk"
+        )));
+    }
+    cached_byte_counts
+        .lock()
+        .map_err(|_| {
+            VulkanError(
+                "stable resource allocation-requirement cache was poisoned".to_string(),
+            )
+        })?
+        .insert(requested_byte_count, physical_byte_count);
+    Ok(physical_byte_count)
+}
+
 fn allocate_stable_resource_groups(
     device_handle: vk::Device,
     layouts: &Arc<VulkanStableResourceArenaLayouts>,
     arena_state: &Arc<std::sync::Mutex<VulkanStableResourceArenaState>>,
     device: &VulkanComputeDevice,
     config: &VulkanStableResourceArenaConfig,
+    allocation_requirement_byte_counts: &std::sync::Mutex<BTreeMap<usize, usize>>,
     groups: &[(&[usize], &[usize])],
     alignment: usize,
+    capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
 ) -> Result<Vec<Vec<Arc<VulkanStableResourceAllocation>>>, VulkanError> {
     if device.device.handle() != device_handle {
         return Err(VulkanError(
@@ -443,76 +575,39 @@ fn allocate_stable_resource_groups(
     let mut state = arena_state
         .lock()
         .map_err(|_| VulkanError("stable resource arena state lock was poisoned".to_string()))?;
-    let mut requested_keys = BTreeSet::new();
-    let mut placements = Vec::with_capacity(groups.len());
-    let mut chunk_byte_capacity = 0usize;
-    let mut payload_byte_count = 0usize;
-    let mut resource_count = 0usize;
-    for (slots, byte_counts) in groups {
-        let mut group_key = slots.to_vec();
-        group_key.sort_unstable();
-        if slots.is_empty()
-            || slots.len() != byte_counts.len()
-            || !requested_keys.insert(group_key.clone())
-            || state.active_groups.contains_key(&group_key)
-        {
-            return Err(VulkanError(
-                "stable resource group allocation is duplicated or invalid".to_string(),
-            ));
-        }
-        let placement = stable_resource_placement_for_slots(layouts, slots, &group_key)?;
-        for (slot, byte_count) in slots.iter().zip(*byte_counts) {
-            let placement_index = placement
-                .resource_slots
-                .iter()
-                .position(|candidate| candidate == slot)
-                .ok_or_else(|| {
-                    VulkanError(
-                        "stable resource request contains an unknown group member".to_string(),
-                    )
-                })?;
-            if placement.resource_byte_counts[placement_index] != *byte_count {
-                return Err(VulkanError(
-                    "stable resource request differs from its compiled placement".to_string(),
-                ));
-            }
-            payload_byte_count = payload_byte_count.checked_add(*byte_count).ok_or_else(|| {
-                VulkanError("stable resource payload capacity overflowed".to_string())
-            })?;
-        }
-        chunk_byte_capacity =
-            align_stable_resource_offset(chunk_byte_capacity, config.minimum_alignment)?
-                .checked_add(placement.group_byte_capacity)
-                .ok_or_else(|| {
-                    VulkanError("stable resource chunk capacity overflowed".to_string())
-                })?;
-        resource_count = resource_count.checked_add(slots.len()).ok_or_else(|| {
-            VulkanError("stable resource allocation count overflowed".to_string())
-        })?;
-        placements.push((placement, group_key, slots.to_vec()));
-    }
+    let plan = plan_stable_resource_groups(layouts, &state, config, groups, alignment)?;
+    let VulkanStableResourceGroupAllocationPlan {
+        placements,
+        chunk_byte_capacity,
+        payload_byte_count,
+        resource_count,
+    } = plan;
+    let physical_chunk_byte_capacity = physical_stable_resource_allocation_byte_count(
+        device_handle,
+        allocation_requirement_byte_counts,
+        device,
+        chunk_byte_capacity,
+    )?;
     let committed_byte_capacity = state
         .committed_byte_capacity
-        .checked_add(chunk_byte_capacity)
+        .checked_add(physical_chunk_byte_capacity)
         .ok_or_else(|| VulkanError("stable resource committed capacity overflowed".to_string()))?;
     if committed_byte_capacity > config.committed_byte_capacity {
         return Err(VulkanError(format!(
-            "stable resources need {chunk_byte_capacity} additional physical bytes, but {} of {} bytes are already committed",
-            state.committed_byte_capacity, config.committed_byte_capacity
+            "stable resources need {physical_chunk_byte_capacity} additional physical bytes for a {chunk_byte_capacity}-byte logical chunk, but {} of {} physical bytes are already committed",
+            state.committed_byte_capacity, config.committed_byte_capacity,
         )));
     }
     state
         .next_allocation_id
         .checked_add(
-            u64::try_from(resource_count).map_err(|_| {
-                VulkanError("stable resource allocation count exceeds u64".to_string())
-            })?,
+            u64::try_from(resource_count).expect("stable resource plan prevalidated count"),
         )
-        .ok_or_else(|| VulkanError("stable resource allocation ids exhausted".to_string()))?;
+        .expect("stable resource plan prevalidated allocation ids");
     let allocated_byte_count = state
         .allocated_byte_count
         .checked_add(payload_byte_count)
-        .ok_or_else(|| VulkanError("stable resource allocated payload overflowed".to_string()))?;
+        .expect("stable resource plan prevalidated payload capacity");
     let chunk_id = state.next_chunk_id;
     state.next_chunk_id = state
         .next_chunk_id
@@ -520,9 +615,22 @@ fn allocate_stable_resource_groups(
         .ok_or_else(|| VulkanError("stable resource chunk ids exhausted".to_string()))?;
     let mut buffer = match config.memory_domain {
         VulkanStableResourceMemoryDomain::Device => {
-            device.create_addressable_resident_buffer(chunk_byte_capacity)?
+            match capacity_permit {
+                Some(permit) => device
+                    .create_addressable_resident_buffer_with_capacity_permit(
+                        chunk_byte_capacity,
+                        permit,
+                    )?,
+                None => device.create_addressable_resident_buffer(chunk_byte_capacity)?,
+            }
         }
         VulkanStableResourceMemoryDomain::HostVisible => {
+            if capacity_permit.is_some() {
+                return Err(VulkanError(
+                    "device-local capacity permit cannot back a host-visible stable arena"
+                        .to_string(),
+                ));
+            }
             device.create_host_visible_addressable_resident_buffer(chunk_byte_capacity)?
         }
     };
@@ -606,13 +714,103 @@ fn allocate_stable_resource_groups(
     state.chunks.insert(
         chunk_id,
         VulkanStableResourceChunk {
-            byte_capacity: chunk_byte_capacity,
+            byte_capacity: physical_chunk_byte_capacity,
             active_allocation_count: resource_count,
         },
     );
     state.allocated_byte_count = allocated_byte_count;
     state.committed_byte_capacity = committed_byte_capacity;
     Ok(allocation_groups)
+}
+
+fn plan_stable_resource_groups(
+    layouts: &VulkanStableResourceArenaLayouts,
+    state: &VulkanStableResourceArenaState,
+    config: &VulkanStableResourceArenaConfig,
+    groups: &[(&[usize], &[usize])],
+    alignment: usize,
+) -> Result<VulkanStableResourceGroupAllocationPlan, VulkanError> {
+    if groups.is_empty() {
+        return Err(VulkanError(
+            "stable resource group allocation batch is empty".to_string(),
+        ));
+    }
+    if alignment != config.minimum_alignment {
+        return Err(VulkanError(format!(
+            "stable resource allocation alignment {alignment} differs from its compiled layout alignment {}",
+            config.minimum_alignment
+        )));
+    }
+    let mut requested_keys = BTreeSet::new();
+    let mut placements = Vec::with_capacity(groups.len());
+    let mut chunk_byte_capacity = 0usize;
+    let mut payload_byte_count = 0usize;
+    let mut resource_count = 0usize;
+    for (slots, byte_counts) in groups {
+        let mut group_key = slots.to_vec();
+        group_key.sort_unstable();
+        if slots.is_empty()
+            || slots.len() != byte_counts.len()
+            || !requested_keys.insert(group_key.clone())
+            || state.active_groups.contains_key(&group_key)
+        {
+            return Err(VulkanError(
+                "stable resource group allocation is duplicated or invalid".to_string(),
+            ));
+        }
+        let placement = stable_resource_placement_for_slots(layouts, slots, &group_key)?;
+        for (slot, byte_count) in slots.iter().zip(*byte_counts) {
+            let placement_index = placement
+                .resource_slots
+                .iter()
+                .position(|candidate| candidate == slot)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "stable resource request contains an unknown group member".to_string(),
+                    )
+                })?;
+            if placement.resource_byte_counts[placement_index] != *byte_count {
+                return Err(VulkanError(
+                    "stable resource request differs from its compiled placement".to_string(),
+                ));
+            }
+            payload_byte_count = payload_byte_count.checked_add(*byte_count).ok_or_else(|| {
+                VulkanError("stable resource payload capacity overflowed".to_string())
+            })?;
+        }
+        chunk_byte_capacity =
+            align_stable_resource_offset(chunk_byte_capacity, config.minimum_alignment)?
+                .checked_add(placement.group_byte_capacity)
+                .ok_or_else(|| {
+                    VulkanError("stable resource chunk capacity overflowed".to_string())
+                })?;
+        resource_count = resource_count.checked_add(slots.len()).ok_or_else(|| {
+            VulkanError("stable resource allocation count overflowed".to_string())
+        })?;
+        placements.push((placement, group_key, slots.to_vec()));
+    }
+    state
+        .next_allocation_id
+        .checked_add(
+            u64::try_from(resource_count).map_err(|_| {
+                VulkanError("stable resource allocation count exceeds u64".to_string())
+            })?,
+        )
+        .ok_or_else(|| VulkanError("stable resource allocation ids exhausted".to_string()))?;
+    state
+        .allocated_byte_count
+        .checked_add(payload_byte_count)
+        .ok_or_else(|| VulkanError("stable resource allocated payload overflowed".to_string()))?;
+    state
+        .next_chunk_id
+        .checked_add(1)
+        .ok_or_else(|| VulkanError("stable resource chunk ids exhausted".to_string()))?;
+    Ok(VulkanStableResourceGroupAllocationPlan {
+        placements,
+        chunk_byte_capacity,
+        payload_byte_count,
+        resource_count,
+    })
 }
 
 impl VulkanStableResourceAllocation {

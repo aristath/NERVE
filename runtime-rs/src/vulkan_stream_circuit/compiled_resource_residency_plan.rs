@@ -16,6 +16,46 @@ pub struct VulkanRuntimeResidencyGrowthAdmission {
     pub safe_device_capacity_bytes: usize,
 }
 
+pub fn admit_vulkan_runtime_initial_residency_by_physical_device(
+    plan: &VulkanRuntimeResidencyPlan,
+    physical_device_by_logical_device: &BTreeMap<String, String>,
+    safe_capacity_by_physical_device: &BTreeMap<String, usize>,
+) -> Result<BTreeMap<String, usize>, VulkanRuntimeResidencyPlanError> {
+    let mut admitted = BTreeMap::<String, usize>::new();
+    for device_plan in &plan.device_plans {
+        let physical_device_id = physical_device_by_logical_device
+            .get(&device_plan.device_id)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "runtime residency device {:?} has no physical-device binding",
+                    device_plan.device_id
+                ))
+            })?;
+        let total = admitted.entry(physical_device_id.clone()).or_default();
+        *total = checked_residency_add(
+            *total,
+            device_plan.initial_device_resident_bytes,
+            "physical initial device residency",
+        )?;
+    }
+    for (physical_device_id, initial_bytes) in &admitted {
+        let safe_capacity = safe_capacity_by_physical_device
+            .get(physical_device_id)
+            .copied()
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "physical device {physical_device_id:?} has no stable capacity budget"
+                ))
+            })?;
+        if *initial_bytes > safe_capacity {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "physical device {physical_device_id:?} needs {initial_bytes} initial device bytes but its stable safe capacity is {safe_capacity}"
+            )));
+        }
+    }
+    Ok(admitted)
+}
+
 pub fn admit_vulkan_runtime_residency_growth(
     device_plan: &VulkanRuntimeDeviceResidencyPlan,
     current_resident_parameter_bytes: usize,

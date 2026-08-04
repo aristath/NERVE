@@ -83,6 +83,111 @@ fn stable_resource_allocations_are_attributed_to_compiled_slots() {
 }
 
 #[test]
+fn stable_resource_arena_preflights_exact_physical_chunk_capacity() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping stable resource planning test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(4096, 256).unwrap(),
+        &[
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![0, 1],
+                resource_byte_counts: vec![13, 17],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![2],
+                resource_byte_counts: vec![300],
+            },
+        ],
+    )
+    .unwrap();
+    let requests = [(&[0, 1][..], &[13, 17][..]), (&[2][..], &[300][..])];
+
+    let planned_bytes = arena
+        .additional_committed_byte_capacity_for_groups(&device, &requests, 256)
+        .unwrap();
+    assert_eq!(planned_bytes, 1024);
+    let capacity_permit = device
+        .reserve_device_local_memory_capacity(planned_bytes)
+        .unwrap();
+    assert_eq!(
+        device
+            .device_local_memory_accounting()
+            .unwrap()
+            .pending_reservation_bytes,
+        planned_bytes as u64,
+    );
+    let groups = arena
+        .allocate_groups_with_capacity_permit(
+            &device,
+            &requests,
+            256,
+            capacity_permit,
+        )
+        .unwrap();
+    assert_eq!(
+        device
+            .device_local_memory_accounting()
+            .unwrap()
+            .pending_reservation_bytes,
+        0,
+    );
+    let chunk_id = groups[0][0].chunk_id();
+    assert_eq!(
+        arena.committed_byte_capacity_for_chunk(chunk_id).unwrap(),
+        1024,
+    );
+    assert!(arena
+        .additional_committed_byte_capacity_for_groups(&device, &requests, 256)
+        .unwrap_err()
+        .0
+        .contains("duplicated or invalid"));
+
+    drop(groups);
+    arena.release_backing().unwrap();
+}
+
+#[test]
+fn stable_resource_commitment_uses_vulkan_requirements_not_logical_bytes() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping physical commitment test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let requirements = device
+        .addressable_resident_buffer_memory_requirement_bytes(8)
+        .unwrap();
+    assert!(requirements >= 8);
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(requirements, 8).unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0],
+            resource_byte_counts: vec![8],
+        }],
+    )
+    .unwrap();
+    let requests = [(&[0][..], &[8][..])];
+    let planned = arena
+        .additional_committed_byte_capacity_for_groups(&device, &requests, 8)
+        .unwrap();
+    assert_eq!(planned, requirements);
+    let permit = device
+        .reserve_device_local_memory_capacity(planned)
+        .unwrap();
+    let groups = arena
+        .allocate_groups_with_capacity_permit(&device, &requests, 8, permit)
+        .unwrap();
+
+    assert_eq!(arena.stats().unwrap().committed_byte_capacity, requirements);
+    drop(groups);
+    arena.release_backing().unwrap();
+}
+
+#[test]
 fn host_visible_stable_resource_is_directly_gpu_addressable() {
     let Some(device_index) = stable_resource_test_device_index() else {
         eprintln!("skipping host-visible stable resource test: explicit Vulkan device unset");

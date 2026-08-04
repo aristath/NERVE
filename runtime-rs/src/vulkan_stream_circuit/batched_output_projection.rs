@@ -72,12 +72,9 @@ impl VulkanResidentBatchedOutputNormRunner {
                 normalized_frames_byte_capacity,
             )
             .with_access(VulkanResidentKernelBufferAccess::Write),
-            VulkanResidentKernelBufferBinding::new(
-                2,
-                &norm_weight.buffer,
-                norm_weight.byte_capacity,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            norm_weight
+                .kernel_binding(2)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
         ];
         let norm_dispatch = device
             .create_resident_kernel_dispatch_2d(
@@ -233,12 +230,9 @@ impl VulkanResidentBatchedOutputProjectionKernelRunner {
                 normalized_frames_byte_capacity,
             )
             .with_access(VulkanResidentKernelBufferAccess::Read),
-            VulkanResidentKernelBufferBinding::new(
-                1,
-                &projection_weight.buffer,
-                projection_weight.byte_capacity,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            projection_weight
+                .kernel_binding(1)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
             VulkanResidentKernelBufferBinding::new(
                 2,
                 &batched_logits_buffer,
@@ -248,7 +242,8 @@ impl VulkanResidentBatchedOutputProjectionKernelRunner {
         ];
         if let Some(scale) = projection_scale {
             bindings.push(
-                VulkanResidentKernelBufferBinding::new(3, &scale.buffer, scale.byte_capacity)
+                scale
+                    .kernel_binding(3)
                     .with_access(VulkanResidentKernelBufferAccess::Read),
             );
         }

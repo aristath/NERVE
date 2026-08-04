@@ -218,6 +218,30 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             )
         })?;
+        let mut physical_device_by_logical_device = BTreeMap::new();
+        let mut safe_capacity_by_physical_device = BTreeMap::new();
+        for device_plan in &residency_plan.device_plans {
+            let device = device_for(&device_plan.device_id)?;
+            let physical_device_id = device.physical_device_id().to_string();
+            physical_device_by_logical_device
+                .insert(device_plan.device_id.clone(), physical_device_id.clone());
+            safe_capacity_by_physical_device.entry(physical_device_id).or_insert_with(|| {
+                usize::try_from(device.device_local_memory_budget().reservable_bytes)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        admit_vulkan_runtime_initial_residency_by_physical_device(
+            &residency_plan,
+            &physical_device_by_logical_device,
+            &safe_capacity_by_physical_device,
+        )
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed stable physical-device capacity admission: {error}"
+                )),
+            )
+        })?;
         let (resource_plan, placement_plan, _boundary_placed_plan) =
             plan_resident_package_placed_stream_circuit_with_tensor_index(
                 &input_device_id,
@@ -660,10 +684,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
             let representative_device_id = device_slices[slice_indices[0]].device_id.clone();
             let physical_device = device_for(&representative_device_id)?;
             let physical_device_id = physical_device.physical_device_id().to_string();
-            let available_bytes =
-                usize::try_from(physical_device.available_device_local_memory_bytes())
-                    .unwrap_or(usize::MAX);
-            let safe_dynamic_bytes = available_bytes.saturating_sub(pending_fixed_bytes);
+            let admission = physical_device
+                .admit_device_local_memory(u64::try_from(pending_fixed_bytes).unwrap_or(u64::MAX))
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed stable capacity admission for physical slices {logical_device_ids:?}: {error}"
+                        )),
+                    )
+                })?;
+            let safe_dynamic_bytes =
+                usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
             let upload_alignment =
                 compiled_resource_upload_alignment(&compiled_resource_contract, physical_device)
                     .map_err(|error| {
@@ -689,6 +720,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })?;
             let resident_payload_capacity = maximum_dynamic_bytes
                 .min(safe_dynamic_bytes.saturating_sub(maximum_alignment_padding));
+            if resident_payload_capacity < physical_parameters.staging_headroom_bytes {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "stable device-local capacity for physical slices {logical_device_ids:?} admits {resident_payload_capacity} dynamic payload bytes, but one atomic resource wave needs {} bytes",
+                        physical_parameters.staging_headroom_bytes
+                    )),
+                ));
+            }
             let (store_payload_capacity, device_payload_capacity, host_visible_payload_capacity) =
                 if maximum_dynamic_bytes > resident_payload_capacity {
                     if remaining_safe_host_visible_payload_bytes.is_none() {
@@ -798,6 +837,15 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )
                 })?,
             );
+            store
+                .register_device_memory_reclaimer(physical_device)
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to register compiled-resource capacity reclamation for physical slices {logical_device_ids:?}: {error}"
+                        )),
+                    )
+                })?;
             for slice_index in &slice_indices {
                 let package_slice = &mut device_slices[*slice_index];
                 let selected_tensors = package_slice

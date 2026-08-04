@@ -135,9 +135,11 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
             .ok_or_else(|| {
                 targeted_component_error_value("targeted fixed-residency accounting overflowed")
             })?;
-        let available_bytes =
-            usize::try_from(device.available_device_local_memory_bytes()).unwrap_or(usize::MAX);
-        let safe_dynamic_bytes = available_bytes.saturating_sub(pending_fixed_bytes);
+        let admission = device
+            .admit_device_local_memory(u64::try_from(pending_fixed_bytes).unwrap_or(u64::MAX))
+            .map_err(|error| targeted_component_error_value(error.to_string()))?;
+        let safe_dynamic_bytes =
+            usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
         let upload_alignment = compiled_resource_upload_alignment(&contract, device)
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
         let addressable_slot_count = layout
@@ -190,6 +192,13 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                 ))
             })?,
         );
+        store
+            .register_device_memory_reclaimer(device)
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to register targeted compiled-resource capacity reclamation: {error}"
+                ))
+            })?;
         slice.dynamic_resource_buffers = Some(
             store
                 .dynamic_buffers_for_components(device, &execution_scope, &component_ids)

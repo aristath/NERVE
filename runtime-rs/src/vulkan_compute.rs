@@ -8,6 +8,7 @@ include!("vulkan_compute/device_activity_lease.rs");
 include!("vulkan_compute/spirv_interface.rs");
 include!("vulkan_compute/device_fault.rs");
 include!("vulkan_compute/device_types.rs");
+include!("vulkan_compute/device_local_memory_budget.rs");
 include!("vulkan_compute/resident_buffers.rs");
 include!("vulkan_compute/resident_buffer_pool.rs");
 include!("vulkan_compute/kernel_sequence.rs");

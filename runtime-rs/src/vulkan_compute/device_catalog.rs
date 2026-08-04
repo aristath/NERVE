@@ -103,6 +103,7 @@ impl VulkanComputeDeviceCatalog {
                 context: Arc::new(VulkanInstanceContext {
                     _entry: entry,
                     instance,
+                    device_local_memory_budget_trackers: Mutex::new(BTreeMap::new()),
                 }),
                 physical_devices,
                 available_devices,
@@ -300,6 +301,47 @@ impl VulkanComputeDeviceCatalog {
                 physical_device,
                 ash::ext::memory_budget::NAME,
             )?;
+            let device_local_memory_budget_tracker = {
+                let mut trackers = self
+                    .context
+                    .device_local_memory_budget_trackers
+                    .lock()
+                    .map_err(|_| {
+                        VulkanError(
+                            "physical device-local memory budget registry was poisoned"
+                                .to_string(),
+                        )
+                    })?;
+                if let Some(tracker) = trackers
+                    .get(&permitted_device.physical_device_id)
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    tracker
+                } else {
+                    let budget = VulkanDeviceLocalMemoryBudget::capture(
+                        query_available_device_local_memory_bytes(
+                            instance,
+                            physical_device,
+                            memory_budget_supported,
+                            device_local_memory_bytes,
+                        ),
+                    );
+                    let tracker = Arc::new(Mutex::new(
+                        VulkanDeviceLocalMemoryBudgetTracker::new(budget),
+                    ));
+                    trackers.insert(
+                        permitted_device.physical_device_id.clone(),
+                        Arc::downgrade(&tracker),
+                    );
+                    tracker
+                }
+            };
+            let device_local_memory_budget = device_local_memory_budget_tracker
+                .lock()
+                .map_err(|_| {
+                    VulkanError("device-local memory budget tracker was poisoned".to_string())
+                })?
+                .budget;
             let device_coherent_memory_supported =
                 physical_device_supports_device_coherent_memory(
                     instance,
@@ -753,6 +795,8 @@ impl VulkanComputeDeviceCatalog {
                 min_storage_buffer_offset_alignment,
                 device_local_memory_bytes,
                 memory_budget_supported,
+                device_local_memory_budget,
+                device_local_memory_budget_tracker,
                 timestamp_period_ns: limits.timestamp_period,
                 conditional_rendering,
                 device_fault,

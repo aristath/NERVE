@@ -999,7 +999,7 @@ fn component_batch_bindings<'a>(
             );
             continue;
         }
-        let (buffer, byte_len) = match &descriptor.target {
+        let (buffer, byte_offset, byte_len) = match &descriptor.target {
             VulkanMountedPlacedBoundDescriptorTarget::Resident { target } => match target {
                 VulkanBoundDescriptorTarget::PermanentParameter { tensor, .. } => {
                     let parameter = mounted
@@ -1012,6 +1012,7 @@ fn component_batch_bindings<'a>(
                         })?;
                     (
                         parameter.buffer.as_ref(),
+                        parameter.byte_offset,
                         parameter.byte_capacity,
                     )
                 }
@@ -1030,7 +1031,7 @@ fn component_batch_bindings<'a>(
                             },
                         )?;
                     let buffer = resources.address_table();
-                    (buffer, buffer.byte_capacity())
+                    (buffer, 0, buffer.byte_capacity())
                 }
                 VulkanBoundDescriptorTarget::DynamicResourceParameterSlots {
                     component_id,
@@ -1062,7 +1063,7 @@ fn component_batch_bindings<'a>(
                                 )),
                             )
                         })?;
-                    (buffer, buffer.byte_capacity())
+                    (buffer, 0, buffer.byte_capacity())
                 }
                 VulkanBoundDescriptorTarget::StreamStateBuffer {
                     buffer_index,
@@ -1083,7 +1084,7 @@ fn component_batch_bindings<'a>(
                                 format!("component batch has no state buffer {buffer_index}"),
                             ))
                         })?;
-                    (&state.buffer, *byte_capacity)
+                    (&state.buffer, 0, *byte_capacity)
                 }
                 VulkanBoundDescriptorTarget::SelectionTelemetry {
                     buffer_index,
@@ -1101,7 +1102,7 @@ fn component_batch_bindings<'a>(
                                 ),
                             ))
                         })?;
-                    (&telemetry.buffer, *byte_capacity)
+                    (&telemetry.buffer, 0, *byte_capacity)
                 }
                 VulkanBoundDescriptorTarget::BoundaryInput { .. }
                 | VulkanBoundDescriptorTarget::BoundaryOutput { .. }
@@ -1118,7 +1119,9 @@ fn component_batch_bindings<'a>(
             _ => unreachable!("signal targets were handled above"),
         };
         bindings.push(
-            VulkanResidentKernelBufferBinding::new(binding, buffer, byte_len).with_access(access),
+            VulkanResidentKernelBufferBinding::new(binding, buffer, byte_len)
+                .with_byte_offset(byte_offset)
+                .with_access(access),
         );
     }
     if let Some(stream_control_buffer) = stream_control_buffer {

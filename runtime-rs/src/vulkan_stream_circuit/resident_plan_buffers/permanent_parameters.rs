@@ -178,7 +178,7 @@ impl VulkanPermanentParameterBufferPlan {
         &self,
         device: &VulkanComputeDevice,
     ) -> Result<VulkanPermanentParameterBuffers, VulkanError> {
-        let mut buffers = Vec::with_capacity(self.parameters.len());
+        let mut byte_counts = Vec::with_capacity(self.parameters.len());
         let mut total_byte_capacity = 0usize;
 
         for parameter in &self.parameters {
@@ -193,14 +193,24 @@ impl VulkanPermanentParameterBufferPlan {
                 byte_capacity,
                 "permanent parameter buffer allocation",
             )?;
-            buffers.push(VulkanPermanentParameterBufferAllocation {
-                parameter: parameter.clone(),
-                byte_capacity,
-                buffer: Arc::new(
-                    device.create_resident_buffer(byte_capacity)?,
-                ),
-            });
+            byte_counts.push(byte_capacity);
         }
+        let allocations = if byte_counts.is_empty() {
+            Vec::new()
+        } else {
+            device.allocate_resident_buffer_arena(&byte_counts)?
+        };
+        let buffers = self
+            .parameters
+            .iter()
+            .zip(allocations)
+            .map(|(parameter, allocation)| VulkanPermanentParameterBufferAllocation {
+                parameter: parameter.clone(),
+                byte_capacity: allocation.byte_count,
+                byte_offset: allocation.byte_offset,
+                buffer: allocation.buffer,
+            })
+            .collect();
 
         Ok(VulkanPermanentParameterBuffers {
             plan: self.clone(),
@@ -217,9 +227,12 @@ impl VulkanPermanentParameterBufferPlan {
         VulkanPermanentParameterBuffers,
         VulkanPermanentParameterLoadError,
     > {
-        let mut buffers = Vec::with_capacity(self.parameters.len());
+        let mut buffers = std::iter::repeat_with(|| None)
+            .take(self.parameters.len())
+            .collect::<Vec<Option<VulkanPermanentParameterBufferAllocation>>>();
+        let mut missing = Vec::new();
         let mut total_byte_capacity = 0usize;
-        for parameter in &self.parameters {
+        for (parameter_index, parameter) in self.parameters.iter().enumerate() {
             let byte_capacity = parameter.byte_capacity.ok_or_else(|| {
                 VulkanPermanentParameterLoadError(format!(
                     "{} permanent parameter {:?} has unknown byte capacity",
@@ -250,36 +263,70 @@ impl VulkanPermanentParameterBufferPlan {
                 0,
                 byte_capacity,
             )?;
-            let buffer = if let Some(buffer) =
-                pool.resident_buffer(&key)
-            {
-                buffer
+            if let Some(allocation) = pool.resident_allocation(&key) {
+                buffers[parameter_index] = Some(VulkanPermanentParameterBufferAllocation {
+                    parameter: parameter.clone(),
+                    byte_capacity,
+                    byte_offset: allocation.byte_offset,
+                    buffer: allocation.buffer,
+                });
             } else {
-                let buffer = pool.allocate_unpublished(&key)?;
-                let allocation =
-                    VulkanPermanentParameterBufferAllocation {
-                        parameter: parameter.clone(),
-                        byte_capacity,
-                        buffer: buffer.clone(),
-                    };
-                load_parameter_allocation_from_tensor_index(
-                    &allocation,
-                    tensor_index,
-                )?;
-                pool.publish(key, buffer.clone())?;
-                buffer
-            };
+                missing.push((parameter_index, key.clone()));
+            }
             total_byte_capacity = checked_add_bytes(
                 total_byte_capacity,
                 byte_capacity,
                 "pooled permanent parameter buffer allocation",
             )?;
-            buffers.push(VulkanPermanentParameterBufferAllocation {
-                parameter: parameter.clone(),
-                byte_capacity,
-                buffer,
-            });
         }
+        if !missing.is_empty() {
+            let missing_keys = missing
+                .iter()
+                .map(|(_, key)| key.clone())
+                .collect::<Vec<_>>();
+            let allocations = pool.allocate_unpublished_batch(&missing_keys)?;
+            for ((parameter_index, _), allocation) in missing.iter().zip(allocations) {
+                let parameter = &self.parameters[*parameter_index];
+                buffers[*parameter_index] = Some(VulkanPermanentParameterBufferAllocation {
+                    parameter: parameter.clone(),
+                    byte_capacity: allocation.byte_count,
+                    byte_offset: allocation.byte_offset,
+                    buffer: allocation.buffer,
+                });
+            }
+            let mut publications = Vec::with_capacity(missing.len());
+            for (parameter_index, key) in &missing {
+                load_parameter_allocation_from_tensor_index(
+                    buffers[*parameter_index]
+                        .as_ref()
+                        .expect("missing permanent parameter arena allocation was installed"),
+                    tensor_index,
+                )?;
+                let allocation = buffers[*parameter_index]
+                    .as_ref()
+                    .expect("loaded permanent parameter arena allocation remains installed");
+                publications.push((
+                    key.clone(),
+                    VulkanResidentBufferPoolAllocation {
+                        buffer: Arc::clone(&allocation.buffer),
+                        byte_offset: allocation.byte_offset,
+                        byte_count: allocation.byte_capacity,
+                    },
+                ));
+            }
+            pool.publish_batch(publications)?;
+        }
+        let buffers = buffers
+            .into_iter()
+            .enumerate()
+            .map(|(index, allocation)| {
+                allocation.ok_or_else(|| {
+                    VulkanPermanentParameterLoadError(format!(
+                        "permanent parameter arena did not allocate plan index {index}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(VulkanPermanentParameterBuffers {
             plan: self.clone(),
             buffers,
@@ -361,7 +408,18 @@ impl VulkanPermanentParameterBuffers {
 pub struct VulkanPermanentParameterBufferAllocation {
     pub parameter: VulkanPermanentParameterBuffer,
     pub byte_capacity: usize,
+    pub byte_offset: usize,
     pub buffer: Arc<VulkanResidentBuffer>,
+}
+
+impl VulkanPermanentParameterBufferAllocation {
+    pub fn kernel_binding(
+        &self,
+        binding: u32,
+    ) -> VulkanResidentKernelBufferBinding<'_> {
+        VulkanResidentKernelBufferBinding::new(binding, &self.buffer, self.byte_capacity)
+            .with_byte_offset(self.byte_offset)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,7 +471,9 @@ fn load_parameter_allocation_from_tensor_index(
     let bytes = storage
         .read_all()
         .map_err(|error| VulkanPermanentParameterLoadError(error.to_string()))?;
-    allocation.buffer.write_bytes(&bytes)?;
+    allocation
+        .buffer
+        .write_bytes_at(allocation.byte_offset, &bytes)?;
 
     Ok(VulkanPermanentParameterLoadRecord {
         tensor: tensor.clone(),

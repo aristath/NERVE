@@ -214,6 +214,7 @@ impl VulkanComputeDevice {
                 persistent_mapping_requires_unmap: false,
                 _shared_host_allocation: Some(allocation),
                 _shared_device_memory_identity: None,
+                _device_local_memory_reservation: None,
             })
         }
     }
@@ -417,6 +418,18 @@ impl VulkanComputeDevice {
                 .max()
                 .expect("at least the owner external buffer exists")
         };
+        let device_local_memory_reservation =
+            match self.reserve_device_local_memory(allocation_size) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    unsafe {
+                        for raw in raw_buffers {
+                            raw.device.device.destroy_buffer(raw.buffer, None);
+                        }
+                    }
+                    return Err(error);
+                }
+            };
         let mut allocated_memories = vec![None; raw_buffers.len()];
         let mut allocated_memory_type_indices = vec![None; raw_buffers.len()];
         let allocation_result = (|| {
@@ -610,6 +623,9 @@ impl VulkanComputeDevice {
                     persistent_mapping_requires_unmap: false,
                     _shared_host_allocation: None,
                     _shared_device_memory_identity: Some(Arc::clone(&identity)),
+                    _device_local_memory_reservation: Some(Arc::clone(
+                        &device_local_memory_reservation,
+                    )),
                 })
             })
             .collect())
@@ -873,11 +889,12 @@ impl VulkanComputeDevice {
                 "resident byte buffer capacity must not be zero".to_string(),
             ));
         }
-        let (buffer, memory, byte_capacity, memory_access) = self.create_resident_storage_buffer(
-            byte_capacity,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )?;
+        let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) =
+            self.create_resident_storage_buffer(
+                byte_capacity,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
             buffer,
@@ -890,6 +907,7 @@ impl VulkanComputeDevice {
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
+            _device_local_memory_reservation: device_local_memory_reservation,
         })
     }
 
@@ -908,13 +926,14 @@ impl VulkanComputeDevice {
                 self.device_name
             )));
         }
-        let (buffer, memory, byte_capacity, memory_access) = self
+        let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) = self
             .create_resident_storage_buffer_with_usage(
                 byte_capacity,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 resident_buffer_usage() | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
                 false,
+                None,
             )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
@@ -928,12 +947,72 @@ impl VulkanComputeDevice {
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
+            _device_local_memory_reservation: device_local_memory_reservation,
         })
     }
 
     pub fn create_addressable_resident_buffer(
         &self,
         byte_capacity: usize,
+    ) -> Result<VulkanResidentBuffer, VulkanError> {
+        self.create_addressable_resident_buffer_internal(byte_capacity, None)
+    }
+
+    pub fn create_addressable_resident_buffer_with_capacity_permit(
+        &self,
+        byte_capacity: usize,
+        capacity_permit: VulkanDeviceLocalMemoryPermit,
+    ) -> Result<VulkanResidentBuffer, VulkanError> {
+        self.create_addressable_resident_buffer_internal(
+            byte_capacity,
+            Some(capacity_permit),
+        )
+    }
+
+    pub fn addressable_resident_buffer_memory_requirement_bytes(
+        &self,
+        byte_capacity: usize,
+    ) -> Result<usize, VulkanError> {
+        if byte_capacity == 0 {
+            return Err(VulkanError(
+                "addressable resident buffer requirement capacity must not be zero"
+                    .to_string(),
+            ));
+        }
+        if !self.buffer_device_address_supported {
+            return Err(VulkanError(format!(
+                "Vulkan device {:?} does not support buffer device addresses",
+                self.device_name
+            )));
+        }
+        unsafe {
+            let buffer_info = vk::BufferCreateInfo::default()
+                .size(byte_capacity as vk::DeviceSize)
+                .usage(resident_buffer_usage() | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let buffer = self
+                .device
+                .create_buffer(&buffer_info, None)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to query addressable resident buffer requirements: {error:?}"
+                    ))
+                })?;
+            let requirements = self.device.get_buffer_memory_requirements(buffer);
+            self.device.destroy_buffer(buffer, None);
+            usize::try_from(requirements.size).map_err(|_| {
+                VulkanError(
+                    "addressable resident buffer memory requirement exceeds usize"
+                        .to_string(),
+                )
+            })
+        }
+    }
+
+    fn create_addressable_resident_buffer_internal(
+        &self,
+        byte_capacity: usize,
+        capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
     ) -> Result<VulkanResidentBuffer, VulkanError> {
         if byte_capacity == 0 {
             return Err(VulkanError(
@@ -946,12 +1025,13 @@ impl VulkanComputeDevice {
                 self.device_name
             )));
         }
-        let (buffer, memory, byte_capacity, memory_access) = self
+        let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) = self
             .create_resident_storage_buffer_with_addressability(
                 byte_capacity,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 true,
+                capacity_permit,
             )?;
         let device_address = unsafe {
             self.device
@@ -978,6 +1058,7 @@ impl VulkanComputeDevice {
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
+            _device_local_memory_reservation: device_local_memory_reservation,
         }, "device-local addressable buffer")
     }
 
@@ -996,12 +1077,13 @@ impl VulkanComputeDevice {
                 self.device_name
             )));
         }
-        let (buffer, memory, byte_capacity, memory_access) = self
+        let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) = self
             .create_resident_storage_buffer_with_addressability(
                 byte_capacity,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::MemoryPropertyFlags::HOST_CACHED,
                 true,
+                None,
             )?;
         let device_address = unsafe {
             self.device
@@ -1029,6 +1111,7 @@ impl VulkanComputeDevice {
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
+            _device_local_memory_reservation: device_local_memory_reservation,
         }, "host-visible addressable buffer")
     }
 
@@ -1041,11 +1124,12 @@ impl VulkanComputeDevice {
                 "resident byte buffer capacity must not be zero".to_string(),
             ));
         }
-        let (buffer, memory, byte_capacity, memory_access) = self.create_resident_storage_buffer(
-            byte_capacity,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        )?;
+        let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) =
+            self.create_resident_storage_buffer(
+                byte_capacity,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
             buffer,
@@ -1058,6 +1142,7 @@ impl VulkanComputeDevice {
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
+            _device_local_memory_reservation: device_local_memory_reservation,
         })
     }
 
@@ -1070,11 +1155,12 @@ impl VulkanComputeDevice {
                 "resident readback buffer capacity must not be zero".to_string(),
             ));
         }
-        let (buffer, memory, byte_capacity, memory_access) = self.create_resident_storage_buffer(
-            byte_capacity,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            vk::MemoryPropertyFlags::HOST_CACHED,
-        )?;
+        let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) =
+            self.create_resident_storage_buffer(
+                byte_capacity,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_CACHED,
+            )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
             buffer,
@@ -1087,6 +1173,7 @@ impl VulkanComputeDevice {
             persistent_mapping_requires_unmap: false,
             _shared_host_allocation: None,
             _shared_device_memory_identity: None,
+            _device_local_memory_reservation: device_local_memory_reservation,
         })
     }
 
@@ -1101,6 +1188,7 @@ impl VulkanComputeDevice {
             vk::DeviceMemory,
             vk::DeviceSize,
             VulkanResidentMemoryAccess,
+            Option<Arc<VulkanDeviceLocalMemoryReservation>>,
         ),
         VulkanError,
     > {
@@ -1109,6 +1197,7 @@ impl VulkanComputeDevice {
             required_memory_flags,
             preferred_memory_flags,
             false,
+            None,
         )
     }
 
@@ -1118,12 +1207,14 @@ impl VulkanComputeDevice {
         required_memory_flags: vk::MemoryPropertyFlags,
         preferred_memory_flags: vk::MemoryPropertyFlags,
         addressable: bool,
+        capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
     ) -> Result<
         (
             vk::Buffer,
             vk::DeviceMemory,
             vk::DeviceSize,
             VulkanResidentMemoryAccess,
+            Option<Arc<VulkanDeviceLocalMemoryReservation>>,
         ),
         VulkanError,
     > {
@@ -1138,6 +1229,7 @@ impl VulkanComputeDevice {
             preferred_memory_flags,
             usage,
             addressable,
+            capacity_permit,
         )
     }
 
@@ -1148,12 +1240,14 @@ impl VulkanComputeDevice {
         preferred_memory_flags: vk::MemoryPropertyFlags,
         usage: vk::BufferUsageFlags,
         addressable: bool,
+        capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
     ) -> Result<
         (
             vk::Buffer,
             vk::DeviceMemory,
             vk::DeviceSize,
             VulkanResidentMemoryAccess,
+            Option<Arc<VulkanDeviceLocalMemoryReservation>>,
         ),
         VulkanError,
     > {
@@ -1191,6 +1285,29 @@ impl VulkanComputeDevice {
                 .get_physical_device_memory_properties(self.physical_device);
             let property_flags =
                 memory_properties.memory_types[memory_type_index as usize].property_flags;
+            let device_local_memory_reservation =
+                if property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+                    let reservation = match capacity_permit {
+                        Some(permit) => {
+                            self.commit_device_local_memory_capacity(permit, requirements.size)
+                        }
+                        None => self.reserve_device_local_memory(requirements.size),
+                    };
+                    match reservation {
+                    Ok(reservation) => Some(reservation),
+                    Err(error) => {
+                        self.device.destroy_buffer(buffer, None);
+                        return Err(error);
+                    }
+                    }
+                } else if capacity_permit.is_some() {
+                    self.device.destroy_buffer(buffer, None);
+                    return Err(VulkanError(
+                        "device-local capacity permit was supplied for host memory".to_string(),
+                    ));
+                } else {
+                    None
+                };
             let directly_mappable = property_flags.contains(
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             );
@@ -1249,6 +1366,7 @@ impl VulkanComputeDevice {
                     property_flags,
                     staging_memory_type_index,
                 },
+                device_local_memory_reservation,
             ))
         }
     }

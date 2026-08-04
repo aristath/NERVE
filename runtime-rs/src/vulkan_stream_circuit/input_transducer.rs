@@ -74,12 +74,9 @@ impl VulkanResidentInputEmbeddingTransducerRunner {
         }
 
         let bindings = [
-            VulkanResidentKernelBufferBinding::new(
-                0,
-                &embedding_weight.buffer,
-                embedding_weight.byte_capacity,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            embedding_weight
+                .kernel_binding(0)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
             VulkanResidentKernelBufferBinding::new(
                 1,
                 &output_frame.buffer,
@@ -235,12 +232,9 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
             .persistently_map()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let bindings = [
-            VulkanResidentKernelBufferBinding::new(
-                0,
-                &embedding_weight.buffer,
-                embedding_weight.byte_capacity,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            embedding_weight
+                .kernel_binding(0)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
             VulkanResidentKernelBufferBinding::new(1, output_frames, output_byte_capacity)
                 .with_access(VulkanResidentKernelBufferAccess::Write),
             VulkanResidentKernelBufferBinding::new(2, &token_ids_buffer, token_byte_capacity)

@@ -137,12 +137,9 @@ fn create_distributed_resident_dispatch(
             ))
         })?;
         bindings.push(
-            VulkanResidentKernelBufferBinding::new(
-                binding,
-                &allocation.buffer,
-                fragment.byte_count,
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Read),
+            allocation
+                .kernel_binding(binding)
+                .with_access(VulkanResidentKernelBufferAccess::Read),
         );
     }
     device

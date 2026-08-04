@@ -161,6 +161,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
         let input_embedding_weight_allocation = VulkanPermanentParameterBufferAllocation {
             parameter: input_embedding_weight.parameter.clone(),
             byte_capacity: input_embedding_weight.byte_capacity,
+            byte_offset: input_embedding_weight.byte_offset,
             buffer: Arc::clone(&input_embedding_weight.buffer),
         };
         let input_transducer =

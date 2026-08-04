@@ -2327,6 +2327,238 @@ fn device_fault_error_context_is_shared_by_detached_queue_objects() {
 }
 
 #[test]
+fn device_local_memory_budget_preserves_headroom_from_the_opening_snapshot() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+
+    assert_eq!(budget.baseline_available_bytes, 1_000_000);
+    assert_eq!(budget.reservable_bytes, 950_000);
+    assert_eq!(budget.protected_headroom_bytes, 50_000);
+    assert_eq!(budget.counter_tolerance_bytes, 12_500);
+    assert_eq!(budget.remaining_bytes_at(1_000_000), 950_000);
+    assert_eq!(budget.remaining_bytes_at(900_000), 850_000);
+    assert_eq!(budget.remaining_bytes_at(1_100_000), 950_000);
+    assert_eq!(budget.remaining_bytes_at(0), 0);
+}
+
+#[test]
+fn device_local_memory_budget_rejects_fixed_residency_before_dynamic_allocation() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let admission = budget.admit_pending_bytes_at(900_000, 800_000).unwrap();
+
+    assert_eq!(admission.acquired_bytes, 100_000);
+    assert_eq!(admission.pending_fixed_bytes, 800_000);
+    assert_eq!(admission.allocatable_bytes, 50_000);
+    let error = budget
+        .admit_pending_bytes_at(900_000, 850_001)
+        .unwrap_err();
+    assert!(error.0.contains("stable device-local budget"));
+    assert!(error.0.contains("850000 bytes remaining"));
+}
+
+#[test]
+fn selected_device_memory_budget_never_exceeds_physical_device_local_memory() {
+    let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+        eprintln!("skipping device memory-budget test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(
+        raw_device_index
+            .parse()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer"),
+    )
+    .expect("explicit AMD Vulkan device must open");
+    let budget = device.device_local_memory_budget();
+
+    assert!(
+        budget.baseline_available_bytes <= device.device_local_memory_bytes(),
+        "opening available bytes {} exceed physical device-local bytes {}",
+        budget.baseline_available_bytes,
+        device.device_local_memory_bytes(),
+    );
+    assert_eq!(
+        budget.reservable_bytes,
+        budget.baseline_available_bytes * VULKAN_DEVICE_LOCAL_RESERVABLE_FRACTION_PPM
+            / VULKAN_CAPACITY_PARTS_PER_MILLION,
+    );
+}
+
+#[test]
+fn device_local_memory_reservations_are_bounded_and_released_by_lifetime() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let first = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 800_000)
+        .unwrap();
+    let accounting = tracker.lock().unwrap().accounting_at(200_000);
+    assert_eq!(accounting.tracked_allocation_bytes, 800_000);
+    assert_eq!(accounting.pending_reservation_bytes, 0);
+    assert_eq!(accounting.untracked_acquired_bytes, 0);
+    assert_eq!(accounting.remaining_bytes, 150_000);
+    assert_eq!(accounting.admissible_remaining_bytes, 162_500);
+
+    let error = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 200_000, 162_501)
+        .unwrap_err();
+    assert!(error.0.contains("beyond the stable 950000-byte budget"));
+
+    drop(first);
+    let accounting = tracker.lock().unwrap().accounting_at(1_000_000);
+    assert_eq!(accounting.tracked_allocation_bytes, 0);
+    assert_eq!(accounting.remaining_bytes, 950_000);
+    assert_eq!(accounting.admissible_remaining_bytes, 962_500);
+}
+
+#[test]
+fn device_local_memory_reclaimer_registration_is_shared_and_lifetime_bounded() {
+    #[derive(Debug)]
+    struct CountingReclaimer(Arc<AtomicU64>);
+
+    impl VulkanDeviceLocalMemoryReclaimer for CountingReclaimer {
+        fn reclaim_device_local_memory(
+            &self,
+            requested_bytes: usize,
+        ) -> Result<usize, VulkanError> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(requested_bytes)
+        }
+    }
+
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        VulkanDeviceLocalMemoryBudget::capture(1_000_000),
+    )));
+    let calls = Arc::new(AtomicU64::new(0));
+    let registration = VulkanDeviceLocalMemoryBudgetTracker::register_reclaimer(
+        &tracker,
+        Arc::new(CountingReclaimer(Arc::clone(&calls))),
+    )
+    .unwrap();
+    let live = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker).unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].reclaim_device_local_memory(17).unwrap(), 17);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+
+    drop(live);
+    drop(registration);
+    assert!(
+        VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn device_local_capacity_permit_is_atomic_and_commits_only_actual_bytes() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let permit = VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
+    let pending = tracker.lock().unwrap().accounting_at(1_000_000);
+    assert_eq!(pending.tracked_allocation_bytes, 0);
+    assert_eq!(pending.pending_reservation_bytes, 400_000);
+    assert_eq!(pending.admissible_remaining_bytes, 562_500);
+    let error = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 562_501)
+        .unwrap_err();
+    assert!(error.to_string().contains("400000 pending"));
+
+    let allocation = permit.commit(1_000_000, 300_000).unwrap();
+    let committed = tracker.lock().unwrap().accounting_at(700_000);
+    assert_eq!(committed.tracked_allocation_bytes, 300_000);
+    assert_eq!(committed.pending_reservation_bytes, 0);
+    assert_eq!(committed.untracked_acquired_bytes, 0);
+
+    drop(allocation);
+    let released = tracker.lock().unwrap().accounting_at(1_000_000);
+    assert_eq!(released.tracked_allocation_bytes, 0);
+    assert_eq!(released.pending_reservation_bytes, 0);
+}
+
+#[test]
+fn device_local_capacity_permit_releases_when_commit_cannot_fit() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let permit = VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
+    let error = permit
+        .commit(1_000_000, 400_001)
+        .expect_err("an allocation cannot exceed its capacity permit");
+
+    assert!(error.to_string().contains("permit holds 400000 bytes"));
+    assert_eq!(
+        tracker.lock().unwrap().pending_reservation_bytes,
+        0,
+        "the failed consuming commit must release its pending reservation",
+    );
+}
+
+#[test]
+fn device_local_memory_counter_tolerance_is_bounded_by_protected_headroom() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let allocation =
+        VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 962_500).unwrap();
+    let error = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 37_500, 1).unwrap_err();
+
+    assert!(error.to_string().contains("bounded counter tolerance"));
+    assert_eq!(budget.counter_tolerance_bytes, budget.protected_headroom_bytes / 4);
+    drop(allocation);
+}
+
+#[test]
+fn device_local_memory_tolerance_is_applied_before_capacity_saturation() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let allocation =
+        VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 940_000).unwrap();
+    let accounting = tracker.lock().unwrap().accounting_at(40_000);
+
+    assert_eq!(accounting.untracked_acquired_bytes, 20_000);
+    assert_eq!(accounting.remaining_bytes, 0);
+    assert_eq!(accounting.admissible_remaining_bytes, 2_500);
+    drop(allocation);
+}
+
+#[test]
+fn selected_device_buffer_lifetime_owns_and_releases_capacity() {
+    let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
+        eprintln!("skipping device allocation-budget test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(
+        raw_device_index
+            .parse()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer"),
+    )
+    .expect("explicit AMD Vulkan device must open");
+    assert_eq!(
+        device
+            .device_local_memory_accounting()
+            .unwrap()
+            .tracked_allocation_bytes,
+        0,
+    );
+
+    let buffer = device.create_addressable_resident_buffer(1 << 20).unwrap();
+    let during = device.device_local_memory_accounting().unwrap();
+    assert!(during.tracked_allocation_bytes >= buffer.byte_capacity() as u64);
+    assert!(during.tracked_allocation_bytes <= during.reservable_bytes);
+
+    drop(buffer);
+    assert_eq!(
+        device
+            .device_local_memory_accounting()
+            .unwrap()
+            .tracked_allocation_bytes,
+        0,
+    );
+}
+
+#[test]
 fn live_addressable_buffers_are_registered_for_device_fault_attribution() {
     let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
         eprintln!("skipping device-fault attribution test: explicit Vulkan device unset");

@@ -92,28 +92,168 @@ impl VulkanComputeDevice {
     }
 
     pub fn available_device_local_memory_bytes(&self) -> u64 {
-        if !self.memory_budget_supported {
-            return self.device_local_memory_bytes;
-        }
-        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
-        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
-        unsafe {
-            self.context
-                .instance
-                .get_physical_device_memory_properties2(self.physical_device, &mut properties);
-        }
-        (0..properties.memory_properties.memory_heap_count)
-            .filter(|heap_index| {
-                properties.memory_properties.memory_heaps[*heap_index as usize]
-                    .flags
-                    .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
-            })
-            .map(|heap_index| {
-                let index = heap_index as usize;
-                budget.heap_budget[index].saturating_sub(budget.heap_usage[index])
-            })
-            .max()
+        query_available_device_local_memory_bytes(
+            &self.context.instance,
+            self.physical_device,
+            self.memory_budget_supported,
+            self.device_local_memory_bytes,
+        )
+    }
+
+    pub fn device_local_memory_budget(&self) -> VulkanDeviceLocalMemoryBudget {
+        self.device_local_memory_budget
+    }
+
+    pub fn remaining_reservable_device_local_memory_bytes(&self) -> u64 {
+        self.device_local_memory_accounting()
+            .map(|accounting| accounting.remaining_bytes)
             .unwrap_or(0)
+    }
+
+    pub fn admit_device_local_memory(
+        &self,
+        pending_fixed_bytes: u64,
+    ) -> Result<VulkanDeviceLocalMemoryAdmission, VulkanError> {
+        let accounting = self.device_local_memory_accounting()?;
+        let allocatable_bytes = accounting
+            .admissible_remaining_bytes
+            .checked_sub(pending_fixed_bytes)
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "pending fixed Vulkan residency needs {pending_fixed_bytes} bytes, but the stable device-local budget has only {} bytes remaining after {} tracked and {} untracked acquired bytes",
+                    accounting.admissible_remaining_bytes,
+                    accounting.tracked_allocation_bytes,
+                    accounting.untracked_acquired_bytes,
+                ))
+            })?;
+        Ok(VulkanDeviceLocalMemoryAdmission {
+            baseline_available_bytes: accounting.baseline_available_bytes,
+            currently_available_bytes: accounting.currently_available_bytes,
+            reservable_bytes: accounting.reservable_bytes,
+            acquired_bytes: accounting
+                .tracked_allocation_bytes
+                .saturating_add(accounting.untracked_acquired_bytes),
+            pending_fixed_bytes,
+            allocatable_bytes,
+        })
+    }
+
+    pub fn device_local_memory_accounting(
+        &self,
+    ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
+        let currently_available_bytes = self.available_device_local_memory_bytes();
+        self.device_local_memory_budget_tracker
+            .lock()
+            .map(|tracker| tracker.accounting_at(currently_available_bytes))
+            .map_err(|_| {
+                VulkanError("device-local memory budget tracker was poisoned".to_string())
+            })
+    }
+
+    fn reserve_device_local_memory(
+        &self,
+        byte_count: u64,
+    ) -> Result<Arc<VulkanDeviceLocalMemoryReservation>, VulkanError> {
+        let initial = VulkanDeviceLocalMemoryReservation::acquire(
+            &self.device_local_memory_budget_tracker,
+            self.available_device_local_memory_bytes(),
+            byte_count,
+        );
+        let Err(initial_error) = initial else {
+            return initial;
+        };
+        let requested_bytes = usize::try_from(byte_count).map_err(|_| {
+            VulkanError("device-local allocation request exceeds usize".to_string())
+        })?;
+        let reclaimers = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(
+            &self.device_local_memory_budget_tracker,
+        )?;
+        if reclaimers.is_empty() {
+            return Err(initial_error);
+        }
+        let mut reclaimed_bytes = 0usize;
+        let mut reclaimer_errors = Vec::new();
+        for reclaimer in reclaimers {
+            let available_bytes = self
+                .device_local_memory_accounting()?
+                .admissible_remaining_bytes;
+            let requested_reclaim_bytes = usize::try_from(
+                byte_count.saturating_sub(available_bytes),
+            )
+            .unwrap_or(requested_bytes);
+            if requested_reclaim_bytes == 0 {
+                return VulkanDeviceLocalMemoryReservation::acquire(
+                    &self.device_local_memory_budget_tracker,
+                    self.available_device_local_memory_bytes(),
+                    byte_count,
+                );
+            }
+            match reclaimer.reclaim_device_local_memory(requested_reclaim_bytes) {
+                Ok(reclaimed) => reclaimed_bytes = reclaimed_bytes.saturating_add(reclaimed),
+                Err(error) => reclaimer_errors.push(error.to_string()),
+            }
+            let started = Instant::now();
+            loop {
+                match VulkanDeviceLocalMemoryReservation::acquire(
+                    &self.device_local_memory_budget_tracker,
+                    self.available_device_local_memory_bytes(),
+                    byte_count,
+                ) {
+                    Ok(reservation) => return Ok(reservation),
+                    Err(_) if started.elapsed() < Duration::from_millis(250) => {
+                        std::thread::sleep(Duration::from_micros(100));
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        Err(VulkanError(format!(
+            "{initial_error}; registered evictable stores released {reclaimed_bytes} bytes but the allocation still could not be admitted{}",
+            if reclaimer_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; reclaimer errors: {}", reclaimer_errors.join(" | "))
+            }
+        )))
+    }
+
+    pub fn register_device_local_memory_reclaimer(
+        &self,
+        reclaimer: Arc<dyn VulkanDeviceLocalMemoryReclaimer>,
+    ) -> Result<VulkanDeviceLocalMemoryReclaimerRegistration, VulkanError> {
+        VulkanDeviceLocalMemoryBudgetTracker::register_reclaimer(
+            &self.device_local_memory_budget_tracker,
+            reclaimer,
+        )
+    }
+
+    pub fn reserve_device_local_memory_capacity(
+        &self,
+        byte_count: usize,
+    ) -> Result<VulkanDeviceLocalMemoryPermit, VulkanError> {
+        VulkanDeviceLocalMemoryPermit::acquire(
+            &self.device_local_memory_budget_tracker,
+            self.available_device_local_memory_bytes(),
+            u64::try_from(byte_count).map_err(|_| {
+                VulkanError("device-local capacity permit exceeds u64".to_string())
+            })?,
+        )
+    }
+
+    fn commit_device_local_memory_capacity(
+        &self,
+        permit: VulkanDeviceLocalMemoryPermit,
+        byte_count: u64,
+    ) -> Result<Arc<VulkanDeviceLocalMemoryReservation>, VulkanError> {
+        if !Arc::ptr_eq(
+            &permit.tracker,
+            &self.device_local_memory_budget_tracker,
+        ) {
+            return Err(VulkanError(
+                "device-local capacity permit belongs to another physical device".to_string(),
+            ));
+        }
+        permit.commit(self.available_device_local_memory_bytes(), byte_count)
     }
 
     pub fn max_compute_work_group_count_x(&self) -> u32 {

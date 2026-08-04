@@ -130,13 +130,9 @@ impl VulkanResidentBuffer {
                 );
             }
             Ok(())
-        } else if offset != 0 {
-            Err(VulkanError(
-                "offset resident buffer writes require persistent mapping".to_string(),
-            ))
         } else if self.memory_access.is_directly_mappable() {
             unsafe {
-                write_byte_memory(
+                write_byte_memory_at(
                     &self.device,
                     self.memory.ok_or_else(|| {
                         VulkanError(
@@ -144,7 +140,8 @@ impl VulkanResidentBuffer {
                                 .to_string(),
                         )
                     })?,
-                    byte_len,
+                    self.byte_capacity,
+                    offset,
                     input,
                 )
             }
@@ -154,6 +151,7 @@ impl VulkanResidentBuffer {
                     &self.device,
                     self.buffer,
                     &self.memory_access,
+                    offset as vk::DeviceSize,
                     byte_len,
                     input,
                 )
@@ -186,9 +184,9 @@ impl VulkanResidentBuffer {
                 unsafe { std::slice::from_raw_parts((address as *const u8).add(offset), len) }
                     .to_vec(),
             )
-        } else if offset == 0 && self.memory_access.is_directly_mappable() {
+        } else if self.memory_access.is_directly_mappable() {
             unsafe {
-                read_byte_memory(
+                read_byte_memory_at(
                     &self.device,
                     self.memory.ok_or_else(|| {
                         VulkanError(
@@ -196,17 +194,20 @@ impl VulkanResidentBuffer {
                                 .to_string(),
                         )
                     })?,
-                    byte_len,
+                    self.byte_capacity,
+                    offset,
                     len,
                 )
             }
-        } else if offset != 0 {
-            Err(VulkanError(
-                "offset resident buffer reads require persistent mapping".to_string(),
-            ))
         } else {
             unsafe {
-                read_device_local_bytes(&self.device, self.buffer, &self.memory_access, byte_len)
+                read_device_local_bytes(
+                    &self.device,
+                    self.buffer,
+                    &self.memory_access,
+                    offset as vk::DeviceSize,
+                    byte_len,
+                )
             }
         }
     }
