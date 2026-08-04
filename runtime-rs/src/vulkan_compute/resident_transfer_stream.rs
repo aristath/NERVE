@@ -1,5 +1,6 @@
 pub struct VulkanResidentTransferStream {
     device: ash::Device,
+    activity_lease_health: VulkanDeviceActivityLeaseHealth,
     queue: vk::Queue,
     consumer_queue: vk::Queue,
     queue_is_distinct_from_consumer: bool,
@@ -120,6 +121,7 @@ impl VulkanComputeDevice {
             }
             Ok(VulkanResidentTransferStream {
                 device: self.device.clone(),
+                activity_lease_health: self.activity_lease_health.clone(),
                 queue: self.transfer_queue,
                 consumer_queue: self.queue,
                 queue_is_distinct_from_consumer:
@@ -157,6 +159,7 @@ impl VulkanResidentTransferStream {
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],
     ) -> Result<VulkanResidentTransferTicket, VulkanError> {
+        self.activity_lease_health.require_healthy()?;
         if writes.is_empty() {
             return Err(VulkanError(
                 "resident transfer submission must contain at least one write".to_string(),
@@ -298,6 +301,9 @@ impl VulkanResidentTransferStream {
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],
     ) -> Result<(), (VulkanError, bool)> {
+        self.activity_lease_health
+            .require_healthy()
+            .map_err(|error| (error, false))?;
         if writes.is_empty() {
             return Err((
                 VulkanError(
@@ -464,7 +470,9 @@ impl VulkanResidentTransferStream {
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         slot.pending_timeline_value = 0;
         self.next_slot_index = (slot_index + 1) % self.slots.len();
-        Ok(())
+        self.activity_lease_health
+            .require_healthy()
+            .map_err(|error| (error, true))
     }
 
     pub fn completion_point<'a>(
@@ -514,16 +522,19 @@ impl VulkanResidentTransferStream {
     }
 
     fn timeline_value(&self) -> Result<u64, VulkanError> {
-        unsafe { self.device.get_semaphore_counter_value(self.timeline.semaphore) }.map_err(
-            |error| {
+        self.activity_lease_health.require_healthy()?;
+        let value = unsafe { self.device.get_semaphore_counter_value(self.timeline.semaphore) }
+            .map_err(|error| {
                 VulkanError(format!(
                     "failed to read resident transfer timeline: {error:?}"
                 ))
-            },
-        )
+            })?;
+        self.activity_lease_health.require_healthy()?;
+        Ok(value)
     }
 
     fn wait_timeline_value(&self, value: u64) -> Result<(), VulkanError> {
+        self.activity_lease_health.require_healthy()?;
         unsafe {
             self.device.wait_semaphores(
                 &vk::SemaphoreWaitInfo::default()
@@ -538,13 +549,14 @@ impl VulkanResidentTransferStream {
             ))
         })?;
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        self.activity_lease_health.require_healthy()
     }
 
     fn wait_timeline_value_on_consumer_queue(
         &self,
         value: u64,
     ) -> Result<(), VulkanError> {
+        self.activity_lease_health.require_healthy()?;
         unsafe {
             let fence = self
                 .device
@@ -583,7 +595,7 @@ impl VulkanResidentTransferStream {
             })?;
         }
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        self.activity_lease_health.require_healthy()
     }
 }
 

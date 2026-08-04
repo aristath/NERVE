@@ -1,4 +1,8 @@
 impl VulkanComputeDevice {
+    fn require_activity_lease_healthy(&self) -> Result<(), VulkanError> {
+        self.activity_lease_health.require_healthy()
+    }
+
     /// Establish that every queue operation submitted through this logical
     /// device is complete before resident resources are released.
     ///
@@ -6,14 +10,16 @@ impl VulkanComputeDevice {
     /// the corresponding resources one device at a time.  Process-exit field
     /// drop order is not an accelerator residency protocol.
     pub fn quiesce(&self) -> Result<(), VulkanError> {
+        self.require_activity_lease_healthy()?;
         unsafe {
             self.device.device_wait_idle().map_err(|error| {
                 VulkanError(format!(
                     "failed to quiesce Vulkan device {:?}: {error:?}",
                     self.device_name
                 ))
-            })
+            })?;
         }
+        self.require_activity_lease_healthy()
     }
 }
 
@@ -30,6 +36,9 @@ impl Drop for VulkanComputeDevice {
                     .destroy_pipeline_layout(pipeline.pipeline_layout, None);
                 self.device
                     .destroy_descriptor_set_layout(pipeline.descriptor_set_layout, None);
+            }
+            if let Some(mut activity_lease) = self.activity_lease.get_mut().take() {
+                let _ = activity_lease.stop();
             }
             self.device.destroy_device(None);
         }
@@ -1023,6 +1032,7 @@ unsafe fn write_device_local_bytes(
     byte_len: vk::DeviceSize,
     input: &[u8],
 ) -> Result<(), VulkanError> {
+    access.activity_lease_health.require_healthy()?;
     let memory_type_index = access
         .staging_memory_type_index
         .ok_or_else(|| VulkanError("device-local buffer has no staging memory type".to_string()))?;
@@ -1051,7 +1061,8 @@ unsafe fn write_device_local_bytes(
         device.destroy_buffer(staging_buffer, None);
         device.free_memory(staging_memory, None);
     }
-    result
+    result?;
+    access.activity_lease_health.require_healthy()
 }
 
 unsafe fn read_device_local_bytes(
@@ -1060,6 +1071,7 @@ unsafe fn read_device_local_bytes(
     access: &VulkanResidentMemoryAccess,
     byte_len: vk::DeviceSize,
 ) -> Result<Vec<u8>, VulkanError> {
+    access.activity_lease_health.require_healthy()?;
     let memory_type_index = access
         .staging_memory_type_index
         .ok_or_else(|| VulkanError("device-local buffer has no staging memory type".to_string()))?;
@@ -1086,7 +1098,9 @@ unsafe fn read_device_local_bytes(
         device.destroy_buffer(staging_buffer, None);
         device.free_memory(staging_memory, None);
     }
-    result
+    let bytes = result?;
+    access.activity_lease_health.require_healthy()?;
+    Ok(bytes)
 }
 
 unsafe fn create_temporary_staging_buffer(

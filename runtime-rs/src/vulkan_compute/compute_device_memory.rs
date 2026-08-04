@@ -858,6 +858,7 @@ impl VulkanComputeDevice {
         Ok(VulkanResidentMemoryAccess {
             queue: self.queue,
             queue_family_index: self.queue_family_index,
+            activity_lease_health: self.activity_lease_health.clone(),
             property_flags,
             staging_memory_type_index,
         })
@@ -1244,6 +1245,7 @@ impl VulkanComputeDevice {
                 VulkanResidentMemoryAccess {
                     queue: self.queue,
                     queue_family_index: self.queue_family_index,
+                    activity_lease_health: self.activity_lease_health.clone(),
                     property_flags,
                     staging_memory_type_index,
                 },
@@ -1406,6 +1408,7 @@ impl VulkanComputeDevice {
 
             Ok(VulkanResidentBufferCopy {
                 device: self.device.clone(),
+                activity_lease_health: self.activity_lease_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.queue,
@@ -1447,6 +1450,7 @@ impl VulkanComputeDevice {
         &self,
         binding: &VulkanResidentBufferCopy,
     ) -> Result<(), VulkanError> {
+        self.require_activity_lease_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy belongs to another logical device".to_string(),
@@ -1462,13 +1466,14 @@ impl VulkanComputeDevice {
                 })?;
         }
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        self.require_activity_lease_healthy()
     }
 
     pub fn wait_resident_buffer_copy_batch(
         &self,
         binding: &VulkanResidentBufferCopyBatch,
     ) -> Result<(), VulkanError> {
+        self.require_activity_lease_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy batch belongs to another logical device".to_string(),
@@ -1484,13 +1489,14 @@ impl VulkanComputeDevice {
                 })?;
         }
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        self.require_activity_lease_healthy()
     }
 
     pub fn submit_resident_buffer_copy_batch(
         &self,
         binding: &VulkanResidentBufferCopyBatch,
     ) -> Result<(), VulkanError> {
+        self.require_activity_lease_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy batch belongs to another logical device".to_string(),
@@ -1594,6 +1600,7 @@ impl VulkanComputeDevice {
                 })?;
             Ok(VulkanResidentBufferCopyBatch {
                 device: self.device.clone(),
+                activity_lease_health: self.activity_lease_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.queue,

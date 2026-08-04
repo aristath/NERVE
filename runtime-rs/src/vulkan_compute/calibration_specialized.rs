@@ -1,5 +1,6 @@
 pub struct VulkanTextureCalibration {
     device: ash::Device,
+    activity_lease_health: VulkanDeviceActivityLeaseHealth,
     image: vk::Image,
     image_memory: vk::DeviceMemory,
     image_view: vk::ImageView,
@@ -430,6 +431,7 @@ impl VulkanComputeDevice {
                 .map_err(|error| VulkanError(format!("failed to end texture commands: {error:?}")))?;
             Ok(VulkanTextureCalibration {
                 device: self.device.clone(),
+                activity_lease_health: self.activity_lease_health.clone(),
                 image,
                 image_memory: memory,
                 image_view,
@@ -454,6 +456,7 @@ impl VulkanComputeDevice {
 
 impl VulkanTextureCalibration {
     pub fn run_for(&self, timeout: Duration) -> Result<u64, VulkanError> {
+        self.activity_lease_health.require_healthy()?;
         unsafe {
             self.device
                 .reset_fences(&[self.completion_fence])
@@ -495,6 +498,7 @@ impl VulkanTextureCalibration {
                     "texture calibration produced invalid device duration {duration_ns}"
                 )));
             }
+            self.activity_lease_health.require_healthy()?;
             Ok((duration_ns.round() as u64).max(1))
         }
     }

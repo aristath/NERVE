@@ -1,5 +1,6 @@
 pub struct VulkanResidentBufferCopy {
     device: ash::Device,
+    activity_lease_health: VulkanDeviceActivityLeaseHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
@@ -15,6 +16,7 @@ pub struct VulkanResidentBufferCopy {
 
 pub struct VulkanResidentBufferCopyBatch {
     device: ash::Device,
+    activity_lease_health: VulkanDeviceActivityLeaseHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
@@ -191,6 +193,7 @@ impl VulkanResidentBufferCopy {
     }
 
     fn run_internal(&self, len: usize) -> Result<Option<u64>, VulkanError> {
+        self.activity_lease_health.require_healthy()?;
         if len == 0 {
             return Err(VulkanError(
                 "resident byte copy length must not be zero".to_string(),
@@ -236,6 +239,7 @@ impl VulkanResidentBufferCopy {
                     )
                 })?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
+            self.activity_lease_health.require_healthy()?;
             let device_duration_ns = if let Some(query_pool) = self.timestamp_query_pool {
                 let mut timestamps = [0_u64; 2];
                 self.device
@@ -275,6 +279,7 @@ impl VulkanResidentBufferCopyBatch {
     }
 
     pub fn run(&self) -> Result<(), VulkanError> {
+        self.activity_lease_health.require_healthy()?;
         unsafe {
             self.device
                 .reset_fences(&[self.completion_fence])
@@ -308,6 +313,7 @@ impl VulkanResidentBufferCopyBatch {
                 })?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         }
+        self.activity_lease_health.require_healthy()?;
         Ok(())
     }
 }
