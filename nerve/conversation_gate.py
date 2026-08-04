@@ -27,6 +27,7 @@ CANONICAL_OUTPUT_TOKEN_ALLOWANCE = 65_536
 _PROMPT_MARKER = b"you> "
 _RESPONSE_PREFIX = "llm> "
 _TURN_START = _PROMPT_MARKER.decode() + _RESPONSE_PREFIX
+_TURN_ERROR_MARKER = b"\nturn_error: "
 _STATS_MARKER = "\nstats:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
 _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
@@ -46,6 +47,12 @@ _RESIDENCY_GAUGE_GROUPS = {"memory_tiers"}
 
 class ConversationGateError(RuntimeError):
     pass
+
+
+class ResidentConversationError(ConversationGateError):
+    def __init__(self, message: str, transcript: str) -> None:
+        super().__init__(message)
+        self.transcript = transcript
 
 
 @dataclass(frozen=True)
@@ -431,6 +438,17 @@ def run_resident_conversation(
             sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
 
+            turn_error = transcript.find(_TURN_ERROR_MARKER, accepted_marker_end)
+            if turn_error >= 0:
+                detail_start = turn_error + len(_TURN_ERROR_MARKER)
+                detail_end = transcript.find(b"\n", detail_start)
+                if detail_end >= 0:
+                    detail = transcript[detail_start:detail_end].decode(
+                        errors="replace"
+                    )
+                    live_error = f"runtime rejected a recoverable chat turn: {detail}"
+                    break
+
             while True:
                 marker = transcript.find(_PROMPT_MARKER, search_from)
                 if marker < 0:
@@ -486,15 +504,22 @@ def run_resident_conversation(
         process.stdin.close()
         process.stdout.close()
 
+    decoded_transcript = transcript.decode(errors="replace")
     if live_error is not None:
-        raise ConversationGateError(live_error)
+        raise ResidentConversationError(live_error, decoded_transcript)
     if return_code != 0:
-        raise ConversationGateError(f"runtime exited with status {return_code}")
-    if sent != len(prompts):
-        raise ConversationGateError(
-            f"runtime accepted {sent} scripted input(s); expected {len(prompts)}"
+        output_tail = bytes(transcript[-4_096:]).decode(errors="replace").strip()
+        detail = f"; output tail:\n{output_tail}" if output_tail else ""
+        raise ResidentConversationError(
+            f"runtime exited with status {return_code}{detail}",
+            decoded_transcript,
         )
-    return transcript.decode(errors="replace"), return_code
+    if sent != len(prompts):
+        raise ResidentConversationError(
+            f"runtime accepted {sent} scripted input(s); expected {len(prompts)}",
+            decoded_transcript,
+        )
+    return decoded_transcript, return_code
 
 
 def _package_metadata(command: Sequence[str]) -> dict[str, Any]:
@@ -550,10 +575,18 @@ def run_conversation_gate(
     runs = []
     for seed in seeds:
         seeded_command = canonical_runtime_command(command, seed)
-        transcript, _ = run_resident_conversation(
-            seeded_command,
-            warmup_conversation_sets=warmup_conversation_sets,
-        )
+        try:
+            transcript, _ = run_resident_conversation(
+                seeded_command,
+                warmup_conversation_sets=warmup_conversation_sets,
+            )
+        except ResidentConversationError as error:
+            if transcript_dir is not None:
+                transcript_dir.mkdir(parents=True, exist_ok=True)
+                (transcript_dir / f"conversation-seed-{seed}-failed.log").write_text(
+                    error.transcript
+                )
+            raise
         if transcript_dir is not None:
             transcript_dir.mkdir(parents=True, exist_ok=True)
             (transcript_dir / f"conversation-seed-{seed}.log").write_text(transcript)

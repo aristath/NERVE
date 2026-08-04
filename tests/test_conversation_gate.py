@@ -403,6 +403,98 @@ for turn in range(7):
     assert len(parse_conversation_transcript(transcript)) == 6
 
 
+def test_resident_runner_reports_bounded_runtime_failure_tail(tmp_path) -> None:
+    fake_runtime = tmp_path / "failing_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+print("ready")
+print("you> ", end="", flush=True)
+sys.stdin.readline()
+print("x" * 5000)
+print("precise terminal failure", flush=True)
+raise SystemExit(7)
+""".lstrip()
+    )
+
+    with pytest.raises(ConversationGateError) as caught:
+        run_resident_conversation([sys.executable, "-u", str(fake_runtime)])
+
+    message = str(caught.value)
+    assert "runtime exited with status 7" in message
+    assert "precise terminal failure" in message
+    assert len(message) < 4_200
+
+
+def test_resident_runner_stops_on_recoverable_turn_rejection(tmp_path) -> None:
+    fake_runtime = tmp_path / "recoverable_turn_error.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+print("ready")
+print("you> ", end="", flush=True)
+sys.stdin.readline()
+print("llm> malformed generated protocol")
+print("turn_error: generated assistant protocol validation failed before canonical commit: reserved token")
+print("you> ", end="", flush=True)
+sys.stdin.readline()
+raise SystemExit(99)
+""".lstrip()
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="runtime rejected a recoverable chat turn.*reserved token",
+    ) as caught:
+        run_resident_conversation([sys.executable, "-u", str(fake_runtime)])
+
+    assert "malformed generated protocol" in caught.value.transcript
+    assert "turn_error:" in caught.value.transcript
+
+
+def test_gate_persists_complete_failed_runtime_transcript(tmp_path) -> None:
+    package = tmp_path / "package.json"
+    package.write_text("{}")
+    fake_runtime = tmp_path / "failing_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+print("ready")
+print("you> ", end="", flush=True)
+sys.stdin.readline()
+print("failure-prefix")
+print("x" * 5000)
+print("precise terminal failure", flush=True)
+raise SystemExit(7)
+""".lstrip()
+    )
+    transcript_dir = tmp_path / "transcripts"
+
+    with pytest.raises(ConversationGateError, match="runtime exited with status 7"):
+        run_conversation_gate(
+            [
+                sys.executable,
+                "-u",
+                str(fake_runtime),
+                "--package",
+                str(package),
+                "--chat",
+            ],
+            seeds=(19,),
+            minimum_decode_tokens_per_second=0.0,
+            require_thinking=True,
+            transcript_dir=transcript_dir,
+        )
+
+    transcript = (transcript_dir / "conversation-seed-19-failed.log").read_text()
+    assert "failure-prefix" in transcript
+    assert "precise terminal failure" in transcript
+    assert "x" * 5000 in transcript
+
+
 def test_gate_discards_one_complete_resident_conversation_and_measures_the_next(
     tmp_path,
 ) -> None:
