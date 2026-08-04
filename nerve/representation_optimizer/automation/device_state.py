@@ -27,6 +27,8 @@ class DeviceCapacityPolicy:
     material_process_vram_bytes: int = 64 * 1024 * 1024
     material_process_gtt_bytes: int = 64 * 1024 * 1024
     release_vram_tolerance_bytes: int = 16 * 1024 * 1024
+    release_settle_timeout_ns: int = 5_000_000_000
+    release_poll_interval_ns: int = 50_000_000
 
     def __post_init__(self) -> None:
         if not 0 < self.reservable_free_vram_fraction_ppm <= 1_000_000:
@@ -42,6 +44,23 @@ class DeviceCapacityPolicy:
             value = getattr(self, field)
             if value < 0:
                 raise ModelCompileError(f"device-capacity {field} must not be negative")
+        if (
+            isinstance(self.release_settle_timeout_ns, bool)
+            or not isinstance(self.release_settle_timeout_ns, int)
+            or self.release_settle_timeout_ns < 0
+        ):
+            raise ModelCompileError(
+                "device-capacity release_settle_timeout_ns must be a "
+                "nonnegative integer"
+            )
+        if (
+            isinstance(self.release_poll_interval_ns, bool)
+            or not isinstance(self.release_poll_interval_ns, int)
+            or self.release_poll_interval_ns <= 0
+        ):
+            raise ModelCompileError(
+                "device-capacity release_poll_interval_ns must be a positive integer"
+            )
 
     def reservable_vram_bytes(self, *, total: int, used: int) -> int:
         if total <= 0 or used < 0 or used > total:
@@ -63,8 +82,10 @@ class DeviceCapacityPolicy:
             "release_vram_tolerance_bytes": (
                 self.release_vram_tolerance_bytes
             ),
+            "release_settle_timeout_ns": self.release_settle_timeout_ns,
+            "release_poll_interval_ns": self.release_poll_interval_ns,
             "concurrent_workload_policy": "preserve_and_share_unreserved_capacity",
-            "release_policy": "declared_reservable_capacity_restored",
+            "release_policy": "declared_capacity_restored_after_driver_settlement",
         }
 
 
@@ -263,6 +284,8 @@ class LinuxAmdDeviceCapacityProbe:
             release_vram_tolerance_bytes=(
                 self.policy.release_vram_tolerance_bytes
             ),
+            release_settle_timeout_ns=self.policy.release_settle_timeout_ns,
+            release_poll_interval_ns=self.policy.release_poll_interval_ns,
         )
 
     def _require_preexisting_residents(

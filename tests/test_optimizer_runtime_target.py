@@ -144,6 +144,8 @@ def test_linux_amd_probe_reserves_remaining_capacity_without_excluding_workloads
     assert state.reservation_digest == expected
     assert state.observations == observation
     assert state.release_vram_tolerance_bytes == policy.release_vram_tolerance_bytes
+    assert state.release_settle_timeout_ns == policy.release_settle_timeout_ns
+    assert state.release_poll_interval_ns == policy.release_poll_interval_ns
 
     used = (sysfs / "card0" / "device").resolve() / "mem_info_vram_used"
     used.write_text("250000000\n")

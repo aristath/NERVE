@@ -945,6 +945,89 @@ def test_verified_capacity_lease_reports_post_execution_residency_leak(
         pass
 
 
+def test_verified_capacity_lease_waits_for_driver_release_settlement(
+    tmp_path: Path,
+) -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
+    probe_results = [
+        _capacity_lease_state(
+            digest=digest,
+            used_vram_bytes=100,
+            settle_timeout_ns=1_000_000_000,
+        ),
+        _capacity_lease_state(
+            digest=digest,
+            used_vram_bytes=111,
+            settle_timeout_ns=1_000_000_000,
+        ),
+        _capacity_lease_state(
+            digest=digest,
+            used_vram_bytes=105,
+            settle_timeout_ns=1_000_000_000,
+        ),
+    ]
+    now = [0]
+    sleeps: list[float] = []
+
+    def settle(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += int(seconds * 1_000_000_000)
+
+    target, _ = _target(
+        lease=VerifiedCapacityLeaseManager(
+            lock_root=tmp_path / "device-locks",
+            probe_capacity_reservation_state=lambda _target: probe_results.pop(0),
+            monotonic_ns=lambda: now[0],
+            sleep=settle,
+        )
+    )
+
+    with target.lease_manager.acquire(target):
+        pass
+
+    assert probe_results == []
+    assert sleeps == [0.1]
+
+
+def test_verified_capacity_lease_rejects_leak_after_settlement_deadline(
+    tmp_path: Path,
+) -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
+    before = _capacity_lease_state(
+        digest=digest,
+        used_vram_bytes=100,
+        settle_timeout_ns=200_000_000,
+    )
+    leaked = _capacity_lease_state(
+        digest=digest,
+        used_vram_bytes=111,
+        settle_timeout_ns=200_000_000,
+    )
+    probe_results = [before, leaked, leaked, leaked]
+    now = [0]
+    sleeps: list[float] = []
+
+    def settle(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += int(seconds * 1_000_000_000)
+
+    target, _ = _target(
+        lease=VerifiedCapacityLeaseManager(
+            lock_root=tmp_path / "device-locks",
+            probe_capacity_reservation_state=lambda _target: probe_results.pop(0),
+            monotonic_ns=lambda: now[0],
+            sleep=settle,
+        )
+    )
+
+    with pytest.raises(ModelCompileError, match="retained 11 VRAM bytes"):
+        with target.lease_manager.acquire(target):
+            pass
+
+    assert probe_results == []
+    assert sleeps == [0.1, 0.1]
+
+
 def test_verified_capacity_lease_preserves_workloads_present_at_acquisition(
     tmp_path: Path,
 ) -> None:
@@ -978,6 +1061,7 @@ def _capacity_lease_state(
     digest: str,
     used_vram_bytes: int,
     resident_pids: tuple[int, ...] = (),
+    settle_timeout_ns: int = 0,
 ) -> CapacityLeaseState:
     return CapacityLeaseState(
         reservation_digest=digest,
@@ -993,4 +1077,6 @@ def _capacity_lease_state(
             },
         ),
         release_vram_tolerance_bytes=10,
+        release_settle_timeout_ns=settle_timeout_ns,
+        release_poll_interval_ns=100_000_000,
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import time
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +79,8 @@ class CapacityLeaseState:
     reservation_digest: str
     observations: tuple[Json, ...]
     release_vram_tolerance_bytes: int
+    release_settle_timeout_ns: int
+    release_poll_interval_ns: int
 
     def __post_init__(self) -> None:
         require_device_state_digest(
@@ -92,6 +95,22 @@ class CapacityLeaseState:
             raise ModelCompileError(
                 "capacity lease release tolerance must be a nonnegative integer"
             )
+        if (
+            isinstance(self.release_settle_timeout_ns, bool)
+            or not isinstance(self.release_settle_timeout_ns, int)
+            or self.release_settle_timeout_ns < 0
+        ):
+            raise ModelCompileError(
+                "capacity lease release settlement timeout must be a nonnegative integer"
+            )
+        if (
+            isinstance(self.release_poll_interval_ns, bool)
+            or not isinstance(self.release_poll_interval_ns, int)
+            or self.release_poll_interval_ns <= 0
+        ):
+            raise ModelCompileError(
+                "capacity lease release poll interval must be a positive integer"
+            )
         _capacity_observations_by_device(self.observations)
 
 
@@ -103,6 +122,8 @@ class VerifiedCapacityLeaseManager:
     probe_capacity_reservation_state: Callable[
         ["OptimizationTarget"], CapacityLeaseState
     ]
+    monotonic_ns: Callable[[], int] = time.monotonic_ns
+    sleep: Callable[[float], None] = time.sleep
 
     @contextmanager
     def acquire(self, target: OptimizationTarget) -> Iterator[None]:
@@ -146,17 +167,49 @@ class VerifiedCapacityLeaseManager:
             try:
                 yield
             finally:
-                after = self.probe_capacity_reservation_state(target)
-                if after.reservation_digest != expected:
-                    raise ModelCompileError(
-                        f"target {target.target_id!r} did not restore its "
-                        "declared device-capacity reservation"
-                    )
-                _require_capacity_released(before, after, target.target_id)
+                _wait_for_capacity_release(
+                    before=before,
+                    expected_reservation_digest=expected,
+                    target=target,
+                    probe=self.probe_capacity_reservation_state,
+                    monotonic_ns=self.monotonic_ns,
+                    sleep=self.sleep,
+                )
         finally:
             for descriptor in reversed(descriptors):
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
+
+
+def _wait_for_capacity_release(
+    *,
+    before: CapacityLeaseState,
+    expected_reservation_digest: str,
+    target: OptimizationTarget,
+    probe: Callable[[OptimizationTarget], CapacityLeaseState],
+    monotonic_ns: Callable[[], int],
+    sleep: Callable[[float], None],
+) -> None:
+    deadline = monotonic_ns() + before.release_settle_timeout_ns
+    last_error: ModelCompileError | None = None
+    while True:
+        try:
+            after = probe(target)
+            if after.reservation_digest != expected_reservation_digest:
+                raise ModelCompileError(
+                    f"target {target.target_id!r} did not restore its "
+                    "declared device-capacity reservation"
+                )
+            _require_capacity_released(before, after, target.target_id)
+            return
+        except ModelCompileError as error:
+            last_error = error
+        now = monotonic_ns()
+        if now >= deadline:
+            assert last_error is not None
+            raise last_error
+        sleep_ns = min(before.release_poll_interval_ns, deadline - now)
+        sleep(sleep_ns / 1_000_000_000)
 
 
 def _require_capacity_released(
@@ -170,6 +223,13 @@ def _require_capacity_released(
     ):
         raise ModelCompileError(
             f"target {target_id!r} changed its device-release tolerance"
+        )
+    if (
+        before.release_settle_timeout_ns != after.release_settle_timeout_ns
+        or before.release_poll_interval_ns != after.release_poll_interval_ns
+    ):
+        raise ModelCompileError(
+            f"target {target_id!r} changed its device-release settlement policy"
         )
     before_by_id = _capacity_observations_by_device(before.observations)
     after_by_id = _capacity_observations_by_device(after.observations)
