@@ -4,6 +4,7 @@ struct VulkanResidentComponentBatchKernelArtifact {
     execution_domain: VulkanResidentComponentKernelExecutionDomain,
     batch_mode: VulkanResidentComponentKernelBatchMode,
     lane_tile_width: usize,
+    selection_priority: u32,
     independent_candidate_compatible: bool,
     causal_sequence_compatible: bool,
     parallel_block_compatible: bool,

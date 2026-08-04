@@ -704,6 +704,9 @@ def valid_batch_implementation(implementation: Any) -> bool:
         and isinstance(implementation.get("lane_tile_width"), int)
         and not isinstance(implementation.get("lane_tile_width"), bool)
         and implementation["lane_tile_width"] > 0
+        and isinstance(implementation.get("selection_priority"), int)
+        and not isinstance(implementation.get("selection_priority"), bool)
+        and implementation["selection_priority"] >= 0
         and isinstance(implementation.get("independent_candidate_compatible"), bool)
         and isinstance(implementation.get("causal_sequence_compatible"), bool)
         and isinstance(implementation.get("parallel_block_compatible"), bool)

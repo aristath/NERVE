@@ -1239,7 +1239,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 output_size,
             )
             <= 0
-            or batch_tile_width != 4 * matrix_n
+            or batch_tile_width not in {matrix_n, 4 * matrix_n}
             or block_columns % matrix_k
             or input_size % block_columns
             or output_size % (2 * matrix_m)
@@ -1272,6 +1272,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "MATRIX_M": str(matrix_m),
                 "MATRIX_N": str(matrix_n),
                 "MATRIX_K": str(matrix_k),
+                "BATCH_TILE_MULTIPLIER": str(batch_tile_width // matrix_n),
                 "BLOCK_ROWS": str(block_rows),
                 "BLOCK_COLUMNS": str(block_columns),
                 "INPUT_SIZE": str(input_size),

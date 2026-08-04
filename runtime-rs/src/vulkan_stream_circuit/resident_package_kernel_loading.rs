@@ -205,6 +205,7 @@ fn load_resident_component_batch_kernels(
                     execution_domain: implementation.execution_domain,
                     batch_mode: kernel.batch_mode,
                     lane_tile_width: implementation.lane_tile_width as usize,
+                    selection_priority: implementation.selection_priority,
                     independent_candidate_compatible: implementation
                         .independent_candidate_compatible,
                     causal_sequence_compatible: implementation.causal_sequence_compatible,

@@ -371,6 +371,7 @@ def _provider_problem(
                                     {
                                         "execution_domain": "prefill",
                                         "lane_tile_width": 64,
+                                        "selection_priority": 0,
                                         "independent_candidate_compatible": False,
                                         "causal_sequence_compatible": True,
                                         "device_requirements": {

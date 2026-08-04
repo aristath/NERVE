@@ -32,6 +32,8 @@ include!("vulkan_compute/gpu_residency_gate_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/mxfp4_tests.rs");
 #[cfg(test)]
+include!("vulkan_compute/cooperative_fp8_crossover_tests.rs");
+#[cfg(test)]
 include!("vulkan_compute/hyper_connection_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/spirv_interface_tests.rs");

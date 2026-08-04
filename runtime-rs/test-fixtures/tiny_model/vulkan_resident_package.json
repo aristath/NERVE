@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v9",
+  "schema": "nerve.vulkan_resident_model_package.v10",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
@@ -1892,6 +1892,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 1,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -1922,6 +1923,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 2,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -1950,6 +1952,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 4,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -1978,6 +1981,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 8,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2006,6 +2010,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 16,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2055,6 +2060,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2098,6 +2104,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 2,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2126,6 +2133,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 4,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2154,6 +2162,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 8,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2182,6 +2191,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 16,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2229,6 +2239,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2273,6 +2284,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2318,6 +2330,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2367,6 +2380,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2425,6 +2439,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2468,6 +2483,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 2,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2496,6 +2512,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 4,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2524,6 +2541,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 8,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2552,6 +2570,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 16,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2599,6 +2618,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 1,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2629,6 +2649,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 2,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2657,6 +2678,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 4,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2685,6 +2707,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 8,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2713,6 +2736,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 16,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2764,6 +2788,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2808,6 +2833,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 2,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2836,6 +2862,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 4,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2864,6 +2891,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 8,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2892,6 +2920,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 16,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -2941,6 +2970,7 @@
             {
               "execution_domain": "prefill",
               "lane_tile_width": 64,
+              "selection_priority": 0,
               "independent_candidate_compatible": false,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": false,
@@ -2984,6 +3014,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 2,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -3012,6 +3043,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 4,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -3040,6 +3072,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 8,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,
@@ -3068,6 +3101,7 @@
             {
               "execution_domain": "decode_and_prefill",
               "lane_tile_width": 16,
+              "selection_priority": 0,
               "independent_candidate_compatible": true,
               "causal_sequence_compatible": true,
               "parallel_block_compatible": true,

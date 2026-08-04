@@ -191,12 +191,17 @@ fn select_component_batch_kernel_artifact_where<'a>(
                 && compatible(artifact)
         })
         .min_by_key(|artifact| {
+            let priority = usize::MAX - artifact.selection_priority as usize;
             if artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan {
-                (0usize, usize::MAX - artifact.lane_tile_width)
+                (0usize, priority, usize::MAX - artifact.lane_tile_width)
             } else if artifact.lane_tile_width >= lane_capacity {
-                (0usize, artifact.lane_tile_width)
+                (1usize, priority, artifact.lane_tile_width)
             } else {
-                (1usize, usize::MAX - artifact.lane_tile_width)
+                (
+                    2usize,
+                    usize::MAX - artifact.lane_tile_width,
+                    priority,
+                )
             }
         })
 }

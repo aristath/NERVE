@@ -408,6 +408,27 @@ def test_fused_linear_residual_preserves_e8m0_and_bf16_boundary(
     compile_shader_artifacts(tmp_path)
 
 
+def test_compact_cooperative_fp8_shader_renders_one_matrix_batch_tile(
+    tmp_path: Path,
+) -> None:
+    scalar = "linear_prequant_fp8_e4m3_b128x128_1024x32768.comp"
+    compact = compact_cooperative_float8_e4m3_batch_shader_file(
+        scalar,
+        shape=(16, 16, 16),
+    )
+    assert compact == (
+        "linear_prequant_batch16_cooperative_fp8_e4m3_"
+        "m16n16k16_b128x128_1024x32768.comp"
+    )
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {compact})
+    shader = (tmp_path / compact).read_text()
+    assert "const uint BATCH_TILE = 1u * MATRIX_N;" in shader
+    assert "const uint BATCH_SUBTILES = BATCH_TILE / MATRIX_N;" in shader
+    compile_shader_artifacts(tmp_path)
+
+
 def test_linear_shader_selector_preserves_native_e8m0_block_scales(
     tmp_path: Path,
 ) -> None:

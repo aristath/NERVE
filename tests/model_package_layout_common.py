@@ -19,6 +19,7 @@ from nerve.model_package import (
     cooperative_bfloat16_workgroup_count_x,
     cooperative_float8_e4m3_batch_shader_file,
     cooperative_float8_e4m3_workgroup_count_x,
+    compact_cooperative_float8_e4m3_batch_shader_file,
     copy_shader_templates,
     frame_parallel_batch_shader_file,
     fp8_moe_block_shape_for_stage,

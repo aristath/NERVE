@@ -532,6 +532,7 @@ def cooperative_float8_e4m3_batch_shader_file(
     shader_file: str,
     *,
     shape: tuple[int, int, int],
+    batch_tile_multiplier: int = 4,
 ) -> str | None:
     linear = re.fullmatch(
         r"(linear|linear_residual)_prequant_fp8_e4m3(_se8m0)?_"
@@ -541,7 +542,11 @@ def cooperative_float8_e4m3_batch_shader_file(
     m, n, k = shape
     if min(shape) <= 0:
         return None
-    batch_tile_width = 4 * n
+    if batch_tile_multiplier not in {1, 4}:
+        raise ModelCompileError(
+            "cooperative FP8 batch tile multiplier must be 1 or 4"
+        )
+    batch_tile_width = batch_tile_multiplier * n
     if linear is not None:
         (
             operation,
@@ -625,6 +630,41 @@ def cooperative_float8_e4m3_batch_shader_file(
         )
 
     return None
+
+
+COMPACT_COOPERATIVE_FP8_MIN_WORKGROUP_COUNT_X = 256
+
+
+def compact_cooperative_float8_e4m3_batch_shader_file(
+    shader_file: str,
+    *,
+    shape: tuple[int, int, int],
+) -> str | None:
+    """Return the exact small-batch matrix path only at proven occupancy.
+
+    A compact matrix tile reuses each staged weight across an entire verifier
+    block, but its fixed cooperative-matrix setup loses to the vector kernel
+    when the output grid cannot occupy the device.  The conservative grid
+    floor is deliberately expressed in physical workgroups rather than model
+    names or layer roles; both sides of the crossover are hardware-tested.
+    """
+
+    if re.fullmatch(
+        r"(?:linear|linear_residual)_prequant_fp8_e4m3(?:_se8m0)?_"
+        r"b\d+x\d+_\d+x\d+\.comp",
+        shader_file,
+    ) is None:
+        return None
+    if (
+        cooperative_float8_e4m3_workgroup_count_x(shader_file, shape=shape)
+        < COMPACT_COOPERATIVE_FP8_MIN_WORKGROUP_COUNT_X
+    ):
+        return None
+    return cooperative_float8_e4m3_batch_shader_file(
+        shader_file,
+        shape=shape,
+        batch_tile_multiplier=1,
+    )
 
 
 def cooperative_float8_e4m3_workgroup_count_x(
@@ -1309,6 +1349,7 @@ def mixed_parallel_projection_batch_implementations(
             {
                 "execution_domain": "prefill",
                 "lane_tile_width": 4 * shape[1],
+                "selection_priority": 0,
                 "independent_candidate_compatible": False,
                 "causal_sequence_compatible": True,
                 "parallel_block_compatible": False,
@@ -1367,6 +1408,7 @@ def mixed_parallel_projection_batch_implementations(
             {
                 "execution_domain": "decode_and_prefill",
                 "lane_tile_width": tile_width,
+                "selection_priority": 0,
                 "independent_candidate_compatible": True,
                 "causal_sequence_compatible": True,
                 "parallel_block_compatible": True,

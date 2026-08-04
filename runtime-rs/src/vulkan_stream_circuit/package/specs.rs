@@ -138,6 +138,7 @@ pub struct VulkanResidentComponentKernelSpec {
 pub struct VulkanResidentComponentBatchImplementationSpec {
     pub execution_domain: VulkanResidentComponentKernelExecutionDomain,
     pub lane_tile_width: u32,
+    pub selection_priority: u32,
     pub independent_candidate_compatible: bool,
     pub causal_sequence_compatible: bool,
     #[serde(default)]

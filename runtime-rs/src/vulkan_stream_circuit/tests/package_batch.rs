@@ -797,6 +797,7 @@ fn component_batches_select_only_mode_compatible_kernels() {
             execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
             batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
             lane_tile_width,
+            selection_priority: 0,
             independent_candidate_compatible,
             causal_sequence_compatible,
             parallel_block_compatible: false,
@@ -860,6 +861,7 @@ fn component_batches_select_only_mode_compatible_kernels() {
         execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
         batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
         lane_tile_width: 64,
+        selection_priority: 0,
         independent_candidate_compatible: false,
         causal_sequence_compatible: false,
         parallel_block_compatible: true,
@@ -901,6 +903,99 @@ fn component_batches_select_only_mode_compatible_kernels() {
 }
 
 #[test]
+fn component_batches_honor_package_owned_selection_priority() {
+    let artifact =
+        |lane_tile_width, selection_priority| VulkanResidentComponentBatchKernelArtifact {
+            component_id: "processor".to_string(),
+            node_id: "project".to_string(),
+            execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
+            batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+            lane_tile_width,
+            selection_priority,
+            independent_candidate_compatible: true,
+            causal_sequence_compatible: true,
+            parallel_block_compatible: true,
+            device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+            stages: Vec::new(),
+        };
+    let artifacts = vec![artifact(8, 0), artifact(16, 1)];
+
+    let selected = select_component_batch_kernel_artifact(
+        &artifacts,
+        "processor",
+        "project",
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        6,
+    )
+    .unwrap();
+
+    assert_eq!(selected.lane_tile_width, 16);
+    assert_eq!(selected.selection_priority, 1);
+}
+
+#[test]
+fn component_batches_never_trade_lane_coverage_for_selection_priority() {
+    let artifact =
+        |lane_tile_width, selection_priority| VulkanResidentComponentBatchKernelArtifact {
+            component_id: "processor".to_string(),
+            node_id: "project".to_string(),
+            execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
+            batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+            lane_tile_width,
+            selection_priority,
+            independent_candidate_compatible: true,
+            causal_sequence_compatible: true,
+            parallel_block_compatible: true,
+            device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+            stages: Vec::new(),
+        };
+    let artifacts = vec![artifact(16, 1), artifact(64, 0)];
+
+    let selected = select_component_batch_kernel_artifact(
+        &artifacts,
+        "processor",
+        "project",
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        48,
+    )
+    .unwrap();
+
+    assert_eq!(selected.lane_tile_width, 64);
+    assert_eq!(selected.selection_priority, 0);
+}
+
+#[test]
+fn component_batches_prefer_the_widest_tile_when_every_candidate_is_undersized() {
+    let artifact =
+        |lane_tile_width, selection_priority| VulkanResidentComponentBatchKernelArtifact {
+            component_id: "processor".to_string(),
+            node_id: "project".to_string(),
+            execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
+            batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+            lane_tile_width,
+            selection_priority,
+            independent_candidate_compatible: true,
+            causal_sequence_compatible: true,
+            parallel_block_compatible: true,
+            device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+            stages: Vec::new(),
+        };
+    let artifacts = vec![artifact(16, 1), artifact(32, 0)];
+
+    let selected = select_component_batch_kernel_artifact(
+        &artifacts,
+        "processor",
+        "project",
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        48,
+    )
+    .unwrap();
+
+    assert_eq!(selected.lane_tile_width, 32);
+    assert_eq!(selected.selection_priority, 0);
+}
+
+#[test]
 fn causal_component_batches_use_bounded_power_of_two_capacity_classes() {
     assert_eq!(causal_component_block_lane_capacity(1).unwrap(), 1);
     assert_eq!(causal_component_block_lane_capacity(2).unwrap(), 2);
@@ -925,6 +1020,7 @@ fn component_batches_select_only_artifacts_for_the_requested_execution_domain() 
         execution_domain,
         batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
         lane_tile_width,
+        selection_priority: 0,
         independent_candidate_compatible: true,
         causal_sequence_compatible: true,
         parallel_block_compatible: false,
@@ -977,6 +1073,7 @@ fn component_batches_use_causal_compatibility_for_temporal_prefill_kernels() {
         execution_domain: VulkanResidentComponentKernelExecutionDomain::Prefill,
         batch_mode: VulkanResidentComponentKernelBatchMode::CausalScan,
         lane_tile_width: 64,
+        selection_priority: 0,
         independent_candidate_compatible: false,
         causal_sequence_compatible: true,
         parallel_block_compatible: false,
@@ -1014,6 +1111,7 @@ fn only_selected_snapshot_reader_artifacts_require_temporal_state_capture() {
         execution_domain: VulkanResidentComponentKernelExecutionDomain::Prefill,
         batch_mode: VulkanResidentComponentKernelBatchMode::CausalScan,
         lane_tile_width: 8,
+        selection_priority: 0,
         independent_candidate_compatible: false,
         causal_sequence_compatible: true,
         parallel_block_compatible: false,
@@ -1053,6 +1151,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
             .map(|shader_path| VulkanResidentComponentBatchImplementationSpec {
                 execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
                 lane_tile_width: 16,
+                selection_priority: 0,
                 independent_candidate_compatible: true,
                 causal_sequence_compatible: true,
                 parallel_block_compatible: false,

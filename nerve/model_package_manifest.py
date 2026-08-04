@@ -1176,6 +1176,21 @@ def component_kernel_spec(
         for shape, candidate in cooperative_float8_shader_files
         if candidate is not None
     ]
+    compact_cooperative_float8_shader_files = [
+        (
+            shape,
+            compact_cooperative_float8_e4m3_batch_shader_file(
+                shader_file,
+                shape=shape,
+            ),
+        )
+        for shape in cooperative_float8_e4m3_shapes
+    ]
+    compact_cooperative_float8_shader_files = [
+        (shape, candidate)
+        for shape, candidate in compact_cooperative_float8_shader_files
+        if candidate is not None
+    ]
     frame_parallel_shader_file = direct_frame_parallel_shader_file or (
         frame_parallel_batch_shader_file(scalar_batch_shader_file)
         if scalar_batch_shader_file is not None
@@ -1212,6 +1227,7 @@ def component_kernel_spec(
             {
                 "execution_domain": "decode_and_prefill",
                 "lane_tile_width": 64,
+                "selection_priority": 0,
                 "independent_candidate_compatible": False,
                 "causal_sequence_compatible": False,
                 "parallel_block_compatible": True,
@@ -1228,6 +1244,7 @@ def component_kernel_spec(
             {
                 "execution_domain": "prefill",
                 "lane_tile_width": CAUSAL_SCAN_LANE_TILE_WIDTH,
+                "selection_priority": 0,
                 "independent_candidate_compatible": False,
                 "causal_sequence_compatible": True,
                 "parallel_block_compatible": False,
@@ -1240,11 +1257,40 @@ def component_kernel_spec(
             }
         )
     elif scalar_batch_shader_file is not None or frame_parallel_shader_file is not None:
+        for shape, cooperative_shader_file in compact_cooperative_float8_shader_files:
+            spec["batch_implementations"].append(
+                {
+                    "execution_domain": "decode_and_prefill",
+                    "lane_tile_width": shape[1],
+                    "selection_priority": 1,
+                    "independent_candidate_compatible": True,
+                    "causal_sequence_compatible": True,
+                    "parallel_block_compatible": True,
+                    "device_requirements": {
+                        "vulkan_device_extensions": [],
+                        "vulkan_features": [],
+                        "subgroup_operations": [],
+                        "cooperative_float8_e4m3_shape": list(shape),
+                        "subgroup_size": 64,
+                    },
+                    "stages": [
+                        persistent_batch_control_stage(
+                            cooperative_shader_file,
+                            256,
+                            cooperative_float8_e4m3_workgroup_count_x(
+                                shader_file,
+                                shape=shape,
+                            ),
+                        )
+                    ],
+                }
+            )
         for shape, cooperative_shader_file in cooperative_float8_shader_files:
             spec["batch_implementations"].append(
                 {
                     "execution_domain": "prefill",
                     "lane_tile_width": 4 * shape[1],
+                    "selection_priority": 0,
                     "independent_candidate_compatible": False,
                     "causal_sequence_compatible": True,
                     "parallel_block_compatible": False,
@@ -1275,6 +1321,7 @@ def component_kernel_spec(
                 {
                     "execution_domain": "prefill",
                     "lane_tile_width": COOPERATIVE_BATCH_LANE_TILE_WIDTH,
+                    "selection_priority": 0,
                     "independent_candidate_compatible": False,
                     "causal_sequence_compatible": True,
                     "parallel_block_compatible": False,
@@ -1338,6 +1385,7 @@ def component_kernel_spec(
                 {
                     "execution_domain": "decode_and_prefill",
                     "lane_tile_width": 1,
+                    "selection_priority": 0,
                     "independent_candidate_compatible": True,
                     "causal_sequence_compatible": True,
                     "parallel_block_compatible": True,
@@ -1364,6 +1412,7 @@ def component_kernel_spec(
                 {
                     "execution_domain": "decode_and_prefill",
                     "lane_tile_width": tile_width,
+                    "selection_priority": 0,
                     "independent_candidate_compatible": True,
                     "causal_sequence_compatible": True,
                     "parallel_block_compatible": True,

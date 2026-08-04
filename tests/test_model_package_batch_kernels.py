@@ -307,6 +307,21 @@ def test_compiler_selects_only_compatible_weight_shared_batch_kernels() -> None:
         )
         == 80
     )
+    assert (
+        compact_cooperative_float8_e4m3_batch_shader_file(
+            "linear_prequant_fp8_e4m3_b128x128_1024x32768.comp",
+            shape=(16, 16, 16),
+        )
+        == "linear_prequant_batch16_cooperative_fp8_e4m3_"
+        "m16n16k16_b128x128_1024x32768.comp"
+    )
+    assert (
+        compact_cooperative_float8_e4m3_batch_shader_file(
+            "linear_prequant_fp8_e4m3_b128x128_4096x2048.comp",
+            shape=(16, 16, 16),
+        )
+        is None
+    )
     parallel_fp8_cooperative = cooperative_float8_e4m3_batch_shader_file(
         "parallel_linear_3way_prequant_fp8_e4m3_b128x128_5120x6144_1024_1024.comp",
         shape=(16, 16, 16),
@@ -1022,6 +1037,7 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
     assert cooperative == {
         "execution_domain": "prefill",
         "lane_tile_width": 64,
+        "selection_priority": 0,
         "independent_candidate_compatible": False,
         "causal_sequence_compatible": True,
         "parallel_block_compatible": False,
@@ -1059,6 +1075,7 @@ def test_projection_component_compiles_ordered_target_native_and_scalar_implemen
         assert implementation == {
             "execution_domain": "decode_and_prefill",
             "lane_tile_width": tile_width,
+            "selection_priority": 0,
             "independent_candidate_compatible": True,
             "causal_sequence_compatible": True,
             "parallel_block_compatible": True,
@@ -1120,6 +1137,7 @@ def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
     assert cooperative == {
         "execution_domain": "prefill",
         "lane_tile_width": 64,
+        "selection_priority": 0,
         "independent_candidate_compatible": False,
         "causal_sequence_compatible": True,
         "parallel_block_compatible": False,
@@ -1147,6 +1165,52 @@ def test_compiler_selects_device_typed_cooperative_fp8_prefill() -> None:
             }
         ],
     }
+
+
+def test_compiler_prefers_compact_cooperative_fp8_only_for_occupied_decode_grid() -> None:
+    spec = component_kernel_spec(
+        execution_index=0,
+        node={"id": "project", "op": "linear"},
+        circuit={},
+        shader_file="linear_prequant_fp8_e4m3_b128x128_1024x32768.comp",
+        local_size_x=1024,
+        workgroup_count_x=2048,
+        cooperative_float8_e4m3_shapes=((16, 16, 16),),
+    )
+
+    compact, wide, *exact = spec["batch_implementations"]
+    assert compact["execution_domain"] == "decode_and_prefill"
+    assert compact["lane_tile_width"] == 16
+    assert compact["selection_priority"] == 1
+    assert compact["independent_candidate_compatible"] is True
+    assert compact["causal_sequence_compatible"] is True
+    assert compact["parallel_block_compatible"] is True
+    assert compact["stages"] == [
+        {
+            "shader_path": (
+                "shaders/linear_prequant_batch16_cooperative_fp8_e4m3_"
+                "m16n16k16_b128x128_1024x32768__pbc31.comp"
+            ),
+            "local_size_x": 256,
+            "workgroup_count_x": 512,
+            "control": {
+                "kind": "storage_buffer",
+                "byte_count": 4,
+                "binding": 31,
+                "payload": "width",
+            },
+        }
+    ]
+    assert wide["execution_domain"] == "prefill"
+    assert wide["lane_tile_width"] == 64
+    assert wide["selection_priority"] == 0
+    assert [implementation["lane_tile_width"] for implementation in exact] == [
+        2,
+        4,
+        8,
+        16,
+    ]
+    assert all(implementation["selection_priority"] == 0 for implementation in exact)
 
 
 def test_mixed_parallel_projection_uses_fused_decode_and_split_prefill() -> None:

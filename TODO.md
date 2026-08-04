@@ -30,10 +30,12 @@ toward 50 tok/s without regressing supported Qwen models.
 3. Raise DeepSeek's accepted decode rate past 30 tok/s and continue until no
    material bottleneck remains. The current complete thinking-enabled gate uses
    128K context, a 65,536-token output allowance, DSpark-7, contiguous placement
-   across all five AMD GPUs, and one full conversation-set warmup. It passes
-   behavior and teardown at 3.987 decode tok/s and 8.288 prefill tok/s. A prior
-   equivalent run reached 4.242 decode tok/s; DSpark acceptance changed from
-   25.64% to 20.87%, confirming that accepted-token throughput and target
+   across all five AMD GPUs, and one full conversation-set warmup followed by
+   an in-process state reset. It passes behavior and teardown at 5.462 decode
+   tok/s and 8.662 prefill tok/s. A same-package vector-kernel control reached
+   5.375 decode tok/s and 8.556 prefill tok/s, so compact cooperative FP8 query
+   projections provide a real but small 1.62% decode and 1.24% prefill gain
+   (3.96% on the long Corinth turn). Accepted-token throughput and target
    verification remain the dominant variables rather than host drafting.
 
    Compile the complete speculative cycle as a device-resident transaction:
@@ -55,11 +57,13 @@ toward 50 tok/s without regressing supported Qwen models.
 
 4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
    quality/performance gates sequentially on equivalent healthy AMD placement.
-   The latest thinking-enabled gates passed with correct Greece recall and exact
-   reservation release: Qwen3.6-35B-A3B reached 101.98 decode tok/s and 152.21
-   prefill tok/s; Qwen3.5-9B reached 50.47 decode tok/s and 167.29 prefill tok/s.
-   Keep repetition, structured-protocol, conversation, and teardown checks
-   active so throughput alone cannot pass.
+   The latest schema-v10 thinking-enabled gates each discarded one complete
+   in-process warmup conversation, reset model state without unloading, passed
+   correct Greece recall, and released their exact recorded reservations:
+   Qwen3.6-35B-A3B reached 100.05 decode tok/s and 173.85 prefill tok/s;
+   Qwen3.5-9B reached 52.99 decode tok/s and 114.40 prefill tok/s. Keep
+   repetition, structured-protocol, conversation, and teardown checks active so
+   throughput alone cannot pass.
 
 5. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime

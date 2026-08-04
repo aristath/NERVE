@@ -693,6 +693,7 @@ def test_package_integrity_rejects_batch_requirements_that_do_not_match_spirv(
         {
             "execution_domain": "decode_and_prefill",
             "lane_tile_width": 4,
+            "selection_priority": 0,
             "independent_candidate_compatible": True,
             "causal_sequence_compatible": True,
             "parallel_block_compatible": True,
