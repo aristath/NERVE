@@ -1379,21 +1379,33 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             "retiering must preserve each logical resource's exact payload"
         );
     }
+    let mut shifted_selection_counts = vec![50, 50];
+    shifted_selection_counts[host_resource_index] = 100;
+    let shifted_telemetry = VulkanSelectionTelemetrySnapshot {
+        domains: vec![VulkanSelectionTelemetryDomainSnapshot {
+            execution_scope: "target".to_string(),
+            component_id: "component".to_string(),
+            node_id: "choose".to_string(),
+            domain_id: "resources".to_string(),
+            resource_count: 2,
+            selection_counts: shifted_selection_counts,
+        }],
+    };
     assert_eq!(
         tiered_store
-            .retier_from_selection_telemetry(&device, &telemetry)
+            .retier_from_selection_telemetry(&device, &shifted_telemetry)
             .unwrap()
             .promoted_group_count,
         0,
-        "a stable hot set must not churn tiers"
+        "one interval favoring the old cold resource must not undo the cumulative working set"
     );
     let retiering_report = tiered_store.residency_report().unwrap();
     assert_eq!(retiering_report.retiering_event_count, 2);
     assert_eq!(retiering_report.retiering_promoted_group_count, 1);
     assert_eq!(retiering_report.retiering_promoted_payload_bytes, 8);
     assert_eq!(retiering_report.retiering_copied_payload_bytes, 16);
-    assert_eq!(retiering_report.retiering_device_selection_count, 100);
-    assert_eq!(retiering_report.retiering_host_visible_selection_count, 1);
+    assert_eq!(retiering_report.retiering_device_selection_count, 1);
+    assert_eq!(retiering_report.retiering_host_visible_selection_count, 149);
     assert!(retiering_report.retiering_time_ns > 0);
     let committed_device_bytes = tiered_store
         .device_arena

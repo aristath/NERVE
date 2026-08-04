@@ -44,7 +44,19 @@ impl VulkanCompiledResourceRetieringCandidate {
             .map(|allocation| allocation.byte_count())
             .collect()
     }
+}
 
+const RETIERING_PAYLOAD_COPIES_PER_EXCHANGE: u64 = 2;
+
+fn observed_accesses_repay_exchange(
+    hot_selection_count: u64,
+    cold_selection_count: u64,
+) -> bool {
+    hot_selection_count
+        .checked_sub(cold_selection_count)
+        .is_some_and(|selection_advantage| {
+            selection_advantage > RETIERING_PAYLOAD_COPIES_PER_EXCHANGE
+        })
 }
 
 impl VulkanCompiledResourceDeviceStore {
@@ -64,11 +76,14 @@ impl VulkanCompiledResourceDeviceStore {
             )));
         }
         let current_counts = self.selection_counts_by_group(telemetry)?;
-        let mut selection_history = self.retiering_selection_counts.lock().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource retiering selection history was poisoned",
-            )
-        })?;
+        let mut selection_history = self
+            .retiering_last_selection_counts
+            .lock()
+            .map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource retiering selection history was poisoned",
+                )
+            })?;
         let interval_counts = current_counts
             .iter()
             .map(|(group_id, current)| {
@@ -138,7 +153,11 @@ impl VulkanCompiledResourceDeviceStore {
                 .map_err(compiled_device_store_vulkan_error)?;
             let candidate = VulkanCompiledResourceRetieringCandidate {
                 group_id: group_id.clone(),
-                selection_count: interval_counts.get(group_id).copied().unwrap_or(0),
+                // Cumulative frequency is the stable working-set signal. Using only the
+                // latest request makes equally shaped experts exchange tiers whenever
+                // their rank changes by one access, even when the migration transfers
+                // more bytes than the avoided host-visible reads.
+                selection_count: current_counts.get(group_id).copied().unwrap_or(0),
                 publications,
                 allocations,
             };
@@ -170,7 +189,15 @@ impl VulkanCompiledResourceDeviceStore {
                     .then_with(|| left.group_id.cmp(&right.group_id))
             });
             for (hot, cold) in host.into_iter().zip(resident) {
-                if hot.selection_count <= cold.selection_count {
+                // Exchanging equal layouts copies the cold payload to the host and the
+                // hot payload to the device. Require the observed selection advantage
+                // to repay both full-payload transfers before changing the stable
+                // working set. This is a byte-traffic break-even rule, not a fixed
+                // migration-count throttle.
+                if !observed_accesses_repay_exchange(
+                    hot.selection_count,
+                    cold.selection_count,
+                ) {
                     break;
                 }
                 exchanges.push((cold, hot));
@@ -217,19 +244,11 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resource retiering copy byte count overflowed",
             )
         })?;
-        let mut final_group_tiers = memory_plan.group_tiers.clone();
-        for exchange in &prepared_exchanges {
-            final_group_tiers.insert(
-                exchange.cold_device.group_id.clone(),
-                VulkanCompiledResourceMemoryTier::HostVisible,
-            );
-            final_group_tiers.insert(
-                exchange.hot_host.group_id.clone(),
-                VulkanCompiledResourceMemoryTier::Device,
-            );
-        }
+        // These counters describe where the completed interval actually executed.
+        // Retiering happens after it, so attributing its accesses to the new tiers would
+        // report a hypothetical future placement rather than measured traffic.
         let (device_selection_count, host_visible_selection_count) =
-            compiled_resource_selection_counts_by_tier(&interval_counts, &final_group_tiers)?;
+            compiled_resource_selection_counts_by_tier(&interval_counts, &memory_plan.group_tiers)?;
         let mut report = VulkanCompiledResourceRetieringReport {
             considered_group_count,
             promoted_group_count: prepared_exchanges.len(),
@@ -770,4 +789,18 @@ fn commit_compiled_resource_allocation_cohort_exchange(
     state
         .group_chunks
         .insert(host_group_id, device_cohorts);
+}
+
+#[cfg(test)]
+mod retiering_policy_tests {
+    use super::observed_accesses_repay_exchange;
+
+    #[test]
+    fn exchange_requires_more_avoided_payload_reads_than_payload_copies() {
+        assert!(!observed_accesses_repay_exchange(10, 10));
+        assert!(!observed_accesses_repay_exchange(11, 10));
+        assert!(!observed_accesses_repay_exchange(12, 10));
+        assert!(observed_accesses_repay_exchange(13, 10));
+        assert!(!observed_accesses_repay_exchange(10, 13));
+    }
 }

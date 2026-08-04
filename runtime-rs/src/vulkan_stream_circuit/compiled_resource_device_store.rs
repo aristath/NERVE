@@ -446,7 +446,7 @@ pub struct VulkanCompiledResourceDeviceStore {
     maximum_load_wave_group_count: usize,
     group_selector_ids: BTreeMap<String, String>,
     selector_payload_budgets: BTreeMap<String, usize>,
-    retiering_selection_counts: std::sync::Mutex<BTreeMap<String, u64>>,
+    retiering_last_selection_counts: std::sync::Mutex<BTreeMap<String, u64>>,
     coverage_index: Vec<VulkanCompiledResourceComponentCoverageIndex>,
     instrumentation: VulkanCompiledResourceStoreInstrumentation,
     lifecycle: std::sync::Mutex<VulkanCompiledResourceStoreLifecycle>,
@@ -790,7 +790,7 @@ impl VulkanCompiledResourceDeviceStore {
             maximum_load_wave_group_count,
             group_selector_ids: selector_cache_policy.group_selector_ids,
             selector_payload_budgets: selector_cache_policy.selector_payload_budgets,
-            retiering_selection_counts: std::sync::Mutex::new(BTreeMap::new()),
+            retiering_last_selection_counts: std::sync::Mutex::new(BTreeMap::new()),
             coverage_index,
             instrumentation: VulkanCompiledResourceStoreInstrumentation::default(),
             lifecycle: std::sync::Mutex::new(VulkanCompiledResourceStoreLifecycle {

@@ -64,14 +64,24 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    eviction, uses exact physical allocation requirements, and treats stable slot
    layouts as versionable physical storage. Adaptive retiering atomically moves
    payload, address publication, residency ownership, allocation cohort, and tier
-   assignment. The complete thinking-enabled two-set DeepSeek gate remained
-   coherent, preserved turn recall, and released all five GPU reservations. The
-   truth set averaged 4.111 decode tok/s and 7.301 prefill tok/s, incurred 283
-   additional misses across 1.42 million expert selections, and ended with
-   128.06 GB of device payload plus 18.14 GB of host-visible payload. Retiering
-   performed 2,894 promotions and copied about 77.9 GB during the truth set,
-   consuming about 30.6 seconds; target verification and overly broad tier churn
-   are therefore the next measured costs to eliminate.
+   assignment. The original complete thinking-enabled two-set DeepSeek gate
+   remained coherent, preserved turn recall, and released all five GPU
+   reservations while averaging 4.111 decode tok/s and 7.301 prefill tok/s.
+   Adaptive tiering now uses cumulative LFU working-set evidence and requires
+   the observed access advantage to repay both full-payload copies before an
+   equal-layout exchange. Runtime counters describe the tier where the completed
+   interval actually executed rather than retroactively attributing it to the
+   next interval's placement. The complete replacement gate passed unchanged
+   behavioral checks and exact teardown. User-visible aggregate throughput rose
+   from 3.186 to 3.641 tok/s (14.3%), decode rose to 4.419 tok/s, and prefill rose
+   to 8.364 tok/s. Across the five measured requests, promotions fell from 2,520
+   to 140, copied bytes from about 67.4 GB to 3.74 GB, and tier-exchange time
+   from about 26.6 seconds to 1.60 seconds. The truth set made 218 load-required
+   misses across 1.39 million expert selections and ended with 129.05 GB of
+   device payload plus 18.42 GB of host-visible payload. This removes broad tier
+   churn as a material bottleneck. Target verification still consumed 318.36
+   seconds across 691 speculative cycles, versus 14.28 seconds drafting and
+   0.58 seconds of draft catch-up, and is now the dominant measured cost.
 
    Compile and submit the complete speculative cycle as a device-resident
    transaction: generate the full demand-resident draft window without a host
@@ -100,7 +110,10 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    passed every turn, and released their NERVE GPU reservations exactly. The
    post-retiering regression gates also passed: Qwen3.6-35B-A3B averaged 101.81
    decode tok/s and 158.59 prefill tok/s, while Qwen3.5-9B averaged 50.91 decode
-   tok/s and 174.03 prefill tok/s. Run both gates again before every
+   tok/s and 174.03 prefill tok/s. After the cost-aware LFU milestone,
+   Qwen3.6-35B-A3B passed at 104.06 decode tok/s and 163.91 prefill tok/s, while
+   Qwen3.5-9B passed at 50.78 decode tok/s and 175.26 prefill tok/s. Run both
+   gates again before every
    runtime-performance commit.
    Keep the live gate's repetition and conversation checks active so throughput
    alone cannot pass. Do not use faulted AMD devices merely to satisfy this
