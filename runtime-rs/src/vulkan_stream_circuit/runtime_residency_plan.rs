@@ -341,9 +341,13 @@ fn plan_stream_circuit_residency(
         0usize,
         |total, bank| {
             bank.slots.iter().try_fold(total, |total, slot| {
+                let label = format!(
+                    "activation slot {}.slot_{} for signals {:?}",
+                    bank.component_id, slot.slot, slot.signal_ids
+                );
                 checked_residency_add(
                     total,
-                    required_optional_bytes(slot.bytes, "activation slot")?,
+                    required_optional_bytes(slot.bytes, &label)?,
                     "activation slot bytes",
                 )
             })
