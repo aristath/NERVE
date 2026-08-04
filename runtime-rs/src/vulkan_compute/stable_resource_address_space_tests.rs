@@ -120,7 +120,7 @@ fn stable_resource_arena_preflights_exact_physical_chunk_capacity() {
             .pending_reservation_bytes,
         planned_bytes as u64,
     );
-    let groups = arena
+    let first_groups = arena
         .allocate_groups_with_capacity_permit(
             &device,
             &requests,
@@ -135,18 +135,38 @@ fn stable_resource_arena_preflights_exact_physical_chunk_capacity() {
             .pending_reservation_bytes,
         0,
     );
-    let chunk_id = groups[0][0].chunk_id();
+    let chunk_id = first_groups[0][0].chunk_id();
     assert_eq!(
         arena.committed_byte_capacity_for_chunk(chunk_id).unwrap(),
         1024,
     );
-    assert!(arena
+    let replacement_bytes = arena
         .additional_committed_byte_capacity_for_groups(&device, &requests, 256)
-        .unwrap_err()
-        .0
-        .contains("duplicated or invalid"));
+        .unwrap();
+    assert_eq!(replacement_bytes, 1024);
+    let replacement_permit = device
+        .reserve_device_local_memory_capacity(replacement_bytes)
+        .unwrap();
+    let replacement_groups = arena
+        .allocate_groups_with_capacity_permit(
+            &device,
+            &requests,
+            256,
+            replacement_permit,
+        )
+        .unwrap();
+    assert_ne!(
+        replacement_groups[0][0].allocation_id(),
+        first_groups[0][0].allocation_id(),
+        "a stable slot layout may have multiple physical generations"
+    );
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 6);
+    assert_eq!(arena.stats().unwrap().committed_byte_capacity, 2048);
 
-    drop(groups);
+    drop(first_groups);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 3);
+    assert_eq!(arena.stats().unwrap().committed_byte_capacity, 1024);
+    drop(replacement_groups);
     arena.release_backing().unwrap();
 }
 

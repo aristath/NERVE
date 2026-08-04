@@ -59,16 +59,19 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    Produced-port fan-out now aliases every local and remote consumer to one
    physical source, and `parallel_backbone_markov` prompt/verification catch-up
    consumes retained target frames through one compiled causal state-ingestion
-   graph instead of replaying scalar adapter/state work per token. The complete
-   thinking-enabled two-set gate remained coherent and released all five GPU
-   reservations exactly. Truth decode improved from 3.908 to 4.048 tok/s while
-   prefill remained effectively flat at 7.130 versus 7.175 tok/s. Across the five
-   truth turns, state catch-up fell from 2.90 to 1.00 ms per speculative cycle
-   and weighted acceptance rose from 25.91% to 27.82%. Target verification still
-   consumed 467.1 seconds across 892 cycles, about 524 ms per cycle, and therefore
-   remains the dominant cost. The truth set incurred 212 additional residency
-   misses, selected zero optimized representations, and ended with 138.04 GB of
-   device payload plus 10.21 GB of host-visible payload.
+   graph instead of replaying scalar adapter/state work per token. Dynamic tier
+   admission now reserves the entire incoming load wave before
+   eviction, uses exact physical allocation requirements, and treats stable slot
+   layouts as versionable physical storage. Adaptive retiering atomically moves
+   payload, address publication, residency ownership, allocation cohort, and tier
+   assignment. The complete thinking-enabled two-set DeepSeek gate remained
+   coherent, preserved turn recall, and released all five GPU reservations. The
+   truth set averaged 4.111 decode tok/s and 7.301 prefill tok/s, incurred 283
+   additional misses across 1.42 million expert selections, and ended with
+   128.06 GB of device payload plus 18.14 GB of host-visible payload. Retiering
+   performed 2,894 promotions and copied about 77.9 GB during the truth set,
+   consuming about 30.6 seconds; target verification and overly broad tier churn
+   are therefore the next measured costs to eliminate.
 
    Compile and submit the complete speculative cycle as a device-resident
    transaction: generate the full demand-resident draft window without a host
@@ -86,13 +89,6 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    host-visible spill by default; do not optimize synthetic scores at the expense
    of behavior.
 
-   Before another whole-model optimizer run, reduce kernel migration pressure
-   by suballocating permanent immutable parameters from bounded device-local
-   arenas instead of allocating one Vulkan memory object per tensor. Prove
-   range binding and shared-arena lifetime with exact sequential tests before a
-   deliberately short AMD workload, then retry full validation only after
-   pre/post VRAM and kernel-log checks pass.
-
 4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and
    Qwen3.5-9B quality/performance gates sequentially on equivalent healthy AMD
    placement. The latest current-schema packages pass the full sampled,
@@ -101,8 +97,11 @@ speculative-decoding stretch target. Preserve supported Qwen models throughout.
    tok/s and 210.53 prefill tok/s versus 109.29 and 211.66 before, while
    Qwen3.5-9B averaged 59.97 decode tok/s and 183.45 prefill tok/s versus 59.58
    and 180.20 before. Both produced byte-identical responses to their baselines,
-   passed every turn, and released their NERVE GPU reservations exactly. Run
-   both gates again before every runtime-performance commit.
+   passed every turn, and released their NERVE GPU reservations exactly. The
+   post-retiering regression gates also passed: Qwen3.6-35B-A3B averaged 101.81
+   decode tok/s and 158.59 prefill tok/s, while Qwen3.5-9B averaged 50.91 decode
+   tok/s and 174.03 prefill tok/s. Run both gates again before every
+   runtime-performance commit.
    Keep the live gate's repetition and conversation checks active so throughput
    alone cannot pass. Do not use faulted AMD devices merely to satisfy this
    gate; defer a model when no verified-healthy placement exists.

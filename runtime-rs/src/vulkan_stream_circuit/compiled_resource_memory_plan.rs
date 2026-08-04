@@ -117,6 +117,18 @@ impl VulkanCompiledResourceMemoryPlan {
         &mut self,
         groups: &[(String, usize)],
     ) -> Result<VulkanCompiledResourceTierAdmission, VulkanCompiledResourceDeviceStoreError> {
+        let device_preferences = groups
+            .iter()
+            .map(|(group_id, _)| group_id.clone())
+            .collect();
+        self.admit_groups_with_device_preferences(groups, &device_preferences)
+    }
+
+    fn admit_groups_with_device_preferences(
+        &mut self,
+        groups: &[(String, usize)],
+        device_preferences: &BTreeSet<String>,
+    ) -> Result<VulkanCompiledResourceTierAdmission, VulkanCompiledResourceDeviceStoreError> {
         if groups.is_empty()
             || groups
                 .iter()
@@ -124,9 +136,12 @@ impl VulkanCompiledResourceMemoryPlan {
                 .collect::<BTreeSet<_>>()
                 .len()
                 != groups.len()
+            || !device_preferences
+                .iter()
+                .all(|group_id| groups.iter().any(|(candidate, _)| candidate == group_id))
         {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
-                "tiered compiled-resource admission is empty or repeats a group",
+                "tiered compiled-resource admission is empty, repeats a group, or has an unknown device preference",
             ));
         }
         let mut device_payload_bytes = self.device_payload_bytes;
@@ -158,25 +173,29 @@ impl VulkanCompiledResourceMemoryPlan {
                     "tiered device admission byte count overflowed",
                 )
             })?;
-            let tier = if device_end <= self.device_payload_capacity {
+            let host_end = host_visible_payload_bytes
+                .checked_add(*byte_count)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "tiered host-visible admission byte count overflowed",
+                    )
+                })?;
+            let tier = if device_preferences.contains(group_id)
+                && device_end <= self.device_payload_capacity
+            {
+                device_payload_bytes = device_end;
+                VulkanCompiledResourceMemoryTier::Device
+            } else if host_end <= self.host_visible_payload_capacity {
+                host_visible_payload_bytes = host_end;
+                VulkanCompiledResourceMemoryTier::HostVisible
+            } else if device_end <= self.device_payload_capacity {
                 device_payload_bytes = device_end;
                 VulkanCompiledResourceMemoryTier::Device
             } else {
-                let host_end = host_visible_payload_bytes
-                    .checked_add(*byte_count)
-                    .ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "tiered host-visible admission byte count overflowed",
-                        )
-                    })?;
-                if host_end > self.host_visible_payload_capacity {
-                    return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                        "tiered compiled resources cannot admit group {group_id:?}: device tier uses {device_payload_bytes}/{} bytes and host-visible tier would use {host_end}/{} bytes",
-                        self.device_payload_capacity, self.host_visible_payload_capacity,
-                    )));
-                }
-                host_visible_payload_bytes = host_end;
-                VulkanCompiledResourceMemoryTier::HostVisible
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "tiered compiled resources cannot admit group {group_id:?}: device tier would use {device_end}/{} bytes and host-visible tier would use {host_end}/{} bytes",
+                    self.device_payload_capacity, self.host_visible_payload_capacity,
+                )));
             };
             assignments.push((group_id.clone(), tier, true));
             newly_assigned_group_ids.push(group_id.clone());

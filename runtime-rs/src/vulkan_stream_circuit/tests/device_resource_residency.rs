@@ -621,6 +621,91 @@ fn per_device_residency_explicit_unload_refuses_live_leases_and_leaks_nothing() 
 }
 
 #[test]
+fn per_device_residency_transforms_inactive_group_payload_ownership_atomically() {
+    let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
+        "gpu0", 4096, 512,
+    )
+    .unwrap();
+    let left_descriptor = residency_descriptor('1', '2', 128);
+    let right_descriptor = residency_descriptor('3', '4', 128);
+    let left_drops = SyncArc::new(AtomicUsize::new(0));
+    let right_drops = SyncArc::new(AtomicUsize::new(0));
+    for (descriptor, drops) in [
+        (left_descriptor.clone(), SyncArc::clone(&left_drops)),
+        (right_descriptor.clone(), SyncArc::clone(&right_drops)),
+    ] {
+        let request = manager.request(descriptor.clone(), owner("model")).unwrap();
+        let DeviceResourceResidencyRequest::LoadRequired(permit) = request else {
+            panic!("new group did not own its load")
+        };
+        drop(permit.publish(resident_test_group(descriptor, drops)).unwrap());
+    }
+
+    manager
+        .transform_inactive_resident_groups(
+            &left_descriptor.id,
+            &right_descriptor.id,
+            |left, right| {
+                let rebuild = |logical: &DeviceResidentResourceGroup<TestResidentPayload>,
+                               storage: &DeviceResidentResourceGroup<TestResidentPayload>| {
+                    let descriptor = logical.descriptor().clone();
+                    let resource = descriptor.resources[0].clone();
+                    DeviceResidentResourceGroup::new(
+                        descriptor,
+                        vec![DeviceResidentResource::new(
+                            resource,
+                            TestResidentPayload {
+                                bytes: storage.resources()[0].payload().bytes,
+                                drops: SyncArc::clone(
+                                    &storage.resources()[0].payload().drops,
+                                ),
+                            },
+                        )?],
+                    )
+                };
+                Ok((rebuild(left, right)?, rebuild(right, left)?))
+            },
+        )
+        .unwrap();
+
+    let left_lease = match manager
+        .request(left_descriptor.clone(), owner("left-reader"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Resident(lease) => lease,
+        _ => panic!("transformed left group stopped being resident"),
+    };
+    assert!(SyncArc::ptr_eq(
+        &left_lease.group().resources()[0].payload().drops,
+        &right_drops
+    ));
+    let error = manager
+        .transform_inactive_resident_groups(
+            &left_descriptor.id,
+            &right_descriptor.id,
+            |_, _| unreachable!("active leases must be rejected before transformation"),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::InUse);
+    drop(left_lease);
+
+    let right_lease = match manager
+        .request(right_descriptor, owner("right-reader"))
+        .unwrap()
+    {
+        DeviceResourceResidencyRequest::Resident(lease) => lease,
+        _ => panic!("transformed right group stopped being resident"),
+    };
+    assert!(SyncArc::ptr_eq(
+        &right_lease.group().resources()[0].payload().drops,
+        &left_drops
+    ));
+    drop(right_lease);
+    assert_eq!(manager.statistics().unwrap().dynamic_resident_bytes, 256);
+    assert_eq!(manager.unload_device().unwrap().byte_count, 256);
+}
+
+#[test]
 fn per_device_residency_device_unload_releases_resident_and_loading_groups() {
     let drops = SyncArc::new(AtomicUsize::new(0));
     let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(

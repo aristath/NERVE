@@ -303,6 +303,60 @@ impl VulkanCompiledResourceDeviceStore {
                     }
                 }
             };
+            if let Err(exchange_error) = self.manager.transform_inactive_resident_groups(
+                &cold_device.group_id,
+                &hot_host.group_id,
+                exchange_stable_compiled_resource_group_allocations,
+            ) {
+                let address_rollback = {
+                    let VulkanCompiledResourceDeviceAddressState {
+                        transfer,
+                        address_table,
+                        ..
+                    } = &mut *address_state;
+                    address_table.swap_groups(
+                        transfer,
+                        &hot_publications,
+                        &cold_publications,
+                    )
+                };
+                let payload_rollback = rollback_compiled_resource_payload_exchange(
+                    &mut address_state.transfer,
+                    &cold_device.allocations,
+                    &hot_host.allocations,
+                    &payload_exchange,
+                );
+                match (address_rollback, payload_rollback) {
+                    (Ok((restored_hot, restored_cold)), Ok(())) => {
+                        address_state.publications.insert(
+                            hot_host.group_id.clone(),
+                            restored_hot,
+                        );
+                        address_state.publications.insert(
+                            cold_device.group_id.clone(),
+                            restored_cold,
+                        );
+                        return Err(compiled_device_store_residency_error(
+                            exchange_error,
+                        ));
+                    }
+                    (address_result, payload_result) => {
+                        let terminal = VulkanError(format!(
+                            "compiled resource residency ownership exchange failed: {exchange_error}; address rollback: {}; payload rollback: {}",
+                            address_result
+                                .err()
+                                .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+                            payload_result
+                                .err()
+                                .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+                        ));
+                        self.record_terminal_device_failure(&terminal)?;
+                        return Err(VulkanCompiledResourceDeviceStoreError::new(
+                            terminal.to_string(),
+                        ));
+                    }
+                }
+            }
             address_state
                 .publications
                 .insert(hot_host.group_id.clone(), hot_publications);

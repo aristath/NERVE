@@ -187,6 +187,155 @@ fn dynamic_tiered_release_reuses_the_released_tier_capacity() {
 }
 
 #[test]
+fn dynamic_tiered_admission_rollback_preserves_preexisting_assignments() {
+    let groups = BTreeMap::from([
+        ("preexisting".to_string(), 80usize),
+        ("provisional".to_string(), 40usize),
+    ]);
+    let mut plan = VulkanCompiledResourceMemoryPlan::dynamic_tiered(&groups, 80, 40).unwrap();
+    plan.admit_groups(&[("preexisting".to_string(), 80)])
+        .unwrap();
+
+    let admission = plan
+        .admit_groups(&[
+            ("preexisting".to_string(), 80),
+            ("provisional".to_string(), 40),
+        ])
+        .unwrap();
+    plan.rollback_admission(&admission).unwrap();
+
+    assert_eq!(plan.device_payload_bytes, 80);
+    assert_eq!(plan.host_visible_payload_bytes, 0);
+    assert_eq!(
+        plan.tier_for_group("preexisting").unwrap(),
+        VulkanCompiledResourceMemoryTier::Device
+    );
+    assert!(plan.tier_for_group("provisional").is_err());
+}
+
+#[test]
+fn compiled_resource_wave_device_demand_excludes_host_tier_groups() {
+    let admission = VulkanCompiledResourceWaveAdmission {
+        group_tiers: BTreeMap::from([
+            (
+                "device".to_string(),
+                VulkanCompiledResourceMemoryTier::Device,
+            ),
+            (
+                "host".to_string(),
+                VulkanCompiledResourceMemoryTier::HostVisible,
+            ),
+        ]),
+        new_group_ids: BTreeSet::from(["device".to_string(), "host".to_string()]),
+        newly_assigned_group_ids: BTreeSet::from([
+            "device".to_string(),
+            "host".to_string(),
+        ]),
+        new_payload_bytes: 120,
+    };
+
+    assert_eq!(
+        compiled_resource_device_tier_group_ids(
+            ["device", "host", "already-resident"],
+            &admission,
+        )
+        .unwrap(),
+        BTreeSet::from(["device".to_string()])
+    );
+}
+
+#[test]
+fn dynamic_tiered_admission_uses_host_before_nonpreferred_device_capacity() {
+    let groups = BTreeMap::from([
+        ("preferred".to_string(), 40usize),
+        ("spill-a".to_string(), 40usize),
+        ("spill-b".to_string(), 40usize),
+    ]);
+    let mut plan = VulkanCompiledResourceMemoryPlan::dynamic_tiered(&groups, 120, 80).unwrap();
+
+    let admission = plan
+        .admit_groups_with_device_preferences(
+            &[
+                ("preferred".to_string(), 40),
+                ("spill-a".to_string(), 40),
+                ("spill-b".to_string(), 40),
+            ],
+            &BTreeSet::from(["preferred".to_string()]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        admission.tiers,
+        vec![
+            VulkanCompiledResourceMemoryTier::Device,
+            VulkanCompiledResourceMemoryTier::HostVisible,
+            VulkanCompiledResourceMemoryTier::HostVisible,
+        ]
+    );
+    assert_eq!(plan.device_payload_bytes, 40);
+    assert_eq!(plan.host_visible_payload_bytes, 80);
+}
+
+#[test]
+fn dynamic_tiered_admission_uses_device_when_preferred_host_is_full() {
+    let groups = BTreeMap::from([
+        ("host-resident".to_string(), 40usize),
+        ("new".to_string(), 40usize),
+    ]);
+    let mut plan = VulkanCompiledResourceMemoryPlan::dynamic_tiered(&groups, 40, 40).unwrap();
+    plan.admit_groups_with_device_preferences(
+        &[("host-resident".to_string(), 40)],
+        &BTreeSet::new(),
+    )
+    .unwrap();
+
+    let admission = plan
+        .admit_groups_with_device_preferences(
+            &[("new".to_string(), 40)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        admission.tiers,
+        vec![VulkanCompiledResourceMemoryTier::Device]
+    );
+    assert_eq!(plan.device_payload_bytes, 40);
+    assert_eq!(plan.host_visible_payload_bytes, 40);
+}
+
+#[test]
+fn physical_wave_budget_selects_only_the_device_prefix_that_really_fits() {
+    let groups = vec![
+        ("first".to_string(), 40usize),
+        ("second".to_string(), 40usize),
+        ("third".to_string(), 40usize),
+    ];
+    let mut estimates = Vec::new();
+
+    let preferred = compiled_resource_preferred_device_group_ids(
+        &groups,
+        120,
+        70,
+        |group_ids| {
+            estimates.push(group_ids.clone());
+            Ok(group_ids.len() * 40)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(preferred, BTreeSet::from(["first".to_string()]));
+    assert_eq!(
+        estimates,
+        vec![
+            BTreeSet::from(["first".to_string()]),
+            BTreeSet::from(["first".to_string(), "second".to_string()]),
+            BTreeSet::from(["first".to_string(), "third".to_string()]),
+        ]
+    );
+}
+
+#[test]
 fn tiered_host_memory_budget_preserves_explicit_system_headroom() {
     let capacity = parse_vulkan_host_memory_capacity(
         "MemTotal:       67108864 kB\nMemAvailable:   41943040 kB\n",
@@ -795,9 +944,208 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     );
     drop(paged_store);
 
+    let failed_tier_store = VulkanCompiledResourceDeviceStore::new_tiered(
+        &device,
+        ResourceResidencyPolicy::DemandPaged,
+        "amd-failed-tier-admission-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
+        root.path(),
+        Arc::clone(&contract),
+        Arc::clone(&layout),
+        BTreeSet::from([selector_id.clone()]),
+        16,
+        8,
+        8,
+        256 * 1024,
+        8,
+        1,
+        128,
+        64,
+        layout.address_table_byte_count().unwrap(),
+    )
+    .unwrap();
+    failed_tier_store.mark_mount_complete().unwrap();
+    let failed_tier_owner =
+        DeviceResourceResidencyOwnerId::new("failed-tier-admission-graph").unwrap();
+    failed_tier_store
+        .load_selector_resource(&device, &selector_id, 0, failed_tier_owner.clone())
+        .unwrap();
+    let mut corrupt_weight_bytes = weight_bytes.to_vec();
+    corrupt_weight_bytes[8] ^= 0xff;
+    fs::write(root.path().join("weights.bin"), &corrupt_weight_bytes).unwrap();
+    let failed_tier_error = failed_tier_store
+        .load_selector_resource(&device, &selector_id, 1, failed_tier_owner)
+        .unwrap_err();
+    assert!(failed_tier_error.to_string().contains("failed SHA-256"));
+    fs::write(root.path().join("weights.bin"), weight_bytes).unwrap();
+    let failed_tier_plan = failed_tier_store
+        .memory_plan
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap();
+    assert_eq!(failed_tier_plan.device_payload_bytes, 8);
+    assert_eq!(failed_tier_plan.host_visible_payload_bytes, 0);
+    assert_eq!(failed_tier_plan.group_tiers.len(), 1);
+    drop(failed_tier_plan);
+    assert_eq!(
+        failed_tier_store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 1,
+            byte_count: 8,
+            cancelled_load_count: 0,
+        }
+    );
+    drop(failed_tier_store);
+
+    let demand_tiered_store = Arc::new(
+        VulkanCompiledResourceDeviceStore::new_tiered(
+            &device,
+            ResourceResidencyPolicy::DemandPaged,
+            "amd-demand-tiered-test",
+            device.physical_device_id(),
+            vec!["gpu0".to_string()],
+            root.path(),
+            Arc::clone(&contract),
+            Arc::clone(&layout),
+            BTreeSet::from([selector_id.clone()]),
+            16,
+            8,
+            8,
+            256 * 1024,
+            8,
+            1,
+            128,
+            64,
+            layout.address_table_byte_count().unwrap(),
+        )
+        .unwrap(),
+    );
+    demand_tiered_store
+        .register_device_memory_reclaimer(&device)
+        .unwrap();
+    demand_tiered_store.mark_mount_complete().unwrap();
+    let demand_tiered_owner =
+        DeviceResourceResidencyOwnerId::new("demand-tiered-graph").unwrap();
+    demand_tiered_store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            0,
+            demand_tiered_owner.clone(),
+        )
+        .unwrap();
+    demand_tiered_store
+        .load_selector_resource(&device, &selector_id, 1, demand_tiered_owner)
+        .expect("host-tier capacity must retain a new group without evicting its device-tier peer");
+    let demand_tiered_report = demand_tiered_store.residency_report().unwrap();
+    assert_eq!(demand_tiered_report.current_payload_bytes, 16);
+    assert_eq!(demand_tiered_report.resident_unit_count, 2);
+    assert_eq!(demand_tiered_report.eviction_count, 0);
+    let demand_tiered_plan = demand_tiered_store
+        .memory_plan
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap();
+    assert_eq!(demand_tiered_plan.device_payload_bytes, 8);
+    assert_eq!(demand_tiered_plan.host_visible_payload_bytes, 8);
+    drop(demand_tiered_plan);
+    assert_eq!(
+        demand_tiered_store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 2,
+            byte_count: 16,
+            cancelled_load_count: 0,
+        }
+    );
+    drop(demand_tiered_store);
+
+    let cohort_store = Arc::new(
+        VulkanCompiledResourceDeviceStore::new_tiered(
+            &device,
+            ResourceResidencyPolicy::DemandPaged,
+            "amd-complete-cohort-reclaimer-test",
+            device.physical_device_id(),
+            vec!["gpu0".to_string()],
+            root.path(),
+            Arc::clone(&contract),
+            Arc::clone(&layout),
+            BTreeSet::from([selector_id.clone()]),
+            16,
+            16,
+            8,
+            256 * 1024,
+            8,
+            1,
+            128,
+            64,
+            layout.address_table_byte_count().unwrap(),
+        )
+        .unwrap(),
+    );
+    cohort_store
+        .register_device_memory_reclaimer(&device)
+        .unwrap();
+    cohort_store.mark_mount_complete().unwrap();
+    assert_eq!(
+        cohort_store
+            .load_all_allowed(
+                &device,
+                DeviceResourceResidencyOwnerId::new("complete-cohort-graph").unwrap(),
+            )
+            .unwrap(),
+        2
+    );
+    let cohort_chunk_ids = cohort_store
+        .address_state
+        .lock()
+        .unwrap()
+        .group_chunks
+        .values()
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        cohort_chunk_ids.len(),
+        1,
+        "the fixture must prove complete shared-chunk reclamation"
+    );
+    let cohort_committed_bytes = cohort_store
+        .device_arena
+        .stats()
+        .unwrap()
+        .committed_byte_capacity;
+    assert!(cohort_committed_bytes > 0);
+    assert_eq!(
+        cohort_store
+            .reclaim_inactive_device_memory(1)
+            .unwrap(),
+        cohort_committed_bytes
+    );
+    assert_eq!(
+        cohort_store
+            .device_arena
+            .stats()
+            .unwrap()
+            .committed_byte_capacity,
+        0
+    );
+    assert_eq!(cohort_store.residency_report().unwrap().resident_unit_count, 0);
+    assert_eq!(
+        cohort_store.unload().unwrap(),
+        DeviceResourceResidencyRelease {
+            group_count: 0,
+            byte_count: 0,
+            cancelled_load_count: 0,
+        }
+    );
+    drop(cohort_store);
+
     let tiered_store = VulkanCompiledResourceDeviceStore::new_tiered(
         &device,
-        ResourceResidencyPolicy::DemandRetained,
+        ResourceResidencyPolicy::DemandPaged,
         "amd-tiered-test",
         device.physical_device_id(),
         vec!["gpu0".to_string()],
@@ -808,7 +1156,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         16,
         8,
         16,
-        256 * 1024,
+        22,
         8,
         1,
         128,
@@ -1047,6 +1395,49 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(retiering_report.retiering_device_selection_count, 100);
     assert_eq!(retiering_report.retiering_host_visible_selection_count, 1);
     assert!(retiering_report.retiering_time_ns > 0);
+    let committed_device_bytes = tiered_store
+        .device_arena
+        .stats()
+        .unwrap()
+        .committed_byte_capacity;
+    assert!(committed_device_bytes > 0);
+    assert_eq!(
+        tiered_store.reclaim_inactive_device_memory(1).unwrap(),
+        committed_device_bytes,
+        "retiered logical ownership must release the physical device allocation"
+    );
+    assert_eq!(
+        tiered_store
+            .device_arena
+            .stats()
+            .unwrap()
+            .committed_byte_capacity,
+        0
+    );
+    assert_eq!(tiered_store.residency_report().unwrap().resident_unit_count, 1);
+    let reload_slots = layout.selectors[0]
+        .mapping
+        .resource_slots(host_resource_index)
+        .unwrap();
+    let competing_device_allocation = tiered_store
+        .device_arena
+        .allocate_groups(&device, &[(&reload_slots, &[8])], 8)
+        .unwrap();
+    tiered_store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            host_resource_index,
+            DeviceResourceResidencyOwnerId::new("retiered-reload").unwrap(),
+        )
+        .expect(
+            "a retiered layout must support another physical generation when reloaded to the host tier",
+        );
+    drop(competing_device_allocation);
+    let reloaded_plan = tiered_store.memory_plan.as_ref().unwrap().lock().unwrap();
+    assert_eq!(reloaded_plan.device_payload_bytes, 0);
+    assert_eq!(reloaded_plan.host_visible_payload_bytes, 16);
+    drop(reloaded_plan);
     assert_eq!(
         tiered_store.unload().unwrap(),
         DeviceResourceResidencyRelease {

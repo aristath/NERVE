@@ -61,6 +61,55 @@ impl DeviceResidentResourcePayload for VulkanResidentCompiledResource {
     }
 }
 
+fn exchange_stable_compiled_resource_group_allocations(
+    left: &DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+    right: &DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+) -> Result<
+    (
+        DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+        DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+    ),
+    DeviceResourceResidencyError,
+> {
+    if left.resources().len() != right.resources().len() {
+        return Err(DeviceResourceResidencyError::load_failed(
+            "stable compiled resource groups have incompatible resource counts",
+        ));
+    }
+    let rebuild = |
+        logical: &DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+        storage: &DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+    | {
+        let resources = logical
+            .resources()
+            .iter()
+            .zip(storage.resources())
+            .map(|(logical_resource, storage_resource)| {
+                let allocation = storage_resource
+                    .payload()
+                    .stable_allocation()
+                    .ok_or_else(|| {
+                        DeviceResourceResidencyError::load_failed(
+                            "stable compiled resource retiering encountered direct storage",
+                        )
+                    })?;
+                DeviceResidentResource::new(
+                    logical_resource.descriptor().clone(),
+                    VulkanResidentCompiledResource {
+                        storage: VulkanResidentCompiledResourceStorage::Stable(
+                            Arc::clone(allocation),
+                        ),
+                        ranges: logical_resource.payload().ranges.clone(),
+                        byte_count: logical_resource.payload().byte_count,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, DeviceResourceResidencyError>>()?;
+        DeviceResidentResourceGroup::new(logical.descriptor().clone(), resources)
+    };
+    Ok((rebuild(left, right)?, rebuild(right, left)?))
+}
+
 pub fn upload_loaded_compiled_resource_group(
     device: &VulkanComputeDevice,
     transfer: &mut VulkanResidentTransferStream,

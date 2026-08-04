@@ -944,6 +944,102 @@ impl<P: DeviceResidentResourcePayload> DeviceResourceResidencyManager<P> {
         })
     }
 
+    pub fn transform_inactive_resident_groups<F>(
+        &self,
+        left_group_id: &str,
+        right_group_id: &str,
+        transform: F,
+    ) -> Result<(), DeviceResourceResidencyError>
+    where
+        F: FnOnce(
+            &DeviceResidentResourceGroup<P>,
+            &DeviceResidentResourceGroup<P>,
+        ) -> Result<
+            (
+                DeviceResidentResourceGroup<P>,
+                DeviceResidentResourceGroup<P>,
+            ),
+            DeviceResourceResidencyError,
+        >,
+    {
+        if left_group_id == right_group_id {
+            return Err(DeviceResourceResidencyError::invalid_descriptor(
+                "device residency transformation names the same group twice",
+            ));
+        }
+        let mut state = self.inner.state.lock().map_err(|_| {
+            DeviceResourceResidencyError::new(
+                DeviceResourceResidencyErrorKind::Stopped,
+                "per-device residency manager was poisoned",
+            )
+        })?;
+        let resident = |group_id: &str| {
+            match state.entries.get(group_id) {
+                Some(DeviceResourceResidencyEntry::Resident {
+                    descriptor,
+                    active_leases,
+                    group,
+                    ..
+                }) if active_leases.is_empty() => {
+                    Ok((descriptor.clone(), Arc::clone(group)))
+                }
+                Some(DeviceResourceResidencyEntry::Resident { .. }) => {
+                    Err(DeviceResourceResidencyError::new(
+                        DeviceResourceResidencyErrorKind::InUse,
+                        format!(
+                            "cannot transform residency group {group_id:?} while an execution lease is active"
+                        ),
+                    ))
+                }
+                Some(_) => Err(DeviceResourceResidencyError::new(
+                    DeviceResourceResidencyErrorKind::InUse,
+                    format!(
+                        "cannot transform residency group {group_id:?} while it is not resident"
+                    ),
+                )),
+                None => Err(DeviceResourceResidencyError::new(
+                    DeviceResourceResidencyErrorKind::StaleOperation,
+                    format!(
+                        "cannot transform absent residency group {group_id:?}"
+                    ),
+                )),
+            }
+        };
+        let (left_descriptor, left_group) = resident(left_group_id)?;
+        let (right_descriptor, right_group) = resident(right_group_id)?;
+        let (replacement_left, replacement_right) =
+            transform(&left_group, &right_group)?;
+        if replacement_left.descriptor() != &left_descriptor
+            || replacement_right.descriptor() != &right_descriptor
+        {
+            return Err(DeviceResourceResidencyError::invalid_publication(
+                "transformed resident groups changed their immutable logical descriptors",
+            ));
+        }
+
+        let DeviceResourceResidencyEntry::Resident {
+            group: left_slot, ..
+        } = state
+            .entries
+            .get_mut(left_group_id)
+            .expect("resident transformation group was prevalidated")
+        else {
+            unreachable!("resident transformation group changed while the manager lock was held")
+        };
+        *left_slot = Arc::new(replacement_left);
+        let DeviceResourceResidencyEntry::Resident {
+            group: right_slot, ..
+        } = state
+            .entries
+            .get_mut(right_group_id)
+            .expect("resident transformation group was prevalidated")
+        else {
+            unreachable!("resident transformation group changed while the manager lock was held")
+        };
+        *right_slot = Arc::new(replacement_right);
+        Ok(())
+    }
+
     pub fn statistics(
         &self,
     ) -> Result<DeviceResourceResidencyStatistics, DeviceResourceResidencyError>

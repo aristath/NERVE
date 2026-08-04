@@ -703,9 +703,14 @@ fn allocate_stable_resource_groups(
                 device_address_registry,
             }));
         }
-        state
-            .active_groups
-            .insert(group_key.clone(), allocations.len());
+        let active_allocation_count = state.active_groups.entry(group_key.clone()).or_default();
+        *active_allocation_count = active_allocation_count
+            .checked_add(allocations.len())
+            .ok_or_else(|| {
+                VulkanError(
+                    "stable resource active layout allocation count overflowed".to_string(),
+                )
+            })?;
         allocation_groups.push(allocations);
         group_byte_offset = group_byte_offset
             .checked_add(placement.group_byte_capacity)
@@ -752,10 +757,10 @@ fn plan_stable_resource_groups(
         if slots.is_empty()
             || slots.len() != byte_counts.len()
             || !requested_keys.insert(group_key.clone())
-            || state.active_groups.contains_key(&group_key)
         {
             return Err(VulkanError(
-                "stable resource group allocation is duplicated or invalid".to_string(),
+                "stable resource allocation batch repeats a group layout or is invalid"
+                    .to_string(),
             ));
         }
         let placement = stable_resource_placement_for_slots(layouts, slots, &group_key)?;
