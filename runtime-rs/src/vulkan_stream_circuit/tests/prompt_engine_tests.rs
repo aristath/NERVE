@@ -1568,6 +1568,14 @@ fn placed_model_package_runs_runtime_graphed_duplicate_layer() {
         .circuit_graph
         .to_resolved_lowered_execution_graph(manifest_dir)
         .unwrap();
+    let layer_stage_count = source_graph
+        .circuits
+        .iter()
+        .find(|circuit| circuit.component.id == "layer_00")
+        .expect("fixture source graph contains layer_00")
+        .circuit
+        .nodes
+        .len();
     let runtime_graph = StreamCircuitRuntimeGraph::from_source_series(&source_graph, "gpu0")
         .unwrap()
         .duplicate_after_instance(&source_graph, "layer_00", "layer_00_repeat")
@@ -1601,7 +1609,11 @@ fn placed_model_package_runs_runtime_graphed_duplicate_layer() {
         run.tick_run.placed_run.status,
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed
     );
-    // Nine component kernels per instance plus both logical-device boundary stages.
-    assert_eq!(run.tick_run.placed_run.completed_stage_delta, 20);
+    // Every source-layer kernel runs in both instances, plus the two
+    // logical-device boundary stages introduced by the duplicated wiring.
+    assert_eq!(
+        run.tick_run.placed_run.completed_stage_delta,
+        layer_stage_count * 2 + 2
+    );
     assert_eq!(run.sampler_run.descriptor_count, 5);
 }
