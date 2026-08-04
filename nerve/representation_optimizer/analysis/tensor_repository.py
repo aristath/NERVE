@@ -259,15 +259,16 @@ class PackageTensorRepository:
             values = np.asarray(selected, dtype=np.float32)
 
         effective = True
-        scale_name = f"{tensor_name}_scale_inv"
-        if dtype == "F8_E4M3" and scale_name in self._tensors:
-            scale_info = self._tensors[scale_name]
+        scale = self._fp8_scale(tensor_name, info, logical_shape)
+        if dtype == "F8_E4M3" and scale is not None:
+            scale_name, scale_info = scale
             scale_shape = tuple(int(value) for value in scale_info["shape"])
             scale_raw = self._memmap(scale_info, str(scale_info["dtype"]), scale_shape)
+            scale_dtype = str(scale_info["dtype"])
             scales = (
-                _bf16_to_f32(scale_raw)
-                if scale_info["dtype"] == "BF16"
-                else np.asarray(scale_raw, dtype=np.float32)
+                _e8m0_to_f32(scale_raw)
+                if scale_dtype == "F8_E8M0"
+                else _to_f32(scale_raw, scale_dtype)
             )
             scale_indices = _scale_indices(
                 logical_shape,
@@ -282,6 +283,59 @@ class PackageTensorRepository:
                 "effective algebraic values are unavailable"
             )
         return values, effective
+
+    def _fp8_scale(
+        self,
+        tensor_name: str,
+        info: Json,
+        logical_shape: tuple[int, ...],
+    ) -> tuple[str, Json] | None:
+        quantization = info.get("quantization")
+        declared = []
+        if isinstance(quantization, dict):
+            for key in ("execution_scales", "scales", "source_scales"):
+                value = quantization.get(key)
+                if isinstance(value, str) and value:
+                    declared.append(value)
+        declared.append(f"{tensor_name}_scale_inv")
+        if tensor_name.endswith(".weight"):
+            declared.append(tensor_name.removesuffix(".weight") + ".scale")
+        candidates = tuple(dict.fromkeys(declared))
+        for scale_name in candidates:
+            scale_info = self._tensors.get(scale_name)
+            if not isinstance(scale_info, dict):
+                continue
+            scale_dtype = str(scale_info.get("dtype"))
+            scale_shape = tuple(int(value) for value in scale_info.get("shape", []))
+            if (
+                len(scale_shape) != len(logical_shape)
+                or any(value <= 0 for value in scale_shape)
+                or any(
+                    scale_dimension > logical_dimension
+                    for logical_dimension, scale_dimension in zip(
+                        logical_shape,
+                        scale_shape,
+                        strict=True,
+                    )
+                )
+            ):
+                continue
+            if scale_dtype == "F8_E8M0":
+                expected = (
+                    (*logical_shape[:-2],)
+                    + (
+                        math.ceil(logical_shape[-2] / 128),
+                        math.ceil(logical_shape[-1] / 128),
+                    )
+                    if len(logical_shape) >= 2
+                    else ()
+                )
+                if scale_shape != expected:
+                    continue
+            elif scale_dtype not in {"BF16", "F16", "F32", "F64"}:
+                continue
+            return scale_name, scale_info
+        return None
 
     def _memmap(
         self,
@@ -316,6 +370,8 @@ class PackageTensorRepository:
             "U16": np.dtype("<u2"),
             "I32": np.dtype("<i4"),
             "U32": np.dtype("<u4"),
+            "I64": np.dtype("<i8"),
+            "U64": np.dtype("<u8"),
         }.get(dtype)
         if numpy_dtype is None:
             raise ModelCompileError(f"analysis cannot decode tensor dtype {dtype!r}")

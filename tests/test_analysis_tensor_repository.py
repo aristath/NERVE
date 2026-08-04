@@ -105,6 +105,64 @@ def test_package_repository_decodes_bf16_and_block_scaled_fp8(tmp_path: Path):
     assert fp8.effective_values is True
 
 
+def test_package_repository_decodes_structural_e8m0_scaled_fp8(
+    tmp_path: Path,
+) -> None:
+    repository = _package(
+        tmp_path,
+        [
+            (
+                "projection.weight",
+                "F8_E4M3",
+                [128, 256],
+                bytes((0x38,)) * (128 * 256),
+                {},
+            ),
+            (
+                "projection.scale",
+                "F8_E8M0",
+                [1, 2],
+                bytes((127, 128)),
+                {},
+            ),
+        ],
+    )
+
+    observed = repository.observe(
+        "projection.weight",
+        exhaustive_element_limit=None,
+        sampled_element_limit=8,
+    )
+
+    expected = np.ones((128, 256), dtype=np.float32)
+    expected[:, 128:] *= 2.0
+    np.testing.assert_array_equal(observed.values, expected)
+    assert observed.effective_values is True
+
+
+def test_package_repository_decodes_i64_control_tensors(tmp_path: Path) -> None:
+    repository = _package(
+        tmp_path,
+        [
+            (
+                "control",
+                "I64",
+                [3],
+                np.array([-2, 0, 7], dtype="<i8").tobytes(),
+                {},
+            ),
+        ],
+    )
+
+    observed = repository.observe(
+        "control",
+        exhaustive_element_limit=None,
+        sampled_element_limit=3,
+    )
+
+    np.testing.assert_array_equal(observed.values, [-2.0, 0.0, 7.0])
+
+
 def test_package_repository_rejects_unscaled_fp8_as_ineffective(
     tmp_path: Path,
 ):
