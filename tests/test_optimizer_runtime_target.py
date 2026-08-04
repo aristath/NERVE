@@ -208,6 +208,40 @@ def test_capacity_probe_rejects_reservation_for_another_device(
         probe.require_capacity((profile,), {other_device: 100})
 
 
+def test_capacity_probe_tolerates_counter_drift_but_not_real_capacity_loss(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:03:00.0"
+    profile = _target((pci_address,), capacity_bytes=1_000_000_000).hardware_profiles[
+        0
+    ].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=100_000_000,
+        busy_percent=0,
+        total_vram=1_000_000_000,
+    )
+    policy = DeviceCapacityPolicy(
+        reservable_free_vram_fraction_ppm=1_000_000,
+        admission_vram_tolerance_bytes=16 * 1024 * 1024,
+    )
+    probe = LinuxAmdDeviceCapacityProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        policy=policy,
+    )
+    required = {_device_id(pci_address): 900_000_000}
+    used = (sysfs / "card0" / "device").resolve() / "mem_info_vram_used"
+
+    used.write_text(f"{100_000_000 + policy.admission_vram_tolerance_bytes}\n")
+    probe.require_capacity((profile,), required)
+
+    used.write_text(f"{100_000_001 + policy.admission_vram_tolerance_bytes}\n")
+    with pytest.raises(ModelCompileError, match="capacity-observation tolerance"):
+        probe.require_capacity((profile,), required)
+
+
 def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
     tmp_path: Path,
 ) -> None:
@@ -287,8 +321,8 @@ def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
         _device_id("0000:0a:00.0"),
     }
     assert admission["reserved_device_capacity_bytes"] == {
-        _device_id("0000:07:00.0"): 600,
-        _device_id("0000:0a:00.0"): 600,
+        _device_id("0000:07:00.0"): 949,
+        _device_id("0000:0a:00.0"): 949,
     }
     assert optimization_target.matched_conditions["residency_scope"] == (
         "capacity_partition"
@@ -342,7 +376,7 @@ def test_runtime_target_counts_transient_working_set_before_selecting_topology(
     ]
 
 
-def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
+def test_demand_admission_reserves_the_complete_bounded_device_tier(
     tmp_path: Path,
 ) -> None:
     pci_address = "0000:07:00.0"
@@ -385,7 +419,9 @@ def test_demand_admission_uses_initial_bytes_not_maximum_address_space(
     available_capacity = next(
         iter(admission["available_device_capacity_bytes"].values())
     )
-    assert next(iter(admission["reserved_device_capacity_bytes"].values())) == 100
+    assert next(iter(admission["reserved_device_capacity_bytes"].values())) == (
+        available_capacity
+    )
     assert plan["residency_policy"] == "demand_retained"
     assert device["initial_device_resident_bytes"] == 100
     assert device["parameter_residency"]["maximum_addressable_bytes"] == 10_100

@@ -982,7 +982,10 @@ def _select_capability_groups(
                 placement=placements[case.case_id],
                 residency_plan=plan,
                 available_device_capacity_bytes=capacities,
-                reserved_device_capacity_bytes=planned_devices,
+                # Demand residency may grow until the runtime's bounded
+                # device-local tier is full. Reserve that complete authorized
+                # tier, not merely the initially mounted working set.
+                reserved_device_capacity_bytes=capacities,
             )
             break
         if selected_group is None:

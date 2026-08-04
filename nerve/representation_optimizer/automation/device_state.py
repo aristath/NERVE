@@ -26,6 +26,7 @@ class DeviceCapacityPolicy:
     minimum_reservable_vram_bytes: int = 1
     material_process_vram_bytes: int = 64 * 1024 * 1024
     material_process_gtt_bytes: int = 64 * 1024 * 1024
+    admission_vram_tolerance_bytes: int = 16 * 1024 * 1024
     release_vram_tolerance_bytes: int = 16 * 1024 * 1024
     release_settle_timeout_ns: int = 5_000_000_000
     release_poll_interval_ns: int = 50_000_000
@@ -39,6 +40,7 @@ class DeviceCapacityPolicy:
             "minimum_reservable_vram_bytes",
             "material_process_vram_bytes",
             "material_process_gtt_bytes",
+            "admission_vram_tolerance_bytes",
             "release_vram_tolerance_bytes",
         ):
             value = getattr(self, field)
@@ -79,6 +81,9 @@ class DeviceCapacityPolicy:
             "minimum_reservable_vram_bytes": self.minimum_reservable_vram_bytes,
             "material_process_vram_bytes": self.material_process_vram_bytes,
             "material_process_gtt_bytes": self.material_process_gtt_bytes,
+            "admission_vram_tolerance_bytes": (
+                self.admission_vram_tolerance_bytes
+            ),
             "release_vram_tolerance_bytes": (
                 self.release_vram_tolerance_bytes
             ),
@@ -210,11 +215,14 @@ class LinuxAmdDeviceCapacityProbe:
                 raise ModelCompileError(
                     f"device {observation.device_id!r} has an invalid VRAM reservation"
                 )
-            if observation.reservable_vram_bytes < required:
+            shortfall = max(0, required - observation.reservable_vram_bytes)
+            if shortfall > self.policy.admission_vram_tolerance_bytes:
                 failures.append(
                     f"{observation.device_id} offers "
                     f"{observation.reservable_vram_bytes} reservable VRAM bytes, "
-                    f"requires {required}"
+                    f"requires {required} (shortfall {shortfall} exceeds the "
+                    f"{self.policy.admission_vram_tolerance_bytes}-byte "
+                    "capacity-observation tolerance)"
                 )
         if failures:
             raise ModelCompileError(
