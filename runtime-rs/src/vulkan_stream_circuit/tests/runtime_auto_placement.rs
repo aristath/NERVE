@@ -142,6 +142,121 @@ fn runtime_auto_placement_admits_eventual_lazy_retention_not_only_initial_mount(
 }
 
 #[test]
+fn runtime_auto_placement_admits_a_bounded_paged_cache_not_the_virtual_resource_space() {
+    let runtime_model = fixture_model_runtime_model_with_dynamic_partition(1_000, 64);
+    let tensor_index = runtime_model.load_runtime_tensor_index(tiny_model_dir()).unwrap();
+    let paged = plan_vulkan_runtime_residency(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        8,
+        0,
+        ResourceResidencyPolicy::DemandPaged,
+    )
+    .unwrap();
+    let device = &paged.device_plans[0];
+    let paged_admission = vulkan_runtime_device_capacity_admission_bytes(
+        device,
+        ResourceResidencyPolicy::DemandPaged,
+    )
+    .unwrap();
+    let retained_admission = vulkan_runtime_device_capacity_admission_bytes(
+        device,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+
+    assert_eq!(
+        paged_admission,
+        device.initial_device_resident_bytes
+            + device.resource_store.maximum_load_wave_payload_bytes
+            + device
+                .resource_store
+                .maximum_dynamic_allocation_padding_bytes
+    );
+    assert!(paged_admission < retained_admission);
+
+    let placed = capacity_pack_vulkan_runtime_model(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        &[VulkanRuntimePlacementCandidate {
+            device_id: "paged".to_string(),
+            safe_capacity_bytes: paged_admission,
+        }],
+        8,
+        0,
+        ResourceResidencyPolicy::DemandPaged,
+    )
+    .unwrap();
+    assert_eq!(placed.selected_device_ids, ["paged"]);
+
+    let error = capacity_pack_vulkan_runtime_model(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        &[VulkanRuntimePlacementCandidate {
+            device_id: "too_small_for_one_wave".to_string(),
+            safe_capacity_bytes: paged_admission - 1,
+        }],
+        8,
+        0,
+        ResourceResidencyPolicy::DemandPaged,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("capacity"));
+}
+
+#[test]
+fn demand_paged_virtual_overcommit_uses_every_cache_in_contiguous_proportion() {
+    let placement = proportional_paged_component_placement(
+        &[
+            CapacityPackedPlacementComponent {
+                component_id: "a".to_string(),
+                resident_weight_bytes: 30,
+            },
+            CapacityPackedPlacementComponent {
+                component_id: "b".to_string(),
+                resident_weight_bytes: 30,
+            },
+            CapacityPackedPlacementComponent {
+                component_id: "c".to_string(),
+                resident_weight_bytes: 30,
+            },
+            CapacityPackedPlacementComponent {
+                component_id: "d".to_string(),
+                resident_weight_bytes: 30,
+            },
+            CapacityPackedPlacementComponent {
+                component_id: "e".to_string(),
+                resident_weight_bytes: 30,
+            },
+        ],
+        &[
+            VulkanRuntimePlacementCandidate {
+                device_id: "large-a".to_string(),
+                safe_capacity_bytes: 40,
+            },
+            VulkanRuntimePlacementCandidate {
+                device_id: "large-b".to_string(),
+                safe_capacity_bytes: 40,
+            },
+            VulkanRuntimePlacementCandidate {
+                device_id: "reserved-tail".to_string(),
+                safe_capacity_bytes: 20,
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(placement["a"], "large-a");
+    assert_eq!(placement["b"], "large-a");
+    assert_eq!(placement["c"], "large-b");
+    assert_eq!(placement["d"], "large-b");
+    assert_eq!(placement["e"], "reserved-tail");
+}
+
+#[test]
 fn runtime_auto_placement_rewires_without_discarding_selected_artifacts() {
     let mut selected = fixture_model_runtime_model();
     selected.tensor_index_fragments.push(VulkanRuntimeTensorIndexFragment {

@@ -86,3 +86,21 @@ fn capacity_packed_placement_does_not_sort_device_names() {
     assert_eq!(placement["a"], "z-fast");
     assert_eq!(placement["b"], "a-slow");
 }
+
+#[test]
+fn capacity_packed_placement_keeps_zero_weight_components_in_the_contiguous_chain() {
+    let placement = capacity_packed_component_placement(
+        &[
+            weighted_component("input", 0),
+            weighted_component("model", 40),
+        ],
+        &[
+            placement_device("preferred", 1),
+            placement_device("spill", 40),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(placement["input"], "preferred");
+    assert_eq!(placement["model"], "spill");
+}

@@ -40,33 +40,58 @@ toward 50 tok/s without regressing supported Qwen models.
    output rollback without model-name branches.
 
 3. Raise DeepSeek's accepted decode rate past 30 tok/s and continue until no
-   material bottleneck remains. First compile a fresh package from the source
-   checkpoint using native MXFP4 as the sparse-expert baseline; never rerun the
-   rejected expanded-FP8 package. The authoritative thinking-enabled product
-   gate uses 128K context, a 65,536-token output allowance, a requested
-   speculative window of seven clamped to the checkpoint's trained five-token
-   block, contiguous placement across all five explicitly bound AMD GPUs, and
-   one complete discarded conversation before the truth conversation in the
-   same resident process. The previous safe native package terminated
-   coherently, preserved Greece recall, released all acquired capacity, and
-   reached 8.818 decode tok/s and 8.942 prefill tok/s. This remains far below
-   the 30 tok/s floor and must be remeasured on the current runtime before
-   attribution work continues.
+   material bottleneck remains. The fresh native-MXFP4 package and the current
+   demand-paged runtime now complete the authoritative thinking-enabled product
+   gate at 128K context and a 65,536-token output allowance. The gate discards
+   one complete conversation, measures a second conversation without unloading
+   the model, preserves Greece/Athens turn recall, and releases every acquired
+   allocation. Its current truth baseline is only **2.7258 decode tok/s** and
+   **5.1398 prefill tok/s** across 3,055 measured generated tokens. After the
+   truth-set `hi`, the five measured turns reread 971.79 GB, evicted 969.25 GB,
+   performed 72,423 reloads, and blocked 486.21 seconds on residency. No derived
+   representation was selected. Fix the following in measured order:
 
-   Complete heterogeneous cost-based auto-placement. The runtime now uses exact
-   fixed, transient, resource-store, speculative-window, and eventually retained
-   lazy-resource bytes to choose the smallest capacity-safe prefix of a
-   caller-ranked device list; it fills contiguous component segments, respects
-   partial VRAM reservations, leaves explicit wiring untouched, excludes
-   integrated display GPUs from automatic placement, and has real one- and
-   two-device product proof. The remaining gap is candidate ranking and spill
-   across different capability classes. Rank devices from measured execution
-   and transfer costs rather than vendor names; on this workstation that means
-   the five AMD GPUs before the slower Intel GPU, and CPU only after compatible
-   GPU capacity. Select each component's representation for its actual target
-   device, reject an incompatible boundary before model allocation, and permit
+   - Replace isolated per-device-store host-visible budgets with a shared,
+     borrowable physical residency cache. Preserve contiguous component
+     ownership while allowing unused host/device capacity to satisfy a hot
+     store, enforce one global hard bound, and keep an evicted expert in a
+     reusable host tier instead of rereading it from disk. Make cache admission,
+     promotion, demotion, and eviction route-aware and evidence-driven.
+   - Stop speculative verification from multiplying sparse-expert traffic. The
+     current five-token target window accepts roughly 20-34% and executes far
+     more routed branches than it commits. Measure scalar and each useful block
+     width on the same resident model, then select speculation only when useful
+     committed tokens per complete cycle win. Compile draft generation, target
+     projection, comparison, state selection, commit, and draft catch-up into
+     one device-resident transaction with no host wait until a real residency
+     miss or completed emitted block.
+   - Optimize the independently material MXFP4 expert path. Retain the source's
+     packed 4-bit payload, amortize or fuse unpacking and activation conversion,
+     and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8
+     alternatives on each actual target device. Include resident footprint and
+     reload traffic in promotion evidence, not kernel time alone.
+   - Add device timestamps around routing, residency, expert projection,
+     speculative target verification, queue submission, and host synchronization
+     so remaining kernel and orchestration costs are separable after churn is
+     removed. Reduce the current tens of thousands of copy submissions and
+     waits without weakening bounded execution quanta or driver-timeout safety.
+   - Restore repeated-process determinism before accepting throughput changes.
+     Audit radix/top-k tie order, sampler RNG consumption, accepted-prefix
+     commit, rollback, reset state, and expert selection. Require equality for
+     committed tokens, routed experts, accepted prefixes, and state digests.
+
+4. Complete heterogeneous cost-based auto-placement. The runtime now admits
+   demand-paged models against fixed residency plus one full selector wave,
+   chooses the smallest capacity-safe device prefix when complete residency
+   fits, and proportionally assigns a larger virtual model across every
+   compatible cache when it does not. It respects partial VRAM reservations,
+   keeps contiguous component segments, excludes integrated display GPUs, and
+   leaves explicit wiring untouched. Complete candidate ranking and spill
+   across capability classes using measured execution and transfer costs rather
+   than model or vendor names. Select each component representation for its
+   target device, reject incompatible boundaries before allocation, and permit
    a model that exhausts the AMD group to continue contiguously onto a
-   compatible Intel or CPU implementation without recompilation.
+   compatible discrete Intel GPU or CPU without recompilation.
 
    Make temporal and speculative batch execution device-segment aware. A valid
    component path may revisit one physical device after traversing others, but
@@ -77,53 +102,7 @@ toward 50 tok/s without regressing supported Qwen models.
    disabling speculation. Until that is complete, product performance gates
    must use a non-revisiting contiguous device pipeline.
 
-   Compile the complete speculative cycle as a device-resident transaction:
-   generate the draft window without a host wait per proposal, append target
-   projection and sampling, compare draft and target tokens on-device, produce
-   the committed-prefix count, select and commit causal state snapshots
-   indirectly, publish the retained source frame, and catch draft state up
-   without per-token host mediation. The host should regain control only for a
-   real residency miss or a completed emitted block. Preserve exact rollback,
-   cancellation, and canonical commit semantics.
-
-   The adaptive selector now measures actual execution shapes, excludes their
-   first warmups and residency-loading cycles, and chooses by useful emitted
-   tokens per speculative-cycle nanosecond. Session reset also clears every
-   target and draft recurrent state, sampler, and auxiliary buffer. The
-   full-horizon causal component harness proved that the indexed-attention
-   temporal lanes are independent when each lane reads its declared state
-   snapshot. The promoted generic workgroup-Y implementation preserves exact
-   output and committed-state digests, is 2.40x faster in the 128K component
-   benchmark, and passes the complete product gate without malformed output.
-   Target verification still consumes 269.44 seconds, about 92% of the measured
-   decode interval. Demand residency still performs 254 loads, 42 evictions,
-   and 40 reloads across the truth conversation. Restore reproducible execution
-   before using whole-process token digests for attribution: with the same
-   package, seed, prompts, placement, and sampler, fresh processes can diverge
-   after the first turn. Audit radix/top-k tie order, speculative sampler RNG
-   consumption, accepted-prefix commit, rollback, and reset state. Require
-   repeated-process equality for committed tokens, routed experts, accepted
-   prefixes, and state digests; do not weaken the product quality gate to
-   accommodate nondeterminism.
-
-   Separate target compute from residency churn with device timestamps, then:
-
-   - compile draft, target projection, comparison, state selection, commit, and
-     draft catch-up into one device-resident transaction with no host wait until
-     a residency miss or completed emitted block;
-   - eliminate reload churn using route-aware expert residency decisions that
-     remain capacity- and evidence-driven rather than model-specific;
-   - optimize independently material MXFP4 sparse-expert kernels with fused or
-     amortized representations, including measured native INT4/FP8 candidates;
-   - close the remaining speculative acceptance gap without sacrificing model
-     quality.
-
-   Do not revive the rejected standalone intermediate-FP8 quantization
-   dispatch, incomplete replay signatures, or naive workgroup-Y temporal-lane
-   split. Every candidate must win exact microbenchmarks, output-and-state
-   equivalence, repeated-process determinism, and the complete product gate.
-
-4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
+5. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
    quality/performance gates sequentially on equivalent healthy AMD placement.
    Restrict discovery to the AMD Vulkan ICD and bind PCI-derived UUIDs so an
    added Intel or NVIDIA adapter cannot silently change the comparison. The
@@ -138,7 +117,7 @@ toward 50 tok/s without regressing supported Qwen models.
    structured-protocol, conversation, and teardown checks active so throughput
    alone cannot pass.
 
-5. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
+6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
    operators, graph wiring, placement, representation, residency, and stream
    transactions remain capability-driven and reusable by unseen models. Finish

@@ -776,6 +776,36 @@ impl VulkanCompiledResourceDeviceStore {
                 self.instrumentation.record_released_device_bytes(released);
             }
             settled_requirement = residency_requirement()?;
+            if released > 0 && settled_requirement.2 == 0 && settled_requirement.4 > 0 {
+                let arena = self
+                    .device_arena
+                    .stats()
+                    .map_err(compiled_device_store_vulkan_error)?;
+                let arena_available_device_bytes = self
+                    .device_arena
+                    .config()
+                    .committed_byte_capacity
+                    .saturating_sub(arena.committed_byte_capacity);
+                wait_for_rebalanced_compiled_resource_device_capacity(
+                    settled_requirement.3,
+                    arena_available_device_bytes,
+                    COMPILED_RESOURCE_DEVICE_CAPACITY_SETTLEMENT_TIMEOUT,
+                    || {
+                        usize::try_from(
+                            device
+                                .device_local_memory_accounting()
+                                .map_err(compiled_device_store_vulkan_error)?
+                                .admissible_remaining_bytes,
+                        )
+                        .map_err(|_| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "available Vulkan device-local capacity exceeds the host address space",
+                            )
+                        })
+                    },
+                )?;
+                settled_requirement = residency_requirement()?;
+            }
         }
         let new_device_bytes = settled_requirement.3;
         if settled_requirement.2 > 0 || settled_requirement.4 > 0 {

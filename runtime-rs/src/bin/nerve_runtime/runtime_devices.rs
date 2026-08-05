@@ -248,19 +248,23 @@ fn runtime_capacity_packed_model(
             args.resource_residency_policy,
         ) {
             Ok(selected) => {
-                let retained_bytes = selected
+                let admitted_bytes = selected
                     .residency_plan
                     .device_plans
                     .iter()
                     .map(|plan| {
-                        vulkan_runtime_maximum_device_resident_bytes(plan)
+                        vulkan_runtime_device_capacity_admission_bytes(
+                            plan,
+                            args.resource_residency_policy,
+                        )
                             .map(|bytes| format!("{}={bytes}", plan.device_id))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 eprintln!(
-                    "nerve runtime auto-placement: strategy=capacity_packed_minimum_devices, devices={:?}, maximum_retained_bytes={:?}",
+                    "nerve runtime auto-placement: strategy=capacity_packed_minimum_devices, policy={}, devices={:?}, capacity_admission_bytes={:?}",
+                    args.resource_residency_policy.as_runtime_name(),
                     selected.selected_device_ids,
-                    retained_bytes,
+                    admitted_bytes,
                 );
                 drop(opened_devices);
                 return Ok(selected.runtime_model);

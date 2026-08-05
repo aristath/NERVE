@@ -699,11 +699,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })?;
             let resident_payload_capacity = maximum_dynamic_bytes
                 .min(safe_dynamic_bytes.saturating_sub(maximum_alignment_padding));
-            if resident_payload_capacity < physical_parameters.staging_headroom_bytes {
+            if resident_payload_capacity < store_residency.maximum_load_wave_payload_bytes {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
-                        "stable device-local capacity for physical slices {logical_device_ids:?} admits {resident_payload_capacity} dynamic payload bytes, but one atomic resource wave needs {} bytes",
-                        physical_parameters.staging_headroom_bytes
+                        "stable device-local capacity for physical slices {logical_device_ids:?} admits {resident_payload_capacity} dynamic payload bytes, but one complete selector load wave needs {} bytes",
+                        store_residency.maximum_load_wave_payload_bytes
                     )),
                 ));
             }

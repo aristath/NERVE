@@ -103,6 +103,23 @@ where
     }
 }
 
+fn wait_for_rebalanced_compiled_resource_device_capacity<F>(
+    required_bytes: usize,
+    arena_available_bytes: usize,
+    timeout: Duration,
+    remaining_bytes: F,
+) -> Result<usize, VulkanCompiledResourceDeviceStoreError>
+where
+    F: FnMut() -> Result<usize, VulkanCompiledResourceDeviceStoreError>,
+{
+    if arena_available_bytes < required_bytes {
+        return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+            "compiled resource rebalance needs {required_bytes} device bytes but only {arena_available_bytes} arena bytes are available"
+        )));
+    }
+    wait_for_compiled_resource_device_capacity(required_bytes, timeout, remaining_bytes)
+}
+
 #[derive(Debug)]
 struct VulkanCompiledResourceEvictionSelection {
     group_ids: BTreeSet<String>,

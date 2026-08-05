@@ -27,7 +27,7 @@ use nerve_runtime::{
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageDeviceSlice,
     VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
     VulkanRuntimePlacementCandidate, capacity_pack_vulkan_runtime_model,
-    vulkan_runtime_maximum_device_resident_bytes,
+    vulkan_runtime_device_capacity_admission_bytes,
     VulkanResidentPlacedPrefixStateCacheStats,
     VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
     VulkanCompiledResourceResidencyReport,

@@ -56,6 +56,39 @@ fn device_capacity_settlement_never_invents_capacity_at_the_deadline() {
 }
 
 #[test]
+fn rebalanced_device_capacity_waits_for_driver_acknowledgement_before_reallocation() {
+    let mut observations = [63usize, 64].into_iter();
+    let acknowledged = wait_for_rebalanced_compiled_resource_device_capacity(
+        64,
+        64,
+        Duration::from_millis(10),
+        || Ok(observations.next().unwrap_or(64)),
+    )
+    .unwrap();
+
+    assert_eq!(acknowledged, 64);
+    assert_eq!(observations.next(), None);
+}
+
+#[test]
+fn rebalanced_device_capacity_never_waits_past_the_arena_hard_bound() {
+    let mut polled = false;
+    let error = wait_for_rebalanced_compiled_resource_device_capacity(
+        65,
+        64,
+        Duration::from_millis(10),
+        || {
+            polled = true;
+            Ok(usize::MAX)
+        },
+    )
+    .unwrap_err();
+
+    assert!(!polled);
+    assert!(error.to_string().contains("arena bytes"));
+}
+
+#[test]
 fn exact_tiered_resource_plan_never_exceeds_either_memory_budget() {
     let groups = BTreeMap::from([
         ("identity-0".to_string(), 40usize),

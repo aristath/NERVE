@@ -88,6 +88,7 @@ pub fn capacity_packed_component_placement(
         }
 
         let mut assigned_bytes = 0usize;
+        let mut assigned_component_count = 0usize;
         while cursor < components.len() {
             let components_after = components.len() - cursor - 1;
             if components_after < remaining_devices - 1 {
@@ -106,9 +107,10 @@ pub fn capacity_packed_component_placement(
             }
             placement.insert(component.component_id.clone(), device.device_id.clone());
             assigned_bytes = next_bytes;
+            assigned_component_count += 1;
             cursor += 1;
         }
-        if assigned_bytes == 0 {
+        if assigned_component_count == 0 {
             let component = &components[cursor];
             return Err(CircuitPlacementError(format!(
                 "component {:?} requires {} bytes but device {:?} has only {} bytes",
