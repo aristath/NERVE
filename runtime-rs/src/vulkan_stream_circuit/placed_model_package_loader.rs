@@ -1,3 +1,40 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanDemandPagedSharedTierCapacities {
+    store_payload_bytes: usize,
+    device_payload_bytes: usize,
+    host_visible_payload_bytes: usize,
+}
+
+fn demand_paged_shared_tier_capacities(
+    maximum_store_payload_bytes: usize,
+    device_payload_bytes: usize,
+    shared_host_physical_bytes: usize,
+) -> Result<VulkanDemandPagedSharedTierCapacities, VulkanResidentTokenModelPackageError> {
+    if maximum_store_payload_bytes == 0
+        || device_payload_bytes == 0
+        || device_payload_bytes >= maximum_store_payload_bytes
+        || shared_host_physical_bytes == 0
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "demand-paged shared-tier capacity has an invalid store, device, or host bound",
+        ));
+    }
+    let store_payload_bytes = device_payload_bytes
+        .checked_add(shared_host_physical_bytes)
+        .unwrap_or(usize::MAX)
+        .min(maximum_store_payload_bytes);
+    Ok(VulkanDemandPagedSharedTierCapacities {
+        store_payload_bytes,
+        device_payload_bytes,
+        // This is a logical per-store admission limit, not a reservation. A
+        // store may need more than its nominal overflow when physical device
+        // fragmentation leaves part of its device payload budget unusable.
+        // The shared cache independently enforces the one physical host-memory
+        // hard bound across every store.
+        host_visible_payload_bytes: maximum_store_payload_bytes.min(shared_host_physical_bytes),
+    })
+}
+
 impl VulkanResidentInProcessPlacedModelPackage {
     pub fn from_manifest_file(
         device: &VulkanComputeDevice,
@@ -528,12 +565,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })
                 .collect::<Vec<_>>();
 
-        let physical_store_count = physical_slice_groups.len();
         let mut compiled_resource_device_stores = BTreeMap::new();
         let mut compiled_resource_physical_placements = Vec::new();
         let mut planned_selector_physical_placements =
             Vec::<(VulkanCompiledSelectorAddressMapping, String)>::new();
         let mut remaining_safe_host_visible_payload_bytes = None;
+        let mut shared_host_cache = None;
         for (physical_group_index, slice_indices) in physical_slice_groups.into_iter().enumerate() {
             let logical_device_ids = slice_indices
                 .iter()
@@ -707,8 +744,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )),
                 ));
             }
-            let (store_payload_capacity, device_payload_capacity, host_visible_payload_capacity) =
-                if maximum_dynamic_bytes > resident_payload_capacity {
+            let (
+                store_payload_capacity,
+                device_payload_capacity,
+                host_visible_payload_capacity,
+                store_shared_host_cache,
+            ) = if maximum_dynamic_bytes > resident_payload_capacity {
                     if remaining_safe_host_visible_payload_bytes.is_none() {
                         let capacity = read_vulkan_host_memory_capacity()
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
@@ -750,38 +791,44 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         maximum_dynamic_bytes,
                         resident_payload_capacity,
                         minimum_host_payload_bytes,
+                        None,
                     )
                     } else {
-                        let remaining_store_count =
-                            physical_store_count.saturating_sub(physical_group_index);
-                        let desired_host_payload_bytes = maximum_dynamic_bytes
-                            .saturating_sub(resident_payload_capacity);
-                        let host_visible_payload_capacity =
-                            reserve_fair_vulkan_host_visible_payload_bytes(
-                                remaining,
-                                remaining_store_count,
-                                desired_host_payload_bytes,
-                                physical_parameters
-                                    .staging_headroom_bytes
-                                    .saturating_add(maximum_alignment_padding),
-                            );
-                        let store_payload_capacity = resident_payload_capacity
-                            .checked_add(host_visible_payload_capacity)
-                            .ok_or_else(|| {
-                                VulkanResidentInProcessPlacedRuntimeError::Package(
-                                    VulkanResidentTokenModelPackageError::new(
-                                        "demand-tiered payload capacity overflowed",
-                                    ),
-                                )
-                            })?;
-                        (
-                            store_payload_capacity,
+                        let cache = match &shared_host_cache {
+                            Some(cache) => Arc::clone(cache),
+                            None => {
+                                let cache = Arc::new(
+                                    VulkanCompiledResourceSharedHostCache::new(
+                                        format!("{package_id}:{execution_scope}:host_cache"),
+                                        *remaining,
+                                    )
+                                    .map_err(|error| {
+                                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                                            VulkanResidentTokenModelPackageError::new(
+                                                error.to_string(),
+                                            ),
+                                        )
+                                    })?,
+                                );
+                                shared_host_cache = Some(Arc::clone(&cache));
+                                cache
+                            }
+                        };
+                        let capacities = demand_paged_shared_tier_capacities(
+                            maximum_dynamic_bytes,
                             resident_payload_capacity,
-                            host_visible_payload_capacity,
+                            cache.capacity_bytes(),
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+                        (
+                            capacities.store_payload_bytes,
+                            capacities.device_payload_bytes,
+                            capacities.host_visible_payload_bytes,
+                            Some(cache),
                         )
                     }
                 } else {
-                    (resident_payload_capacity, resident_payload_capacity, 0)
+                    (resident_payload_capacity, resident_payload_capacity, 0, None)
                 };
             let store_id = format!(
                 "{}:physical_store_{physical_group_index}:{}",
@@ -807,6 +854,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     physical_parameters.always_resident_bytes,
                     working_set_bytes,
                     store_residency.metadata_device_bytes,
+                    store_shared_host_cache.clone(),
                 )
                 .map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -816,6 +864,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )
                 })?,
             );
+            if let Some(cache) = &store_shared_host_cache {
+                let reclaimer: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> =
+                    store.clone();
+                cache.register_store(&reclaimer).map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to register shared host-cache store for physical slices {logical_device_ids:?}: {error}"
+                        )),
+                    )
+                })?;
+            }
             store
                 .register_device_memory_reclaimer(physical_device)
                 .map_err(|error| {

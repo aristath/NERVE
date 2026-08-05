@@ -177,6 +177,7 @@ include!("vulkan_stream_circuit/device_resource_residency.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");
 include!("vulkan_stream_circuit/compiled_resource_residency_report.rs");
 include!("vulkan_stream_circuit/compiled_resource_memory_plan.rs");
+include!("vulkan_stream_circuit/compiled_resource_shared_host_cache.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_store.rs");
 include!("vulkan_stream_circuit/compiled_resource_wave.rs");
 include!("vulkan_stream_circuit/compiled_resource_retiering.rs");

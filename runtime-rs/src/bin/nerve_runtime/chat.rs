@@ -381,6 +381,14 @@ fn print_runtime_resource_residency(
         totals.maximum_device_tier_payload_bytes,
         totals.maximum_host_visible_tier_payload_bytes,
     );
+    if totals.shared_host_cache_count > 0 {
+        println!(
+            "  shared_host_cache(instances/committed_bytes/capacity_bytes)={}/{}/{}",
+            totals.shared_host_cache_count,
+            totals.shared_host_cache_committed_bytes,
+            totals.shared_host_cache_capacity_bytes,
+        );
+    }
     println!(
         "  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={}/{}/{}/{}/{:.3}/{:.3}/{:.3}/{:.3}",
         totals.physical_read_count,

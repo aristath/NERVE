@@ -1,5 +1,5 @@
 pub const VULKAN_COMPILED_RESOURCE_RESIDENCY_REPORT_SCHEMA: &str =
-    "nerve.vulkan_compiled_resource_residency_report.v4";
+    "nerve.vulkan_compiled_resource_residency_report.v5";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanCompiledResourceComponentCoverageReport {
@@ -44,6 +44,10 @@ pub struct VulkanCompiledResourceStoreReport {
     pub host_visible_tier_payload_bytes: usize,
     pub maximum_device_tier_payload_bytes: usize,
     pub maximum_host_visible_tier_payload_bytes: usize,
+    pub shared_host_cache_id: Option<String>,
+    pub shared_host_cache_store_committed_bytes: usize,
+    pub shared_host_cache_committed_bytes: usize,
+    pub shared_host_cache_capacity_bytes: usize,
     pub addressable_unit_count: usize,
     pub initial_resident_unit_count: usize,
     pub resident_unit_count: usize,
@@ -104,6 +108,9 @@ pub struct VulkanCompiledResourceResidencyTotalsReport {
     pub host_visible_tier_payload_bytes: usize,
     pub maximum_device_tier_payload_bytes: usize,
     pub maximum_host_visible_tier_payload_bytes: usize,
+    pub shared_host_cache_count: usize,
+    pub shared_host_cache_committed_bytes: usize,
+    pub shared_host_cache_capacity_bytes: usize,
     pub addressable_unit_count: usize,
     pub initial_resident_unit_count: usize,
     pub resident_unit_count: usize,
@@ -388,10 +395,30 @@ impl VulkanResidentInProcessPlacedModelPackage {
 
         let mut totals =
             VulkanCompiledResourceResidencyTotalsReport::default();
+        let mut shared_host_cache_ids = BTreeSet::new();
         let mut scopes =
             BTreeMap::<String, VulkanCompiledResourceScopeCoverageReport>::new();
         for store in &stores {
             totals.add_store(store)?;
+            if let Some(cache_id) = &store.shared_host_cache_id
+                && shared_host_cache_ids.insert(cache_id.clone())
+            {
+                checked_report_add(
+                    &mut totals.shared_host_cache_count,
+                    1,
+                    "shared host cache count",
+                )?;
+                checked_report_add(
+                    &mut totals.shared_host_cache_committed_bytes,
+                    store.shared_host_cache_committed_bytes,
+                    "shared host cache committed bytes",
+                )?;
+                checked_report_add(
+                    &mut totals.shared_host_cache_capacity_bytes,
+                    store.shared_host_cache_capacity_bytes,
+                    "shared host cache capacity bytes",
+                )?;
+            }
             for scope in &store.scopes {
                 let aggregate = scopes
                     .entry(scope.execution_scope.clone())
@@ -432,6 +459,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     "scope GPU-miss count",
                 )?;
             }
+        }
+        if !shared_host_cache_ids.is_empty() {
+            totals.maximum_host_visible_tier_payload_bytes =
+                totals.shared_host_cache_capacity_bytes;
         }
         let target = scopes.remove("target").unwrap_or_else(|| {
             VulkanCompiledResourceScopeCoverageReport {

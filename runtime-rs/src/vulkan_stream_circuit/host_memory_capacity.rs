@@ -15,28 +15,6 @@ impl VulkanHostMemoryCapacity {
     }
 }
 
-fn reserve_fair_vulkan_host_visible_payload_bytes(
-    remaining_safe_bytes: &mut usize,
-    remaining_store_count: usize,
-    desired_payload_bytes: usize,
-    allocation_overhead_bytes: usize,
-) -> usize {
-    if remaining_store_count == 0 || desired_payload_bytes == 0 {
-        return 0;
-    }
-    let fair_total = *remaining_safe_bytes / remaining_store_count;
-    let payload_bytes = desired_payload_bytes.min(
-        fair_total.saturating_sub(allocation_overhead_bytes),
-    );
-    if payload_bytes == 0 {
-        return 0;
-    }
-    *remaining_safe_bytes = remaining_safe_bytes.saturating_sub(
-        payload_bytes.saturating_add(allocation_overhead_bytes),
-    );
-    payload_bytes
-}
-
 fn read_vulkan_host_memory_capacity()
 -> Result<VulkanHostMemoryCapacity, VulkanResidentTokenModelPackageError> {
     let contents = fs::read_to_string("/proc/meminfo").map_err(|error| {
