@@ -45,11 +45,14 @@ toward 50 tok/s without regressing supported Qwen models.
    gate at 128K context and a 65,536-token output allowance. The gate discards
    one complete conversation, measures a second conversation without unloading
    the model, preserves Greece/Athens turn recall, and releases every acquired
-   allocation. Its current truth baseline is only **2.7258 decode tok/s** and
-   **5.1398 prefill tok/s** across 3,055 measured generated tokens. After the
-   truth-set `hi`, the five measured turns reread 971.79 GB, evicted 969.25 GB,
-   performed 72,423 reloads, and blocked 486.21 seconds on residency. No derived
-   representation was selected. Fix the following in measured order:
+   allocation. Its current truth baseline is **6.2442 decode tok/s** and
+   **7.6488 prefill tok/s** across 3,313 measured generated tokens. Capacity
+   packing now charges target endpoints and mounted draft parameters to their
+   physical component segment; that removed the tail-device overload and cut
+   truth-set source reads from 971.79 GB to 108.68 GB. The remaining five turns
+   still evicted 112.82 GB, performed 7,866 reloads, and blocked 80.47 seconds
+   on residency, so the cache hierarchy remains the first measured bottleneck.
+   No derived representation was selected. Fix the following in measured order:
 
    - Replace isolated per-device-store host-visible budgets with a shared,
      borrowable physical residency cache. Preserve contiguous component
@@ -109,9 +112,9 @@ toward 50 tok/s without regressing supported Qwen models.
    current thinking-enabled gates each discard one complete in-process warmup
    conversation, reset model state without unloading, pass correct Greece
    recall, and release their exact recorded reservations. On the current
-   pressure-safe runtime, Qwen3.6-35B-A3B reaches 96.71 decode tok/s and 119.79
-   prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches 53.65
-   decode tok/s and 133.15 prefill tok/s on one AMD using the official
+   pressure-safe runtime, Qwen3.6-35B-A3B reaches 97.164 decode tok/s and
+   128.9294 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches
+   54.4492 decode tok/s and 133.9638 prefill tok/s on one AMD using the official
    temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
    repetition-penalty 1.0 thinking profile. Keep repetition,
    structured-protocol, conversation, and teardown checks active so throughput

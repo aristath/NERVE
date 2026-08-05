@@ -9,6 +9,82 @@ fn maximum_resident_bytes(plan: &VulkanRuntimeResidencyPlan, device_id: &str) ->
 }
 
 #[test]
+fn runtime_component_weights_include_target_endpoint_parameters() {
+    let runtime_model = fixture_model_runtime_model();
+    let tensor_index = runtime_model.load_runtime_tensor_index(tiny_model_dir()).unwrap();
+    let components = capacity_packed_runtime_components(&runtime_model, &tensor_index, false)
+        .unwrap();
+    let expected = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .flat_map(|component| component.params.refs.values())
+        .filter_map(|parameter| parameter.tensor.as_deref())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|tensor| tensor_index.tensors[tensor].byte_count.unwrap())
+        .sum::<usize>();
+
+    assert_eq!(components.len(), 1);
+    assert_eq!(components[0].resident_weight_bytes, expected);
+}
+
+#[test]
+fn runtime_component_weights_charge_mounted_draft_parameters_to_the_output_tail() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let mut tensor_index = runtime_model.load_runtime_tensor_index(tiny_model_dir()).unwrap();
+    let without_draft = capacity_packed_runtime_components(&runtime_model, &tensor_index, false)
+        .unwrap();
+    let mut draft_graph = runtime_model.circuit_graph.clone();
+    let draft_component = draft_graph
+        .components
+        .iter_mut()
+        .find(|component| component.runtime_role.is_signal_processor())
+        .unwrap();
+    let draft_parameter = draft_component
+        .params
+        .refs
+        .values_mut()
+        .find(|parameter| parameter.tensor.is_some())
+        .unwrap();
+    let source_tensor = draft_parameter.tensor.clone().unwrap();
+    let unique_draft_tensor = "draft.unique.weight".to_string();
+    draft_parameter.tensor = Some(unique_draft_tensor.clone());
+    let draft_tensor_bytes = tensor_index.tensors[&source_tensor].byte_count.unwrap();
+    tensor_index.tensors.insert(
+        unique_draft_tensor,
+        tensor_index.tensors[&source_tensor].clone(),
+    );
+    runtime_model.package.speculative_decoders.push(
+        VulkanResidentSpeculativeDecoderPackageSpec {
+            id: "draft_fixture".to_string(),
+            decoder_type: "fixture".to_string(),
+            source_prefix: "draft".to_string(),
+            execution_contract: VulkanResidentSpeculativeExecutionContract::AutoregressiveFeedback {
+                processor_schedule: "one_token_per_tick".to_string(),
+                output_schedule: "dedicated_token_transducer".to_string(),
+            },
+            proposal_contract: None,
+            circuit_graph: draft_graph,
+            input_adapter: None,
+            output_transducer: None,
+            component_executions: Vec::new(),
+            state_contract: serde_json::json!({}),
+            verification_contract: serde_json::json!({}),
+        },
+    );
+
+    let with_draft = capacity_packed_runtime_components(&runtime_model, &tensor_index, true)
+        .unwrap();
+
+    assert_eq!(with_draft.len(), 1);
+    assert_eq!(
+        with_draft[0].resident_weight_bytes,
+        without_draft[0].resident_weight_bytes + draft_tensor_bytes,
+    );
+}
+
+#[test]
 fn runtime_auto_placement_uses_one_device_when_the_complete_retained_set_fits() {
     let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
     let tensor_index = runtime_model.load_runtime_tensor_index(tiny_model_dir()).unwrap();

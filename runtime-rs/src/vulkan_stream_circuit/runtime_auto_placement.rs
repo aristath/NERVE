@@ -74,7 +74,11 @@ pub fn capacity_pack_vulkan_runtime_model(
             "runtime auto-placement requires candidate devices".to_string(),
         ));
     }
-    let components = capacity_packed_runtime_components(runtime_model, tensor_index)?;
+    let components = capacity_packed_runtime_components(
+        runtime_model,
+        tensor_index,
+        speculative_draft_tokens > 0,
+    )?;
     if components.is_empty() {
         return Err(VulkanRuntimeResidencyPlanError(
             "runtime auto-placement found no independently placeable signal processors"
@@ -438,40 +442,91 @@ fn capacity_pack_vulkan_runtime_model_on_devices(
 fn capacity_packed_runtime_components(
     runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
+    mount_speculative_decoders: bool,
 ) -> Result<Vec<CapacityPackedPlacementComponent>, VulkanRuntimeResidencyPlanError> {
-    let mut charged_tensors = BTreeSet::new();
-    runtime_model
+    let component_ids = runtime_model
         .circuit_graph
         .components
         .iter()
         .filter(|component| component.runtime_role.is_signal_processor())
-        .map(|component| {
-            let mut bytes = 0usize;
-            let tensors = component
+        .map(|component| component.component_id.clone())
+        .collect::<Vec<_>>();
+    let first_component_id = component_ids.first().ok_or_else(|| {
+        VulkanRuntimeResidencyPlanError(
+            "capacity-packed runtime has no signal processor".to_string(),
+        )
+    })?;
+    let last_component_id = component_ids
+        .last()
+        .expect("a first signal processor implies a last signal processor");
+    let mut tensors_by_component = component_ids
+        .iter()
+        .map(|component_id| (component_id.clone(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut charged_tensors = BTreeSet::new();
+    let mut charge_graph = |graph: &VulkanResidentPackageCircuitGraph,
+                            fixed_anchor: Option<&str>|
+     -> Result<(), VulkanRuntimeResidencyPlanError> {
+        for component in &graph.components {
+            let anchor = fixed_anchor.unwrap_or(match component.runtime_role {
+                CircuitRuntimeRole::InputTransducer => first_component_id,
+                CircuitRuntimeRole::SignalProcessor => &component.component_id,
+                CircuitRuntimeRole::OutputTransducer
+                | CircuitRuntimeRole::Sampler
+                | CircuitRuntimeRole::DraftProcessor
+                | CircuitRuntimeRole::DraftInputAdapter
+                | CircuitRuntimeRole::DraftOutputTransducer => last_component_id,
+            });
+            let target = tensors_by_component.get_mut(anchor).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "capacity-packed auxiliary component {:?} resolves to unknown signal processor {anchor:?}",
+                    component.component_id,
+                ))
+            })?;
+            for tensor in component
                 .params
                 .refs
                 .values()
                 .filter_map(|parameter| parameter.tensor.as_deref())
-                .collect::<BTreeSet<_>>();
-            for tensor in tensors {
+                .collect::<BTreeSet<_>>()
+            {
                 if !charged_tensors.insert(tensor.to_string()) {
                     continue;
                 }
-                let metadata = tensor_index.tensors.get(tensor).ok_or_else(|| {
-                    VulkanRuntimeResidencyPlanError(format!(
-                        "component {:?} references tensor {tensor:?} absent from the runtime tensor index",
-                        component.component_id,
-                    ))
-                })?;
-                let tensor_bytes = metadata.byte_count.ok_or_else(|| {
-                    VulkanRuntimeResidencyPlanError(format!(
-                        "tensor {tensor:?} has no byte_count for capacity-packed placement",
-                    ))
-                })?;
-                bytes = checked_residency_add(bytes, tensor_bytes, "component tensor weight")?;
+                target.insert(tensor.to_string());
             }
+        }
+        Ok(())
+    };
+    charge_graph(&runtime_model.circuit_graph, None)?;
+    if mount_speculative_decoders {
+        for decoder in &runtime_model.package.speculative_decoders {
+            charge_graph(&decoder.circuit_graph, Some(last_component_id))?;
+        }
+    }
+
+    component_ids
+        .into_iter()
+        .map(|component_id| {
+            let bytes = tensors_by_component
+                .remove(&component_id)
+                .expect("every signal processor was indexed")
+                .into_iter()
+                .try_fold(0usize, |bytes, tensor| {
+                    let metadata = tensor_index.tensors.get(&tensor).ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "component {component_id:?} references tensor {tensor:?} absent from the runtime tensor index",
+                        ))
+                    })?;
+                    let tensor_bytes = metadata.byte_count.ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "tensor {tensor:?} has no byte_count for capacity-packed placement",
+                        ))
+                    })?;
+                    checked_residency_add(bytes, tensor_bytes, "component tensor weight")
+                })?;
             Ok(CapacityPackedPlacementComponent {
-                component_id: component.component_id.clone(),
+                component_id,
                 resident_weight_bytes: bytes,
             })
         })
