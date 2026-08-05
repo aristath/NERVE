@@ -598,7 +598,14 @@ def render_latent_compression_shader(
     radix_topk = temporal_radix_topk or RADIX_TOPK_SHADER_PATTERN.fullmatch(shader_file)
     if radix_topk is not None:
         maximum, top_k, ratio, offset = map(int, radix_topk.groups())
-        if maximum <= 0 or top_k <= 0 or top_k > maximum or ratio <= 0:
+        sort_capacity = 1 << (top_k - 1).bit_length()
+        if (
+            maximum <= 0
+            or top_k <= 0
+            or top_k > maximum
+            or sort_capacity > 1024
+            or ratio <= 0
+        ):
             raise ModelCompileError(f"invalid radix top-k shape {shader_file!r}")
         return _render_template(
             source_dir
@@ -610,6 +617,7 @@ def render_latent_compression_shader(
             {
                 "MAX_SCORES": str(maximum),
                 "TOP_K": str(top_k),
+                "SORT_CAPACITY": str(sort_capacity),
                 "COMPRESSION_RATIO": str(ratio),
                 "INDEX_OFFSET": str(offset),
             },

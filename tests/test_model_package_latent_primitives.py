@@ -788,9 +788,23 @@ def test_compiles_learned_index_transform_scores_and_exact_radix_topk(
     assert "shared uint query_cache[QUERY_WORDS];" in score_source
     assert "uint selected_prefix;" in topk_source
     assert "for (int bit_index = 31; bit_index >= 0; --bit_index)" in topk_source
+    assert "shared uint selected_keys[512];" in topk_source
+    assert "selected_candidate_precedes" in topk_source
+    assert "atomicAdd" not in topk_source
+    assert "left_index < right_index" in topk_source
     assert all("{{" not in (tmp_path / name).read_text() for name in files.values())
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == len(files)
+
+
+def test_rejects_radix_topk_that_cannot_be_sorted_by_one_workgroup(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_file = "radix_topk_index_f32_u32_m2048_k1025_r1_o0__sc2.comp"
+
+    with pytest.raises(ModelCompileError, match="invalid radix top-k shape"):
+        copy_shader_templates(shader_source_dir, tmp_path, {shader_file})
 
 
 def test_compiles_causal_indexed_attention_with_compressed_memory(

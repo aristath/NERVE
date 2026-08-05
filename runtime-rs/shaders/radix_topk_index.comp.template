@@ -15,7 +15,9 @@ shared uint reductions[1024];
 shared uint selected_prefix;
 shared uint selected_mask;
 shared uint selected_rank;
-shared uint output_count;
+shared uint selected_count;
+shared uint selected_keys[{{SORT_CAPACITY}}];
+shared uint selected_indices[{{SORT_CAPACITY}}];
 
 uint ordered_float_key(float value) {
     uint bits = floatBitsToUint(value);
@@ -28,6 +30,28 @@ void reduce_counts(uint lane) {
         if (lane < stride) reductions[lane] += reductions[lane + stride];
     }
     barrier();
+}
+
+uint exclusive_prefix_sum(uint lane, uint value) {
+    reductions[lane] = value;
+    barrier();
+    for (uint offset = 1u; offset < 1024u; offset <<= 1u) {
+        uint addend = lane >= offset ? reductions[lane - offset] : 0u;
+        barrier();
+        reductions[lane] += addend;
+        barrier();
+    }
+    return lane == 0u ? 0u : reductions[lane - 1u];
+}
+
+bool selected_candidate_precedes(
+    uint left_key,
+    uint left_index,
+    uint right_key,
+    uint right_index
+) {
+    return left_key > right_key
+        || (left_key == right_key && left_index < right_index);
 }
 
 void main() {
@@ -62,21 +86,87 @@ void main() {
         barrier();
     }
 
-    if (lane == 0u) output_count = 0u;
+    if (lane < {{SORT_CAPACITY}}u) {
+        selected_keys[lane] = 0u;
+        selected_indices[lane] = 0xffffffffu;
+    }
     barrier();
-    for (uint position = lane; position < score_count; position += 1024u) {
+
+    uint chunk_start = (score_count * lane) / 1024u;
+    uint chunk_end = (score_count * (lane + 1u)) / 1024u;
+    uint local_count = 0u;
+    for (uint position = chunk_start; position < chunk_end; ++position) {
+        uint key = ordered_float_key(scores.values[position]);
+        if (key > selected_prefix) ++local_count;
+    }
+    uint output_base = exclusive_prefix_sum(lane, local_count);
+    if (lane == 1023u) selected_count = output_base + local_count;
+    barrier();
+
+    uint local_ordinal = 0u;
+    for (uint position = chunk_start; position < chunk_end; ++position) {
         uint key = ordered_float_key(scores.values[position]);
         if (key > selected_prefix) {
-            uint slot = atomicAdd(output_count, 1u);
-            if (slot < result_count) indices.values[slot] = INDEX_OFFSET + position;
+            uint slot = output_base + local_ordinal;
+            if (slot < result_count) {
+                selected_keys[slot] = key;
+                selected_indices[slot] = position;
+            }
+            ++local_ordinal;
         }
     }
     barrier();
-    for (uint position = lane; position < score_count; position += 1024u) {
+
+    local_count = 0u;
+    for (uint position = chunk_start; position < chunk_end; ++position) {
+        if (ordered_float_key(scores.values[position]) == selected_prefix) {
+            ++local_count;
+        }
+    }
+    output_base = exclusive_prefix_sum(lane, local_count) + selected_count;
+    barrier();
+    local_ordinal = 0u;
+    for (uint position = chunk_start; position < chunk_end; ++position) {
         uint key = ordered_float_key(scores.values[position]);
         if (key == selected_prefix) {
-            uint slot = atomicAdd(output_count, 1u);
-            if (slot < result_count) indices.values[slot] = INDEX_OFFSET + position;
+            uint slot = output_base + local_ordinal;
+            if (slot < result_count) {
+                selected_keys[slot] = key;
+                selected_indices[slot] = position;
+            }
+            ++local_ordinal;
         }
+    }
+    barrier();
+
+    for (uint span = 2u; span <= {{SORT_CAPACITY}}u; span <<= 1u) {
+        for (uint stride = span >> 1u; stride > 0u; stride >>= 1u) {
+            uint partner = lane ^ stride;
+            if (lane < {{SORT_CAPACITY}}u && partner > lane) {
+                uint left_key = selected_keys[lane];
+                uint left_index = selected_indices[lane];
+                uint right_key = selected_keys[partner];
+                uint right_index = selected_indices[partner];
+                bool descending = (lane & span) == 0u;
+                bool ordered = descending
+                    ? selected_candidate_precedes(
+                        left_key, left_index, right_key, right_index
+                    )
+                    : selected_candidate_precedes(
+                        right_key, right_index, left_key, left_index
+                    );
+                if (!ordered) {
+                    selected_keys[lane] = right_key;
+                    selected_indices[lane] = right_index;
+                    selected_keys[partner] = left_key;
+                    selected_indices[partner] = left_index;
+                }
+            }
+            barrier();
+        }
+    }
+
+    if (lane < result_count) {
+        indices.values[lane] = INDEX_OFFSET + selected_indices[lane];
     }
 }
