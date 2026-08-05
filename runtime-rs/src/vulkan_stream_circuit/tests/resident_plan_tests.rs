@@ -135,6 +135,7 @@ fn bounds_each_dynamic_state_buffer_by_its_own_activation_limit() {
         .find(|state| state.component_id == "layer_00" && state.state_id == "kv_memory")
         .unwrap();
 
+    assert_eq!(state.dtype.as_deref(), Some("BF16"));
     assert_eq!(state.max_dynamic_activations, Some(2));
     let layout = VulkanTransientStateBufferLayout::for_state(state, 4).unwrap();
     assert_eq!(

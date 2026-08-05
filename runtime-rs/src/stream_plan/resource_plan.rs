@@ -29,6 +29,7 @@ pub struct PlannedStateResource {
     pub owner: Option<String>,
     pub layout: Option<String>,
     pub source_layout: Option<String>,
+    pub dtype: Option<String>,
     pub element_bytes: Option<usize>,
 }
 
@@ -469,6 +470,7 @@ pub struct PlannedStatePort {
     pub shape: Option<Vec<usize>>,
     pub elements_per_activation: Option<usize>,
     pub max_dynamic_activations: Option<usize>,
+    pub dtype: Option<String>,
 }
 
 impl PlannedStatePort {
@@ -479,6 +481,7 @@ impl PlannedStatePort {
             shape: state.shape.clone(),
             elements_per_activation: state.elements_per_activation(),
             max_dynamic_activations: state.dynamic_activation_capacity(),
+            dtype: state.dtype.clone(),
         }
     }
 }

@@ -195,6 +195,7 @@ impl StreamCircuitResourcePlan {
                     owner: state.owner.clone(),
                     layout: state.layout.clone(),
                     source_layout: state.source_layout.clone(),
+                    dtype: state.dtype.clone(),
                     element_bytes: state
                         .dtype
                         .as_deref()

@@ -218,6 +218,7 @@ mod transient_state_buffer_layout_tests {
             component_id: "component".to_string(),
             state_id: "state".to_string(),
             state_type: "test".to_string(),
+            dtype: None,
             layout: None,
             static_elements: None,
             elements_per_activation: None,
