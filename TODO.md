@@ -18,7 +18,19 @@ toward 50 tok/s without regressing supported Qwen models.
    placement as runtime choices, never model-family switches. SINT8 matrix
    calibration alone is insufficient: the previous inline MXFP4-to-SINT8
    reconstruction lost to native MXFP4 because activation quantization and
-   packed-weight reconstruction were not amortized.
+   packed-weight reconstruction were not amortized. Hardware capability is
+   candidate discovery, not promotion: the rejected schema-v4 experiment
+   selected expanded FP8 merely because every target exposed the required
+   features. It doubled sparse-expert residency, reduced the first DeepSeek
+   turn to 0.719 tok/s, and caused 207.3 GB of uploads for 143 decode tokens.
+   The baseline compiler now keeps native MXFP4; attach any derived resident
+   representation only through measured optimizer evidence that includes the
+   whole routed working set, footprint, reload cost, and device headroom. The
+   package/runtime contract can now materialize one explicitly selected MXFP4
+   to FP8 derivation without changing source artifacts. Complete the remaining
+   alternative-set contract, device-local measurement evidence, and runtime
+   choice so native and derived representations can coexist and be selected per
+   component on the component's actual target device.
 
 2. Extend the generic quality gate with a representative tool-call round trip
    and a long-stream continuity case. Use package-owned chat behavior, official
@@ -28,16 +40,18 @@ toward 50 tok/s without regressing supported Qwen models.
    output rollback without model-name branches.
 
 3. Raise DeepSeek's accepted decode rate past 30 tok/s and continue until no
-   material bottleneck remains. The authoritative thinking-enabled product gate
-   uses 128K context, a 65,536-token output allowance, a requested speculative
-   window of seven clamped to the checkpoint's trained five-token block,
-   contiguous placement across all five AMD GPUs, and one complete discarded
-   conversation before the truth conversation in the same resident process.
-   It terminates coherently, preserves Greece recall, releases all acquired
-   capacity, and reaches 8.818 decode tok/s and 8.942 prefill tok/s. This is an
-   11.6% decode improvement over the former 7.900 tok/s gate and a 61.4%
-   improvement over the fixed-window 5.462 tok/s gate, but remains far below
-   the 30 tok/s floor.
+   material bottleneck remains. First compile a fresh package from the source
+   checkpoint using native MXFP4 as the sparse-expert baseline; never rerun the
+   rejected expanded-FP8 package. The authoritative thinking-enabled product
+   gate uses 128K context, a 65,536-token output allowance, a requested
+   speculative window of seven clamped to the checkpoint's trained five-token
+   block, contiguous placement across all five explicitly bound AMD GPUs, and
+   one complete discarded conversation before the truth conversation in the
+   same resident process. The previous safe native package terminated
+   coherently, preserved Greece recall, released all acquired capacity, and
+   reached 8.818 decode tok/s and 8.942 prefill tok/s. This remains far below
+   the 30 tok/s floor and must be remeasured on the current runtime before
+   attribution work continues.
 
    Compile the complete speculative cycle as a device-resident transaction:
    generate the draft window without a host wait per proposal, append target
@@ -87,13 +101,18 @@ toward 50 tok/s without regressing supported Qwen models.
 
 4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
    quality/performance gates sequentially on equivalent healthy AMD placement.
-   The latest schema-v10 thinking-enabled gates each discarded one complete
-   in-process warmup conversation, reset model state without unloading, passed
-   correct Greece recall, and released their exact recorded reservations:
-   Qwen3.6-35B-A3B reaches 106.22 decode tok/s and 173.91 prefill tok/s;
-   Qwen3.5-9B reaches 54.33 decode tok/s and 117.76 prefill tok/s. Keep
-   repetition, structured-protocol, conversation, and teardown checks active so
-   throughput alone cannot pass.
+   Restrict discovery to the AMD Vulkan ICD and bind PCI-derived UUIDs so an
+   added Intel or NVIDIA adapter cannot silently change the comparison. The
+   current thinking-enabled gates each discard one complete in-process warmup
+   conversation, reset model state without unloading, pass correct Greece
+   recall, and release their exact recorded reservations. On the current
+   pressure-safe runtime, Qwen3.6-35B-A3B reaches 101.05 decode tok/s and 196.34
+   prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches 48.96
+   decode tok/s and 123.65 prefill tok/s on one AMD using the official
+   temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
+   repetition-penalty 1.0 thinking profile. Keep repetition,
+   structured-protocol, conversation, and teardown checks active so throughput
+   alone cannot pass.
 
 5. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
