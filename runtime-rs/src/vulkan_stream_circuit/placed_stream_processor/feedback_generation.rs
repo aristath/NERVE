@@ -1,4 +1,11 @@
 impl VulkanResidentInProcessPlacedStreamProcessor {
+    fn effective_speculative_draft_token_count(&self, requested: usize) -> usize {
+        self.speculative_decoders
+            .first()
+            .map(|decoder| decoder.effective_draft_token_count(requested))
+            .unwrap_or_default()
+    }
+
     pub fn run_feedback_bounded_in_process(
         &self,
         device: &VulkanComputeDevice,

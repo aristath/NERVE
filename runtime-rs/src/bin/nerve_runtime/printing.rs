@@ -390,6 +390,7 @@ fn print_runtime_speculative_stats(
     target_verification_time_ns: u64,
     draft_catch_up_time_ns: u64,
     total_time_ns: u64,
+    windows: &[VulkanSpeculativeWindowStats],
     cycle_traces: &[VulkanSpeculativeCycleTrace],
 ) {
     if cycle_count == 0 {
@@ -419,6 +420,21 @@ fn print_runtime_speculative_stats(
         nanos_to_millis(draft_catch_up_time_ns)
     );
     println!("  total_ms={:.3}", nanos_to_millis(total_time_ns));
+    for window in windows {
+        let accepted_throughput = if window.total_time_ns == 0 {
+            0.0
+        } else {
+            window.emitted_token_count as f64
+                / (window.total_time_ns as f64 / 1_000_000_000.0)
+        };
+        println!(
+            "  window_{}=cycles:{},useful_tokens:{},total_ms:{:.3},accepted_tokens_per_second:{accepted_throughput:.3}",
+            window.draft_width,
+            window.cycle_count,
+            window.emitted_token_count,
+            nanos_to_millis(window.total_time_ns),
+        );
+    }
     for (index, trace) in cycle_traces.iter().enumerate() {
         println!(
             "  trace_{index}=tick:{} anchor:{} accepted:{} draft:{:?} target:{:?}",

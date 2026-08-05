@@ -21,6 +21,7 @@ struct RuntimeChatTurn {
     speculative_target_verification_time_ns: u64,
     speculative_draft_catch_up_time_ns: u64,
     speculative_total_time_ns: u64,
+    speculative_windows: Vec<VulkanSpeculativeWindowStats>,
     speculative_cycle_traces: Vec<VulkanSpeculativeCycleTrace>,
     resident_feedback: RuntimeFeedbackExecutionReport,
     transport_edges: Vec<RuntimePlacedTransportEdgeReport>,
@@ -263,6 +264,7 @@ where
                 turn.speculative_target_verification_time_ns,
                 turn.speculative_draft_catch_up_time_ns,
                 turn.speculative_total_time_ns,
+                &turn.speculative_windows,
                 &turn.speculative_cycle_traces,
             );
             print_runtime_feedback_stats(&turn.resident_feedback);

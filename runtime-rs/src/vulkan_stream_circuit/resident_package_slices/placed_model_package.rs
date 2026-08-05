@@ -87,6 +87,36 @@ impl VulkanResidentInProcessPlacedModelPackage {
         &self.compiled_resource_physical_placements
     }
 
+    fn compiled_resource_load_required_count(
+        &self,
+    ) -> Result<u64, VulkanCompiledResourceDeviceStoreError> {
+        self.compiled_resource_physical_placements
+            .iter()
+            .try_fold(0u64, |total, placement| {
+                let logical_device_id = placement.logical_device_ids.first().ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource physical placement has no logical device",
+                    )
+                })?;
+                let store = self
+                    .compiled_resource_device_stores
+                    .get(logical_device_id)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "compiled resource physical placement {:?} has no device store",
+                            placement.store_id
+                        ))
+                    })?;
+                total
+                    .checked_add(store.statistics()?.miss_count)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "compiled resource load-required count overflowed",
+                        )
+                    })
+            })
+    }
+
     pub fn resident_state_buffer(
         &self,
         key: &TransientStateKey,

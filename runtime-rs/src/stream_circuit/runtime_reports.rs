@@ -586,6 +586,7 @@ pub struct RuntimePlacedPromptRunReport {
     pub speculative_target_verification_time_ns: u64,
     pub speculative_draft_catch_up_time_ns: u64,
     pub speculative_total_time_ns: u64,
+    pub speculative_windows: Vec<crate::VulkanSpeculativeWindowStats>,
     pub speculative_cycle_traces: Vec<crate::VulkanSpeculativeCycleTrace>,
     pub resident_feedback: RuntimeFeedbackExecutionReport,
     pub sparse_moe: RuntimeSparseMoeWorkReport,

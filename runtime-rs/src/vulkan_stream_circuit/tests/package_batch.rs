@@ -782,9 +782,116 @@ fn speculative_decode_stats_report_rollbacks_and_total_cost() {
     assert_eq!(stats.accepted_draft_token_count, 1);
     assert_eq!(stats.emitted_token_count, 2);
     assert_eq!(stats.total_time_ns, 100);
+    assert_eq!(
+        stats.windows.get(&2),
+        Some(&VulkanSpeculativeWindowStats {
+            draft_width: 2,
+            cycle_count: 1,
+            emitted_token_count: 2,
+            total_time_ns: 100,
+        })
+    );
     assert_eq!(stats.cycle_traces.len(), 1);
     assert_eq!(stats.cycle_traces[0].draft_token_ids, vec![2, 3]);
     assert_eq!(stats.cycle_traces[0].target_token_ids, vec![2, 9, 4]);
+}
+
+fn adaptive_window_cycle(
+    draft_width: usize,
+    emitted_token_count: usize,
+    total_time_ns: u64,
+) -> VulkanSpeculativeCycleRun {
+    let draft_token_ids = (0..draft_width)
+        .map(|index| u32::try_from(index + 2).unwrap())
+        .collect::<Vec<_>>();
+    let target_tokens = (0..=draft_width)
+        .map(|index| sampled_token(u32::try_from(index + 2).unwrap()))
+        .collect::<Vec<_>>();
+    VulkanSpeculativeCycleRun {
+        decoder_id: "draft".to_string(),
+        initial_token_id: 1,
+        start_stream_tick: 0,
+        draft_token_ids,
+        target_tokens: target_tokens.clone(),
+        verification: VulkanSpeculativeVerificationResult {
+            accepted_draft_count: emitted_token_count.saturating_sub(1),
+            committed_target_tick_count: emitted_token_count,
+            emitted_tokens: target_tokens[..emitted_token_count].to_vec(),
+        },
+        draft_time_ns: total_time_ns / 10,
+        target_verification_time_ns: total_time_ns.saturating_mul(8) / 10,
+        draft_catch_up_time_ns: total_time_ns / 100,
+        total_time_ns,
+    }
+}
+
+#[test]
+fn adaptive_speculative_windows_probe_execution_shape_boundaries() {
+    assert_eq!(
+        adaptive_speculative_window_candidates(5),
+        vec![5, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        adaptive_speculative_window_candidates(15),
+        vec![15, 1, 2, 3, 4, 7, 8]
+    );
+    assert_eq!(adaptive_speculative_window_candidates(1), vec![1]);
+}
+
+#[test]
+fn adaptive_speculative_window_selects_measured_accepted_throughput() {
+    let mut selector = VulkanAdaptiveSpeculativeWindowSelector::new(5);
+    let scores = BTreeMap::from([
+        (1, (2, 100)),
+        (2, (2, 160)),
+        (3, (3, 260)),
+        (4, (3, 330)),
+        (5, (3, 400)),
+    ]);
+
+    for expected_width in [5, 1, 2, 3, 4] {
+        for _ in 0..3 {
+            assert_eq!(selector.next_window_width(), expected_width);
+            let (emitted, elapsed) = scores[&expected_width];
+            selector.record_cycle(
+                expected_width,
+                &adaptive_window_cycle(expected_width, emitted, elapsed),
+            );
+        }
+    }
+
+    assert!(selector.is_calibrated());
+    assert_eq!(selector.next_window_width(), 1);
+}
+
+#[test]
+fn adaptive_speculative_window_excludes_first_shape_warmup() {
+    let mut selector = VulkanAdaptiveSpeculativeWindowSelector::new(2);
+
+    for (width, emitted, elapsed) in [
+        (2, 3, 10),
+        (2, 2, 200),
+        (2, 2, 200),
+        (1, 1, 10_000),
+        (1, 2, 100),
+        (1, 2, 100),
+    ] {
+        assert_eq!(selector.next_window_width(), width);
+        selector.record_cycle(width, &adaptive_window_cycle(width, emitted, elapsed));
+    }
+
+    assert!(selector.is_calibrated());
+    assert_eq!(selector.next_window_width(), 1);
+}
+
+#[test]
+fn adaptive_speculative_window_ignores_truncated_or_failed_measurements() {
+    let mut selector = VulkanAdaptiveSpeculativeWindowSelector::new(2);
+
+    selector.record_cycle(2, &adaptive_window_cycle(1, 2, 100));
+    assert_eq!(selector.next_window_width(), 2);
+    selector.record_cycle(2, &adaptive_window_cycle(2, 2, 0));
+    assert_eq!(selector.next_window_width(), 2);
 }
 
 #[test]

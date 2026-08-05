@@ -13,6 +13,7 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     pending_input_events: VecDeque<VulkanResidentTokenInputEvent>,
     speculative_draft_tokens: usize,
     speculative_confidence_threshold: f32,
+    speculative_window_selector: Option<VulkanAdaptiveSpeculativeWindowSelector>,
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
@@ -37,6 +38,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
             ));
         }
         self.speculative_draft_tokens = speculative_draft_tokens;
+        self.speculative_window_selector = (speculative_draft_tokens > 0).then(|| {
+            VulkanAdaptiveSpeculativeWindowSelector::new(
+                self.processor
+                    .effective_speculative_draft_token_count(speculative_draft_tokens),
+            )
+        });
         Ok(self)
     }
 
@@ -117,9 +124,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 resource_residency_policy,
             )?,
         );
-        let mut stream = Self::new(package, devices, random_seed)?;
-        stream.speculative_draft_tokens = speculative_draft_tokens;
-        Ok(stream)
+        Self::new(package, devices, random_seed)?
+            .with_speculative_draft_tokens(speculative_draft_tokens)
     }
 
     pub fn from_package_devices_and_session(
@@ -149,6 +155,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: 0,
             speculative_confidence_threshold: 0.0,
+            speculative_window_selector: None,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -188,6 +195,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.session.transport = VulkanInProcessPlacedEdgeTransport::new();
         self.package = package;
         self.processor = processor;
+        self.speculative_window_selector = (self.speculative_draft_tokens > 0).then(|| {
+            VulkanAdaptiveSpeculativeWindowSelector::new(
+                self.processor
+                    .effective_speculative_draft_token_count(self.speculative_draft_tokens),
+            )
+        });
         self.resident_feedback_template_catalog.clear();
         self.pending_scheduler_activation = None;
         Ok(())
@@ -225,6 +238,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
             speculative_confidence_threshold: self.speculative_confidence_threshold,
+            speculative_window_selector: self.speculative_window_selector.clone(),
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -759,8 +773,15 @@ impl VulkanResidentInProcessPlacedPromptStream {
         {
             return Ok(false);
         }
-        let draft_token_count = self
-            .speculative_draft_tokens
+        let selected_window_width = if self.speculative_confidence_threshold == 0.0 {
+            self.speculative_window_selector
+                .as_ref()
+                .map(VulkanAdaptiveSpeculativeWindowSelector::next_window_width)
+                .unwrap_or(self.speculative_draft_tokens)
+        } else {
+            self.speculative_draft_tokens
+        };
+        let draft_token_count = selected_window_width
             .min(active.remaining_public_outputs - 1)
             .min(max_public_outputs - 1);
         let stop_token_ids = active
@@ -770,6 +791,24 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .copied()
             .collect::<BTreeSet<_>>();
         let start_stream_tick = self.session.next_stream_tick;
+        let calibration_loads_before = self
+            .speculative_window_selector
+            .as_ref()
+            .filter(|selector| {
+                self.speculative_confidence_threshold == 0.0 && !selector.is_calibrated()
+            })
+            .map(|_| {
+                self.package
+                    .compiled_resource_load_required_count()
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to read speculative calibration residency: {error}"
+                            )),
+                        )
+                    })
+            })
+            .transpose()?;
         let cycle = self.processor.run_speculative_cycle_on_bound_devices(
             &self.devices,
             activation.input_token_id,
@@ -778,6 +817,35 @@ impl VulkanResidentInProcessPlacedPromptStream {
             self.speculative_confidence_threshold,
             &stop_token_ids,
         )?;
+        let stopped = cycle
+            .verification
+            .emitted_tokens
+            .last()
+            .is_some_and(|token| stop_token_ids.contains(&token.token_id));
+        let calibration_had_no_loads = calibration_loads_before
+            .map(|before| {
+                self.package
+                    .compiled_resource_load_required_count()
+                    .map(|after| after == before)
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to verify speculative calibration residency: {error}"
+                            )),
+                        )
+                    })
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if self.speculative_confidence_threshold == 0.0
+            && !stopped
+            && calibration_had_no_loads
+        {
+            self.speculative_window_selector
+                .as_mut()
+                .expect("configured speculative decoding has a window selector")
+                .record_cycle(selected_window_width, &cycle);
+        }
         self.active_input_event
             .as_mut()
             .expect("speculative feedback cycle requires an active input event")
