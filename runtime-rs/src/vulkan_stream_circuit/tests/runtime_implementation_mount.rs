@@ -85,6 +85,103 @@ fn seal_staged_runtime_candidate(candidate_root: &Path, candidate_id: &str) {
     .unwrap();
 }
 
+fn overlay_batch_implementation_fixture(
+    shader_path: &str,
+) -> VulkanResidentComponentBatchImplementationSpec {
+    VulkanResidentComponentBatchImplementationSpec {
+        execution_domain:
+            VulkanResidentComponentKernelExecutionDomain::Prefill,
+        lane_tile_width: 16,
+        selection_priority: 0,
+        independent_candidate_compatible: false,
+        causal_sequence_compatible: true,
+        parallel_block_compatible: false,
+        device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+        stages: vec![VulkanResidentComponentBatchStageSpec {
+            shader_path: shader_path.to_string(),
+            local_size_x: 256,
+            workgroup_count_x: 64,
+            descriptor_bindings: Vec::new(),
+            state_snapshot_binding: None,
+            state_snapshot_source_binding: None,
+            control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+                byte_count: 4,
+                binding: 31,
+                payload: VulkanResidentComponentBatchControlPayload::Width,
+                access: VulkanResidentComponentBatchControlAccess::Read,
+            },
+            indirect_dispatch_byte_offset: None,
+            dispatch_y_from_batch_width: false,
+        }],
+    }
+}
+
+#[test]
+fn runtime_overlay_disambiguates_equal_batch_geometry_by_structure() {
+    let mut cooperative = overlay_batch_implementation_fixture(
+        "shaders/cooperative.spv",
+    );
+    cooperative.device_requirements.cooperative_float8_e4m3_shape =
+        Some([16, 16, 16]);
+    let exact = overlay_batch_implementation_fixture("shaders/exact.spv");
+    let source_kernel = VulkanResidentComponentKernelSpec {
+        execution_index: 0,
+        node_id: "projection".to_string(),
+        op: "linear".to_string(),
+        source_node_ids: vec!["projection".to_string()],
+        semantic_module_ids: Vec::new(),
+        execution_domain:
+            VulkanResidentComponentKernelExecutionDomain::Decode,
+        stream_control_binding: None,
+        shader_path: "shaders/scalar.spv".to_string(),
+        local_size_x: 256,
+        workgroup_count_x: 64,
+        batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+        batch_implementations: vec![cooperative, exact.clone()],
+    };
+    let mut overlay = exact.clone();
+    overlay.stages[0].shader_path = "kernels/candidate.spv".to_string();
+    overlay.stages[0].dispatch_y_from_batch_width = true;
+
+    let selected = source_batch_implementation_for_overlay(
+        &source_kernel,
+        &overlay,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected, &exact);
+}
+
+#[test]
+fn runtime_overlay_rejects_ambiguous_batch_implementation_identity() {
+    let first = overlay_batch_implementation_fixture("shaders/first.spv");
+    let second = overlay_batch_implementation_fixture("shaders/second.spv");
+    let source_kernel = VulkanResidentComponentKernelSpec {
+        execution_index: 0,
+        node_id: "projection".to_string(),
+        op: "linear".to_string(),
+        source_node_ids: vec!["projection".to_string()],
+        semantic_module_ids: Vec::new(),
+        execution_domain:
+            VulkanResidentComponentKernelExecutionDomain::Decode,
+        stream_control_binding: None,
+        shader_path: "shaders/scalar.spv".to_string(),
+        local_size_x: 256,
+        workgroup_count_x: 64,
+        batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+        batch_implementations: vec![first.clone(), second],
+    };
+    let mut overlay = first;
+    overlay.stages[0].shader_path = "kernels/candidate.spv".to_string();
+
+    let error = source_batch_implementation_for_overlay(
+        &source_kernel,
+        &overlay,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("ambiguous source identity"));
+}
+
 fn staged_runtime_candidate_fixture() -> (
     PathBuf,
     PathBuf,

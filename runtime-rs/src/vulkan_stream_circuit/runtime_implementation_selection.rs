@@ -1194,14 +1194,15 @@ fn rebase_overlay_shader_paths(
             "runtime implementation shader",
         )?;
         for implementation in &mut kernel.batch_implementations {
-            let source_implementation = source_kernel.and_then(|source| {
-                source.batch_implementations.iter().find(|candidate| {
-                    candidate.execution_domain
-                        == implementation.execution_domain
-                        && candidate.lane_tile_width
-                            == implementation.lane_tile_width
+            let source_implementation = source_kernel
+                .map(|source| {
+                    source_batch_implementation_for_overlay(
+                        source,
+                        implementation,
+                    )
                 })
-            });
+                .transpose()?
+                .flatten();
             for (stage_index, stage) in
                 implementation.stages.iter_mut().enumerate()
             {
@@ -1219,6 +1220,59 @@ fn rebase_overlay_shader_paths(
         }
     }
     Ok(())
+}
+
+fn source_batch_implementation_for_overlay<'a>(
+    source_kernel: &'a VulkanResidentComponentKernelSpec,
+    overlay: &VulkanResidentComponentBatchImplementationSpec,
+) -> Result<
+    Option<&'a VulkanResidentComponentBatchImplementationSpec>,
+    VulkanResidentTokenModelPackageError,
+> {
+    if let Some(exact) = source_kernel
+        .batch_implementations
+        .iter()
+        .find(|source| *source == overlay)
+    {
+        return Ok(Some(exact));
+    }
+    let matches = source_kernel
+        .batch_implementations
+        .iter()
+        .filter(|source| {
+            source.execution_domain == overlay.execution_domain
+                && source.lane_tile_width == overlay.lane_tile_width
+                && source.selection_priority == overlay.selection_priority
+                && source.independent_candidate_compatible
+                    == overlay.independent_candidate_compatible
+                && source.causal_sequence_compatible
+                    == overlay.causal_sequence_compatible
+                && source.parallel_block_compatible
+                    == overlay.parallel_block_compatible
+                && source.device_requirements == overlay.device_requirements
+                && source.stages.len() == overlay.stages.len()
+                && source.stages.iter().zip(&overlay.stages).all(
+                    |(source_stage, overlay_stage)| {
+                        source_stage.descriptor_bindings
+                            == overlay_stage.descriptor_bindings
+                            && source_stage.state_snapshot_binding
+                                == overlay_stage.state_snapshot_binding
+                            && source_stage.state_snapshot_source_binding
+                                == overlay_stage.state_snapshot_source_binding
+                            && source_stage.control == overlay_stage.control
+                    },
+                )
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [source] => Ok(Some(*source)),
+        _ => Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime overlay batch implementation for {}.{} has ambiguous source identity; physical shader and dispatch geometry are not identity fields",
+            source_kernel.node_id,
+            overlay.lane_tile_width,
+        ))),
+    }
 }
 
 fn rebase_output_transducer_overlay_shader_paths(
