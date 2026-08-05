@@ -147,13 +147,15 @@ where
         if !stop_token_ids.is_empty() {
             generation_event = generation_event.with_stop_tokens(stop_token_ids.to_vec());
         }
-        let mut output_error = None;
-        let mut protocol_terminal_token_count = None;
+        let mut output_error: Option<Box<dyn Error>> = None;
+        let mut observed_generated_token_count = 0usize;
+        let mut protocol_retained_token_count = None;
         let generation_run = engine.submit_input_event_transactionally_until_idle_with_output(
             stream_id,
             generation_event,
             |event| {
-                if output_error.is_some() {
+                observed_generated_token_count = observed_generated_token_count.saturating_add(1);
+                if output_error.is_some() || protocol_retained_token_count.is_some() {
                     return VulkanResidentOutputControl::Abort;
                 }
                 match on_output_event(event) {
@@ -161,7 +163,19 @@ where
                         VulkanResidentOutputControl::Continue
                     }
                     Ok(RuntimeChatGeneratedOutputControl::TerminateAndTrim { token_count }) => {
-                        protocol_terminal_token_count = Some(token_count);
+                        match observed_generated_token_count.checked_sub(token_count) {
+                            Some(retained_token_count) if token_count > 0 => {
+                                protocol_retained_token_count = Some(retained_token_count);
+                            }
+                            _ => {
+                                output_error = Some(Box::new(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "stream protocol requested trimming {token_count} token(s) after observing {observed_generated_token_count} generated token(s)",
+                                    ),
+                                )));
+                            }
+                        }
                         VulkanResidentOutputControl::Abort
                     }
                     Err(error) => {
@@ -182,22 +196,17 @@ where
             ));
         }
         let mut generated_token_ids = generation_run.generated_token_ids.clone();
-        if let Some(token_count) = protocol_terminal_token_count {
-            if token_count == 0 || token_count > generated_token_ids.len() {
-                return Err(recoverable_chat_turn_error(
-                    "normalizing generated assistant protocol boundary failed before canonical commit",
-                    Box::new(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "stream protocol requested trimming {token_count} token(s) from {} generated token(s)",
-                            generated_token_ids.len(),
-                        ),
-                    )),
-                ));
-            }
-            generated_token_ids.truncate(generated_token_ids.len() - token_count);
-        }
-        let generation_terminated_by_protocol = protocol_terminal_token_count.is_some();
+        normalize_generated_tokens_at_protocol_boundary(
+            &mut generated_token_ids,
+            protocol_retained_token_count,
+        )
+        .map_err(|error| {
+            recoverable_chat_turn_error(
+                "normalizing generated assistant protocol boundary failed before canonical commit",
+                Box::new(error),
+            )
+        })?;
+        let generation_terminated_by_protocol = protocol_retained_token_count.is_some();
         let assistant_stopped = generation_terminated_by_protocol
             || generated_token_ids
                 .last()
@@ -293,6 +302,26 @@ pub fn assistant_content_token_ids<'a>(
         content_len -= 1;
     }
     &generated_token_ids[..content_len]
+}
+
+pub fn normalize_generated_tokens_at_protocol_boundary(
+    generated_token_ids: &mut Vec<u32>,
+    retained_token_count: Option<usize>,
+) -> io::Result<()> {
+    let Some(retained_token_count) = retained_token_count else {
+        return Ok(());
+    };
+    if retained_token_count >= generated_token_ids.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "stream protocol retained {retained_token_count} token(s), but the completed generation contains only {} token(s)",
+                generated_token_ids.len(),
+            ),
+        ));
+    }
+    generated_token_ids.truncate(retained_token_count);
+    Ok(())
 }
 
 pub fn chat_transcript_codec(

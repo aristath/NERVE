@@ -16,6 +16,7 @@ mod tests {
         RuntimeRecoverableChatTurnError,
         VulkanComputeDeviceInfo, VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
         VulkanResidentTokenTextCodecError, assistant_content_token_ids, chat_transcript_codec,
+        normalize_generated_tokens_at_protocol_boundary,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
     };
 
@@ -1009,6 +1010,26 @@ mod tests {
             assistant_content_token_ids(&[1, 2, 98, 99], &[98, 99]),
             &[1, 2]
         );
+    }
+
+    #[test]
+    fn protocol_boundary_discards_every_token_completed_after_batched_termination() {
+        let mut generated = vec![10, 11, 12, 99, 100, 101];
+
+        normalize_generated_tokens_at_protocol_boundary(&mut generated, Some(3)).unwrap();
+
+        assert_eq!(generated, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn protocol_boundary_rejects_a_boundary_missing_from_the_completed_generation() {
+        let mut generated = vec![10, 11, 12];
+
+        let error = normalize_generated_tokens_at_protocol_boundary(&mut generated, Some(3))
+            .expect_err("a protocol terminator must be present after retained content");
+
+        assert!(error.to_string().contains("completed generation contains only 3"));
+        assert_eq!(generated, vec![10, 11, 12]);
     }
 
     #[test]
