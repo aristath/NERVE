@@ -313,6 +313,9 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
                 state_snapshot_source_binding=(
                     1 if reads_static_state_snapshot else None
                 ),
+                dispatch_y_from_batch_width=causal_scan_shader.startswith(
+                    "indexed_sparse_attention_main_temporal_parallel_"
+                ),
             )
             if temporal_binding is not None
             else persistent_batch_control_stage(
@@ -820,7 +823,7 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
         (
             r"indexed_sparse_attention_main_bf16_q\d+_kv1_.+__sc\d+\.comp",
             "indexed_sparse_attention_main_",
-            "indexed_sparse_attention_main_temporal_",
+            "indexed_sparse_attention_main_temporal_parallel_",
         ),
     )
     for pattern, source_prefix, temporal_prefix in temporal_latent_patterns:

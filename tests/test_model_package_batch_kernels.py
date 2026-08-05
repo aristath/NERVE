@@ -1,6 +1,7 @@
 from model_package_layout_common import *
 from nerve.model_package_validation import valid_indirect_dispatch_pipeline
 from nerve.model_package_shader_compiler import compile_shader_artifacts
+from nerve.model_package_shader_templates import parallelize_temporal_batch_lanes
 
 
 def test_indirect_batch_dispatch_requires_an_earlier_writable_producer() -> None:
@@ -579,8 +580,8 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         ),
         "indexed_sparse_attention_main_bf16_q64_kv1_d512_w128_r4_k512_"
         "scale0.0441941738__sc8.comp": (
-            "indexed_sparse_attention_main_temporal_bf16_q64_kv1_d512_w128_"
-            "r4_k512_scale0.0441941738.comp",
+            "indexed_sparse_attention_main_temporal_parallel_bf16_q64_kv1_d512_"
+            "w128_r4_k512_scale0.0441941738.comp",
             64,
         ),
     }
@@ -742,6 +743,7 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
     }
     assert attention_stages[0]["state_snapshot_binding"] == 30
     assert attention_stages[0]["state_snapshot_source_binding"] == 1
+    assert attention_stages[0]["dispatch_y_from_batch_width"] is True
     conv_stages = causal_scan_batch_stages(
         "causal_conv1d_silu_bf16_c8192_k4.comp",
         128,
@@ -905,8 +907,8 @@ def test_compiler_renders_deepseek_stateful_causal_scan_kernels(
         "scale0.0110485435__pbc5.comp",
         "radix_topk_index_temporal_f32_u32_m262144_k512_r4_o128__pbc2.comp",
         "chronological_compressed_index_temporal_u32_m8192_r128_o128__pbc3.comp",
-        "indexed_sparse_attention_main_temporal_bf16_q64_kv1_d512_w128_r4_"
-        "k512_scale0.0441941738__pbc8.comp",
+        "indexed_sparse_attention_main_temporal_parallel_bf16_q64_kv1_d512_w128_"
+        "r4_k512_scale0.0441941738__pbc8.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
@@ -936,13 +938,39 @@ def test_compiler_renders_deepseek_stateful_causal_scan_kernels(
         ]
     )
     attention = sources[
-        "indexed_sparse_attention_main_temporal_bf16_q64_kv1_d512_w128_r4_"
-        "k512_scale0.0441941738__pbc8.comp"
+        "indexed_sparse_attention_main_temporal_parallel_bf16_q64_kv1_d512_w128_"
+        "r4_k512_scale0.0441941738__pbc8.comp"
     ]
     assert "binding = 30) readonly buffer LocalStateSnapshots" in attention
     assert "batch_position * LOCAL_STATE_WORDS" in attention
+    assert "uint batch_position = gl_WorkGroupID.y;" in attention
+    assert "if (batch_position >= batch_control.batch_width)" in attention
+    assert "for (uint batch_position" not in attention
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == len(shader_files)
+
+
+def test_temporal_lane_parallelization_fails_closed_on_template_drift() -> None:
+    with pytest.raises(
+        ModelCompileError,
+        match="has 0 serial lane loops; expected one",
+    ):
+        parallelize_temporal_batch_lanes(
+            "indexed_sparse_attention_main_temporal_parallel.comp",
+            "void main() {}",
+        )
+
+    duplicated_loop = """    for (uint batch_position = 0u;
+         batch_position < batch_control.batch_width;
+         ++batch_position) {"""
+    with pytest.raises(
+        ModelCompileError,
+        match="has 2 serial lane loops; expected one",
+    ):
+        parallelize_temporal_batch_lanes(
+            "indexed_sparse_attention_main_temporal_parallel.comp",
+            duplicated_loop + "\n}\n" + duplicated_loop,
+        )
 
 
 def test_compiler_lowers_component_batch_width_to_a_persistent_buffer(

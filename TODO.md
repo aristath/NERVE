@@ -34,9 +34,10 @@ toward 50 tok/s without regressing supported Qwen models.
    contiguous placement across all five AMD GPUs, and one complete discarded
    conversation before the truth conversation in the same resident process.
    It terminates coherently, preserves Greece recall, releases all acquired
-   capacity, and reaches 7.900 decode tok/s and 8.832 prefill tok/s. This is a
-   44.6% decode improvement over the former fixed-window 5.462 tok/s gate, but
-   remains far below the 30 tok/s floor.
+   capacity, and reaches 8.818 decode tok/s and 8.942 prefill tok/s. This is an
+   11.6% decode improvement over the former 7.900 tok/s gate and a 61.4%
+   improvement over the fixed-window 5.462 tok/s gate, but remains far below
+   the 30 tok/s floor.
 
    Compile the complete speculative cycle as a device-resident transaction:
    generate the draft window without a host wait per proposal, append target
@@ -51,19 +52,21 @@ toward 50 tok/s without regressing supported Qwen models.
    first warmups and residency-loading cycles, and chooses by useful emitted
    tokens per speculative-cycle nanosecond. Session reset also clears every
    target and draft recurrent state, sampler, and auxiliary buffer. The
-   remaining truth set still spent most speculative time in target verification
-   (237.45 seconds of the long Corinth turn), while demand residency performed
-   367 loads, 221 evictions, and 195 reloads across the measured conversation.
-   The rejected parallel-latent-lane candidate proved that a shader-local
-   speedup is not acceptable evidence: it regressed truth throughput and twice
-   emitted a second reserved thinking terminator after a coherent answer.
-   Restore reproducible execution before using token digests for attribution.
-   With the same package, seed, prompts, placement, and sampler, fresh processes
-   reproduce the first turn but can diverge later. Audit radix/top-k tie order,
-   speculative sampler RNG consumption, accepted-prefix commit, rollback, and
-   reset state. Require repeated-process equality for committed tokens, routed
-   experts, accepted prefixes, and state digests; do not weaken the product
-   quality gate to accommodate nondeterminism.
+   full-horizon causal component harness proved that the indexed-attention
+   temporal lanes are independent when each lane reads its declared state
+   snapshot. The promoted generic workgroup-Y implementation preserves exact
+   output and committed-state digests, is 2.40x faster in the 128K component
+   benchmark, and passes the complete product gate without malformed output.
+   Target verification still consumes 269.44 seconds, about 92% of the measured
+   decode interval. Demand residency still performs 254 loads, 42 evictions,
+   and 40 reloads across the truth conversation. Restore reproducible execution
+   before using whole-process token digests for attribution: with the same
+   package, seed, prompts, placement, and sampler, fresh processes can diverge
+   after the first turn. Audit radix/top-k tie order, speculative sampler RNG
+   consumption, accepted-prefix commit, rollback, and reset state. Require
+   repeated-process equality for committed tokens, routed experts, accepted
+   prefixes, and state digests; do not weaken the product quality gate to
+   accommodate nondeterminism.
 
    Separate target compute from residency churn with device timestamps, then:
 
@@ -74,9 +77,6 @@ toward 50 tok/s without regressing supported Qwen models.
      remain capacity- and evidence-driven rather than model-specific;
    - optimize independently material MXFP4 sparse-expert kernels with fused or
      amortized representations, including measured native INT4/FP8 candidates;
-   - use the causal component harness to replace the serialized indexed-
-     attention batch transaction only when a staged candidate preserves exact
-     output and committed-state digests at the declared context horizon;
    - close the remaining speculative acceptance gap without sacrificing model
      quality.
 
@@ -90,8 +90,8 @@ toward 50 tok/s without regressing supported Qwen models.
    The latest schema-v10 thinking-enabled gates each discarded one complete
    in-process warmup conversation, reset model state without unloading, passed
    correct Greece recall, and released their exact recorded reservations:
-   Qwen3.6-35B-A3B reaches 100.34 decode tok/s and 161.34 prefill tok/s;
-   Qwen3.5-9B reaches 54.52 decode tok/s and 116.38 prefill tok/s. Keep
+   Qwen3.6-35B-A3B reaches 106.22 decode tok/s and 173.91 prefill tok/s;
+   Qwen3.5-9B reaches 54.33 decode tok/s and 117.76 prefill tok/s. Keep
    repetition, structured-protocol, conversation, and teardown checks active so
    throughput alone cannot pass.
 

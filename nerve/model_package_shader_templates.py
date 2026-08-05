@@ -100,6 +100,27 @@ def lower_batch_control_to_persistent_buffer(
     return lowered
 
 
+def parallelize_temporal_batch_lanes(shader_file: str, rendered: str) -> str:
+    """Assign each causally independent snapshot lane to a workgroup row."""
+    serial_lane_loop = """    for (uint batch_position = 0u;
+         batch_position < batch_control.batch_width;
+         ++batch_position) {"""
+    parallel_lane = """    uint batch_position = gl_WorkGroupID.y;
+    if (batch_position >= batch_control.batch_width) return;
+    {"""
+    parallelized, replacement_count = re.subn(
+        re.escape(serial_lane_loop),
+        lambda _match: parallel_lane,
+        rendered,
+    )
+    if replacement_count != 1:
+        raise ModelCompileError(
+            f"temporal batch shader {shader_file!r} has {replacement_count} "
+            "serial lane loops; expected one"
+        )
+    return parallelized
+
+
 def render_shader_source(source_dir: Path, shader_file: str) -> str:
     source = source_dir / shader_file
     if source.exists():
@@ -629,7 +650,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return rendered
 
     indexed_sparse_attention_main = re.fullmatch(
-        r"indexed_sparse_attention_main(_temporal)?_bf16_q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
+        r"indexed_sparse_attention_main(_temporal(?:_parallel)?)?_bf16_"
+        r"q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
         r"r(\d+)_k(\d+)_scale([0-9eE+.-]+)\.comp",
         shader_file,
     )
@@ -677,7 +699,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             raise ModelCompileError(
                 f"invalid main indexed sparse-attention shader shape {shader_file!r}"
             )
-        return render_shader_template(
+        rendered = render_shader_template(
             source_dir,
             (
                 "indexed_sparse_attention_main_temporal_bf16.comp.template"
@@ -699,6 +721,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "CONTROL_BINDING": "8" if has_compressed else "5",
             },
         )
+        if temporal == "_temporal_parallel":
+            return parallelize_temporal_batch_lanes(shader_file, rendered)
+        return rendered
 
     indexed_sparse_attention = re.fullmatch(
         r"indexed_sparse_attention(_parallel)?_bf16_q(\d+)_kv(\d+)_d(\d+)_"
