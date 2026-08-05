@@ -662,7 +662,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .reset_deferred_demand_pipeline_predicate()?;
             runner
                 .execution_graph
-                .begin_deferred_demand_pipeline_executions(&runner.pipeline)?
+                .begin_deferred_demand_pipeline_executions(devices, &runner.pipeline)?
         } else {
             Vec::new()
         };
@@ -735,7 +735,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 let retry_pipeline = &runner.pipeline[retry_start..];
                 let retry_execution_guards = runner
                     .execution_graph
-                    .begin_deferred_demand_pipeline_executions(retry_pipeline)?;
+                    .begin_deferred_demand_pipeline_executions(devices, retry_pipeline)?;
                 self.transfer_causal_component_block_edge(
                     runner,
                     runner.pipeline[miss_position],

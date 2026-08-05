@@ -150,6 +150,43 @@ impl VulkanComputeDevice {
             })
     }
 
+    /// Restores the device-local headroom protected when this physical device
+    /// was opened. This must run before entering an execution epoch: registered
+    /// residency reclaimers take the execution barrier exclusively while they
+    /// retire evictable resources.
+    pub fn ensure_device_local_memory_headroom(
+        &self,
+    ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
+        let recent = VulkanDeviceLocalMemoryBudgetTracker::recent_execution_accounting(
+            &self.device_local_memory_budget_tracker,
+            VULKAN_EXECUTION_HEADROOM_OBSERVATION_MAXIMUM_AGE,
+        )?
+        .map(Ok)
+        .unwrap_or_else(|| {
+            VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
+                &self.device_local_memory_budget_tracker,
+                Duration::ZERO,
+                || self.available_device_local_memory_bytes(),
+            )
+        })?;
+        if self
+            .device_local_memory_budget
+            .protected_headroom_deficit_at(recent.currently_available_bytes)
+            == 0
+        {
+            return Ok(recent);
+        }
+        let reclaimers = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(
+            &self.device_local_memory_budget_tracker,
+        )?;
+        restore_protected_device_local_headroom(
+            self.device_local_memory_budget,
+            reclaimers,
+            Duration::from_millis(250),
+            || self.device_local_memory_accounting(),
+        )
+    }
+
     fn reserve_device_local_memory(
         &self,
         byte_count: u64,
@@ -253,7 +290,7 @@ impl VulkanComputeDevice {
                 "device-local capacity permit belongs to another physical device".to_string(),
             ));
         }
-        permit.commit(self.available_device_local_memory_bytes(), byte_count)
+        permit.commit(byte_count)
     }
 
     pub fn max_compute_work_group_count_x(&self) -> u32 {

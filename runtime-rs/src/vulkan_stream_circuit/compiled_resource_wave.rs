@@ -485,22 +485,11 @@ impl VulkanCompiledResourceDeviceStore {
                 selection.payload_bytes, selection.device_bytes,
             )));
         }
+        let reusable_device_bytes = selection.device_bytes;
         let selected_group_ids = selection.group_ids;
         if selected_group_ids.is_empty() {
             return Ok(0);
         }
-        let committed_before = self
-            .device_arena
-            .stats()
-            .map_err(compiled_device_store_vulkan_error)?
-            .committed_byte_capacity;
-        let host_committed_before = self
-            .host_visible_arena
-            .as_ref()
-            .map(|arena| arena.stats().map(|stats| stats.committed_byte_capacity))
-            .transpose()
-            .map_err(compiled_device_store_vulkan_error)?
-            .unwrap_or(0);
         let eviction = self
             .manager
             .evict_inactive_groups(selected_group_ids.clone())
@@ -562,32 +551,12 @@ impl VulkanCompiledResourceDeviceStore {
                 })?
                 .release_dynamic_groups(&selected_group_ids)?;
         }
-        let committed_after = self
-            .device_arena
-            .stats()
-            .map_err(compiled_device_store_vulkan_error)?
-            .committed_byte_capacity;
-        let host_committed_after = self
-            .host_visible_arena
-            .as_ref()
-            .map(|arena| arena.stats().map(|stats| stats.committed_byte_capacity))
-            .transpose()
-            .map_err(compiled_device_store_vulkan_error)?
-            .unwrap_or(0);
-        if committed_after >= committed_before
-            && host_committed_after >= host_committed_before
-        {
-            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                "evicting {} complete allocation-cohort groups released no device-local or host-visible bytes",
-                release.group_count
-            )));
+        if release.group_count == 0 {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource eviction selected groups but released no logical residency",
+            ));
         }
-        let released_device_bytes = committed_before.saturating_sub(committed_after);
-        if released_device_bytes > 0 {
-            self.instrumentation
-                .record_released_device_bytes(released_device_bytes);
-        }
-        Ok(released_device_bytes)
+        Ok(reusable_device_bytes)
     }
 
     fn reclaim_inactive_device_memory(
@@ -607,6 +576,15 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resource execution barrier was poisoned",
             )
         })?;
+        let mut released_device_bytes = self
+            .device_arena
+            .trim_inactive_backing(requested_bytes)
+            .map_err(compiled_device_store_vulkan_error)?;
+        if released_device_bytes >= requested_bytes {
+            self.instrumentation
+                .record_released_device_bytes(released_device_bytes);
+            return Ok(released_device_bytes);
+        }
         let protected_group_ids = BTreeSet::new();
         let candidates = self
             .manager
@@ -616,9 +594,25 @@ impl VulkanCompiledResourceDeviceStore {
             &candidates,
             &protected_group_ids,
             0,
-            requested_bytes,
+            requested_bytes.saturating_sub(released_device_bytes),
             false,
-        )
+        )?;
+        released_device_bytes = released_device_bytes
+            .checked_add(
+                self.device_arena
+                    .trim_inactive_backing(requested_bytes.saturating_sub(released_device_bytes))
+                    .map_err(compiled_device_store_vulkan_error)?,
+            )
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource released device capacity overflowed",
+                )
+            })?;
+        if released_device_bytes > 0 {
+            self.instrumentation
+                .record_released_device_bytes(released_device_bytes);
+        }
+        Ok(released_device_bytes)
     }
 
     fn evict_for_compiled_resource_wave(
@@ -763,6 +757,36 @@ impl VulkanCompiledResourceDeviceStore {
             required_device_bytes,
             true,
         )?;
+        let mut settled_requirement = residency_requirement()?;
+        if settled_requirement.2 > 0 {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource eviction left {} payload bytes above the residency budget",
+                settled_requirement.2,
+            )));
+        }
+        if settled_requirement.4 > 0 {
+            // A differently shaped wave may not fit any retained inactive
+            // chunk. Only this explicit arena-rebalancing path releases
+            // physical backing; ordinary expert replacement reuses it.
+            let released = self
+                .device_arena
+                .trim_inactive_backing(settled_requirement.4)
+                .map_err(compiled_device_store_vulkan_error)?;
+            if released > 0 {
+                self.instrumentation.record_released_device_bytes(released);
+            }
+            settled_requirement = residency_requirement()?;
+        }
+        let new_device_bytes = settled_requirement.3;
+        if settled_requirement.2 > 0 || settled_requirement.4 > 0 {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource eviction and arena rebalance left {} payload and {} device bytes unavailable",
+                settled_requirement.2, settled_requirement.4,
+            )));
+        }
+        if new_device_bytes == 0 {
+            return Ok(None);
+        }
         let committed_after = self
             .device_arena
             .stats()
@@ -802,6 +826,17 @@ impl VulkanCompiledResourceDeviceStore {
     }
 
     fn begin_execution(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanCompiledResourceDeviceStoreError>
+    {
+        device
+            .ensure_device_local_memory_headroom()
+            .map_err(compiled_device_store_vulkan_error)?;
+        self.begin_execution_after_headroom_check()
+    }
+
+    fn begin_execution_after_headroom_check(
         &self,
     ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanCompiledResourceDeviceStoreError>
     {
@@ -926,11 +961,15 @@ impl VulkanCompiledResourceDeviceStore {
                         self.upload_alignment,
                     )
                     .map_err(compiled_device_store_vulkan_error)?;
-                Some(
-                    device
-                        .reserve_device_local_memory_capacity(required_bytes)
-                        .map_err(compiled_device_store_vulkan_error)?,
-                )
+                if required_bytes == 0 {
+                    None
+                } else {
+                    Some(
+                        device
+                            .reserve_device_local_memory_capacity(required_bytes)
+                            .map_err(compiled_device_store_vulkan_error)?,
+                    )
+                }
             }
             None => None,
         };

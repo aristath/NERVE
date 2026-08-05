@@ -329,6 +329,14 @@ impl VulkanComputeDeviceCatalog {
                     let tracker = Arc::new(Mutex::new(
                         VulkanDeviceLocalMemoryBudgetTracker::new(budget),
                     ));
+                    start_device_local_memory_observer(
+                        &self.context,
+                        physical_device,
+                        memory_budget_supported,
+                        device_local_memory_bytes,
+                        &tracker,
+                        &permitted_device.physical_device_id,
+                    )?;
                     trackers.insert(
                         permitted_device.physical_device_id.clone(),
                         Arc::downgrade(&tracker),

@@ -599,6 +599,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
 
     fn begin_deferred_demand_pipeline_executions<'a>(
         &'a self,
+        devices: &'a BTreeMap<String, Rc<VulkanComputeDevice>>,
         pipeline: &[usize],
     ) -> Result<
         Vec<VulkanCompiledResourceExecutionGuard<'a>>,
@@ -609,10 +610,32 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 VulkanError("component batch has no deferred demand pipeline".to_string()),
             ));
         }
+        // Pressure must be resolved on every participating device before any
+        // execution read guard is held. A reclaimer needs the corresponding
+        // store's execution barrier exclusively, and acquiring guards while
+        // still preflighting later devices would permit a cross-store deadlock.
+        for device_index in pipeline.iter().copied() {
+            let device_id = self.device_ids.get(device_index).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch has no device identity for slice {device_index}"
+                )))
+            })?;
+            let device = devices.get(device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.clone(),
+                }
+            })?;
+            device
+                .ensure_device_local_memory_headroom()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
         pipeline
             .iter()
             .copied()
-            .map(|device_index| self.slice(device_index)?.begin_pipeline_demand_execution())
+            .map(|device_index| {
+                self.slice(device_index)?
+                    .begin_pipeline_demand_execution_after_headroom_check()
+            })
             .collect()
     }
 

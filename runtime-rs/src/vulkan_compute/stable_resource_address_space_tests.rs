@@ -37,6 +37,26 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
 }
 
 #[test]
+fn inactive_chunk_trimming_uses_the_smallest_sufficient_backing() {
+    let mut candidates = vec![(1, 4096), (2, 1024), (3, 2048)];
+
+    assert_eq!(
+        inactive_stable_resource_chunks_to_trim(&mut candidates, 1500),
+        vec![3],
+    );
+}
+
+#[test]
+fn inactive_chunk_trimming_combines_largest_backing_only_when_required() {
+    let mut candidates = vec![(1, 4096), (2, 1024), (3, 2048)];
+
+    assert_eq!(
+        inactive_stable_resource_chunks_to_trim(&mut candidates, 5000),
+        vec![1, 3],
+    );
+}
+
+#[test]
 fn stable_resource_allocations_are_attributed_to_compiled_slots() {
     let Some(device_index) = stable_resource_test_device_index() else {
         eprintln!("skipping stable resource attribution test: explicit Vulkan device unset");
@@ -165,8 +185,136 @@ fn stable_resource_arena_preflights_exact_physical_chunk_capacity() {
 
     drop(first_groups);
     assert_eq!(arena.stats().unwrap().active_allocation_count, 3);
-    assert_eq!(arena.stats().unwrap().committed_byte_capacity, 1024);
+    assert_eq!(arena.stats().unwrap().committed_byte_capacity, 2048);
+    assert_eq!(
+        arena
+            .additional_committed_byte_capacity_for_groups(&device, &requests, 256)
+            .unwrap(),
+        0,
+        "an inactive chunk must satisfy the next physical generation without another Vulkan allocation",
+    );
+    let reused_groups = arena.allocate_groups(&device, &requests, 256).unwrap();
+    assert_eq!(reused_groups[0][0].chunk_id(), chunk_id);
+    assert_eq!(arena.stats().unwrap().active_allocation_count, 6);
+    assert_eq!(arena.stats().unwrap().committed_byte_capacity, 2048);
+    assert_eq!(arena.stats().unwrap().chunk_count, 2);
+    drop(reused_groups);
     drop(replacement_groups);
+    arena.release_backing().unwrap();
+}
+
+#[test]
+fn stable_resource_arena_reuses_one_chunk_across_many_logical_evictions() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping stable resource churn test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(4096, 256).unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0, 1],
+            resource_byte_counts: vec![257, 513],
+        }],
+    )
+    .unwrap();
+    let requests = [(&[0, 1][..], &[257, 513][..])];
+    let (_, logical_chunk_byte_count) =
+        stable_group_member_layout(&[257, 513], 256).unwrap();
+    let physical_chunk_byte_count = device
+        .addressable_resident_buffer_memory_requirement_bytes(logical_chunk_byte_count)
+        .unwrap();
+    let mut committed_byte_capacity = None;
+
+    // This deliberately exceeds the 649 logical eviction cycles observed in
+    // the crash-producing DeepSeek run. Logical generations must not become
+    // Vulkan allocation/free generations.
+    for generation in 0..1024 {
+        assert_eq!(
+            arena
+                .additional_committed_byte_capacity_for_groups(&device, &requests, 256)
+                .unwrap(),
+            if generation == 0 {
+                physical_chunk_byte_count
+            } else {
+                0
+            },
+        );
+        let groups = arena.allocate_groups(&device, &requests, 256).unwrap();
+        let stats = arena.stats().unwrap();
+        assert_eq!(stats.chunk_count, 1);
+        assert_eq!(stats.active_allocation_count, 2);
+        assert_eq!(stats.allocated_byte_count, 770);
+        match committed_byte_capacity {
+            Some(capacity) => assert_eq!(stats.committed_byte_capacity, capacity),
+            None => committed_byte_capacity = Some(stats.committed_byte_capacity),
+        }
+        drop(groups);
+        let inactive = arena.stats().unwrap();
+        assert_eq!(inactive.chunk_count, 1);
+        assert_eq!(inactive.active_allocation_count, 0);
+        assert_eq!(inactive.allocated_byte_count, 0);
+        assert_eq!(
+            inactive.committed_byte_capacity,
+            committed_byte_capacity.unwrap()
+        );
+    }
+
+    arena.release_backing().unwrap();
+    assert_eq!(arena.stats().unwrap(), VulkanStableResourceArenaStats::default());
+}
+
+#[test]
+fn stable_resource_arena_converges_for_alternating_chunk_shapes() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping stable resource alternating-shape test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(32 * 1024, 256).unwrap(),
+        &[
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![0],
+                resource_byte_counts: vec![257],
+            },
+            VulkanStableResourceGroupLayout::Explicit {
+                resource_slots: vec![1],
+                resource_byte_counts: vec![4097],
+            },
+        ],
+    )
+    .unwrap();
+    let small = [(&[0][..], &[257][..])];
+    let large = [(&[1][..], &[4097][..])];
+    let mut converged_commitment = None;
+
+    for generation in 0..256 {
+        let request = if generation % 2 == 0 { &small } else { &large };
+        let additional = arena
+            .additional_committed_byte_capacity_for_groups(&device, request, 256)
+            .unwrap();
+        if generation >= 2 {
+            assert_eq!(
+                additional, 0,
+                "alternating logical shapes must reuse their established backing",
+            );
+        }
+        let groups = arena.allocate_groups(&device, request, 256).unwrap();
+        let active = arena.stats().unwrap();
+        assert!(active.chunk_count <= 2);
+        if generation >= 1 {
+            match converged_commitment {
+                Some(expected) => assert_eq!(active.committed_byte_capacity, expected),
+                None => converged_commitment = Some(active.committed_byte_capacity),
+            }
+        }
+        drop(groups);
+    }
+
+    assert_eq!(arena.stats().unwrap().chunk_count, 2);
     arena.release_backing().unwrap();
 }
 
@@ -576,14 +724,30 @@ fn dense_stable_resource_groups_allocate_on_demand_in_load_wave_chunks() {
     drop(earlier_group);
     drop(later_group);
     assert_eq!(arena.stats().unwrap().active_allocation_count, 0);
+    let retained_stats = arena.stats().unwrap();
+    assert_eq!(retained_stats.chunk_count, 2);
+    assert!(retained_stats.committed_byte_capacity >= 7168);
+    assert_eq!(
+        arena
+            .additional_committed_byte_capacity_for_groups(
+                &device,
+                &[(&[0, 1], &[1024, 2048])],
+                256,
+            )
+            .unwrap(),
+        0,
+    );
     let retry_group = arena
         .allocate_groups(&device, &[(&[0, 1], &[1024, 2048])], 256)
         .unwrap()
         .pop()
         .unwrap();
     let retry_stats = arena.stats().unwrap();
-    assert_eq!(retry_stats.committed_byte_capacity, 3072);
-    assert_eq!(retry_stats.chunk_count, 1);
+    assert_eq!(
+        retry_stats.committed_byte_capacity,
+        retained_stats.committed_byte_capacity
+    );
+    assert_eq!(retry_stats.chunk_count, 2);
     assert_eq!(retry_stats.allocated_byte_count, 3072);
     assert_eq!(retry_stats.active_allocation_count, 2);
     drop(retry_group);

@@ -932,6 +932,9 @@ impl VulkanCompiledResourceDeviceStore {
         (usize, VulkanCompiledResourceExecutionGuard<'_>),
         VulkanCompiledResourceDeviceStoreError,
     > {
+        device
+            .ensure_device_local_memory_headroom()
+            .map_err(compiled_device_store_vulkan_error)?;
         let _load = self.begin_load_operation()?;
         let _mutation = self.residency_mutation.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
@@ -944,7 +947,9 @@ impl VulkanCompiledResourceDeviceStore {
             resource_indices,
             owner,
         )?;
-        let execution = self.begin_execution()?;
+        // The pressure gate ran before acquiring the residency mutation lock;
+        // a reclaimer may need that lock and the execution barrier exclusively.
+        let execution = self.begin_execution_after_headroom_check()?;
         Ok((loaded, execution))
     }
 

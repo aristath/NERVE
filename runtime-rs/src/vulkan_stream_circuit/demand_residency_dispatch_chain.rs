@@ -440,7 +440,7 @@ impl VulkanDemandResidencyDispatchChain {
             self.continuation_enabled.set(true);
         }
         {
-            let _execution = context.store.begin_execution().map_err(|error| {
+            let _execution = context.store.begin_execution(device).map_err(|error| {
                 demand_dispatch_error(format!(
                     "failed to enter compiled-resource execution epoch: {error}"
                 ))

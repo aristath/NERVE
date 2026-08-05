@@ -1,7 +1,10 @@
-const VULKAN_DEVICE_LOCAL_RESERVABLE_FRACTION_PPM: u64 = 950_000;
 const VULKAN_CAPACITY_PARTS_PER_MILLION: u64 = 1_000_000;
+const VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM: u64 = 200_000;
+const VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP: u64 = 4 * 1024 * 1024 * 1024;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_BYTE_CAP: u64 = 16 * 1024 * 1024;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_HEADROOM_DIVISOR: u64 = 4;
+const VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL: Duration = Duration::from_millis(25);
+const VULKAN_EXECUTION_HEADROOM_OBSERVATION_MAXIMUM_AGE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanDeviceLocalMemoryBudget {
@@ -38,6 +41,8 @@ struct VulkanDeviceLocalMemoryBudgetTracker {
     budget: VulkanDeviceLocalMemoryBudget,
     tracked_allocation_bytes: u64,
     pending_reservation_bytes: u64,
+    allocation_generation: u64,
+    execution_memory_observation: Option<(Instant, u64, u64)>,
     next_reclaimer_id: u64,
     reclaimers: BTreeMap<u64, std::sync::Weak<dyn VulkanDeviceLocalMemoryReclaimer>>,
 }
@@ -71,6 +76,8 @@ impl VulkanDeviceLocalMemoryBudgetTracker {
             budget,
             tracked_allocation_bytes: 0,
             pending_reservation_bytes: 0,
+            allocation_generation: 0,
+            execution_memory_observation: None,
             next_reclaimer_id: 0,
             reclaimers: BTreeMap::new(),
         }
@@ -147,6 +154,194 @@ impl VulkanDeviceLocalMemoryBudgetTracker {
             admissible_remaining_bytes,
         }
     }
+
+    fn execution_accounting(
+        tracker: &Arc<Mutex<Self>>,
+        maximum_age: Duration,
+        mut observe_available_bytes: impl FnMut() -> u64,
+    ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
+        loop {
+            let allocation_generation = {
+                let state = tracker.lock().map_err(|_| {
+                    VulkanError("device-local memory budget tracker was poisoned".to_string())
+                })?;
+                if maximum_age > Duration::ZERO
+                    && let Some((observed_at, available_bytes, observed_generation)) =
+                        state.execution_memory_observation
+                    && observed_generation == state.allocation_generation
+                    && observed_at.elapsed() <= maximum_age
+                {
+                    return Ok(state.accounting_at(available_bytes));
+                }
+                state.allocation_generation
+            };
+            let available_bytes = observe_available_bytes();
+            let mut state = tracker.lock().map_err(|_| {
+                VulkanError("device-local memory budget tracker was poisoned".to_string())
+            })?;
+            if state.allocation_generation != allocation_generation {
+                // An allocation was acquired or released while the driver
+                // counter was sampled. That value describes neither side of
+                // the completed accounting transition, so retry rather than
+                // publishing it as a recent execution observation.
+                continue;
+            }
+            state.execution_memory_observation = Some((
+                Instant::now(),
+                available_bytes,
+                allocation_generation,
+            ));
+            return Ok(state.accounting_at(available_bytes));
+        }
+    }
+
+    fn recent_execution_accounting(
+        tracker: &Arc<Mutex<Self>>,
+        maximum_age: Duration,
+    ) -> Result<Option<VulkanDeviceLocalMemoryAccounting>, VulkanError> {
+        let state = tracker.lock().map_err(|_| {
+            VulkanError("device-local memory budget tracker was poisoned".to_string())
+        })?;
+        Ok(state.execution_memory_observation.and_then(
+            |(observed_at, available_bytes, observed_generation)| {
+                (observed_generation == state.allocation_generation
+                    && observed_at.elapsed() <= maximum_age)
+                    .then(|| state.accounting_at(available_bytes))
+            },
+        ))
+    }
+
+    fn record_execution_observation(
+        tracker: &Arc<Mutex<Self>>,
+        allocation_generation: u64,
+        available_bytes: u64,
+    ) -> Result<bool, VulkanError> {
+        let mut state = tracker.lock().map_err(|_| {
+            VulkanError("device-local memory budget tracker was poisoned".to_string())
+        })?;
+        if state.allocation_generation != allocation_generation {
+            return Ok(false);
+        }
+        state.execution_memory_observation = Some((
+            Instant::now(),
+            available_bytes,
+            allocation_generation,
+        ));
+        Ok(true)
+    }
+
+    fn allocation_generation(tracker: &Arc<Mutex<Self>>) -> Result<u64, VulkanError> {
+        tracker
+            .lock()
+            .map(|state| state.allocation_generation)
+            .map_err(|_| {
+                VulkanError("device-local memory budget tracker was poisoned".to_string())
+            })
+    }
+
+    fn invalidate_execution_memory_observation(&mut self) {
+        self.allocation_generation = self.allocation_generation.wrapping_add(1);
+        self.execution_memory_observation = None;
+    }
+}
+
+fn start_device_local_memory_observer(
+    context: &Arc<VulkanInstanceContext>,
+    physical_device: vk::PhysicalDevice,
+    memory_budget_supported: bool,
+    device_local_memory_bytes: u64,
+    tracker: &Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
+    physical_device_id: &str,
+) -> Result<(), VulkanError> {
+    if !memory_budget_supported {
+        return Ok(());
+    }
+    let context = Arc::clone(context);
+    let tracker = Arc::downgrade(tracker);
+    let thread_name = format!("nerve-vram-{}", physical_device_id.replace(':', "-"));
+    std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || loop {
+            let Some(tracker) = tracker.upgrade() else {
+                break;
+            };
+            let Ok(allocation_generation) =
+                VulkanDeviceLocalMemoryBudgetTracker::allocation_generation(&tracker)
+            else {
+                break;
+            };
+            let available_bytes = query_available_device_local_memory_bytes(
+                &context.instance,
+                physical_device,
+                memory_budget_supported,
+                device_local_memory_bytes,
+            );
+            let _ = VulkanDeviceLocalMemoryBudgetTracker::record_execution_observation(
+                &tracker,
+                allocation_generation,
+                available_bytes,
+            );
+            drop(tracker);
+            std::thread::sleep(VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL);
+        })
+        .map(drop)
+        .map_err(|error| {
+            VulkanError(format!(
+                "could not start device-local memory observer for {physical_device_id}: {error}"
+            ))
+        })
+}
+
+fn restore_protected_device_local_headroom(
+    budget: VulkanDeviceLocalMemoryBudget,
+    reclaimers: Vec<Arc<dyn VulkanDeviceLocalMemoryReclaimer>>,
+    settlement_timeout: Duration,
+    mut current_accounting: impl FnMut() -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError>,
+) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
+    let initial = current_accounting()?;
+    let mut deficit = budget.protected_headroom_deficit_at(initial.currently_available_bytes);
+    if deficit == 0 {
+        return Ok(initial);
+    }
+    if reclaimers.is_empty() {
+        return Err(VulkanError(format!(
+            "device-local execution refused: only {} bytes are currently available, below the protected {}-byte headroom ({} bytes of counter tolerance), and no evictable residency store is registered",
+            initial.currently_available_bytes,
+            budget.protected_headroom_bytes,
+            budget.counter_tolerance_bytes,
+        )));
+    }
+    let mut reclaimed_bytes = 0usize;
+    let mut reclaimer_errors = Vec::new();
+    for reclaimer in reclaimers {
+        let requested_bytes = usize::try_from(deficit).unwrap_or(usize::MAX);
+        match reclaimer.reclaim_device_local_memory(requested_bytes) {
+            Ok(reclaimed) => reclaimed_bytes = reclaimed_bytes.saturating_add(reclaimed),
+            Err(error) => reclaimer_errors.push(error.to_string()),
+        }
+        let started = Instant::now();
+        loop {
+            let accounting = current_accounting()?;
+            deficit = budget.protected_headroom_deficit_at(accounting.currently_available_bytes);
+            if deficit == 0 {
+                return Ok(accounting);
+            }
+            if started.elapsed() >= settlement_timeout {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
+    let final_accounting = current_accounting()?;
+    Err(VulkanError(format!(
+        "device-local execution refused: protected headroom still lacks {} bytes after registered stores released {reclaimed_bytes} bytes{}",
+        budget.protected_headroom_deficit_at(final_accounting.currently_available_bytes),
+        if reclaimer_errors.is_empty() {
+            String::new()
+        } else {
+            format!("; reclaimer errors: {}", reclaimer_errors.join(" | "))
+        }
+    )))
 }
 
 impl VulkanDeviceLocalMemoryReservation {
@@ -191,6 +386,11 @@ impl VulkanDeviceLocalMemoryReservation {
             )));
         }
         state.tracked_allocation_bytes = projected;
+        // The caller acquires this reservation immediately before creating the
+        // Vulkan allocation. A cached execution observation taken before this
+        // point must never authorize work against the pre-allocation heap
+        // availability.
+        state.invalidate_execution_memory_observation();
         drop(state);
         Ok(Arc::new(Self {
             tracker: Arc::clone(tracker),
@@ -251,7 +451,6 @@ impl VulkanDeviceLocalMemoryPermit {
 
     fn commit(
         mut self,
-        currently_available_bytes: u64,
         allocation_byte_count: u64,
     ) -> Result<Arc<VulkanDeviceLocalMemoryReservation>, VulkanError> {
         if allocation_byte_count == 0 || allocation_byte_count > self.byte_count {
@@ -263,7 +462,6 @@ impl VulkanDeviceLocalMemoryPermit {
         let mut state = self.tracker.lock().map_err(|_| {
             VulkanError("device-local memory budget tracker was poisoned".to_string())
         })?;
-        let before = state.accounting_at(currently_available_bytes);
         let projected_pending = state
             .pending_reservation_bytes
             .checked_sub(self.byte_count)
@@ -276,24 +474,22 @@ impl VulkanDeviceLocalMemoryPermit {
             .ok_or_else(|| {
                 VulkanError("device-local tracked allocation bytes overflowed".to_string())
             })?;
-        let projected_total = projected_tracked
-            .checked_add(projected_pending)
-            .ok_or_else(|| {
-                VulkanError("device-local accounted allocation bytes overflowed".to_string())
-            })?;
-        let maximum_accounted = state
-            .budget
-            .reservable_bytes
-            .saturating_add(state.budget.counter_tolerance_bytes)
-            .saturating_sub(before.untracked_acquired_bytes);
-        if projected_total > maximum_accounted {
-            return Err(VulkanError(format!(
-                "device-local capacity changed before a {}-byte permit could commit its {allocation_byte_count}-byte allocation: {projected_total} accounted bytes would exceed {maximum_accounted}",
-                self.byte_count,
-            )));
-        }
+        // Admission already accounted this permit in `pending_reservation_bytes`.
+        // Re-reading VK_EXT_memory_budget here would make an admitted operation
+        // depend on an asynchronous heap counter for a second time. In
+        // particular, delayed accounting for a concurrent release can appear as
+        // newly acquired, untracked memory and invalidate a permit even though
+        // the transaction has not increased its reservation. Commit therefore
+        // only changes the accounting class from pending to tracked. The Vulkan
+        // allocation that immediately follows is the authoritative physical
+        // capacity check; later admissions take a fresh counter snapshot and can
+        // reclaim dynamic residency if external usage has grown.
         state.pending_reservation_bytes = projected_pending;
         state.tracked_allocation_bytes = projected_tracked;
+        // The allocation backed by this permit now exists. Force the next
+        // execution boundary to observe its physical heap cost instead of
+        // reusing an observation captured while the allocation was pending.
+        state.invalidate_execution_memory_observation();
         self.byte_count = 0;
         drop(state);
         Ok(Arc::new(VulkanDeviceLocalMemoryReservation {
@@ -322,6 +518,10 @@ impl Drop for VulkanDeviceLocalMemoryReservation {
             state.tracked_allocation_bytes = state
                 .tracked_allocation_bytes
                 .saturating_sub(self.byte_count);
+            // VulkanResidentBuffer releases its memory before dropping this
+            // reservation, so a subsequent boundary can immediately observe
+            // the restored heap capacity.
+            state.invalidate_execution_memory_observation();
         }
     }
 }
@@ -336,19 +536,33 @@ impl Drop for VulkanDeviceLocalMemoryReclaimerRegistration {
 
 impl VulkanDeviceLocalMemoryBudget {
     fn capture(baseline_available_bytes: u64) -> Self {
-        let reservable_bytes = baseline_available_bytes
-            .saturating_mul(VULKAN_DEVICE_LOCAL_RESERVABLE_FRACTION_PPM)
-            / VULKAN_CAPACITY_PARTS_PER_MILLION;
+        // A model may remain resident while unrelated workloads grow. Keep a
+        // meaningful amount of the opening availability outside NERVE's stable
+        // allocation budget so an ordinary dispatch cannot drive the heap to
+        // exhaustion. The cap avoids stranding an ever-growing absolute amount
+        // on large heaps, while the fraction scales safely on constrained
+        // devices.
+        let protected_headroom_bytes = baseline_available_bytes
+            .saturating_mul(VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM)
+            .checked_div(VULKAN_CAPACITY_PARTS_PER_MILLION)
+            .unwrap_or(0)
+            .min(VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP);
+        let reservable_bytes = baseline_available_bytes.saturating_sub(protected_headroom_bytes);
         Self {
             baseline_available_bytes,
             reservable_bytes,
-            protected_headroom_bytes: baseline_available_bytes.saturating_sub(reservable_bytes),
-            counter_tolerance_bytes: baseline_available_bytes
-                .saturating_sub(reservable_bytes)
+            protected_headroom_bytes,
+            counter_tolerance_bytes: protected_headroom_bytes
                 .checked_div(VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_HEADROOM_DIVISOR)
                 .unwrap_or(0)
                 .min(VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_BYTE_CAP),
         }
+    }
+
+    fn protected_headroom_deficit_at(&self, currently_available_bytes: u64) -> u64 {
+        self.protected_headroom_bytes.saturating_sub(
+            currently_available_bytes.saturating_add(self.counter_tolerance_bytes),
+        )
     }
 
     pub fn acquired_bytes_at(&self, currently_available_bytes: u64) -> u64 {

@@ -272,15 +272,18 @@ impl VulkanDemandResidencyBatchSegment {
         }))
     }
 
-    fn begin_execution(
+    fn begin_execution_after_headroom_check(
         &self,
     ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanResidentInProcessPlacedRuntimeError>
     {
-        self.context.store.begin_execution().map_err(|error| {
-            demand_batch_error(format!(
-                "failed to enter compiled-resource deferred batch execution epoch: {error}"
-            ))
-        })
+        self.context
+            .store
+            .begin_execution_after_headroom_check()
+            .map_err(|error| {
+                demand_batch_error(format!(
+                    "failed to enter compiled-resource deferred batch execution epoch: {error}"
+                ))
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -639,7 +642,7 @@ impl VulkanDemandResidencyBatchChain {
             self.continuation_enabled.set(true);
         }
         {
-            let _execution = context.store.begin_execution().map_err(|error| {
+            let _execution = context.store.begin_execution(device).map_err(|error| {
                 demand_batch_error(format!(
                     "failed to enter compiled-resource batch execution epoch: {error}"
                 ))

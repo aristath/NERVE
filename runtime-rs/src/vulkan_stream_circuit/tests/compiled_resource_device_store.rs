@@ -916,7 +916,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(paged.eviction_count, 2);
     assert_eq!(paged.evicted_unit_count, 2);
     assert_eq!(paged.evicted_payload_bytes, 16);
-    assert!(paged.released_device_bytes >= 16);
+    assert_eq!(
+        paged.released_device_bytes, 0,
+        "ordinary expert replacement must reuse retained chunks instead of cycling Vulkan allocations",
+    );
     assert_eq!(paged.reload_count, 1);
     let remaining = usize::try_from(
         device
@@ -933,6 +936,10 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(reclaimed.current_payload_bytes, 0);
     assert_eq!(reclaimed.resident_unit_count, 0);
     assert!(reclaimed.eviction_count > paged.eviction_count);
+    assert!(
+        reclaimed.released_device_bytes > paged.released_device_bytes,
+        "explicit device-wide pressure must still be able to trim inactive arena backing",
+    );
     drop(fixed_runtime_buffer);
     drop(competing_allocation);
     assert_eq!(

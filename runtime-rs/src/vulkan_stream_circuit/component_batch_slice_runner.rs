@@ -295,11 +295,12 @@ impl VulkanResidentComponentBatchSliceRunner {
             .segment)
     }
 
-    fn begin_pipeline_demand_execution(
+    fn begin_pipeline_demand_execution_after_headroom_check(
         &self,
     ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanResidentInProcessPlacedRuntimeError>
     {
-        self.pipeline_demand_segment()?.begin_execution()
+        self.pipeline_demand_segment()?
+            .begin_execution_after_headroom_check()
     }
 
     fn wait_pipeline_demand_submission(
