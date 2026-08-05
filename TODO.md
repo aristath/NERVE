@@ -28,15 +28,15 @@ toward 50 tok/s without regressing supported Qwen models.
    output rollback without model-name branches.
 
 3. Raise DeepSeek's accepted decode rate past 30 tok/s and continue until no
-   material bottleneck remains. The current complete thinking-enabled gate uses
-   128K context, a 65,536-token output allowance, DSpark-7, contiguous placement
-   across all five AMD GPUs, and one full conversation-set warmup followed by
-   an in-process state reset. It passes behavior and teardown at 5.462 decode
-   tok/s and 8.662 prefill tok/s. A same-package vector-kernel control reached
-   5.375 decode tok/s and 8.556 prefill tok/s, so compact cooperative FP8 query
-   projections provide a real but small 1.62% decode and 1.24% prefill gain
-   (3.96% on the long Corinth turn). Accepted-token throughput and target
-   verification remain the dominant variables rather than host drafting.
+   material bottleneck remains. The authoritative thinking-enabled product gate
+   uses 128K context, a 65,536-token output allowance, a requested speculative
+   window of seven clamped to the checkpoint's trained five-token block,
+   contiguous placement across all five AMD GPUs, and one complete discarded
+   conversation before the truth conversation in the same resident process.
+   It terminates coherently, preserves Greece recall, releases all acquired
+   capacity, and reaches 7.900 decode tok/s and 8.832 prefill tok/s. This is a
+   44.6% decode improvement over the former fixed-window 5.462 tok/s gate, but
+   remains far below the 30 tok/s floor.
 
    Compile the complete speculative cycle as a device-resident transaction:
    generate the draft window without a host wait per proposal, append target
@@ -47,21 +47,37 @@ toward 50 tok/s without regressing supported Qwen models.
    real residency miss or a completed emitted block. Preserve exact rollback,
    cancellation, and canonical commit semantics.
 
-   Close the semantic acceptance gap against the equivalent llama.cpp DSpark
-   reference, then reduce target verification cost. Optimize the independently
-   material six-lane MXFP4 sparse expert kernels with fused or amortized
-   representations; do not revive the rejected standalone intermediate-FP8
-   quantization dispatch, incomplete replay signatures, or temporal-width
-   experiment. Every candidate must win exact microbenchmarks, behavioral
-   equivalence, and the complete product gate.
+   The adaptive selector now measures actual execution shapes, excludes their
+   first warmups and residency-loading cycles, and chooses by useful emitted
+   tokens per speculative-cycle nanosecond. Session reset also clears every
+   target and draft recurrent state, sampler, and auxiliary buffer. The
+   remaining truth set still spent most speculative time in target verification
+   (237.45 seconds of the long Corinth turn), while demand residency performed
+   367 loads, 221 evictions, and 195 reloads across the measured conversation.
+   Separate target compute from residency churn with device timestamps, then:
+
+   - compile draft, target projection, comparison, state selection, commit, and
+     draft catch-up into one device-resident transaction with no host wait until
+     a residency miss or completed emitted block;
+   - eliminate reload churn using route-aware expert residency decisions that
+     remain capacity- and evidence-driven rather than model-specific;
+   - optimize independently material MXFP4 sparse-expert kernels with fused or
+     amortized representations, including measured native INT4/FP8 candidates;
+   - close the remaining speculative acceptance gap without sacrificing model
+     quality.
+
+   Do not revive the rejected standalone intermediate-FP8 quantization
+   dispatch, incomplete replay signatures, or temporal-width experiment. Every
+   candidate must win exact microbenchmarks, behavioral equivalence, and the
+   complete product gate.
 
 4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
    quality/performance gates sequentially on equivalent healthy AMD placement.
    The latest schema-v10 thinking-enabled gates each discarded one complete
    in-process warmup conversation, reset model state without unloading, passed
    correct Greece recall, and released their exact recorded reservations:
-   Qwen3.6-35B-A3B reached 100.05 decode tok/s and 173.85 prefill tok/s;
-   Qwen3.5-9B reached 52.99 decode tok/s and 114.40 prefill tok/s. Keep
+   Qwen3.6-35B-A3B reaches 100.34 decode tok/s and 161.34 prefill tok/s;
+   Qwen3.5-9B reaches 54.52 decode tok/s and 116.38 prefill tok/s. Keep
    repetition, structured-protocol, conversation, and teardown checks active so
    throughput alone cannot pass.
 
