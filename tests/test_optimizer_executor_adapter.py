@@ -17,6 +17,9 @@ from nerve.representation_optimizer.benchmarking.executor_adapter import (
 from nerve.representation_optimizer.benchmarking.executor_protocol import (
     EXECUTOR_RESPONSE_SCHEMA,
 )
+from nerve.representation_optimizer.benchmarking.executor_client import (
+    regime_dynamic_state_capacity,
+)
 from nerve.representation_optimizer.benchmarking.planning import (
     create_benchmark_workload,
 )
@@ -178,6 +181,26 @@ class FixtureExecutor:
         self.aborted = True
 
 
+def test_targeted_dynamic_state_capacity_preserves_declared_horizon() -> None:
+    assert regime_dynamic_state_capacity(
+        {"context_size": 131_072, "state_size": 8_192},
+        5,
+    ) == 131_072
+    assert regime_dynamic_state_capacity(
+        {"context_size": 0, "state_size": 8_192},
+        5,
+    ) == 8_192
+    assert regime_dynamic_state_capacity(
+        {"context_size": 0, "state_size": 0},
+        5,
+    ) == 5
+    with pytest.raises(ModelCompileError, match="context size"):
+        regime_dynamic_state_capacity(
+            {"context_size": -1, "state_size": 0},
+            5,
+        )
+
+
 def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -220,6 +243,10 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert executor.commands[0]["physical_device_id"] == "vulkan:amd-fixture"
     assert executor.commands[0]["execution_scope"] == "node"
     assert executor.commands[0]["maximum_quantum_wait_ns"] == 9_000_000
+    assert (
+        executor.commands[0]["dynamic_state_capacity_activations"]
+        == 131_072
+    )
     assert executor.commands[1]["useful_units"] == 8
     assert [command["command"] for command in executor.commands] == [
         "mount",
@@ -358,7 +385,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         activation_batch_width=1,
         context_size=0,
         context_size_basis={"kind": "not_applicable"},
-        state_size=0,
+        state_size=8_192,
         boundary_mode="local",
         input_artifact={
             "path": "fixtures/component.bin",
@@ -464,8 +491,25 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         result,
         result,
     )
+    drifted_state = dict(result)
+    drifted_state["state_digest"] = _artifact_digest(b"drifted state")
+    rejected_state_drift = backend.compare_results(
+        ValidationComparisonRequest(
+            plan_id=plan_id,
+            candidate_id=candidate_id,
+            check=check,
+            seed=17,
+            behavioral_contract={"mode": "exact"},
+        ),
+        result,
+        drifted_state,
+    )
 
     assert executor.commands[0]["phase"] == "decode"
+    assert (
+        executor.commands[0]["dynamic_state_capacity_activations"]
+        == 8_192
+    )
     assert executor.commands[1]["useful_units"] == 8
     assert [
         command["command"] for command in executor.commands
@@ -475,6 +519,8 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
     assert result["output_digest"] == _artifact_digest(b"output")
     assert result["default_statistics"]["physical_dispatch_count"] == 1
     assert comparison["metrics"][0]["error"] == 0.0
+    assert rejected_state_drift["metrics"][0]["error"] == 1.0
+    assert rejected_state_drift["diagnostics"]
     assert mount["device_state_before_digest"] == _device_digest(b"capacity_reserved")
     assert unmount["device_state_after_digest"] == _device_digest(b"capacity_reserved")
 
@@ -563,8 +609,8 @@ def _requests(
         name="fixture targeted component decode",
         execution_phase="component",
         activation_batch_width=1,
-        context_size=0,
-        state_size=0,
+        context_size=131_072,
+        state_size=8_192,
         stream_count=1,
         mount_mode="resident_reuse",
         boundary_mode="local",

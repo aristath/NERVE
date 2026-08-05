@@ -52,6 +52,79 @@ fn targeted_component_fixture_is_deterministic_bounded_bf16() {
     }
 }
 
+#[test]
+fn targeted_state_fixture_preserves_declared_numeric_type() {
+    let bf16 = targeted_state_fixture_bytes(32, 17, 2, "BF16").unwrap();
+    let f32 = targeted_state_fixture_bytes(64, 17, 2, "F32").unwrap();
+    let u32s = targeted_state_fixture_bytes(64, 17, 2, "U32").unwrap();
+
+    assert_eq!(bf16, targeted_state_fixture_bytes(32, 17, 2, "BF16").unwrap());
+    assert_ne!(bf16, vec![0; bf16.len()]);
+    assert!(bf16.chunks_exact(2).all(|bytes| {
+        f32::from_bits(u32::from(u16::from_le_bytes(bytes.try_into().unwrap())) << 16).is_finite()
+    }));
+    assert_ne!(f32, vec![0; f32.len()]);
+    assert!(f32.chunks_exact(4).all(|bytes| {
+        f32::from_le_bytes(bytes.try_into().unwrap()).is_finite()
+    }));
+    assert!(u32s.chunks_exact(4).all(|bytes| {
+        u32::from_le_bytes(bytes.try_into().unwrap()) < 1_024
+    }));
+    assert!(
+        targeted_state_fixture_bytes(3, 17, 2, "BF16")
+            .unwrap_err()
+            .to_string()
+            .contains("aligned")
+    );
+    assert!(
+        targeted_state_fixture_bytes(16, 17, 2, "unknown")
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported state dtype")
+    );
+}
+
+#[test]
+fn targeted_causal_fixture_uses_declared_nonempty_history() {
+    assert_eq!(
+        targeted_prefill_start_stream_tick(
+            VulkanResidentComponentKernelBatchMode::WeightShared,
+            3,
+            4_096,
+        )
+        .unwrap(),
+        0,
+    );
+    assert_eq!(
+        targeted_prefill_start_stream_tick(
+            VulkanResidentComponentKernelBatchMode::CausalScan,
+            3,
+            4_096,
+        )
+        .unwrap(),
+        4_093,
+    );
+    assert_eq!(
+        targeted_prefill_start_stream_tick(
+            VulkanResidentComponentKernelBatchMode::CausalScan,
+            3,
+            8,
+        )
+        .unwrap(),
+        5,
+    );
+    assert!(
+        targeted_prefill_start_stream_tick(
+            VulkanResidentComponentKernelBatchMode::CausalScan,
+            9,
+            8,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("exceeds dynamic-state capacity")
+    );
+}
+
 fn targeted_test_dispatch(
     dispatch_index: usize,
     component_id: &str,
@@ -341,7 +414,7 @@ fn targeted_output_identity_remains_an_artifact_digest() {
 }
 
 #[test]
-fn targeted_prefill_accepts_truthful_stateless_causal_scan_metadata() {
+fn targeted_prefill_accepts_truthful_causal_scan_metadata() {
     assert!(targeted_prefill_batch_mode_is_supported(
         VulkanResidentComponentKernelBatchMode::CausalScan,
     ));

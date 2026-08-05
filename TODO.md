@@ -57,13 +57,6 @@ toward 50 tok/s without regressing supported Qwen models.
    The rejected parallel-latent-lane candidate proved that a shader-local
    speedup is not acceptable evidence: it regressed truth throughput and twice
    emitted a second reserved thinking terminator after a coherent answer.
-   Before another temporal-kernel experiment, extend targeted component
-   execution to run `causal_sequence_compatible` batch implementations with
-   deterministic temporal controls and state snapshots. The resulting
-   sub-minute microbenchmark must compare the same node input, output, and
-   committed state digest for the packaged implementation and a staged
-   candidate; it must fail on output or state drift.
-
    Restore reproducible execution before using token digests for attribution.
    With the same package, seed, prompts, placement, and sampler, fresh processes
    reproduce the first turn but can diverge later. Audit radix/top-k tie order,
@@ -81,8 +74,9 @@ toward 50 tok/s without regressing supported Qwen models.
      remain capacity- and evidence-driven rather than model-specific;
    - optimize independently material MXFP4 sparse-expert kernels with fused or
      amortized representations, including measured native INT4/FP8 candidates;
-   - replace the serialized indexed-attention batch transaction only after the
-     causal component harness proves exact output and state equivalence;
+   - use the causal component harness to replace the serialized indexed-
+     attention batch transaction only when a staged candidate preserves exact
+     output and committed-state digests at the declared context horizon;
    - close the remaining speculative acceptance gap without sacrificing model
      quality.
 

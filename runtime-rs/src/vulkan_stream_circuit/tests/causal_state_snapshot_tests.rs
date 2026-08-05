@@ -77,6 +77,38 @@ fn causal_state_snapshot_bank_fails_closed_when_capture_is_disabled() {
 }
 
 #[test]
+fn causal_state_snapshot_bank_initializes_and_digests_every_lane() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let buffers = static_state_test_buffers(&device);
+    let state = &buffers.state_buffers[0];
+    let source = [11u32, 22, 33, 44]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    state
+        .buffer
+        .write_bytes_at(state.layout.static_data_offset, &source)
+        .unwrap();
+    let mut bank = VulkanCausalStateSnapshotBank::new(&device, 3, true).unwrap();
+    bank.binding_buffer(&device, &buffers, 0).unwrap();
+    bank.mount_commit_batches(&device, &buffers).unwrap();
+    bank.initialize_from_state_buffers(&buffers).unwrap();
+
+    let snapshots = bank.entries[0]
+        .snapshots
+        .read_bytes(bank.entries[0].snapshots.byte_capacity())
+        .unwrap();
+    assert_eq!(snapshots, source.repeat(3));
+    let mut first = Sha256::new();
+    bank.update_digest(&buffers, &mut first).unwrap();
+    let first = first.finalize().to_vec();
+    bank.entries[0].snapshots.write_bytes(&vec![0; snapshots.len()]).unwrap();
+    let mut second = Sha256::new();
+    bank.update_digest(&buffers, &mut second).unwrap();
+    assert_ne!(first, second.finalize().to_vec());
+}
+
+#[test]
 fn temporal_causal_convolution_matches_repeated_scalar_dispatches() {
     const CHANNELS: usize = 10_240;
     const KERNEL_WIDTH: usize = 4;

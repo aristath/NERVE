@@ -15,6 +15,7 @@ from nerve.representation_optimizer.benchmarking.executor_client import (
     ResidentExecutorClient,
     ResidentExecutorMountSpec,
     ResidentExecutorSession,
+    regime_dynamic_state_capacity,
 )
 from nerve.representation_optimizer.benchmarking.executor_transport import (
     ExecutorTransport,
@@ -141,10 +142,9 @@ class ResidentComponentValidationBackend:
             phase=phase,
             activation_batch_width=width,
             physical_device_id=physical_device_id,
-            dynamic_state_capacity_activations=max(
+            dynamic_state_capacity_activations=regime_dynamic_state_capacity(
+                check["regime"],
                 width,
-                int(check["regime"]["state_size"]),
-                1,
             ),
             maximum_quantum_wait_ns=maximum_wait_ns,
             request_identity=request.to_json(),

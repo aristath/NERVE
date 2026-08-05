@@ -132,6 +132,83 @@ impl VulkanCausalStateSnapshotBank {
         Ok(())
     }
 
+    fn initialize_from_state_buffers(
+        &self,
+        buffers: &VulkanStreamCircuitStreamBuffers,
+    ) -> Result<(), VulkanError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        for entry in &self.entries {
+            let state = buffers
+                .state_buffers
+                .get(entry.state_buffer_index)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "causal state snapshot fixture references absent state buffer {}",
+                        entry.state_buffer_index,
+                    ))
+                })?;
+            let source = state.buffer.read_bytes_at(
+                state.layout.static_data_offset,
+                entry.static_byte_capacity,
+            )?;
+            let byte_capacity = entry
+                .static_byte_capacity
+                .checked_mul(self.lane_capacity)
+                .ok_or_else(|| {
+                    VulkanError("causal state snapshot fixture capacity overflowed".to_string())
+                })?;
+            let mut snapshots = Vec::with_capacity(byte_capacity);
+            for _ in 0..self.lane_capacity {
+                snapshots.extend_from_slice(&source);
+            }
+            entry.snapshots.write_bytes(&snapshots)?;
+        }
+        Ok(())
+    }
+
+    fn update_digest(
+        &self,
+        buffers: &VulkanStreamCircuitStreamBuffers,
+        digest: &mut Sha256,
+    ) -> Result<(), VulkanError> {
+        digest.update(b"causal_state_snapshots");
+        digest.update([u8::from(self.enabled)]);
+        let mut entries = self.entries.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.state_buffer_index);
+        for entry in entries {
+            let state = buffers
+                .state_buffers
+                .get(entry.state_buffer_index)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "causal state snapshot digest references absent state buffer {}",
+                        entry.state_buffer_index,
+                    ))
+                })?;
+            digest.update(entry.state_buffer_index.to_le_bytes());
+            digest.update(state.component_id.as_bytes());
+            digest.update(state.state_id.as_bytes());
+            digest.update(entry.static_byte_capacity.to_le_bytes());
+            digest.update(
+                entry
+                    .snapshots
+                    .read_bytes(entry.snapshots.byte_capacity())?,
+            );
+        }
+        Ok(())
+    }
+
+    fn total_byte_capacity(&self) -> usize {
+        self.dummy_buffer.byte_capacity().saturating_add(
+            self.entries
+                .iter()
+                .map(|entry| entry.snapshots.byte_capacity())
+                .sum::<usize>(),
+        )
+    }
+
     fn can_commit_prefix(&self) -> bool {
         self.enabled
             && self.required_state_buffer_indices

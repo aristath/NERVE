@@ -51,6 +51,26 @@ class ResidentExecutorMountSpec:
     cancel_requested: Callable[[], bool] | None = None
 
 
+def regime_dynamic_state_capacity(
+    regime: Json,
+    activation_batch_width: int,
+) -> int:
+    """Preserve the declared temporal horizon in targeted execution."""
+    width = positive_integer(
+        activation_batch_width,
+        "targeted activation batch width",
+    )
+    context_size = regime.get("context_size")
+    state_size = regime.get("state_size")
+    for value, label in (
+        (context_size, "targeted context size"),
+        (state_size, "targeted state size"),
+    ):
+        if type(value) is not int or value < 0:
+            raise ModelCompileError(f"{label} must be a nonnegative integer")
+    return max(width, context_size, state_size)
+
+
 @dataclass(frozen=True)
 class ResidentExecutorExecution:
     report: Json
