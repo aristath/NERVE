@@ -33,6 +33,7 @@ use nerve_runtime::{
     VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
     VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats,
+    RuntimeAssistantStreamProtocolAction, RuntimeChatGeneratedOutputControl,
     RuntimeChatSession, RuntimePreparedChatTurn, RuntimeRecoverableChatTurnError,
     ResourceResidencyPolicy,
     VulkanResidentChatTransactionPhase,

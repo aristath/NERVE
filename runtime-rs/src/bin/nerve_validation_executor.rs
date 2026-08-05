@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nerve_runtime::{
-    ResourceResidencyPolicy, RuntimeChatSession, RuntimeStagedCandidate, VulkanComputeDevice,
-    VulkanComputeDeviceCatalog, VulkanPlacedPromptEngineShutdownReport, VulkanResidentBufferPool,
-    VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
+    ResourceResidencyPolicy, RuntimeAssistantStreamProtocolAction,
+    RuntimeChatGeneratedOutputControl, RuntimeChatSession, RuntimeStagedCandidate,
+    VulkanComputeDevice, VulkanComputeDeviceCatalog, VulkanPlacedPromptEngineShutdownReport,
+    VulkanResidentBufferPool, VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
     VulkanResidentOutputControl, VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig,
@@ -873,6 +874,10 @@ impl MountedValidation {
             let prepared = self
                 .chat
                 .prepare_user_turn(user_content, &self.transcript_codec)?;
+            let mut protocol_validator = self
+                .chat
+                .formatter
+                .assistant_stream_protocol_validator(&self.transcript_codec)?;
             let mut progress_error: Option<Box<dyn Error>> = None;
             let transaction = execute_vulkan_resident_chat_transaction(
                 &mut self.engine,
@@ -885,6 +890,18 @@ impl MountedValidation {
                 &prepared,
                 max_output_tokens,
                 |event| {
+                    if let Some(validator) = protocol_validator.as_mut() {
+                        match validator.observe(event.output_event.token_id)? {
+                            RuntimeAssistantStreamProtocolAction::Continue => {}
+                            RuntimeAssistantStreamProtocolAction::TerminateAndTrim {
+                                token_count,
+                            } => {
+                                return Ok(RuntimeChatGeneratedOutputControl::TerminateAndTrim {
+                                    token_count,
+                                });
+                            }
+                        }
+                    }
                     let generated_tokens = event.output_event.output_index.saturating_add(1);
                     if (generated_tokens == 1 || generated_tokens % 32 == 0)
                         && progress_error.is_none()
@@ -900,7 +917,7 @@ impl MountedValidation {
                             progress_error = Some(error);
                         }
                     }
-                    Ok(())
+                    Ok(RuntimeChatGeneratedOutputControl::Continue)
                 },
                 |_, _| Ok(()),
             )?;
@@ -958,6 +975,7 @@ impl MountedValidation {
                 &transaction.generated_token_ids,
                 &self.stop_token_ids,
                 max_output_tokens,
+                transaction.generation_terminated_by_protocol,
             )?;
             traces.push(json!({
                 "turn_index": turn_index,
@@ -1325,8 +1343,11 @@ fn validation_conversation_stop_reason(
     generated_token_ids: &[u32],
     stop_token_ids: &[u32],
     output_allowance: usize,
+    generation_terminated_by_protocol: bool,
 ) -> Result<&'static str, io::Error> {
-    if generated_token_ids
+    if generation_terminated_by_protocol {
+        Ok("protocol_boundary")
+    } else if generated_token_ids
         .last()
         .is_some_and(|token_id| stop_token_ids.contains(token_id))
     {
@@ -1870,14 +1891,18 @@ mod tests {
     #[test]
     fn validation_conversation_completion_requires_eos_or_output_allowance() {
         assert_eq!(
-            validation_conversation_stop_reason(&[7, 99], &[99], 2).unwrap(),
+            validation_conversation_stop_reason(&[7, 99], &[99], 2, false).unwrap(),
             "eos"
         );
         assert_eq!(
-            validation_conversation_stop_reason(&[7, 8], &[99], 2).unwrap(),
+            validation_conversation_stop_reason(&[7, 8], &[99], 2, false).unwrap(),
             "output_allowance"
         );
-        assert!(validation_conversation_stop_reason(&[7], &[99], 2).is_err());
+        assert_eq!(
+            validation_conversation_stop_reason(&[7], &[99], 2, true).unwrap(),
+            "protocol_boundary"
+        );
+        assert!(validation_conversation_stop_reason(&[7], &[99], 2, false).is_err());
     }
 
     #[test]

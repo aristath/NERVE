@@ -122,7 +122,18 @@ fn run_placed_chat(
                 args.max_new_tokens,
                 |output_event| {
                     if let Some(validator) = protocol_validator.as_mut() {
-                        validator.observe(output_event.output_event.token_id)?;
+                        match validator.observe(output_event.output_event.token_id)? {
+                            RuntimeAssistantStreamProtocolAction::Continue => {}
+                            RuntimeAssistantStreamProtocolAction::TerminateAndTrim {
+                                token_count,
+                            } => {
+                                return Ok(
+                                    RuntimeChatGeneratedOutputControl::TerminateAndTrim {
+                                        token_count,
+                                    },
+                                );
+                            }
+                        }
                     }
                     let output_at = Instant::now();
                     if let Some(previous) = previous_output_at {
@@ -158,7 +169,7 @@ fn run_placed_chat(
                         Ok(None) => {}
                         Err(error) => return Err(Box::new(error)),
                     }
-                    Ok(())
+                    Ok(RuntimeChatGeneratedOutputControl::Continue)
                 },
                 |phase, engine| {
                     let snapshot = engine

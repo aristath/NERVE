@@ -514,7 +514,7 @@ fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
         "first",
         &prepared,
         2,
-        |_| Ok(()),
+        |_| Ok(crate::RuntimeChatGeneratedOutputControl::Continue),
         |phase, _| {
             phases.push(phase);
             Ok(())
@@ -562,6 +562,7 @@ fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
         .prepare_user_turn("first", &FixedGeneratedChatCodec)
         .unwrap();
     let mut retry_phases = Vec::new();
+    let mut retry_output_count = 0usize;
     let retry = crate::execute_vulkan_resident_chat_transaction(
         &mut engine,
         "main",
@@ -572,7 +573,14 @@ fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
         "first",
         &retry_prepared,
         2,
-        |_| Ok(()),
+        |_| {
+            retry_output_count = retry_output_count.saturating_add(1);
+            Ok(if retry_output_count == 2 {
+                crate::RuntimeChatGeneratedOutputControl::TerminateAndTrim { token_count: 1 }
+            } else {
+                crate::RuntimeChatGeneratedOutputControl::Continue
+            })
+        },
         |phase, _| {
             retry_phases.push(phase);
             Ok(())
@@ -580,6 +588,10 @@ fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
     )
     .unwrap();
 
+    assert_eq!(retry_output_count, 2);
+    assert_eq!(retry.generation_run.generated_token_ids.len(), 2);
+    assert_eq!(retry.generated_token_ids.len(), 1);
+    assert!(retry.generation_terminated_by_protocol);
     assert_eq!(
         retry_phases,
         vec![

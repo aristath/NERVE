@@ -54,7 +54,14 @@ pub struct VulkanResidentChatTransactionRun {
     pub generation_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub canonical_commit_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub execution_counters: VulkanResidentExecutionCounters,
+    pub generation_terminated_by_protocol: bool,
     pub elapsed_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeChatGeneratedOutputControl {
+    Continue,
+    TerminateAndTrim { token_count: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +114,9 @@ pub fn execute_vulkan_resident_chat_transaction<T, F, P>(
 ) -> Result<VulkanResidentChatTransactionRun, Box<dyn Error>>
 where
     T: VulkanResidentTokenTextCodec,
-    F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent) -> Result<(), Box<dyn Error>>,
+    F: FnMut(
+        VulkanResidentTokenRuntimeSchedulerOutputEvent,
+    ) -> Result<RuntimeChatGeneratedOutputControl, Box<dyn Error>>,
     P: FnMut(
         VulkanResidentChatTransactionPhase,
         &VulkanResidentInProcessPlacedPromptEngine,
@@ -139,6 +148,7 @@ where
             generation_event = generation_event.with_stop_tokens(stop_token_ids.to_vec());
         }
         let mut output_error = None;
+        let mut protocol_terminal_token_count = None;
         let generation_run = engine.submit_input_event_transactionally_until_idle_with_output(
             stream_id,
             generation_event,
@@ -146,11 +156,18 @@ where
                 if output_error.is_some() {
                     return VulkanResidentOutputControl::Abort;
                 }
-                if let Err(error) = on_output_event(event) {
-                    output_error = Some(error);
-                    VulkanResidentOutputControl::Abort
-                } else {
-                    VulkanResidentOutputControl::Continue
+                match on_output_event(event) {
+                    Ok(RuntimeChatGeneratedOutputControl::Continue) => {
+                        VulkanResidentOutputControl::Continue
+                    }
+                    Ok(RuntimeChatGeneratedOutputControl::TerminateAndTrim { token_count }) => {
+                        protocol_terminal_token_count = Some(token_count);
+                        VulkanResidentOutputControl::Abort
+                    }
+                    Err(error) => {
+                        output_error = Some(error);
+                        VulkanResidentOutputControl::Abort
+                    }
                 }
             },
         )?;
@@ -164,13 +181,30 @@ where
                 error,
             ));
         }
-        let assistant_stopped = generation_run
-            .generated_token_ids
-            .last()
-            .is_some_and(|token_id| stop_token_ids.contains(token_id));
+        let mut generated_token_ids = generation_run.generated_token_ids.clone();
+        if let Some(token_count) = protocol_terminal_token_count {
+            if token_count == 0 || token_count > generated_token_ids.len() {
+                return Err(recoverable_chat_turn_error(
+                    "normalizing generated assistant protocol boundary failed before canonical commit",
+                    Box::new(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "stream protocol requested trimming {token_count} token(s) from {} generated token(s)",
+                            generated_token_ids.len(),
+                        ),
+                    )),
+                ));
+            }
+            generated_token_ids.truncate(generated_token_ids.len() - token_count);
+        }
+        let generation_terminated_by_protocol = protocol_terminal_token_count.is_some();
+        let assistant_stopped = generation_terminated_by_protocol
+            || generated_token_ids
+                .last()
+                .is_some_and(|token_id| stop_token_ids.contains(token_id));
         let assistant_content = transcript_codec
             .decode_tokens(assistant_content_token_ids(
-                &generation_run.generated_token_ids,
+                &generated_token_ids,
                 stop_token_ids,
             ))
             .map_err(|error| {
@@ -217,7 +251,7 @@ where
             engine,
         )?;
         Ok(VulkanResidentChatTransactionRun {
-            generated_token_ids: generation_run.generated_token_ids.clone(),
+            generated_token_ids,
             assistant_content,
             assistant_message,
             canonical_committed_token_ids,
@@ -228,6 +262,7 @@ where
             generation_run,
             canonical_commit_run,
             execution_counters: vulkan_resident_execution_counters(),
+            generation_terminated_by_protocol,
             elapsed_ns: 0,
         })
     })();

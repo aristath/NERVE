@@ -87,15 +87,21 @@ struct RuntimeAssistantStreamProtocolToken {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeAssistantStreamProtocolValidator {
     thinking: bool,
-    saw_thinking_end: bool,
+    thinking_end_at: Option<usize>,
     observed_token_count: usize,
     recent_token_ids: Vec<u32>,
     maximum_protocol_token_length: usize,
     protocol_tokens: Vec<RuntimeAssistantStreamProtocolToken>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeAssistantStreamProtocolAction {
+    Continue,
+    TerminateAndTrim { token_count: usize },
+}
+
 impl RuntimeAssistantStreamProtocolValidator {
-    pub fn observe(&mut self, token_id: u32) -> io::Result<()> {
+    pub fn observe(&mut self, token_id: u32) -> io::Result<RuntimeAssistantStreamProtocolAction> {
         self.observed_token_count = self.observed_token_count.saturating_add(1);
         self.recent_token_ids.push(token_id);
         if self.recent_token_ids.len() > self.maximum_protocol_token_length {
@@ -109,39 +115,50 @@ impl RuntimeAssistantStreamProtocolValidator {
             .protocol_tokens
             .iter()
             .find(|protocol| self.recent_token_ids.ends_with(&protocol.token_ids))
-            .map(|protocol| protocol.kind);
+            .map(|protocol| (protocol.kind, protocol.token_ids.len()));
         match matched {
-            Some(RuntimeAssistantStreamProtocolTokenKind::Forbidden(name)) => {
+            Some((RuntimeAssistantStreamProtocolTokenKind::Forbidden(name), _)) => {
                 Err(invalid_data(format!(
                     "generated assistant emitted reserved {name} token ending at generated token {}",
                     self.observed_token_count,
                 )))
             }
-            Some(RuntimeAssistantStreamProtocolTokenKind::ThinkingEnd) => {
+            Some((RuntimeAssistantStreamProtocolTokenKind::ThinkingEnd, token_count)) => {
                 if !self.thinking {
                     return Err(invalid_data(format!(
                         "generated assistant emitted reserved thinking_end token in non-thinking content ending at generated token {}",
                         self.observed_token_count,
                     )));
                 }
-                if self.saw_thinking_end {
+                if let Some(first_end) = self.thinking_end_at {
+                    let final_content_token_count = self
+                        .observed_token_count
+                        .saturating_sub(first_end)
+                        .saturating_sub(token_count);
+                    if final_content_token_count > 0 {
+                        return Ok(RuntimeAssistantStreamProtocolAction::TerminateAndTrim {
+                            token_count,
+                        });
+                    }
                     return Err(invalid_data(format!(
-                        "generated assistant emitted a second thinking_end token ending at generated token {}",
+                        "generated assistant emitted adjacent thinking_end tokens ending at generated token {}",
                         self.observed_token_count,
                     )));
                 }
-                self.saw_thinking_end = true;
-                Ok(())
+                self.thinking_end_at = Some(self.observed_token_count);
+                Ok(RuntimeAssistantStreamProtocolAction::Continue)
             }
-            Some(RuntimeAssistantStreamProtocolTokenKind::ToolMarkup)
-                if self.thinking && !self.saw_thinking_end =>
+            Some((RuntimeAssistantStreamProtocolTokenKind::ToolMarkup, _))
+                if self.thinking && self.thinking_end_at.is_none() =>
             {
                 Err(invalid_data(format!(
                     "generated assistant emitted reserved tool markup inside reasoning ending at generated token {}",
                     self.observed_token_count,
                 )))
             }
-            Some(RuntimeAssistantStreamProtocolTokenKind::ToolMarkup) | None => Ok(()),
+            Some((RuntimeAssistantStreamProtocolTokenKind::ToolMarkup, _)) | None => {
+                Ok(RuntimeAssistantStreamProtocolAction::Continue)
+            }
         }
     }
 }
@@ -275,7 +292,7 @@ impl CompiledChatCodec {
                 .get("enable_thinking")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
-            saw_thinking_end: false,
+            thinking_end_at: None,
             observed_token_count: 0,
             recent_token_ids: Vec::with_capacity(maximum_protocol_token_length),
             maximum_protocol_token_length,
@@ -967,7 +984,7 @@ mod tests {
     use super::{
         COMPILED_CHAT_CODEC_FILE, COMPILED_CHAT_CODEC_SCHEMA, CompiledChatCodec,
         CompiledChatReasoning, CompiledChatTemplates, CompiledChatTokens, CompiledChatTools,
-        CompiledResponseParser, STRUCTURED_CODEC_KIND,
+        CompiledResponseParser, RuntimeAssistantStreamProtocolAction, STRUCTURED_CODEC_KIND,
     };
     use crate::{
         RuntimeChatFormatter, RuntimeChatMessage, VulkanResidentTokenTextCodec,
@@ -1052,15 +1069,19 @@ mod tests {
     fn observe_text(
         validator: &mut super::RuntimeAssistantStreamProtocolValidator,
         text: &str,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<RuntimeAssistantStreamProtocolAction> {
+        let mut action = RuntimeAssistantStreamProtocolAction::Continue;
         for token_id in ByteCodec.encode_text(text).unwrap() {
-            validator.observe(token_id)?;
+            action = validator.observe(token_id)?;
+            if action != RuntimeAssistantStreamProtocolAction::Continue {
+                break;
+            }
         }
-        Ok(())
+        Ok(action)
     }
 
     #[test]
-    fn compiled_codec_stream_validator_rejects_a_second_reasoning_boundary_immediately() {
+    fn compiled_codec_stream_validator_rejects_adjacent_reasoning_boundaries() {
         let mut validator = fixture_codec()
             .assistant_stream_protocol_validator(
                 &ByteCodec,
@@ -1069,12 +1090,29 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        observe_text(&mut validator, "reasoning</T>answer").unwrap();
-        let error = observe_text(&mut validator, "again</T>").unwrap_err();
+        observe_text(&mut validator, "reasoning</T>").unwrap();
+        let error = observe_text(&mut validator, "</T>").unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("emitted a second thinking_end token")
+                .contains("emitted adjacent thinking_end tokens")
+        );
+    }
+
+    #[test]
+    fn compiled_codec_stream_validator_terminates_at_a_redundant_close_after_final_content() {
+        let mut validator = fixture_codec()
+            .assistant_stream_protocol_validator(
+                &ByteCodec,
+                &Map::from_iter([("enable_thinking".to_string(), Value::Bool(true))]),
+            )
+            .unwrap()
+            .unwrap();
+
+        observe_text(&mut validator, "reasoning</T>final answer").unwrap();
+        assert_eq!(
+            observe_text(&mut validator, "</T>").unwrap(),
+            RuntimeAssistantStreamProtocolAction::TerminateAndTrim { token_count: 4 },
         );
     }
 
