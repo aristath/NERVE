@@ -45,21 +45,16 @@ toward 50 tok/s without regressing supported Qwen models.
    gate at 128K context and a 65,536-token output allowance. The gate discards
    one complete conversation, measures a second conversation without unloading
    the model, preserves Greece/Athens turn recall, and releases every acquired
-   allocation. Its current truth baseline is **6.2442 decode tok/s** and
-   **7.6488 prefill tok/s** across 3,313 measured generated tokens. Capacity
-   packing now charges target endpoints and mounted draft parameters to their
-   physical component segment; that removed the tail-device overload and cut
-   truth-set source reads from 971.79 GB to 108.68 GB. The remaining five turns
-   still evicted 112.82 GB, performed 7,866 reloads, and blocked 80.47 seconds
-   on residency, so the cache hierarchy remains the first measured bottleneck.
-   No derived representation was selected. Fix the following in measured order:
-
-   - Replace isolated per-device-store host-visible budgets with a shared,
-     borrowable physical residency cache. Preserve contiguous component
-     ownership while allowing unused host/device capacity to satisfy a hot
-     store, enforce one global hard bound, and keep an evicted expert in a
-     reusable host tier instead of rereading it from disk. Make cache admission,
-     promotion, demotion, and eviction route-aware and evidence-driven.
+   allocation. Its current truth baseline is **6.6966 decode tok/s** and
+   **8.5176 prefill tok/s**. The shared, borrowable physical host cache replaced
+   isolated per-store budgets and enforces one measured global hard bound. It
+   reduced the measured truth conversation from 108.68 GB and 7,866 source
+   reloads to 4.13 GB and 6 reloads, with one 80.2 MB eviction and 6.59 seconds
+   of residency blocking. Cache reservations are transactional, reclaim full
+   allocation cohorts, and use a global-before-store lock order so simultaneous
+   stores cannot deadlock. Residency is no longer the dominant steady-state
+   bottleneck. No derived representation was selected. Fix the following in
+   measured order:
    - Stop speculative verification from multiplying sparse-expert traffic. The
      current five-token target window accepts roughly 20-34% and executes far
      more routed branches than it commits. Measure scalar and each useful block
@@ -78,10 +73,14 @@ toward 50 tok/s without regressing supported Qwen models.
      so remaining kernel and orchestration costs are separable after churn is
      removed. Reduce the current tens of thousands of copy submissions and
      waits without weakening bounded execution quanta or driver-timeout safety.
-   - Restore repeated-process determinism before accepting throughput changes.
-     Audit radix/top-k tie order, sampler RNG consumption, accepted-prefix
-     commit, rollback, reset state, and expert selection. Require equality for
-     committed tokens, routed experts, accepted prefixes, and state digests.
+   - Complete repeated-process determinism before accepting throughput changes.
+     Scalar and temporal radix/top-k now have deterministic cutoff-tie ordering,
+     score-descending output, compiler bounds, and numeric Vulkan coverage.
+     Audit the remaining sampler RNG consumption, accepted-prefix commit,
+     rollback, reset state, and expert-selection state. Require equality for
+     committed tokens, routed experts, accepted prefixes, and state digests,
+     and measure whether the current 512-entry bitonic ordering costs more than
+     a deterministic radix-prefix implementation would.
 
 4. Complete heterogeneous cost-based auto-placement. The runtime now admits
    demand-paged models against fixed residency plus one full selector wave,
@@ -112,9 +111,9 @@ toward 50 tok/s without regressing supported Qwen models.
    current thinking-enabled gates each discard one complete in-process warmup
    conversation, reset model state without unloading, pass correct Greece
    recall, and release their exact recorded reservations. On the current
-   pressure-safe runtime, Qwen3.6-35B-A3B reaches 97.164 decode tok/s and
-   128.9294 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches
-   54.4492 decode tok/s and 133.9638 prefill tok/s on one AMD using the official
+   pressure-safe runtime, Qwen3.6-35B-A3B reaches 96.2418 decode tok/s and
+   121.7564 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches
+   54.1696 decode tok/s and 135.7208 prefill tok/s on one AMD using the official
    temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
    repetition-penalty 1.0 thinking profile. Keep repetition,
    structured-protocol, conversation, and teardown checks active so throughput
