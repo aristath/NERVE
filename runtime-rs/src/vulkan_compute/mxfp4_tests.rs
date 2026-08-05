@@ -6,16 +6,42 @@ mod mxfp4_tests {
     const WEIGHT_BYTES: usize = WIDTH * WIDTH / 2;
     const SCALE_BYTES: usize = WIDTH * WIDTH / 32;
     const FRAME_BYTES: usize = WIDTH * 2;
+    const TEST_DEVICE_UUID_ENV: &str = "NERVE_TEST_VULKAN_DEVICE_UUID";
+
+    fn explicitly_selected_device(test_name: &str) -> Option<VulkanComputeDevice> {
+        let Ok(physical_device_id) = std::env::var(TEST_DEVICE_UUID_ENV) else {
+            eprintln!("skipping {test_name}: explicit Vulkan device UUID unset");
+            return None;
+        };
+        let encoded = physical_device_id
+            .strip_prefix("vulkan-uuid:")
+            .expect("MXFP4 test device must use an exact vulkan-uuid: reference");
+        assert_eq!(
+            encoded.len(),
+            32,
+            "MXFP4 test device UUID must contain exactly 32 hexadecimal digits"
+        );
+        let mut uuid = [0u8; 16];
+        for (index, byte) in uuid.iter_mut().enumerate() {
+            let offset = index * 2;
+            *byte = u8::from_str_radix(&encoded[offset..offset + 2], 16)
+                .expect("MXFP4 test device UUID must be hexadecimal");
+        }
+        let device = VulkanComputeDevice::new_for_device_uuid(uuid)
+            .expect("explicitly selected Vulkan device must open");
+        assert_eq!(
+            device.physical_device_id(),
+            physical_device_id,
+            "Vulkan opened a device other than the explicitly selected GPU"
+        );
+        Some(device)
+    }
 
     #[test]
     fn native_mxfp4_expert_kernels_match_known_cpu_results() {
-        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-            eprintln!("skipping native MXFP4 conformance: explicit Vulkan device index unset");
+        let Some(device) = explicitly_selected_device("native MXFP4 conformance") else {
             return;
         };
-        let device_index = raw_device_index
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let gate_shader = render_mxfp4_shader(
             "independent_sparse_moe_gate_up_mxfp4.comp.template",
             &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
@@ -31,8 +57,6 @@ mod mxfp4_tests {
             &[("{{TILE_ROWS}}", "64")],
             false,
         );
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .expect("explicit idle AMD Vulkan device must open");
         assert!(device.supports_buffer_device_address());
 
         let hidden = device.create_resident_buffer(FRAME_BYTES).unwrap();
@@ -166,22 +190,14 @@ mod mxfp4_tests {
 
     #[test]
     fn native_mxfp4_batch_expert_fails_closed_on_invalid_dynamic_metadata() {
-        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-            eprintln!(
-                "skipping native MXFP4 metadata guard: explicit Vulkan device index unset"
-            );
+        let Some(device) = explicitly_selected_device("native MXFP4 metadata guard") else {
             return;
         };
-        let device_index = raw_device_index
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let gate_shader = render_mxfp4_shader(
             "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
             &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
             true,
         );
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .expect("explicit idle AMD Vulkan device must open");
 
         let quantized_hidden = device.create_resident_buffer(WIDTH).unwrap();
         quantized_hidden.write_bytes(&vec![0x38; WIDTH]).unwrap();
@@ -272,16 +288,10 @@ mod mxfp4_tests {
 
     #[test]
     fn native_mxfp4_batch_real_geometry_matches_and_finishes_under_one_minute() {
-        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-            eprintln!(
-                "skipping native MXFP4 real batch geometry: explicit Vulkan device index unset"
-            );
+        let Some(device) = explicitly_selected_device("native MXFP4 real batch geometry") else {
             return;
         };
         let started = std::time::Instant::now();
-        let device_index = raw_device_index
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let hidden_size = 4096usize;
         let intermediate_size = 2048usize;
         let num_experts = 256usize;
@@ -337,8 +347,6 @@ mod mxfp4_tests {
             &[("{{TILE_ROWS}}", "64")],
             false,
         );
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .expect("explicit idle AMD Vulkan device must open");
 
         let hidden_fp8_words = hidden_size / 4;
         let hidden_blocks = hidden_size / 128;
@@ -758,16 +766,11 @@ mod mxfp4_tests {
 
     #[test]
     fn native_mxfp4_real_geometry_microbenchmark_finishes_under_one_minute() {
-        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-            eprintln!(
-                "skipping native MXFP4 real-geometry microbenchmark: explicit Vulkan device index unset"
-            );
+        let Some(device) = explicitly_selected_device("native MXFP4 real-geometry microbenchmark")
+        else {
             return;
         };
         let started = std::time::Instant::now();
-        let device_index = raw_device_index
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
         let hidden_size = 4096usize;
         let intermediate_size = 2048usize;
         let expert_count = 6usize;
@@ -789,8 +792,6 @@ mod mxfp4_tests {
             &[("{{TILE_ROWS}}", "64")],
             false,
         );
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .expect("explicit idle AMD Vulkan device must open");
 
         let quantized_hidden = device.create_resident_buffer(hidden_size).unwrap();
         quantized_hidden
@@ -1069,18 +1070,10 @@ mod mxfp4_tests {
 
     #[test]
     fn selected_expert_host_to_device_copy_microbenchmark_finishes_under_one_minute() {
-        let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-            eprintln!(
-                "skipping selected-expert copy microbenchmark: explicit Vulkan device index unset"
-            );
+        let Some(device) = explicitly_selected_device("selected-expert copy microbenchmark") else {
             return;
         };
         let started = std::time::Instant::now();
-        let device_index = raw_device_index
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
-            .expect("explicit idle AMD Vulkan device must open");
         let expert_group_bytes = 3 * (4_194_304 + 262_144);
         let selected_expert_bytes = 6 * expert_group_bytes;
         let source = device
