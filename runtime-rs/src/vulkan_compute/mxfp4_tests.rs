@@ -143,6 +143,25 @@ mod mxfp4_tests {
             u16_bytes(&vec![f32_to_bf16_bits(1.0); WIDTH]),
             "native MXFP4 down projection must apply the route weight after the linear map"
         );
+
+        let finite_e2m1_values = [
+            0.0_f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0,
+            -1.5, -2.0, -3.0, -4.0, -6.0,
+        ];
+        for (nibble, expected) in finite_e2m1_values.into_iter().enumerate() {
+            let packed = u8::try_from(nibble | (nibble << 4)).unwrap();
+            down_weight
+                .write_bytes(&vec![packed; WEIGHT_BYTES])
+                .unwrap();
+            device
+                .run_resident_kernel_dispatch(&down_dispatch, &[])
+                .unwrap();
+            assert_eq!(
+                outputs.read_bytes(FRAME_BYTES).unwrap(),
+                u16_bytes(&vec![f32_to_bf16_bits(expected); WIDTH]),
+                "native MXFP4 down projection changed finite E2M1 code {nibble:#x}"
+            );
+        }
     }
 
     #[test]
