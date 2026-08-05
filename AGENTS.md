@@ -11,6 +11,7 @@
 ## GPU residency
 
 - Do not use the NVIDIA GPU for any NERVE workload. This includes model execution, tests, benchmarks, compilation probes, device enumeration, and diagnostic probes.
+- Do not use the AMD integrated GPU at PCI `0000:8a:00.0` for any NERVE workload. Only explicitly allowlisted discrete AMD GPUs may be used for execution, tests, benchmarks, compilation probes, device enumeration, or diagnostics.
 - Inspect every selected AMD GPU immediately before a workload and record its
   current VRAM allocation, usable capacity, and activity. Existing allocations
   are reservations, not a reason to discard the device.
