@@ -54,6 +54,24 @@ toward 50 tok/s without regressing supported Qwen models.
    remaining truth set still spent most speculative time in target verification
    (237.45 seconds of the long Corinth turn), while demand residency performed
    367 loads, 221 evictions, and 195 reloads across the measured conversation.
+   The rejected parallel-latent-lane candidate proved that a shader-local
+   speedup is not acceptable evidence: it regressed truth throughput and twice
+   emitted a second reserved thinking terminator after a coherent answer.
+   Before another temporal-kernel experiment, extend targeted component
+   execution to run `causal_sequence_compatible` batch implementations with
+   deterministic temporal controls and state snapshots. The resulting
+   sub-minute microbenchmark must compare the same node input, output, and
+   committed state digest for the packaged implementation and a staged
+   candidate; it must fail on output or state drift.
+
+   Restore reproducible execution before using token digests for attribution.
+   With the same package, seed, prompts, placement, and sampler, fresh processes
+   reproduce the first turn but can diverge later. Audit radix/top-k tie order,
+   speculative sampler RNG consumption, accepted-prefix commit, rollback, and
+   reset state. Require repeated-process equality for committed tokens, routed
+   experts, accepted prefixes, and state digests; do not weaken the product
+   quality gate to accommodate nondeterminism.
+
    Separate target compute from residency churn with device timestamps, then:
 
    - compile draft, target projection, comparison, state selection, commit, and
@@ -63,13 +81,15 @@ toward 50 tok/s without regressing supported Qwen models.
      remain capacity- and evidence-driven rather than model-specific;
    - optimize independently material MXFP4 sparse-expert kernels with fused or
      amortized representations, including measured native INT4/FP8 candidates;
+   - replace the serialized indexed-attention batch transaction only after the
+     causal component harness proves exact output and state equivalence;
    - close the remaining speculative acceptance gap without sacrificing model
      quality.
 
    Do not revive the rejected standalone intermediate-FP8 quantization
-   dispatch, incomplete replay signatures, or temporal-width experiment. Every
-   candidate must win exact microbenchmarks, behavioral equivalence, and the
-   complete product gate.
+   dispatch, incomplete replay signatures, or naive workgroup-Y temporal-lane
+   split. Every candidate must win exact microbenchmarks, output-and-state
+   equivalence, repeated-process determinism, and the complete product gate.
 
 4. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
    quality/performance gates sequentially on equivalent healthy AMD placement.
