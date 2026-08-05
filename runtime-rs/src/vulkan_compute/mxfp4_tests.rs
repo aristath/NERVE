@@ -319,6 +319,24 @@ mod mxfp4_tests {
             &[("{{TILE_ROWS}}", "64")],
             false,
         );
+        let preexpanded_fp8_gate_shader = render_preexpanded_fp8_shader_geometry(
+            "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
+            true,
+        );
+        let preexpanded_fp8_down_shader = render_preexpanded_fp8_shader_geometry(
+            "independent_sparse_moe_down_batch1_mxfp4.comp.template",
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            &[("{{TILE_ROWS}}", "64")],
+            false,
+        );
         let device = VulkanComputeDevice::new_for_physical_device_index(device_index)
             .expect("explicit idle AMD Vulkan device must open");
 
@@ -530,8 +548,9 @@ mod mxfp4_tests {
         device
             .run_resident_kernel_dispatch(&down_dispatch, &[])
             .unwrap();
+        let native_output_bytes = outputs.read_bytes(outputs.byte_capacity()).unwrap();
         assert!(
-            outputs.read_bytes(outputs.byte_capacity()).unwrap().iter().any(|byte| *byte != 0),
+            native_output_bytes.iter().any(|byte| *byte != 0),
             "real-geometry batched MXFP4 execution must produce routed expert output"
         );
 
@@ -566,12 +585,169 @@ mod mxfp4_tests {
         let down_ns = device
             .run_timestamped_recorded_resident_kernel_sequence_for(&down_sequence, timeout)
             .unwrap();
+
+        intermediates
+            .write_bytes(&u32_bytes(&intermediate_storage))
+            .unwrap();
+        outputs
+            .write_bytes(&vec![0; outputs.byte_capacity()])
+            .unwrap();
+        let preexpanded_gate_weight_bytes = hidden_size * intermediate_size;
+        let preexpanded_gate_groups = (0..experts_per_token)
+            .map(|_| {
+                vec![
+                    (preexpanded_gate_weight_bytes, 0x38),
+                    (gate_scale_bytes, 120),
+                    (preexpanded_gate_weight_bytes, 0x38),
+                    (gate_scale_bytes, 120),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let (_preexpanded_gate_arena, preexpanded_gate_addresses) =
+            stable_resource_table(&device, &preexpanded_gate_groups, 256);
+        let preexpanded_gate_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &preexpanded_fp8_gate_shader,
+                &[
+                    read_binding(0, &quantized_hidden, batch_width * hidden_size),
+                    read_binding(
+                        1,
+                        &hidden_scales,
+                        batch_width * hidden_blocks * size_of::<f32>(),
+                    ),
+                    read_binding(
+                        2,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(
+                        3,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(
+                        4,
+                        preexpanded_gate_addresses.buffer(),
+                        preexpanded_gate_addresses.byte_capacity(),
+                    ),
+                    read_binding(5, &gate_slots, num_experts * 4 * size_of::<u32>()),
+                    read_binding(31, &gate_batch_control, 28),
+                ],
+                gate_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        let preexpanded_down_weight_bytes = hidden_size * intermediate_size;
+        let preexpanded_down_groups = (0..experts_per_token)
+            .map(|_| {
+                vec![
+                    (preexpanded_down_weight_bytes, 0x38),
+                    (down_scale_bytes, 120),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let (_preexpanded_down_arena, preexpanded_down_addresses) =
+            stable_resource_table(&device, &preexpanded_down_groups, 256);
+        let preexpanded_down_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &preexpanded_fp8_down_shader,
+                &[
+                    read_binding(
+                        0,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(
+                        1,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(2, &outputs, outputs.byte_capacity()),
+                    read_binding(
+                        3,
+                        preexpanded_down_addresses.buffer(),
+                        preexpanded_down_addresses.byte_capacity(),
+                    ),
+                    read_binding(4, &down_slots, num_experts * 2 * size_of::<u32>()),
+                    read_binding(31, &down_batch_control, 28),
+                ],
+                down_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&preexpanded_gate_dispatch, &[])
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&preexpanded_down_dispatch, &[])
+            .unwrap();
+        assert_eq!(
+            outputs.read_bytes(outputs.byte_capacity()).unwrap(),
+            native_output_bytes,
+            "pre-expanded FP8 sparse experts must preserve native MXFP4 BF16 boundaries"
+        );
+        let preexpanded_gate_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &preexpanded_gate_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &preexpanded_gate_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        let preexpanded_down_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &preexpanded_down_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &preexpanded_down_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &preexpanded_gate_sequence,
+                timeout,
+            )
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &preexpanded_down_sequence,
+                timeout,
+            )
+            .unwrap();
+        let preexpanded_gate_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &preexpanded_gate_sequence,
+                timeout,
+            )
+            .unwrap();
+        let preexpanded_down_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &preexpanded_down_sequence,
+                timeout,
+            )
+            .unwrap();
         eprintln!(
-            "native_mxfp4_batch_real_geometry width={batch_width} routes={} gate_ms={:.6} down_ms={:.6} total_ms={:.6} elapsed_ms={:.3}",
+            "native_mxfp4_batch_real_geometry width={batch_width} routes={} gate_ms={:.6} down_ms={:.6} total_ms={:.6} preexpanded_fp8_gate_ms={:.6} preexpanded_fp8_down_ms={:.6} preexpanded_fp8_total_ms={:.6} ratio={:.6} elapsed_ms={:.3}",
             batch_width * experts_per_token,
             gate_ns as f64 / 1_000_000.0,
             down_ns as f64 / 1_000_000.0,
             (gate_ns + down_ns) as f64 / 1_000_000.0,
+            preexpanded_gate_ns as f64 / 1_000_000.0,
+            preexpanded_down_ns as f64 / 1_000_000.0,
+            (preexpanded_gate_ns + preexpanded_down_ns) as f64 / 1_000_000.0,
+            (preexpanded_gate_ns + preexpanded_down_ns) as f64 / (gate_ns + down_ns) as f64,
             started.elapsed().as_secs_f64() * 1_000.0,
         );
         assert!(
@@ -990,6 +1166,67 @@ mod mxfp4_tests {
         stage_replacements: &[(&str, &str)],
         prequantized: bool,
     ) -> Vec<u32> {
+        let source = render_mxfp4_shader_source(
+            template_name,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            stage_replacements,
+            prequantized,
+        );
+        compile_rendered_shader(template_name, source)
+    }
+
+    fn render_preexpanded_fp8_shader_geometry(
+        template_name: &str,
+        hidden_size: usize,
+        intermediate_size: usize,
+        num_experts: usize,
+        experts_per_token: usize,
+        stage_replacements: &[(&str, &str)],
+        prequantized: bool,
+    ) -> Vec<u32> {
+        let mut source = render_mxfp4_shader_source(
+            template_name,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            stage_replacements,
+            prequantized,
+        )
+        .replace(
+            "const uint WEIGHT_ROW_BYTES = HIDDEN_SIZE / 2u;",
+            "const uint WEIGHT_ROW_BYTES = HIDDEN_SIZE;",
+        )
+        .replace(
+            "const uint WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE / 2u;",
+            "const uint WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE;",
+        );
+        let function_start = source
+            .find("fe4m3vec4 read_mxfp4x4(")
+            .expect("MXFP4 shader must contain its weight decoder");
+        let function_end = source[function_start..]
+            .find("\n}\n\nfloat read_e8m0_scale")
+            .map(|offset| function_start + offset + 2)
+            .expect("MXFP4 shader weight decoder must end before its scale reader");
+        source.replace_range(
+            function_start..function_end,
+            "fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {\n    uint packed = weight.words[(row * WEIGHT_ROW_BYTES + column) >> 2u];\n    return uintBitsToFloate4m3EXT(u8vec4(\n        uint8_t(packed),\n        uint8_t(packed >> 8u),\n        uint8_t(packed >> 16u),\n        uint8_t(packed >> 24u)\n    ));\n}",
+        );
+        compile_rendered_shader(template_name, source)
+    }
+
+    fn render_mxfp4_shader_source(
+        template_name: &str,
+        hidden_size: usize,
+        intermediate_size: usize,
+        num_experts: usize,
+        experts_per_token: usize,
+        stage_replacements: &[(&str, &str)],
+        prequantized: bool,
+    ) -> String {
         let shader_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let mut source = std::fs::read_to_string(shader_dir.join(template_name)).unwrap();
         let hidden_size = hidden_size.to_string();
@@ -1017,6 +1254,10 @@ mod mxfp4_tests {
                 "layout(set = 0, binding = 31) readonly buffer BatchControl",
             );
         }
+        source
+    }
+
+    fn compile_rendered_shader(template_name: &str, source: String) -> Vec<u32> {
         let source_path = std::env::temp_dir().join(format!(
             "nerve-test-{}-{}.comp",
             template_name.replace(['/', '.'], "-"),
