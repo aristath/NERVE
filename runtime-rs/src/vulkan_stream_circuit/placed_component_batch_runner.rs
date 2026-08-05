@@ -669,6 +669,18 @@ impl VulkanResidentPlacedComponentBatchRunner {
         Ok(())
     }
 
+    fn mark_deferred_demand_pipeline_submitted(
+        &self,
+        pipeline: &[usize],
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        for device_index in pipeline {
+            self.slice(*device_index)?
+                .mark_pipeline_demand_submission_submitted(batch_width)?;
+        }
+        Ok(())
+    }
+
     fn resolve_deferred_demand_pipeline_submissions(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
@@ -720,6 +732,60 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 )))
             })?
             .run()
+    }
+
+    fn enqueue_deferred_edge<'a>(
+        &'a self,
+        source_device_index: usize,
+        destination_device_index: usize,
+        edge_index: usize,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+    ) -> Result<VulkanPlacedEdgeTransferRoute, VulkanResidentInProcessPlacedRuntimeError> {
+        self.edge_transfers
+            .iter()
+            .find(|transfer| {
+                transfer.source_device_index == source_device_index
+                    && transfer.destination_device_index == destination_device_index
+                    && transfer.edge_index == edge_index
+            })
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch has no edge transfer {source_device_index}->{destination_device_index}:{edge_index}"
+                )))
+            })?
+            .enqueue_deferred(submission_batch)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_deferred_demand_causal_sequence<'a>(
+        &'a self,
+        devices: &'a BTreeMap<String, Rc<VulkanComputeDevice>>,
+        device_index: usize,
+        owner_device_id: &str,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        dynamic_state_capacity_activations: u32,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+        signal_completion: bool,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let device = devices.get(owner_device_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: owner_device_id.to_string(),
+            }
+        })?;
+        self.slice(device_index)?.enqueue_pipeline_demand_submission(
+            devices,
+            device,
+            owner_device_id,
+            &self.distributed_dispatches,
+            mounted,
+            input_token_ids,
+            start_stream_tick,
+            dynamic_state_capacity_activations,
+            submission_batch,
+            signal_completion,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

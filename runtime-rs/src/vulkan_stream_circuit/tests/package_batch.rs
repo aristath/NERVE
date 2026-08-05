@@ -650,6 +650,18 @@ fn demand_batch_conditional_layout_rejects_an_invalid_direct_gate() {
 }
 
 #[test]
+fn deferred_component_pipeline_assigns_completion_only_to_its_terminal_segment() {
+    assert_eq!(
+        (0..5)
+            .map(|position| deferred_pipeline_signals_completion(position, 5).unwrap())
+            .collect::<Vec<_>>(),
+        vec![false, false, false, false, true]
+    );
+    assert!(deferred_pipeline_signals_completion(0, 0).is_err());
+    assert!(deferred_pipeline_signals_completion(5, 5).is_err());
+}
+
+#[test]
 fn component_batch_execution_rejects_noncontiguous_dispatch_steps() {
     let spans = vec![
         VulkanComponentBatchDispatchSpan {

@@ -84,10 +84,20 @@ toward 50 tok/s without regressing supported Qwen models.
      floor. Before treating modes as interchangeable, certify committed-token,
      routed-expert, sampler, and state-digest equivalence from identical
      checkpoints; scalar and batched verification currently follow different
-     deterministic token paths. Then compile draft generation, target projection,
-     comparison, state selection, commit, and draft catch-up into one
-     device-resident transaction with no host wait until a real residency miss or
-     completed emitted block.
+     deterministic token paths. Demand-resident temporal target execution now
+     mounts input embedding, ordered device segments, and device-local edge
+     copies into one queue batch with completion attached only to the terminal
+     segment. On an identical warmup turn this reduced individual sequence
+     submits from 9,340 to 9,184 and copy submits from 7,719 to 7,447 while
+     preserving exact token, selection, and state digests. The complete truth
+     conversation remained statistically flat at **8.0350 decode tok/s** and
+     **8.2372 prefill tok/s**. An analogous all-device scalar batch was rejected:
+     sparse expert misses forced suffix retries, producing **7.8518 decode
+     tok/s** and **8.1042 prefill tok/s**. Do not revive that host-retry design.
+     The remaining transaction must keep demand resolution on device, then fuse
+     draft generation, target projection, comparison, state selection, commit,
+     and draft catch-up without a host wait until a true external residency miss
+     or completed emitted block.
    - Optimize the independently material MXFP4 expert path. Retain the source's
      packed 4-bit payload, amortize or fuse unpacking and activation conversion,
      and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8

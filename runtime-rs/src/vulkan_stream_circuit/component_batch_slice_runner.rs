@@ -320,6 +320,54 @@ impl VulkanResidentComponentBatchSliceRunner {
             .mark_initial_submission_completed(batch_width)
     }
 
+    fn mark_pipeline_demand_submission_submitted(
+        &self,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.pipeline_demand_segment()?
+            .mark_initial_submission_submitted(batch_width)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_pipeline_demand_submission<'a>(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        device: &'a VulkanComputeDevice,
+        owner_device_id: &str,
+        distributed_dispatches: &VulkanDistributedComponentBatchRunners,
+        _mounted: &VulkanMountedPlacedStreamCircuit,
+        input_token_ids: &[u32],
+        start_stream_tick: u64,
+        dynamic_state_capacity_activations: u32,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+        signal_completion: bool,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.has_pipeline_deferred_demand_segment() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "component batch has no pipeline-wide deferred demand segment".to_string(),
+                ),
+            ));
+        }
+        let stream_ticks = consecutive_component_batch_stream_ticks(
+            start_stream_tick,
+            input_token_ids.len(),
+        )?;
+        self.run(
+            device,
+            input_token_ids,
+            &stream_ticks,
+            start_stream_tick,
+            dynamic_state_capacity_activations,
+            devices,
+            owner_device_id,
+            distributed_dispatches,
+            VulkanComponentBatchCompletionMode::Deferred,
+            Some(submission_batch),
+            signal_completion,
+        )
+    }
+
     fn resolve_pipeline_demand_submission(
         &self,
         device: &VulkanComputeDevice,
@@ -1015,6 +1063,8 @@ impl VulkanResidentComponentBatchSliceRunner {
             owner_device_id,
             distributed_dispatches,
             completion_mode,
+            None,
+            false,
         )
     }
 
@@ -1043,6 +1093,8 @@ impl VulkanResidentComponentBatchSliceRunner {
             owner_device_id,
             distributed_dispatches,
             VulkanComponentBatchCompletionMode::Blocking,
+            None,
+            false,
         )
     }
 
@@ -1075,13 +1127,15 @@ impl VulkanResidentComponentBatchSliceRunner {
             owner_device_id,
             distributed_dispatches,
             VulkanComponentBatchCompletionMode::Blocking,
+            None,
+            false,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(
+    fn run<'a>(
         &self,
-        device: &VulkanComputeDevice,
+        device: &'a VulkanComputeDevice,
         input_token_ids: &[u32],
         stream_ticks: &[u64],
         start_stream_tick: u64,
@@ -1090,6 +1144,8 @@ impl VulkanResidentComponentBatchSliceRunner {
         owner_device_id: &str,
         distributed_dispatches: &VulkanDistributedComponentBatchRunners,
         completion_mode: VulkanComponentBatchCompletionMode,
+        deferred_submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
+        signal_deferred_completion: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let batch_width = input_token_ids.len();
         if batch_width == 0 || batch_width > self.lane_capacity {
@@ -1171,6 +1227,17 @@ impl VulkanResidentComponentBatchSliceRunner {
         } else {
             VulkanComponentBatchCompletionMode::Blocking
         };
+        if deferred_submission_batch.is_some()
+            && (completion_mode != VulkanComponentBatchCompletionMode::Deferred
+                || !self.has_pipeline_deferred_demand_segment())
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "queue-batched component execution requires a pipeline-wide deferred demand segment"
+                        .to_string(),
+                ),
+            ));
+        }
         let dependency_value = self
             .execution_units
             .iter()
@@ -1241,14 +1308,27 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 _ => Vec::new(),
                             };
                         if completion_mode == VulkanComponentBatchCompletionMode::Deferred {
-                            demand_residency.segment.submit_initial(
-                                device,
-                                &self.steps,
-                                &self.batch_control_buffers,
-                                batch_width,
-                                stream_ticks,
-                                dynamic_state_capacity_activations,
-                            )?;
+                            if let Some(submission_batch) = deferred_submission_batch {
+                                demand_residency.segment.enqueue_initial(
+                                    device,
+                                    &self.steps,
+                                    &self.batch_control_buffers,
+                                    batch_width,
+                                    stream_ticks,
+                                    dynamic_state_capacity_activations,
+                                    submission_batch,
+                                    signal_deferred_completion,
+                                )?;
+                            } else {
+                                demand_residency.segment.submit_initial(
+                                    device,
+                                    &self.steps,
+                                    &self.batch_control_buffers,
+                                    batch_width,
+                                    stream_ticks,
+                                    dynamic_state_capacity_activations,
+                                )?;
+                            }
                         } else {
                             demand_residency.segment.run(
                                 device,

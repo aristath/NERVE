@@ -131,13 +131,14 @@ fn mount_speculative_source_tap_frame_copies(
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {
-    fn transfer_causal_component_block_edge(
-        &self,
-        runner: &VulkanResidentPlacedTemporalBlockRunner,
+    fn transfer_causal_component_block_edge<'a>(
+        &'a self,
+        runner: &'a VulkanResidentPlacedTemporalBlockRunner,
         source_device_index: usize,
         destination_device_index: usize,
         batch_width: usize,
         transport_stats: &mut VulkanPlacedEdgeTransportStats,
+        deferred_submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let source_slice = self.device_slices.get(source_device_index).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
@@ -153,11 +154,19 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 )),
             ));
         };
-        let route = runner.execution_graph.transfer_edge(
-            source_device_index,
-            destination_device_index,
-            outgoing.endpoint.edge_index,
-        )?;
+        let route = match deferred_submission_batch {
+            Some(submission_batch) => runner.execution_graph.enqueue_deferred_edge(
+                source_device_index,
+                destination_device_index,
+                outgoing.endpoint.edge_index,
+                submission_batch,
+            )?,
+            None => runner.execution_graph.transfer_edge(
+                source_device_index,
+                destination_device_index,
+                outgoing.endpoint.edge_index,
+            )?,
+        };
         let transferred_bytes = outgoing.byte_capacity.saturating_mul(batch_width);
         transport_stats.direct_copy_count = transport_stats.direct_copy_count.saturating_add(1);
         transport_stats.direct_copy_byte_count = transport_stats
@@ -669,11 +678,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 device_id: self.model.input_device_id.clone(),
             }
         })?;
-        if completion_mode == VulkanComponentBatchCompletionMode::Deferred {
+        if completion_mode == VulkanComponentBatchCompletionMode::Deferred
+            && !deferred_demand_pipeline
+        {
             runner
                 .input_embedding
                 .submit_deferred(input_device, input_token_ids)?;
-        } else {
+        } else if completion_mode == VulkanComponentBatchCompletionMode::Blocking {
             runner.input_embedding.run(input_device, input_token_ids)?;
         }
 
@@ -688,26 +699,74 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         } else {
             Vec::new()
         };
-        for (pipeline_index, device_index) in runner.pipeline.iter().copied().enumerate() {
-            let slice = &self.device_slices[device_index];
-            runner.execution_graph.run_causal_sequence(
-                devices,
-                device_index,
-                &slice.device_id,
-                &slice.mounted,
-                input_token_ids,
-                start_stream_tick,
-                capacity,
-                completion_mode,
-            )?;
-            if let Some(next_device_index) = runner.pipeline.get(pipeline_index + 1).copied() {
-                self.transfer_causal_component_block_edge(
-                    runner,
-                    device_index,
-                    next_device_index,
+        if deferred_demand_pipeline {
+            let submission_batch = VulkanResidentQueueSubmissionBatch::new();
+            runner
+                .input_embedding
+                .enqueue_deferred(input_device, input_token_ids, &submission_batch)?;
+            for (pipeline_index, device_index) in runner.pipeline.iter().copied().enumerate() {
+                let slice = &self.device_slices[device_index];
+                runner
+                    .execution_graph
+                    .enqueue_deferred_demand_causal_sequence(
+                        devices,
+                        device_index,
+                        &slice.device_id,
+                        &slice.mounted,
+                        input_token_ids,
+                        start_stream_tick,
+                        capacity,
+                        &submission_batch,
+                        deferred_pipeline_signals_completion(
+                            pipeline_index,
+                            runner.pipeline.len(),
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    )?;
+                if let Some(next_device_index) = runner.pipeline.get(pipeline_index + 1).copied() {
+                    self.transfer_causal_component_block_edge(
+                        runner,
+                        device_index,
+                        next_device_index,
+                        input_token_ids.len(),
+                        &mut transport_stats,
+                        Some(&submission_batch),
+                    )?;
+                }
+            }
+            submission_batch
+                .mount()
+                .and_then(|submission| submission.submit_with_timeline_value_offset(0))
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            runner
+                .execution_graph
+                .mark_deferred_demand_pipeline_submitted(
+                    &runner.pipeline,
                     input_token_ids.len(),
-                    &mut transport_stats,
                 )?;
+        } else {
+            for (pipeline_index, device_index) in runner.pipeline.iter().copied().enumerate() {
+                let slice = &self.device_slices[device_index];
+                runner.execution_graph.run_causal_sequence(
+                    devices,
+                    device_index,
+                    &slice.device_id,
+                    &slice.mounted,
+                    input_token_ids,
+                    start_stream_tick,
+                    capacity,
+                    completion_mode,
+                )?;
+                if let Some(next_device_index) = runner.pipeline.get(pipeline_index + 1).copied() {
+                    self.transfer_causal_component_block_edge(
+                        runner,
+                        device_index,
+                        next_device_index,
+                        input_token_ids.len(),
+                        &mut transport_stats,
+                        None,
+                    )?;
+                }
             }
         }
         if deferred_demand_pipeline {
@@ -758,25 +817,34 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 let retry_execution_guards = runner
                     .execution_graph
                     .begin_deferred_demand_pipeline_executions(devices, retry_pipeline)?;
+                let retry_submission_batch = VulkanResidentQueueSubmissionBatch::new();
                 self.transfer_causal_component_block_edge(
                     runner,
                     runner.pipeline[miss_position],
                     runner.pipeline[retry_start],
                     input_token_ids.len(),
                     &mut transport_stats,
+                    Some(&retry_submission_batch),
                 )?;
                 for (retry_offset, device_index) in retry_pipeline.iter().copied().enumerate() {
                     let slice = &self.device_slices[device_index];
-                    runner.execution_graph.run_causal_sequence(
-                        devices,
-                        device_index,
-                        &slice.device_id,
-                        &slice.mounted,
-                        input_token_ids,
-                        start_stream_tick,
-                        capacity,
-                        VulkanComponentBatchCompletionMode::Deferred,
-                    )?;
+                    runner
+                        .execution_graph
+                        .enqueue_deferred_demand_causal_sequence(
+                            devices,
+                            device_index,
+                            &slice.device_id,
+                            &slice.mounted,
+                            input_token_ids,
+                            start_stream_tick,
+                            capacity,
+                            &retry_submission_batch,
+                            deferred_pipeline_signals_completion(
+                                retry_offset,
+                                retry_pipeline.len(),
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                        )?;
                     if let Some(next_device_index) =
                         retry_pipeline.get(retry_offset + 1).copied()
                     {
@@ -786,9 +854,20 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             next_device_index,
                             input_token_ids.len(),
                             &mut transport_stats,
+                            Some(&retry_submission_batch),
                         )?;
                     }
                 }
+                retry_submission_batch
+                    .mount()
+                    .and_then(|submission| submission.submit_with_timeline_value_offset(0))
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                runner
+                    .execution_graph
+                    .mark_deferred_demand_pipeline_submitted(
+                        retry_pipeline,
+                        input_token_ids.len(),
+                    )?;
                 runner
                     .execution_graph
                     .complete_deferred_demand_pipeline_submissions(

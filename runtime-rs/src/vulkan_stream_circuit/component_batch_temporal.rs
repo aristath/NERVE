@@ -43,6 +43,23 @@ struct VulkanResidentTemporalBlockRun {
     transport_stats: VulkanPlacedEdgeTransportStats,
 }
 
+fn deferred_pipeline_signals_completion(
+    pipeline_position: usize,
+    pipeline_len: usize,
+) -> Result<bool, VulkanError> {
+    if pipeline_len == 0 {
+        return Err(VulkanError(
+            "deferred component pipeline must not be empty".to_string(),
+        ));
+    }
+    if pipeline_position >= pipeline_len {
+        return Err(VulkanError(format!(
+            "deferred component pipeline position {pipeline_position} exceeds length {pipeline_len}"
+        )));
+    }
+    Ok(pipeline_position + 1 == pipeline_len)
+}
+
 enum VulkanComponentBatchEdgeTransferBinding {
     Resident(Box<VulkanResidentBufferCopy>),
     HostStaging {
@@ -136,5 +153,51 @@ impl VulkanComponentBatchEdgeTransfer {
                 Ok(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging)
             }
         }
+    }
+
+    fn enqueue_deferred<'a>(
+        &'a self,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+    ) -> Result<VulkanPlacedEdgeTransferRoute, VulkanResidentInProcessPlacedRuntimeError> {
+        let VulkanComponentBatchEdgeTransferBinding::DeviceLocalStaging {
+            source_device,
+            destination_device,
+            source_copy,
+            destination_copy,
+            source_signal,
+            destination_wait,
+            next_value,
+            ..
+        } = &self.binding
+        else {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "deferred component-batch edge requires device-local staging".to_string(),
+                ),
+            ));
+        };
+        let value = next_value.get();
+        next_value.set(value.checked_add(1).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "component batch edge timeline exhausted its values".to_string(),
+            ))
+        })?);
+        submission_batch
+            .enqueue_resident_buffer_copy(
+                source_device,
+                source_copy,
+                &[],
+                &[VulkanTimelineSemaphorePoint::new(source_signal, value)],
+            )
+            .and_then(|()| {
+                submission_batch.enqueue_resident_buffer_copy(
+                    destination_device,
+                    destination_copy,
+                    &[VulkanTimelineSemaphorePoint::new(destination_wait, value)],
+                    &[],
+                )
+            })
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        Ok(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging)
     }
 }
