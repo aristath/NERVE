@@ -288,8 +288,9 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     resident_down_source = (tmp_path / resident_down_shader).read_text()
     assert "const uint DYNAMIC_PARAMETER_COUNT = 4u;" in gate_source
     assert "const uint DYNAMIC_PARAMETER_COUNT = 2u;" in down_source
-    assert "const float MXFP4_VALUES[8]" in gate_source
-    assert "0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0" in gate_source
+    assert "const uint MXFP4_E4M3_BITS[8]" in gate_source
+    assert "0x00u, 0x30u, 0x38u, 0x3cu, 0x40u, 0x44u, 0x48u, 0x4cu" in gate_source
+    assert "uint8_t(mxfp4_e4m3_bits(lo & 0x0fu))" in gate_source
     assert "uintBitsToFloat(scale_byte << 23u)" in gate_source
     assert "float rounded_fp8_scale(float block_max)" in gate_source
     assert "fp8_dot4_acc32" in gate_source

@@ -1126,6 +1126,7 @@ mod mxfp4_tests {
                 "{{PREQUANTIZED_INPUT}}",
                 if prequantized { "1" } else { "0" },
             ),
+            ("{{PREEXPANDED_FP8}}", "0"),
         ]
         .into_iter()
         .chain(stage_replacements.iter().copied())

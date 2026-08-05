@@ -57,8 +57,8 @@ const uint SCALE_ROW_BYTES = INTERMEDIATE_SIZE / 32u;
 const uint ADDRESS_RECORD_WORDS = 8u;
 const uint DYNAMIC_PARAMETER_COUNT = 2u;
 const uint UNBOUND_PARAMETER_SLOT = 0xffffffffu;
-const float MXFP4_VALUES[8] = float[8](
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+const uint MXFP4_E4M3_BITS[8] = uint[8](
+    0x00u, 0x30u, 0x38u, 0x3cu, 0x40u, 0x44u, 0x48u, 0x4cu
 );
 
 shared fe4m3vec4 quantized_intermediate[INTERMEDIATE_FP8_WORDS];
@@ -132,9 +132,8 @@ uint read_u8(DynamicU32Buffer source, uint index) {
     return (source.words[index >> 2u] >> ((index & 3u) * 8u)) & 0xffu;
 }
 
-float decode_mxfp4(uint nibble) {
-    float magnitude = MXFP4_VALUES[nibble & 7u];
-    return (nibble & 8u) != 0u ? -magnitude : magnitude;
+uint mxfp4_e4m3_bits(uint nibble) {
+    return MXFP4_E4M3_BITS[nibble & 7u] | ((nibble & 8u) << 4u);
 }
 
 fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
@@ -150,9 +149,11 @@ fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
     uint byte_index = row * WEIGHT_ROW_BYTES + column / 2u;
     uint lo = read_u8(weight, byte_index);
     uint hi = read_u8(weight, byte_index + 1u);
-    return fe4m3vec4(vec4(
-        decode_mxfp4(lo & 0x0fu), decode_mxfp4(lo >> 4u),
-        decode_mxfp4(hi & 0x0fu), decode_mxfp4(hi >> 4u)
+    return uintBitsToFloate4m3EXT(u8vec4(
+        uint8_t(mxfp4_e4m3_bits(lo & 0x0fu)),
+        uint8_t(mxfp4_e4m3_bits(lo >> 4u)),
+        uint8_t(mxfp4_e4m3_bits(hi & 0x0fu)),
+        uint8_t(mxfp4_e4m3_bits(hi >> 4u))
     ));
 #endif
 }

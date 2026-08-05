@@ -53,7 +53,17 @@ toward 50 tok/s without regressing supported Qwen models.
    one complete conversation, measures a second conversation without unloading
    the model, preserves Greece/Athens turn recall, and releases every acquired
    allocation. Its current official-profile truth baseline is **8.0818 decode
-   tok/s** and **8.4564 prefill tok/s**. The shared, borrowable physical host cache replaced
+   tok/s** and **8.4564 prefill tok/s** before the compact-MXFP4 remap. The
+   exact integer remap keeps the source's packed 4-bit residency and replaces
+   per-value floating reconstruction with direct E2M1-to-E4M3 bit mapping. It
+   reduced the real-geometry scalar expert pair from 1.03344 ms to 0.72736 ms
+   (29.6%) while exhaustive coverage proved all 16 nibble codes unchanged. The
+   six-token native batch moved only from 2.45352 ms to 2.41128 ms. In the full
+   model, identical truth token counts completed at **7.9532 decode tok/s** and
+   **8.5312 prefill tok/s**, statistically flat against the earlier run. This
+   proves the optimized compact math is being masked by orchestration overhead,
+   not that unpacking remains the primary end-to-end limit. The shared,
+   borrowable physical host cache replaced
    isolated per-store budgets and enforces one measured global hard bound. It
    reduced the measured truth conversation from 108.68 GB and 7,866 source
    reloads to 4.13 GB and 6 reloads, with one 80.2 MB eviction and 6.59 seconds
@@ -82,12 +92,24 @@ toward 50 tok/s without regressing supported Qwen models.
      packed 4-bit payload, amortize or fuse unpacking and activation conversion,
      and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8
      alternatives on each actual target device. Include resident footprint and
-     reload traffic in promotion evidence, not kernel time alone.
+     reload traffic in promotion evidence, not kernel time alone. Direct integer
+     E2M1-to-E4M3 remapping is now exact and materially improves the scalar
+     kernel without expanding expert residency; retain it. The remaining work is
+     device-local alternative measurement and whole-working-set promotion, not
+     another inline scalar reconstruction variant.
    - Add device timestamps around routing, residency, expert projection,
      speculative target verification, queue submission, and host synchronization
      so remaining kernel and orchestration costs are separable after churn is
      removed. Reduce the current tens of thousands of copy submissions and
      waits without weakening bounded execution quanta or driver-timeout safety.
+     The scalar real-geometry microbenchmark now measures 0.72736 ms of device
+     work but 5.58972 ms through individually submitted host calls, a 7.69x
+     host/device gap. A representative 1,597-token truth turn recorded 28,167
+     sequence submits, 30,163 fence waits, 8,944 copy submits, and 9,313 copy
+     waits. Collapse cached-hit execution into ordered per-device component
+     segments with timeline synchronization only at real segment boundaries;
+     host waits must remain limited to residency misses, bounded watchdog
+     quanta, and completed emitted blocks.
    - Complete repeated-process determinism before accepting throughput changes.
      Scalar and temporal radix/top-k now have deterministic cutoff-tie ordering,
      score-descending output, compiler bounds, and numeric Vulkan coverage.
@@ -125,10 +147,10 @@ toward 50 tok/s without regressing supported Qwen models.
    added Intel or NVIDIA adapter cannot silently change the comparison. The
    current thinking-enabled gates each discard one complete in-process warmup
    conversation, reset model state without unloading, pass correct Greece
-   recall, and release their exact recorded reservations. On the current
-   pressure-safe runtime, Qwen3.6-35B-A3B reaches 99.8296 decode tok/s and
-   125.0604 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches
-   54.6634 decode tok/s and 129.1822 prefill tok/s on one AMD using the official
+   recall, and release their exact recorded reservations. Before the compact
+   MXFP4 performance commit, Qwen3.6-35B-A3B passed at 93.821 decode tok/s and
+   126.699 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B passed at
+   54.1862 decode tok/s and 135.1144 prefill tok/s on one AMD using the official
    temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
    repetition-penalty 1.0 thinking profile. Keep repetition,
    structured-protocol, conversation, and teardown checks active so throughput
