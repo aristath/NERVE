@@ -59,6 +59,107 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         }
     }
 
+    fn initialize_transient_state_buffers(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        let initialized = self
+            .mounted()
+            .buffers
+            .initialize_state_buffers(device)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let cloned = self
+            .mounted()
+            .buffers
+            .apply_clone_state_policies()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        initialized.checked_add(cloned).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "speculative decoder state initialization byte count overflowed"
+                    .to_string(),
+            ))
+        })
+    }
+
+    fn reset_transient_state_buffers(
+        &self,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        let state_bytes = self
+            .mounted()
+            .buffers
+            .zero_state_buffers()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let telemetry_bytes = self
+            .mounted()
+            .buffers
+            .zero_selection_telemetry_buffers()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let auxiliary_bytes = match &self.execution {
+            VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
+                processor
+                    .sampler
+                    .reset_token_state()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+                processor.reset_auxiliary_state()?
+            }
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => 0,
+        };
+        state_bytes
+            .checked_add(telemetry_bytes)
+            .and_then(|bytes| bytes.checked_add(auxiliary_bytes))
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "speculative decoder reset byte count overflowed".to_string(),
+                ))
+            })
+    }
+
+    fn reset_session_state(
+        &self,
+        random_seed: u32,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        match &self.execution {
+            VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
+                processor
+                    .sampler
+                    .reset_session_state(random_seed)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+                processor.reset_auxiliary_state()
+            }
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => Ok(0),
+        }
+    }
+
+    fn restore_initial_session_state(
+        &self,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        match &self.execution {
+            VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
+                processor
+                    .sampler
+                    .reset_token_state()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+                processor.reset_auxiliary_state()
+            }
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => Ok(0),
+        }
+    }
+
+    fn set_random_seed(
+        &self,
+        random_seed: u32,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        match &self.execution {
+            VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
+                processor
+                    .sampler
+                    .set_random_seed(random_seed)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)
+            }
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => Ok(()),
+        }
+    }
+
     fn effective_draft_token_count(&self, requested: usize) -> usize {
         match &self.execution {
             VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(_) => requested,

@@ -81,6 +81,26 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
         &self.device_slice.mounted
     }
 
+    fn reset_auxiliary_state(
+        &self,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+        self.active_pending_target_hidden.set(0);
+        self.pending_target_hiddens.iter().try_fold(
+            0usize,
+            |total, buffer| {
+                buffer
+                    .write_bytes(&vec![0; buffer.byte_capacity()])
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge)?;
+                total.checked_add(buffer.byte_capacity()).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::FeedbackEdge(VulkanError(
+                        "speculative decoder auxiliary reset byte count overflowed"
+                            .to_string(),
+                    ))
+                })
+            },
+        )
+    }
+
     fn execution_plan(&self) -> &VulkanMountedPlacedResidentStreamTickExecutionPlan {
         &self.device_slice.resident_execution_plan
     }

@@ -198,14 +198,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         self.speculative_decoders
             .iter()
             .try_fold(target_bytes, |total, decoder| {
-                let telemetry_bytes = decoder
-                    .mounted()
-                    .buffers
-                    .zero_selection_telemetry_buffers()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                total.checked_add(telemetry_bytes).ok_or_else(|| {
+                let reset_bytes = decoder.reset_transient_state_buffers()?;
+                total.checked_add(reset_bytes).ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                        "reset selection telemetry byte count overflowed".to_string(),
+                        "reset transient state byte count overflowed".to_string(),
                     ))
                 })
             })
@@ -215,7 +211,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
-        self.device_slices
+        let target_bytes = self.device_slices
             .iter()
             .try_fold(0usize, |total, slice| {
                 let device = devices.get(&slice.device_id).ok_or_else(|| {
@@ -238,6 +234,22 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         ),
                     )
                 })
+            })?;
+        self.speculative_decoders
+            .iter()
+            .try_fold(target_bytes, |total, decoder| {
+                let device = devices.get(&decoder.device_id).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                        device_id: decoder.device_id.clone(),
+                    }
+                })?;
+                let bytes = decoder.initialize_transient_state_buffers(device)?;
+                total.checked_add(bytes).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "speculative decoder state initialization byte count overflowed"
+                            .to_string(),
+                    ))
+                })
             })
     }
 
@@ -246,11 +258,21 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         random_seed: u32,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
-        let initialized =
-            self.initialize_transient_state_buffers(devices)?;
+        let initialized = self.initialize_transient_state_buffers(devices)?;
         self.sampler
             .reset_session_state(random_seed)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        let initialized = self.speculative_decoders.iter().try_fold(
+            initialized,
+            |total, decoder| {
+                let bytes = decoder.reset_session_state(random_seed)?;
+                total.checked_add(bytes).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "new-session reset byte count overflowed".to_string(),
+                    ))
+                })
+            },
+        )?;
         self.verification_state_transactions.borrow_mut().take();
         Ok(initialized)
     }
@@ -263,6 +285,17 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         self.sampler
             .reset_token_state()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        let initialized = self.speculative_decoders.iter().try_fold(
+            initialized,
+            |total, decoder| {
+                let bytes = decoder.restore_initial_session_state()?;
+                total.checked_add(bytes).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "initial-session restore byte count overflowed".to_string(),
+                    ))
+                })
+            },
+        )?;
         self.verification_state_transactions.borrow_mut().take();
         Ok(initialized)
     }
@@ -273,7 +306,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         self.sampler
             .set_random_seed(random_seed)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        for decoder in &self.speculative_decoders {
+            decoder.set_random_seed(random_seed)?;
+        }
+        Ok(())
     }
 }
 
