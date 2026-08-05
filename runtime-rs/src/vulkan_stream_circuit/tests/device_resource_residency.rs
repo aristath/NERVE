@@ -72,6 +72,52 @@ fn owner(value: &str) -> DeviceResourceResidencyOwnerId {
 }
 
 #[test]
+fn resolved_descriptor_uses_derived_resident_size_not_packed_source_size() {
+    let required_features = vec![
+        "shader_float8".to_string(),
+        "shader_int8".to_string(),
+        "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+    ];
+    let resource_id = format!("sha256:{}", "1".repeat(64));
+    let resolved = ResolvedCompiledResourceGroup::Atomic(
+        ResolvedCompiledAtomicGroup {
+            schema: RESOLVED_ATOMIC_GROUP_SCHEMA.to_string(),
+            id: format!("sha256:{}", "2".repeat(64)),
+            resource_ids: vec![resource_id.clone()],
+            dependencies: Vec::new(),
+            resources: vec![ResolvedCompiledResource {
+                id: resource_id,
+                ranges: vec![ResolvedCompiledResourceRange {
+                    artifact_path: "weights.bin".to_string(),
+                    byte_offset: 0,
+                    byte_count: 8,
+                    alignment_bytes: 8,
+                    sha256: "0".repeat(64),
+                }],
+                compatibility: CompiledResourceCompatibility {
+                    device_api: "vulkan".to_string(),
+                    storage_class: "storage_buffer".to_string(),
+                    read_only: true,
+                    required_features: required_features.clone(),
+                },
+                resident_derivation: Some(CompiledResourceResidentDerivation {
+                    schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+                    kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+                    source_byte_count: 8,
+                    resident_byte_count: 16,
+                    required_features,
+                }),
+            }],
+        },
+    );
+
+    let descriptor = DeviceResourceGroupDescriptor::from_resolved(&resolved).unwrap();
+
+    assert_eq!(descriptor.byte_count, 16);
+    assert_eq!(descriptor.resources[0].byte_count, 16);
+}
+
+#[test]
 fn per_device_residency_single_flight_shares_one_atomic_publication() {
     const CALLER_COUNT: usize = 8;
     let manager = DeviceResourceResidencyManager::<TestResidentPayload>::new(
@@ -850,6 +896,7 @@ fn stable_resource_upload_capacity_failure_rolls_back_every_allocation_and_publi
                     sha256: format!("{:x}", Sha256::digest(bytes)),
                 }],
                 compatibility: compatibility.clone(),
+                resident_derivation: None,
             }
         })
         .collect::<Vec<_>>();

@@ -464,6 +464,7 @@ fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
                 read_only: true,
                 required_features: Vec::new(),
             },
+            resident_derivation: None,
         }],
         dependencies: Vec::new(),
     });

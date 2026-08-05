@@ -1174,6 +1174,7 @@ mod mxfp4_tests {
             experts_per_token,
             stage_replacements,
             prequantized,
+            false,
         );
         compile_rendered_shader(template_name, source)
     }
@@ -1187,7 +1188,7 @@ mod mxfp4_tests {
         stage_replacements: &[(&str, &str)],
         prequantized: bool,
     ) -> Vec<u32> {
-        let mut source = render_mxfp4_shader_source(
+        let source = render_mxfp4_shader_source(
             template_name,
             hidden_size,
             intermediate_size,
@@ -1195,25 +1196,7 @@ mod mxfp4_tests {
             experts_per_token,
             stage_replacements,
             prequantized,
-        )
-        .replace(
-            "const uint WEIGHT_ROW_BYTES = HIDDEN_SIZE / 2u;",
-            "const uint WEIGHT_ROW_BYTES = HIDDEN_SIZE;",
-        )
-        .replace(
-            "const uint WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE / 2u;",
-            "const uint WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE;",
-        );
-        let function_start = source
-            .find("fe4m3vec4 read_mxfp4x4(")
-            .expect("MXFP4 shader must contain its weight decoder");
-        let function_end = source[function_start..]
-            .find("\n}\n\nfloat read_e8m0_scale")
-            .map(|offset| function_start + offset + 2)
-            .expect("MXFP4 shader weight decoder must end before its scale reader");
-        source.replace_range(
-            function_start..function_end,
-            "fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {\n    uint packed = weight.words[(row * WEIGHT_ROW_BYTES + column) >> 2u];\n    return uintBitsToFloate4m3EXT(u8vec4(\n        uint8_t(packed),\n        uint8_t(packed >> 8u),\n        uint8_t(packed >> 16u),\n        uint8_t(packed >> 24u)\n    ));\n}",
+            true,
         );
         compile_rendered_shader(template_name, source)
     }
@@ -1226,6 +1209,7 @@ mod mxfp4_tests {
         experts_per_token: usize,
         stage_replacements: &[(&str, &str)],
         prequantized: bool,
+        preexpanded_fp8: bool,
     ) -> String {
         let shader_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let mut source = std::fs::read_to_string(shader_dir.join(template_name)).unwrap();
@@ -1241,6 +1225,10 @@ mod mxfp4_tests {
             (
                 "{{PREQUANTIZED_INPUT}}",
                 if prequantized { "1" } else { "0" },
+            ),
+            (
+                "{{PREEXPANDED_FP8}}",
+                if preexpanded_fp8 { "1" } else { "0" },
             ),
         ]
         .into_iter()

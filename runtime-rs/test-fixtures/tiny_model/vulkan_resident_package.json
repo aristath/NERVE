@@ -3134,7 +3134,7 @@
   ],
   "speculative_decoders": [],
   "resource_residency": {
-    "schema": "nerve.compiled_resource_residency.v3",
+    "schema": "nerve.compiled_resource_residency.v4",
     "identity_algorithm": "nerve.resource_identity_sha256.v1",
     "state_machine_schema": "nerve.resource_residency_state_machine.v1",
     "supported_policies": [

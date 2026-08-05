@@ -1,5 +1,7 @@
 pub const COMPILED_RESOURCE_RESIDENCY_SCHEMA: &str =
-    "nerve.compiled_resource_residency.v3";
+    "nerve.compiled_resource_residency.v4";
+pub const RESIDENT_DERIVATION_SCHEMA: &str =
+    "nerve.resident_derivation.v1";
 pub const RESOURCE_IDENTITY_ALGORITHM: &str =
     "nerve.resource_identity_sha256.v1";
 pub const RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA: &str =
@@ -72,6 +74,51 @@ pub struct CompiledImmutableResource {
     pub ranges: Vec<CompiledResourceByteRange>,
     pub dependencies: Vec<String>,
     pub compatibility: CompiledResourceCompatibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_derivation: Option<CompiledResourceResidentDerivation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledResourceResidentDerivation {
+    pub schema: String,
+    pub kind: CompiledResourceResidentDerivationKind,
+    pub source_byte_count: usize,
+    pub resident_byte_count: usize,
+    pub required_features: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompiledResourceResidentDerivationKind {
+    Mxfp4E2m1ToFp8E4m3,
+}
+
+impl CompiledResourceResidentDerivation {
+    pub fn validate_for_source_byte_count(
+        &self,
+        source_byte_count: usize,
+    ) -> std::io::Result<()> {
+        let expected_resident_byte_count = source_byte_count
+            .checked_mul(2)
+            .ok_or_else(|| invalid_residency_error("resident derivation size overflowed"))?;
+        let expected_features = [
+            "shader_float8",
+            "shader_int8",
+            "shader_mixed_float_dot_product_float8_acc_float32",
+        ];
+        if self.schema != RESIDENT_DERIVATION_SCHEMA
+            || self.kind
+                != CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3
+            || self.source_byte_count != source_byte_count
+            || self.resident_byte_count != expected_resident_byte_count
+            || self.required_features
+                != expected_features.map(str::to_string)
+        {
+            return invalid_residency("compiled resident derivation is inconsistent");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +205,8 @@ pub struct CompiledPartitionMemberTemplate {
     pub resource_identity_seed: String,
     pub range_templates: Vec<CompiledResourceRangeTemplate>,
     pub compatibility: CompiledResourceCompatibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_derivation: Option<CompiledResourceResidentDerivation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,17 +295,20 @@ impl CompiledResourceResidencyContract {
             .resources
             .iter()
             .map(|resource| {
-                resource.ranges.iter().try_fold(
-                    0usize,
-                    |total, range| {
-                        total.checked_add(range.byte_count).ok_or_else(
-                            || {
-                                invalid_residency_error(
-                                    "compiled resource inspection byte count overflowed",
-                                )
+                resource.resident_derivation.as_ref().map_or_else(
+                    || {
+                        resource.ranges.iter().try_fold(
+                            0usize,
+                            |total, range| {
+                                total.checked_add(range.byte_count).ok_or_else(|| {
+                                    invalid_residency_error(
+                                        "compiled resource inspection byte count overflowed",
+                                    )
+                                })
                             },
                         )
                     },
+                    |derivation| Ok(derivation.resident_byte_count),
                 )
                 .map(|bytes| (resource.id.as_str(), bytes))
             })
@@ -296,15 +348,27 @@ impl CompiledResourceResidencyContract {
                 template
                     .member_templates
                     .iter()
-                    .flat_map(|member| &member.range_templates)
-                    .try_fold(0usize, |total, range| {
-                        total.checked_add(range.byte_count).ok_or_else(
+                    .try_fold(0usize, |total, member| {
+                        let member_bytes = member.resident_derivation.as_ref().map_or_else(
                             || {
-                                invalid_residency_error(
-                                    "compiled partition inspection byte count overflowed",
+                                member.range_templates.iter().try_fold(
+                                    0usize,
+                                    |member_total, range| {
+                                        member_total.checked_add(range.byte_count).ok_or_else(|| {
+                                            invalid_residency_error(
+                                                "compiled partition inspection byte count overflowed",
+                                            )
+                                        })
+                                    },
                                 )
                             },
-                        )
+                            |derivation| Ok(derivation.resident_byte_count),
+                        )?;
+                        total.checked_add(member_bytes).ok_or_else(|| {
+                            invalid_residency_error(
+                                "compiled partition inspection byte count overflowed",
+                            )
+                        })
                     })
                     .map(|bytes| (template.id.as_str(), bytes))
             })
@@ -539,15 +603,25 @@ fn runtime_resource_residency_class_report(
             let unit_bytes = template
                 .member_templates
                 .iter()
-                .flat_map(|member| &member.range_templates)
-                .try_fold(0usize, |unit_total, range| {
-                    unit_total.checked_add(range.byte_count).ok_or_else(
-                        || {
-                            invalid_residency_error(
-                                "compiled residency inspection byte count overflowed",
-                            )
-                        },
-                    )
+                .try_fold(0usize, |unit_total, member| {
+                    let member_bytes = member.resident_derivation.as_ref().map_or_else(
+                        || member.range_templates.iter().try_fold(
+                            0usize,
+                            |member_total, range| {
+                                member_total.checked_add(range.byte_count).ok_or_else(|| {
+                                    invalid_residency_error(
+                                        "compiled residency inspection byte count overflowed",
+                                    )
+                                })
+                            },
+                        ),
+                        |derivation| Ok(derivation.resident_byte_count),
+                    )?;
+                    unit_total.checked_add(member_bytes).ok_or_else(|| {
+                        invalid_residency_error(
+                            "compiled residency inspection byte count overflowed",
+                        )
+                    })
                 })?;
             total
                 .checked_add(
@@ -647,9 +721,7 @@ fn resource_content_id(kind: &str, payload: Value) -> io::Result<String> {
 pub(crate) fn compiled_resource_identity(
     resource: &CompiledImmutableResource,
 ) -> io::Result<String> {
-    resource_content_id(
-        "resource",
-        serde_json::json!({
+    let mut payload = serde_json::json!({
             "lifetime": resource.lifetime,
             "ranges": resource.ranges.iter().map(|range| serde_json::json!({
                 "byte_count": range.byte_count,
@@ -658,8 +730,17 @@ pub(crate) fn compiled_resource_identity(
             })).collect::<Vec<_>>(),
             "dependencies": resource.dependencies,
             "compatibility": resource.compatibility,
-        }),
-    )
+        });
+    if let Some(derivation) = &resource.resident_derivation {
+        payload
+            .as_object_mut()
+            .expect("resource identity payload is an object")
+            .insert(
+                "resident_derivation".to_string(),
+                serde_json::to_value(derivation).map_err(io::Error::other)?,
+            );
+    }
+    resource_content_id("resource", payload)
 }
 
 fn compiled_atomic_group_identity(
@@ -678,13 +759,11 @@ fn compiled_atomic_group_identity(
 fn compiled_partition_template_identity(
     template: &CompiledPartitionTemplate,
 ) -> io::Result<String> {
-    resource_content_id(
-        "partition_template",
-        serde_json::json!({
-            "partition_count": template.partition_count,
-            "lifetime": template.lifetime,
-            "group_identity_seed": template.group_identity_seed,
-            "member_templates": template.member_templates.iter().map(|member| serde_json::json!({
+    let member_payloads = template
+        .member_templates
+        .iter()
+        .map(|member| {
+            let mut payload = serde_json::json!({
                 "resource_identity_seed": member.resource_identity_seed,
                 "range_templates": member.range_templates.iter().map(|range| serde_json::json!({
                     "base_byte_offset": range.base_byte_offset,
@@ -698,7 +777,26 @@ fn compiled_partition_template_identity(
                     },
                 })).collect::<Vec<_>>(),
                 "compatibility": member.compatibility,
-            })).collect::<Vec<_>>(),
+            });
+            if let Some(derivation) = &member.resident_derivation {
+                payload
+                    .as_object_mut()
+                    .expect("partition member identity payload is an object")
+                    .insert(
+                        "resident_derivation".to_string(),
+                        serde_json::to_value(derivation).map_err(io::Error::other)?,
+                    );
+            }
+            Ok(payload)
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    resource_content_id(
+        "partition_template",
+        serde_json::json!({
+            "partition_count": template.partition_count,
+            "lifetime": template.lifetime,
+            "group_identity_seed": template.group_identity_seed,
+            "member_templates": member_payloads,
             "dependencies": template.dependencies,
         }),
     )
@@ -856,6 +954,26 @@ fn validate_compiled_resource_residency(
                 .entry(&range.artifact_path)
                 .or_default()
                 .push((range.byte_offset, end, &resource.id));
+        }
+        if let Some(derivation) = &resource.resident_derivation {
+            let source_byte_count = resource.ranges.iter().try_fold(
+                0usize,
+                |total, range| {
+                    total.checked_add(range.byte_count).ok_or_else(|| {
+                        invalid_residency_error(
+                            "compiled resource source size overflowed",
+                        )
+                    })
+                },
+            )?;
+            derivation.validate_for_source_byte_count(source_byte_count)?;
+            if derivation.required_features.iter().any(|feature| {
+                !resource.compatibility.required_features.contains(feature)
+            }) {
+                return invalid_residency(
+                    "compiled resource compatibility omits resident derivation features",
+                );
+            }
         }
         if compiled_resource_identity(resource)? != resource.id {
             return invalid_residency(format!(
@@ -1106,6 +1224,26 @@ fn validate_partition_template(
             }) {
                 return invalid_residency(
                     "compiled partition digest table is too small",
+                );
+            }
+        }
+        if let Some(derivation) = &member.resident_derivation {
+            let source_byte_count = member.range_templates.iter().try_fold(
+                0usize,
+                |total, range| {
+                    total.checked_add(range.byte_count).ok_or_else(|| {
+                        invalid_residency_error(
+                            "partition member source size overflowed",
+                        )
+                    })
+                },
+            )?;
+            derivation.validate_for_source_byte_count(source_byte_count)?;
+            if derivation.required_features.iter().any(|feature| {
+                !member.compatibility.required_features.contains(feature)
+            }) {
+                return invalid_residency(
+                    "partition member compatibility omits resident derivation features",
                 );
             }
         }

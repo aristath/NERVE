@@ -130,6 +130,7 @@ impl CompiledResourceContractIndex {
                         })
                         .collect(),
                     compatibility: resource.compatibility.clone(),
+                    resident_derivation: resource.resident_derivation.clone(),
                 })
             })
             .collect::<io::Result<Vec<_>>>()?;
@@ -192,6 +193,7 @@ mod resource_contract_index_tests {
                 }],
                 dependencies: Vec::new(),
                 compatibility: compatibility(),
+                resident_derivation: None,
             })
             .collect::<Vec<_>>();
         let group_id = content_id(resource_count + 1);

@@ -1388,8 +1388,10 @@ impl VulkanCompiledResourceDeviceStore {
             physical_read_count: backing.physical_reads,
             logical_bytes_read: backing.logical_bytes,
             physical_bytes_read: backing.physical_bytes,
+            resident_bytes_produced: backing.resident_bytes,
             uploaded_bytes: self.instrumentation.uploaded_bytes.load(Ordering::Relaxed),
             read_time_ns: backing.read_time_ns,
+            derivation_time_ns: backing.derivation_time_ns,
             upload_time_ns: self.instrumentation.upload_time_ns.load(Ordering::Relaxed),
             blocking_time_ns: self
                 .instrumentation
@@ -1872,13 +1874,18 @@ fn compiled_resource_selector_cache_policy(
         .resources
         .iter()
         .map(|resource| {
-            let byte_count = resource.ranges.iter().try_fold(0usize, |total, range| {
-                total.checked_add(range.byte_count).ok_or_else(|| {
-                    VulkanCompiledResourceDeviceStoreError::new(
-                        "compiled selector resource byte count overflowed",
-                    )
-                })
-            })?;
+            let byte_count = resource.resident_derivation.as_ref().map_or_else(
+                || {
+                    resource.ranges.iter().try_fold(0usize, |total, range| {
+                        total.checked_add(range.byte_count).ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "compiled selector resource byte count overflowed",
+                            )
+                        })
+                    })
+                },
+                |derivation| Ok(derivation.resident_byte_count),
+            )?;
             if byte_count == 0 {
                 return Err(VulkanCompiledResourceDeviceStoreError::new(
                     "compiled selector resource is empty",
@@ -2092,13 +2099,18 @@ fn compiled_resource_sparse_group_layouts(
     let resource_byte_count = |resource: &CompiledImmutableResource,
                                label: &str|
      -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        let byte_count = resource.ranges.iter().try_fold(0usize, |total, range| {
-            total.checked_add(range.byte_count).ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(format!(
-                    "sparse {label} resource byte count overflowed"
-                ))
-            })
-        })?;
+        let byte_count = resource.resident_derivation.as_ref().map_or_else(
+            || {
+                resource.ranges.iter().try_fold(0usize, |total, range| {
+                    total.checked_add(range.byte_count).ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "sparse {label} resource byte count overflowed"
+                        ))
+                    })
+                })
+            },
+            |derivation| Ok(derivation.resident_byte_count),
+        )?;
         if byte_count == 0 {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
                 "sparse {label} resource is empty"
@@ -2190,17 +2202,21 @@ fn compiled_resource_sparse_group_layouts(
                     .member_templates
                     .iter()
                     .map(|member| {
-                        let byte_count =
-                            member
-                                .range_templates
-                                .iter()
-                                .try_fold(0usize, |total, range| {
-                                    total.checked_add(range.byte_count).ok_or_else(|| {
-                                        VulkanCompiledResourceDeviceStoreError::new(
-                                            "sparse partition resource byte count overflowed",
-                                        )
-                                    })
-                                })?;
+                        let byte_count = member.resident_derivation.as_ref().map_or_else(
+                            || {
+                                member.range_templates.iter().try_fold(
+                                    0usize,
+                                    |total, range| {
+                                        total.checked_add(range.byte_count).ok_or_else(|| {
+                                            VulkanCompiledResourceDeviceStoreError::new(
+                                                "sparse partition resource byte count overflowed",
+                                            )
+                                        })
+                                    },
+                                )
+                            },
+                            |derivation| Ok(derivation.resident_byte_count),
+                        )?;
                         if byte_count == 0 {
                             return Err(VulkanCompiledResourceDeviceStoreError::new(
                                 "sparse partition resource is empty",

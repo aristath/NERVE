@@ -896,6 +896,7 @@ mod compiled_resource_address_layout_tests {
                 ranges: Vec::new(),
                 dependencies: Vec::new(),
                 compatibility: compatibility.clone(),
+                resident_derivation: None,
             })
             .collect::<Vec<_>>();
         let groups = vec![
@@ -1039,6 +1040,7 @@ mod compiled_resource_address_layout_tests {
                         read_only: true,
                         required_features: Vec::new(),
                     },
+                    resident_derivation: None,
                 },
                 CompiledPartitionMemberTemplate {
                     resource_identity_seed: scale_seed.clone(),
@@ -1049,6 +1051,7 @@ mod compiled_resource_address_layout_tests {
                         read_only: true,
                         required_features: Vec::new(),
                     },
+                    resident_derivation: None,
                 },
             ],
             dependencies: Vec::new(),
@@ -1203,11 +1206,13 @@ mod compiled_resource_address_layout_tests {
                         resource_identity_seed: weight_seed.clone(),
                         range_templates: Vec::new(),
                         compatibility: compatibility.clone(),
+                        resident_derivation: None,
                     },
                     CompiledPartitionMemberTemplate {
                         resource_identity_seed: scale_seed.clone(),
                         range_templates: Vec::new(),
                         compatibility: compatibility.clone(),
+                        resident_derivation: None,
                     },
                 ],
                 dependencies: Vec::new(),

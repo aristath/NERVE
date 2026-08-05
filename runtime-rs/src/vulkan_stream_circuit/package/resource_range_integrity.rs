@@ -19,6 +19,26 @@ pub struct ResolvedCompiledResource {
     pub id: String,
     pub ranges: Vec<ResolvedCompiledResourceRange>,
     pub compatibility: CompiledResourceCompatibility,
+    pub resident_derivation: Option<CompiledResourceResidentDerivation>,
+}
+
+impl ResolvedCompiledResource {
+    pub fn source_byte_count(&self) -> io::Result<usize> {
+        self.ranges.iter().try_fold(0usize, |total, range| {
+            total
+                .checked_add(range.byte_count)
+                .ok_or_else(|| invalid_residency_error("resolved resource size overflowed"))
+        })
+    }
+
+    pub fn resident_byte_count(&self) -> io::Result<usize> {
+        Ok(self
+            .resident_derivation
+            .as_ref()
+            .map_or(self.source_byte_count()?, |derivation| {
+                derivation.resident_byte_count
+            }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -213,6 +233,7 @@ pub fn resolve_compiled_partition_group(
             )?,
             ranges,
             compatibility: member.compatibility.clone(),
+            resident_derivation: member.resident_derivation.clone(),
         });
     }
     resources.sort_by(|left, right| left.id.cmp(&right.id));
@@ -272,6 +293,7 @@ pub fn resolve_compiled_atomic_group(
                 id: resource.id.clone(),
                 ranges,
                 compatibility: resource.compatibility.clone(),
+                resident_derivation: resource.resident_derivation.clone(),
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -834,6 +856,7 @@ mod resource_range_tests {
                     },
                 }],
                 compatibility,
+                resident_derivation: None,
             };
             let mut template = CompiledPartitionTemplate {
                 id: String::new(),

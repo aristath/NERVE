@@ -19,6 +19,7 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 
 #define PREQUANTIZED_INPUT {{PREQUANTIZED_INPUT}}
+#define PREEXPANDED_FP8 {{PREEXPANDED_FP8}}
 #if PREQUANTIZED_INPUT
 layout(set = 0, binding = 0) readonly buffer QuantizedHidden { uint words[]; } quantized_hidden;
 layout(set = 0, binding = 1) readonly buffer HiddenScales { float values[]; } hidden_scales;
@@ -49,7 +50,7 @@ const uint HIDDEN_WORDS = HIDDEN_SIZE / 2u;
 const uint HIDDEN_FP8_WORDS = HIDDEN_SIZE / 4u;
 const uint HIDDEN_BLOCKS = HIDDEN_SIZE / 128u;
 const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
-const uint WEIGHT_ROW_BYTES = HIDDEN_SIZE / 2u;
+const uint WEIGHT_ROW_BYTES = PREEXPANDED_FP8 != 0 ? HIDDEN_SIZE : HIDDEN_SIZE / 2u;
 const uint SCALE_ROW_BYTES = HIDDEN_SIZE / 32u;
 const uint ADDRESS_RECORD_WORDS = 8u;
 const uint DYNAMIC_PARAMETER_COUNT = 4u;
@@ -160,6 +161,15 @@ float decode_mxfp4(uint nibble) {
 }
 
 fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
+#if PREEXPANDED_FP8
+    uint packed = weight.words[(row * WEIGHT_ROW_BYTES + column) >> 2u];
+    return uintBitsToFloate4m3EXT(u8vec4(
+        uint8_t(packed),
+        uint8_t(packed >> 8u),
+        uint8_t(packed >> 16u),
+        uint8_t(packed >> 24u)
+    ));
+#else
     uint byte_index = row * WEIGHT_ROW_BYTES + column / 2u;
     uint lo = read_u8(weight, byte_index);
     uint hi = read_u8(weight, byte_index + 1u);
@@ -167,6 +177,7 @@ fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
         decode_mxfp4(lo & 0x0fu), decode_mxfp4(lo >> 4u),
         decode_mxfp4(hi & 0x0fu), decode_mxfp4(hi >> 4u)
     ));
+#endif
 }
 
 float read_e8m0_scale(DynamicU32Buffer scale, uint row, uint block) {

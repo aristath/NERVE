@@ -703,6 +703,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
                     read_only: true,
                     required_features: vec!["buffer_device_address".to_string()],
                 },
+                resident_derivation: None,
             }],
             dependencies: Vec::new(),
         }],
@@ -1803,6 +1804,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
             }],
             dependencies: Vec::new(),
             compatibility: compatibility.clone(),
+            resident_derivation: None,
         })
         .collect::<Vec<_>>();
     let group_ids = vec![content_id('5'), content_id('6')];

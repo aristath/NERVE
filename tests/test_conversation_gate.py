@@ -118,7 +118,7 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
             f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={index}/{index}/0/{index}/0/0\n"
             "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0\n"
             f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={index * 8}/{index * 2}/80/20\n"
-            f"  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={index}/{index * 10}/{index * 10}/{index * 0.5}/{index * 0.25}/{index * 0.75}\n"
+            f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={index}/{index * 10}/{index * 20}/{index * 20}/{index * 0.5}/{index * 0.125}/{index * 0.25}/{index * 0.75}\n"
             "determinism:\n"
         )
     sections.append("you> ")
@@ -142,9 +142,11 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
         "residency_eviction.device_bytes": 0,
         "residency_eviction.reloads": 0,
         "transfers.reads": 6,
-        "transfers.read_bytes": 60,
-        "transfers.uploaded_bytes": 60,
+        "transfers.source_bytes": 60,
+        "transfers.resident_bytes": 120,
+        "transfers.uploaded_bytes": 120,
         "transfers.read_ms": 3.0,
+        "transfers.derivation_ms": 0.75,
         "transfers.upload_ms": 1.5,
         "transfers.blocking_ms": 4.5,
     }
@@ -545,7 +547,7 @@ while True:
     print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={misses}/{misses}/0/{misses}/0/0")
     print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
     print(f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={misses * 8}/{misses * 2}/80/20")
-    print(f"  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={misses}/{misses * 10}/{misses * 10}/{misses}.0/{misses}.0/{misses}.0", flush=True)
+    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={misses}/{misses * 10}/{misses * 20}/{misses * 20}/{misses}.0/{misses / 2}/{misses}.0/{misses}.0", flush=True)
 """.lstrip()
     )
 

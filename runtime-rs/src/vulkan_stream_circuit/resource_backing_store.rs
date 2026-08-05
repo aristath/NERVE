@@ -169,6 +169,8 @@ pub struct LoadedCompiledResourceGroup {
     pub physical_read_count: usize,
     pub logical_byte_count: usize,
     pub physical_byte_count: usize,
+    pub resident_byte_count: usize,
+    pub derivation_elapsed: Duration,
     pub elapsed: Duration,
     _host_memory_reservation: Arc<CompiledResourceHostMemoryReservation>,
 }
@@ -184,7 +186,9 @@ pub struct CompiledResourceBackingStoreStatistics {
     pub physical_reads: u64,
     pub logical_bytes: u64,
     pub physical_bytes: u64,
+    pub resident_bytes: u64,
     pub read_time_ns: u64,
+    pub derivation_time_ns: u64,
 }
 
 #[derive(Default)]
@@ -198,7 +202,9 @@ struct CompiledResourceBackingStoreAtomicStatistics {
     physical_reads: AtomicU64,
     logical_bytes: AtomicU64,
     physical_bytes: AtomicU64,
+    resident_bytes: AtomicU64,
     read_time_ns: AtomicU64,
+    derivation_time_ns: AtomicU64,
 }
 
 impl CompiledResourceBackingStoreAtomicStatistics {
@@ -213,7 +219,11 @@ impl CompiledResourceBackingStoreAtomicStatistics {
             physical_reads: self.physical_reads.load(AtomicOrdering::Relaxed),
             logical_bytes: self.logical_bytes.load(AtomicOrdering::Relaxed),
             physical_bytes: self.physical_bytes.load(AtomicOrdering::Relaxed),
+            resident_bytes: self.resident_bytes.load(AtomicOrdering::Relaxed),
             read_time_ns: self.read_time_ns.load(AtomicOrdering::Relaxed),
+            derivation_time_ns: self
+                .derivation_time_ns
+                .load(AtomicOrdering::Relaxed),
         }
     }
 }
@@ -341,6 +351,17 @@ impl CompiledResourceLoadTicket {
             )
         })?
     }
+
+    #[cfg(test)]
+    fn wait_timeout(
+        self,
+        timeout: Duration,
+    ) -> Result<
+        Result<LoadedCompiledResourceGroup, CompiledResourceBackingStoreError>,
+        mpsc::RecvTimeoutError,
+    > {
+        self.response.recv_timeout(timeout)
+    }
 }
 
 impl Drop for CompiledResourceLoadTicket {
@@ -427,8 +448,22 @@ impl CompiledResourceBackingStore {
                                     loaded.physical_byte_count as u64,
                                     AtomicOrdering::Relaxed,
                                 );
+                                worker_statistics.resident_bytes.fetch_add(
+                                    loaded.resident_byte_count as u64,
+                                    AtomicOrdering::Relaxed,
+                                );
                                 worker_statistics.read_time_ns.fetch_add(
-                                    u64::try_from(loaded.elapsed.as_nanos())
+                                    u64::try_from(
+                                        loaded
+                                            .elapsed
+                                            .saturating_sub(loaded.derivation_elapsed)
+                                            .as_nanos(),
+                                    )
+                                        .unwrap_or(u64::MAX),
+                                    AtomicOrdering::Relaxed,
+                                );
+                                worker_statistics.derivation_time_ns.fetch_add(
+                                    u64::try_from(loaded.derivation_elapsed.as_nanos())
                                         .unwrap_or(u64::MAX),
                                     AtomicOrdering::Relaxed,
                                 );
@@ -591,8 +626,32 @@ fn read_compiled_resource_group_with_limits(
             limits.maximum_logical_bytes_per_group
         )));
     }
+    // The retained budget covers payloads that can coexist while an atomic
+    // selection wave is assembled. Packed input is worker-local and
+    // transient; its independent bound is worker_count multiplied by
+    // maximum_logical_bytes_per_group. Charging both source and derived output
+    // for the lifetime of the returned payload can deadlock a valid wave: a
+    // completed later ticket holds capacity needed by an earlier ticket that
+    // the publisher is waiting to collect.
+    let has_resident_derivation = group
+        .resources()
+        .iter()
+        .any(|resource| resource.resident_derivation.is_some());
+    let expected_resident_byte_count = group.resources().iter().try_fold(
+        0usize,
+        |total, resource| {
+            let byte_count = resource.resident_byte_count().map_err(|error| {
+                CompiledResourceBackingStoreError::configuration(error.to_string())
+            })?;
+            total.checked_add(byte_count).ok_or_else(|| {
+                CompiledResourceBackingStoreError::configuration(
+                    "compiled resident payload size overflowed",
+                )
+            })
+        },
+    )?;
     let host_memory_reservation =
-        host_memory_budget.reserve(logical_byte_count, cancellation)?;
+        host_memory_budget.reserve(expected_resident_byte_count, cancellation)?;
 
     let unique_ranges = logical_ranges
         .iter()
@@ -673,11 +732,12 @@ fn read_compiled_resource_group_with_limits(
         return Err(CompiledResourceBackingStoreError::cancelled());
     }
 
+    let derivation_started = Instant::now();
     let resources = group
         .resources()
         .iter()
         .map(|resource| {
-            let ranges = resource
+            let source_ranges = resource
                 .ranges
                 .iter()
                 .map(|range| {
@@ -697,6 +757,13 @@ fn read_compiled_resource_group_with_limits(
                     })
                 })
                 .collect::<Result<Vec<_>, CompiledResourceBackingStoreError>>()?;
+            let ranges = match &resource.resident_derivation {
+                Some(derivation) => derive_resident_resource_ranges(
+                    &source_ranges,
+                    derivation,
+                )?,
+                None => source_ranges,
+            };
             Ok(LoadedCompiledResource {
                 id: resource.id.clone(),
                 ranges,
@@ -704,6 +771,31 @@ fn read_compiled_resource_group_with_limits(
             })
         })
         .collect::<Result<Vec<_>, CompiledResourceBackingStoreError>>()?;
+    let derivation_elapsed = if has_resident_derivation {
+        derivation_started.elapsed()
+    } else {
+        Duration::ZERO
+    };
+    let resident_byte_count = resources.iter().try_fold(
+        0usize,
+        |total, resource| {
+            resource
+                .ranges
+                .iter()
+                .try_fold(total, |resource_total, range| {
+                    resource_total.checked_add(range.bytes.len()).ok_or_else(|| {
+                        CompiledResourceBackingStoreError::configuration(
+                            "compiled resident resource size overflowed",
+                        )
+                    })
+                })
+        },
+    )?;
+    if resident_byte_count != expected_resident_byte_count {
+        return Err(CompiledResourceBackingStoreError::configuration(
+            "compiled resident payload differs from its reserved size",
+        ));
+    }
     Ok(LoadedCompiledResourceGroup {
         id: group.id().to_string(),
         origin: match group {
@@ -726,9 +818,72 @@ fn read_compiled_resource_group_with_limits(
         physical_read_count: reads.len(),
         logical_byte_count,
         physical_byte_count,
+        resident_byte_count,
+        derivation_elapsed,
         elapsed: started.elapsed(),
         _host_memory_reservation: host_memory_reservation,
     })
+}
+
+fn derive_resident_resource_ranges(
+    source_ranges: &[LoadedCompiledResourceRange],
+    derivation: &CompiledResourceResidentDerivation,
+) -> Result<Vec<LoadedCompiledResourceRange>, CompiledResourceBackingStoreError> {
+    let source_byte_count = source_ranges.iter().try_fold(0usize, |total, range| {
+        total.checked_add(range.bytes.len()).ok_or_else(|| {
+            CompiledResourceBackingStoreError::configuration(
+                "resident derivation source size overflowed",
+            )
+        })
+    })?;
+    derivation
+        .validate_for_source_byte_count(source_byte_count)
+        .map_err(|error| {
+            CompiledResourceBackingStoreError::configuration(error.to_string())
+        })?;
+    if source_ranges.is_empty() {
+        return Err(CompiledResourceBackingStoreError::configuration(
+            "resident derivation has no source ranges",
+        ));
+    }
+    let mut resident_ranges = Vec::with_capacity(source_ranges.len());
+    match derivation.kind {
+        CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3 => {
+            const E2M1_TO_E4M3: [u8; 16] = [
+                0x00, 0x30, 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c,
+                0x80, 0xb0, 0xb8, 0xbc, 0xc0, 0xc4, 0xc8, 0xcc,
+            ];
+            for range in source_ranges {
+                let resident_range_byte_count = range.bytes.len().checked_mul(2).ok_or_else(|| {
+                    CompiledResourceBackingStoreError::configuration(
+                        "resident derivation range size overflowed",
+                    )
+                })?;
+                let mut expanded = Vec::with_capacity(resident_range_byte_count);
+                for packed in range.bytes.iter().copied() {
+                    expanded.push(E2M1_TO_E4M3[usize::from(packed & 0x0f)]);
+                    expanded.push(E2M1_TO_E4M3[usize::from(packed >> 4)]);
+                }
+                resident_ranges.push(LoadedCompiledResourceRange {
+                    descriptor: range.descriptor.clone(),
+                    bytes: Arc::from(expanded),
+                });
+            }
+        }
+    }
+    let resident_byte_count = resident_ranges.iter().try_fold(0usize, |total, range| {
+        total.checked_add(range.bytes.len()).ok_or_else(|| {
+            CompiledResourceBackingStoreError::configuration(
+                "resident derivation output size overflowed",
+            )
+        })
+    })?;
+    if resident_byte_count != derivation.resident_byte_count {
+        return Err(CompiledResourceBackingStoreError::configuration(
+            "resident derivation produced an inconsistent byte count",
+        ));
+    }
+    Ok(resident_ranges)
 }
 
 fn validate_resolved_group_for_loading(
@@ -777,6 +932,27 @@ fn validate_resolved_group_for_loading(
             return Err(CompiledResourceBackingStoreError::configuration(
                 "resolved compiled resource range is invalid",
             ));
+        }
+    }
+    for resource in group.resources() {
+        if let Some(derivation) = &resource.resident_derivation {
+            let source_byte_count = resource.source_byte_count().map_err(|error| {
+                CompiledResourceBackingStoreError::configuration(error.to_string())
+            })?;
+            derivation
+                .validate_for_source_byte_count(source_byte_count)
+                .map_err(|error| {
+                    CompiledResourceBackingStoreError::configuration(
+                        error.to_string(),
+                    )
+                })?;
+            if derivation.required_features.iter().any(|feature| {
+                !resource.compatibility.required_features.contains(feature)
+            }) {
+                return Err(CompiledResourceBackingStoreError::configuration(
+                    "resident derivation features are absent from resource compatibility",
+                ));
+            }
         }
     }
     Ok(())
@@ -884,6 +1060,7 @@ mod resource_backing_store_tests {
                     id: resource_id,
                     ranges: resolved_ranges,
                     compatibility: compatibility(),
+                    resident_derivation: None,
                 }],
             },
         )
@@ -927,15 +1104,219 @@ mod resource_backing_store_tests {
         assert_eq!(loaded.physical_read_count, 2);
         assert_eq!(loaded.logical_byte_count, 24);
         assert_eq!(loaded.physical_byte_count, 24);
+        assert_eq!(loaded.resident_byte_count, 24);
         assert_eq!(&*loaded.resources[0].ranges[1].bytes, b"ijklmnop");
         let statistics = store.statistics();
         assert_eq!(statistics.physical_reads, 2);
         assert_eq!(statistics.physical_bytes, 24);
+        assert_eq!(statistics.resident_bytes, 24);
         assert_eq!(
             statistics.read_time_ns,
             u64::try_from(loaded.elapsed.as_nanos())
                 .unwrap_or(u64::MAX)
         );
+    }
+
+    #[test]
+    fn exact_mxfp4_derivation_expands_every_code_after_source_integrity() {
+        let packed = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe];
+        let (root, mut group) =
+            group_with_ranges(vec![("weights/mxfp4.bin", 0, &packed)]);
+        group.resources[0].compatibility.required_features = vec![
+            "shader_float8".to_string(),
+            "shader_int8".to_string(),
+            "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+        ];
+        group.resources[0].resident_derivation =
+            Some(CompiledResourceResidentDerivation {
+                schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+                kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+                source_byte_count: packed.len(),
+                resident_byte_count: packed.len() * 2,
+                required_features: group.resources[0]
+                    .compatibility
+                    .required_features
+                    .clone(),
+            });
+        let store = CompiledResourceBackingStore::new(
+            root.path(),
+            CompiledResourceBackingStoreLimits {
+                worker_count: 1,
+                queued_request_capacity: 1,
+                maximum_ranges_per_group: 2,
+                maximum_logical_bytes_per_group: 64,
+                maximum_retained_payload_bytes: 64,
+                maximum_coalesced_read_bytes: 64,
+                maximum_coalescing_gap_bytes: 0,
+            },
+        )
+        .unwrap();
+
+        let loaded = store.try_load(group).unwrap().wait().unwrap();
+
+        assert_eq!(loaded.logical_byte_count, 8);
+        assert_eq!(loaded.physical_byte_count, 8);
+        assert_eq!(loaded.resident_byte_count, 16);
+        assert_eq!(store.retained_payload_bytes(), 16);
+        assert_eq!(
+            &*loaded.resources[0].ranges[0].bytes,
+            &[
+                0x00, 0x30, 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c,
+                0x80, 0xb0, 0xb8, 0xbc, 0xc0, 0xc4, 0xc8, 0xcc,
+            ]
+        );
+        assert!(loaded.derivation_elapsed > Duration::ZERO);
+        let statistics = store.statistics();
+        assert_eq!(statistics.logical_bytes, 8);
+        assert_eq!(statistics.physical_bytes, 8);
+        assert_eq!(statistics.resident_bytes, 16);
+        assert!(statistics.derivation_time_ns > 0);
+        drop(loaded);
+        assert_eq!(store.retained_payload_bytes(), 0);
+    }
+
+    #[test]
+    fn resident_derivation_preserves_source_range_boundaries_and_order() {
+        let first = [0x10, 0x32];
+        let second = [0xfe, 0xdc, 0xba];
+        let (root, mut group) = group_with_ranges(vec![
+            ("weights/first.bin", 4, &first),
+            ("weights/second.bin", 8, &second),
+        ]);
+        let source_descriptors = group.resources[0].ranges.clone();
+        let required_features = vec![
+            "shader_float8".to_string(),
+            "shader_int8".to_string(),
+            "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+        ];
+        group.resources[0].compatibility.required_features = required_features.clone();
+        group.resources[0].resident_derivation = Some(CompiledResourceResidentDerivation {
+            schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+            kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+            source_byte_count: first.len() + second.len(),
+            resident_byte_count: (first.len() + second.len()) * 2,
+            required_features,
+        });
+        let store = CompiledResourceBackingStore::new(
+            root.path(),
+            CompiledResourceBackingStoreLimits {
+                worker_count: 1,
+                queued_request_capacity: 1,
+                maximum_ranges_per_group: 2,
+                maximum_logical_bytes_per_group: 32,
+                maximum_retained_payload_bytes: 32,
+                maximum_coalesced_read_bytes: 32,
+                maximum_coalescing_gap_bytes: 0,
+            },
+        )
+        .unwrap();
+
+        let loaded = store.try_load(group).unwrap().wait().unwrap();
+        let ranges = &loaded.resources[0].ranges;
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].descriptor, source_descriptors[0]);
+        assert_eq!(ranges[1].descriptor, source_descriptors[1]);
+        assert_eq!(&*ranges[0].bytes, &[0x00, 0x30, 0x38, 0x3c]);
+        assert_eq!(&*ranges[1].bytes, &[0xc8, 0xcc, 0xc0, 0xc4, 0xb8, 0xbc]);
+        assert_eq!(loaded.resident_byte_count, 10);
+    }
+
+    #[test]
+    fn maximum_width_derived_wave_cannot_deadlock_retained_budget() {
+        const WAVE_WIDTH: usize = 6;
+        let packed = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe];
+        let (root, mut group) =
+            group_with_ranges(vec![("weights/mxfp4.bin", 0, &packed)]);
+        let required_features = vec![
+            "shader_float8".to_string(),
+            "shader_int8".to_string(),
+            "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+        ];
+        group.resources[0].compatibility.required_features =
+            required_features.clone();
+        group.resources[0].resident_derivation =
+            Some(CompiledResourceResidentDerivation {
+                schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+                kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+                source_byte_count: packed.len(),
+                resident_byte_count: packed.len() * 2,
+                required_features,
+            });
+        let resident_group_bytes = packed.len() * 2;
+        let store = CompiledResourceBackingStore::new(
+            root.path(),
+            CompiledResourceBackingStoreLimits {
+                worker_count: 1,
+                queued_request_capacity: WAVE_WIDTH,
+                maximum_ranges_per_group: 2,
+                maximum_logical_bytes_per_group: resident_group_bytes,
+                maximum_retained_payload_bytes: resident_group_bytes * WAVE_WIDTH,
+                maximum_coalesced_read_bytes: resident_group_bytes,
+                maximum_coalescing_gap_bytes: 0,
+            },
+        )
+        .unwrap();
+        let tickets = (0..WAVE_WIDTH)
+            .map(|_| store.try_load(group.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let loaded = tickets
+            .into_iter()
+            .map(|ticket| {
+                ticket
+                    .wait_timeout(Duration::from_secs(1))
+                    .expect("derived wave formed a retained-memory resource cycle")
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            store.retained_payload_bytes(),
+            resident_group_bytes * WAVE_WIDTH
+        );
+        drop(loaded);
+        assert_eq!(store.retained_payload_bytes(), 0);
+    }
+
+    #[test]
+    fn resident_derivation_rejects_inconsistent_sizes_before_reading() {
+        let packed = [0x10, 0x32];
+        let (root, mut group) =
+            group_with_ranges(vec![("weights/mxfp4.bin", 0, &packed)]);
+        let features = vec![
+            "shader_float8".to_string(),
+            "shader_int8".to_string(),
+            "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+        ];
+        group.resources[0].compatibility.required_features = features.clone();
+        group.resources[0].resident_derivation =
+            Some(CompiledResourceResidentDerivation {
+                schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+                kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+                source_byte_count: packed.len(),
+                resident_byte_count: 3,
+                required_features: features,
+            });
+        let store = CompiledResourceBackingStore::new(
+            root.path(),
+            CompiledResourceBackingStoreLimits {
+                worker_count: 1,
+                queued_request_capacity: 1,
+                maximum_ranges_per_group: 2,
+                maximum_logical_bytes_per_group: 64,
+                maximum_retained_payload_bytes: 64,
+                maximum_coalesced_read_bytes: 64,
+                maximum_coalescing_gap_bytes: 0,
+            },
+        )
+        .unwrap();
+
+        let error = store.try_load(group).unwrap().wait().unwrap_err();
+
+        assert_eq!(error.kind(), CompiledResourceBackingStoreErrorKind::Configuration);
+        assert!(error.to_string().contains("resident derivation is inconsistent"));
+        assert_eq!(store.statistics().failed_requests, 1);
+        assert_eq!(store.statistics().physical_reads, 0);
     }
 
     #[test]
@@ -947,6 +1328,7 @@ mod resource_backing_store_tests {
             id: duplicate_id.clone(),
             ranges: group.resources[0].ranges.clone(),
             compatibility: compatibility(),
+            resident_derivation: None,
         };
         group.resource_ids.push(duplicate_id);
         group.resources.push(duplicate);
@@ -1003,6 +1385,7 @@ mod resource_backing_store_tests {
                 }],
                 dependencies: Vec::new(),
                 compatibility: compatibility(),
+                resident_derivation: None,
             }],
             atomic_groups: vec![CompiledAtomicResidencyGroup {
                 id: group_id.clone(),

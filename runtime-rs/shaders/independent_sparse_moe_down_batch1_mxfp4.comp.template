@@ -18,6 +18,8 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 
+#define PREEXPANDED_FP8 {{PREEXPANDED_FP8}}
+
 layout(set = 0, binding = 0) readonly buffer ExpertIntermediates { uint words[]; } expert_intermediates;
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
 layout(set = 0, binding = 2) buffer ExpertOutputs { uint words[]; } expert_outputs;
@@ -50,7 +52,7 @@ const uint INTERMEDIATE_FP8_WORDS = INTERMEDIATE_SIZE / 4u;
 const uint INTERMEDIATE_BLOCKS = INTERMEDIATE_SIZE / 128u;
 const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
 const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
-const uint WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE / 2u;
+const uint WEIGHT_ROW_BYTES = PREEXPANDED_FP8 != 0 ? INTERMEDIATE_SIZE : INTERMEDIATE_SIZE / 2u;
 const uint SCALE_ROW_BYTES = INTERMEDIATE_SIZE / 32u;
 const uint ADDRESS_RECORD_WORDS = 8u;
 const uint DYNAMIC_PARAMETER_COUNT = 2u;
@@ -136,6 +138,15 @@ float decode_mxfp4(uint nibble) {
 }
 
 fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
+#if PREEXPANDED_FP8
+    uint packed = weight.words[(row * WEIGHT_ROW_BYTES + column) >> 2u];
+    return uintBitsToFloate4m3EXT(u8vec4(
+        uint8_t(packed),
+        uint8_t(packed >> 8u),
+        uint8_t(packed >> 16u),
+        uint8_t(packed >> 24u)
+    ));
+#else
     uint byte_index = row * WEIGHT_ROW_BYTES + column / 2u;
     uint lo = read_u8(weight, byte_index);
     uint hi = read_u8(weight, byte_index + 1u);
@@ -143,6 +154,7 @@ fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
         decode_mxfp4(lo & 0x0fu), decode_mxfp4(lo >> 4u),
         decode_mxfp4(hi & 0x0fu), decode_mxfp4(hi >> 4u)
     ));
+#endif
 }
 
 float read_e8m0_scale(DynamicU32Buffer scale, uint row, uint block) {

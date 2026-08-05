@@ -16,9 +16,10 @@ from nerve.resource_range_integrity import (
     resolve_partition_range,
     validate_partition_range_storage,
 )
+from nerve.resident_representations import validate_resident_derivation
 
 
-RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v3"
+RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v4"
 RESOURCE_IDENTITY_ALGORITHM = "nerve.resource_identity_sha256.v1"
 RESOURCE_STATE_MACHINE_SCHEMA = "nerve.resource_residency_state_machine.v1"
 SUPPORTED_RESIDENCY_POLICIES = ("demand_retained", "eager")
@@ -165,22 +166,22 @@ def residency_content_id(kind: str, payload: Json) -> str:
 
 
 def resource_identity(resource: Json) -> str:
-    return residency_content_id(
-        "resource",
-        {
-            "lifetime": resource["lifetime"],
-            "ranges": [
-                {
-                    "byte_count": byte_range["byte_count"],
-                    "alignment_bytes": byte_range["alignment_bytes"],
-                    "integrity": byte_range["integrity"],
-                }
-                for byte_range in resource["ranges"]
-            ],
-            "dependencies": resource["dependencies"],
-            "compatibility": resource["compatibility"],
-        },
-    )
+    payload = {
+        "lifetime": resource["lifetime"],
+        "ranges": [
+            {
+                "byte_count": byte_range["byte_count"],
+                "alignment_bytes": byte_range["alignment_bytes"],
+                "integrity": byte_range["integrity"],
+            }
+            for byte_range in resource["ranges"]
+        ],
+        "dependencies": resource["dependencies"],
+        "compatibility": resource["compatibility"],
+    }
+    if "resident_derivation" in resource:
+        payload["resident_derivation"] = resource["resident_derivation"]
+    return residency_content_id("resource", payload)
 
 
 def atomic_group_identity(group: Json) -> str:
@@ -221,6 +222,11 @@ def partition_template_identity(template: Json) -> str:
                         for byte_range in member["range_templates"]
                     ],
                     "compatibility": member["compatibility"],
+                    **(
+                        {"resident_derivation": member["resident_derivation"]}
+                        if "resident_derivation" in member
+                        else {}
+                    ),
                 }
                 for member in template["member_templates"]
             ],
@@ -410,6 +416,11 @@ def resolve_partition_atomic_group(
                 "lifetime": "dynamic",
                 "ranges": resolved_ranges,
                 "compatibility": deepcopy(member.get("compatibility")),
+                **(
+                    {"resident_derivation": deepcopy(member["resident_derivation"])}
+                    if "resident_derivation" in member
+                    else {}
+                ),
             }
         )
     resources.sort(key=lambda resource: resource["id"])
@@ -797,7 +808,11 @@ def _validate_resources(package_dir: Path, resources: list[Json]) -> dict[str, J
     resource_by_id: dict[str, Json] = {}
     artifact_intervals: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
     for resource in resources:
-        _require_exact_fields(resource, _RESOURCE_FIELDS, "resource")
+        fields = set(resource)
+        if not _RESOURCE_FIELDS <= fields or fields - _RESOURCE_FIELDS != (
+            {"resident_derivation"} if "resident_derivation" in resource else set()
+        ):
+            raise ModelCompileError("resource fields are invalid")
         resource_id = _require_content_id(resource["id"], "resource id")
         lifetime = resource["lifetime"]
         if lifetime not in RESOURCE_LIFETIMES:
@@ -857,6 +872,20 @@ def _validate_resources(package_dir: Path, resources: list[Json]) -> dict[str, J
             raise ModelCompileError(
                 f"resource {resource_id!r} ranges must be unique and physically sorted"
             )
+        if "resident_derivation" in resource:
+            derivation = validate_resident_derivation(
+                resource["resident_derivation"],
+                source_byte_count=sum(
+                    byte_range["byte_count"] for byte_range in byte_ranges
+                ),
+                label=f"resource {resource_id!r}",
+            )
+            if not set(derivation["required_features"]) <= set(
+                compatibility["required_features"]
+            ):
+                raise ModelCompileError(
+                    f"resource {resource_id!r} compatibility omits derivation features"
+                )
         if dependencies.count(resource_id):
             raise ModelCompileError(f"resource {resource_id!r} depends on itself")
         if resource_identity(resource) != resource_id:
@@ -990,14 +1019,22 @@ def _validate_partition_templates(
             )
         member_seeds = []
         for member in members:
-            _require_exact_fields(
-                member, _PARTITION_MEMBER_FIELDS, "partition member template"
-            )
+            member_fields = set(member)
+            if not _PARTITION_MEMBER_FIELDS <= member_fields or (
+                member_fields - _PARTITION_MEMBER_FIELDS
+            ) != (
+                {"resident_derivation"}
+                if "resident_derivation" in member
+                else set()
+            ):
+                raise ModelCompileError(
+                    "partition member template fields are invalid"
+                )
             seed = _require_content_id(
                 member["resource_identity_seed"], "partition resource identity seed"
             )
             member_seeds.append(seed)
-            _validate_compatibility(
+            compatibility = _validate_compatibility(
                 member["compatibility"], "partition member compatibility"
             )
             ranges = _require_object_list(
@@ -1007,6 +1044,20 @@ def _validate_partition_templates(
                 raise ModelCompileError(
                     f"partition member {seed!r} has no range templates"
                 )
+            if "resident_derivation" in member:
+                derivation = validate_resident_derivation(
+                    member["resident_derivation"],
+                    source_byte_count=sum(
+                        byte_range["byte_count"] for byte_range in ranges
+                    ),
+                    label=f"partition member {seed!r}",
+                )
+                if not set(derivation["required_features"]) <= set(
+                    compatibility["required_features"]
+                ):
+                    raise ModelCompileError(
+                        f"partition member {seed!r} compatibility omits derivation features"
+                    )
             for byte_range in ranges:
                 partition_series.append(
                     _validate_range_template(

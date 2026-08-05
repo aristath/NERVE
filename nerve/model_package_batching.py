@@ -64,7 +64,8 @@ def persistent_batch_control_stage(
 
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     if re.fullmatch(
-        r"independent_sparse_moe_(?:gate_up|down)(?:_prequant)?_mxfp4_e2m1_g32_"
+        r"independent_sparse_moe_(?:gate_up|down)(?:_prequant)?_mxfp4_e2m1"
+        r"(?:_resident_fp8_e4m3)?_g32_"
         r"h\d+_i\d+_e\d+_k\d+(?:_limit[0-9eE+.-]+)?\.comp",
         shader_file,
     ):
@@ -160,7 +161,8 @@ def parallel_block_attention_stages(
 
 def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     independent = re.fullmatch(
-        r"independent_sparse_moe_(gate_up|down)(?:_prequant)?_mxfp4_e2m1_g32_"
+        r"independent_sparse_moe_(gate_up|down)(?:_prequant)?_mxfp4_e2m1"
+        r"(?:_resident_fp8_e4m3)?_g32_"
         r"h(\d+)_i(\d+)_e\d+_k(\d+)(?:_limit[0-9eE+.-]+)?\.comp",
         shader_file,
     )

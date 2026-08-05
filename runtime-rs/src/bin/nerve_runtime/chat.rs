@@ -382,11 +382,13 @@ fn print_runtime_resource_residency(
         totals.maximum_host_visible_tier_payload_bytes,
     );
     println!(
-        "  transfers(reads/read_bytes/uploaded_bytes/read_ms/upload_ms/blocking_ms)={}/{}/{}/{:.3}/{:.3}/{:.3}",
+        "  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={}/{}/{}/{}/{:.3}/{:.3}/{:.3}/{:.3}",
         totals.physical_read_count,
         totals.physical_bytes_read,
+        totals.resident_bytes_produced,
         totals.uploaded_bytes,
         nanos_to_millis(totals.read_time_ns),
+        nanos_to_millis(totals.derivation_time_ns),
         nanos_to_millis(totals.upload_time_ns),
         nanos_to_millis(totals.blocking_time_ns)
     );

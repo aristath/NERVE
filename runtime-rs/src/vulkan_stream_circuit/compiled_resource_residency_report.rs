@@ -1,5 +1,5 @@
 pub const VULKAN_COMPILED_RESOURCE_RESIDENCY_REPORT_SCHEMA: &str =
-    "nerve.vulkan_compiled_resource_residency_report.v3";
+    "nerve.vulkan_compiled_resource_residency_report.v4";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanCompiledResourceComponentCoverageReport {
@@ -68,8 +68,10 @@ pub struct VulkanCompiledResourceStoreReport {
     pub physical_read_count: u64,
     pub logical_bytes_read: u64,
     pub physical_bytes_read: u64,
+    pub resident_bytes_produced: u64,
     pub uploaded_bytes: u64,
     pub read_time_ns: u64,
+    pub derivation_time_ns: u64,
     pub upload_time_ns: u64,
     pub blocking_time_ns: u64,
     pub retiering_event_count: u64,
@@ -122,8 +124,10 @@ pub struct VulkanCompiledResourceResidencyTotalsReport {
     pub reload_count: u64,
     pub physical_read_count: u64,
     pub physical_bytes_read: u64,
+    pub resident_bytes_produced: u64,
     pub uploaded_bytes: u64,
     pub read_time_ns: u64,
+    pub derivation_time_ns: u64,
     pub upload_time_ns: u64,
     pub blocking_time_ns: u64,
     pub retiering_event_count: u64,
@@ -650,8 +654,10 @@ impl VulkanCompiledResourceResidencyTotalsReport {
         add_u64!(reload_count);
         add_u64!(physical_read_count);
         add_u64!(physical_bytes_read);
+        add_u64!(resident_bytes_produced);
         add_u64!(uploaded_bytes);
         add_u64!(read_time_ns);
+        add_u64!(derivation_time_ns);
         add_u64!(upload_time_ns);
         add_u64!(blocking_time_ns);
         add_u64!(retiering_event_count);
@@ -828,8 +834,10 @@ mod compiled_resource_residency_report_tests {
             reload_count: 1,
             physical_read_count: 2,
             physical_bytes_read: 50,
-            uploaded_bytes: 50,
+            resident_bytes_produced: 100,
+            uploaded_bytes: 100,
             read_time_ns: 5,
+            derivation_time_ns: 9,
             upload_time_ns: 6,
             blocking_time_ns: 7,
             retiering_event_count: 1,
@@ -862,6 +870,9 @@ mod compiled_resource_residency_report_tests {
         assert_eq!(totals.gpu_resident_hit_count, 18);
         assert_eq!(totals.gpu_miss_count, 4);
         assert_eq!(totals.physical_bytes_read, 100);
+        assert_eq!(totals.resident_bytes_produced, 200);
+        assert_eq!(totals.uploaded_bytes, 200);
+        assert_eq!(totals.derivation_time_ns, 18);
         assert_eq!(totals.eviction_count, 6);
         assert_eq!(totals.evicted_unit_count, 8);
         assert_eq!(totals.evicted_payload_bytes, 80);
