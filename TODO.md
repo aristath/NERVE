@@ -39,14 +39,21 @@ toward 50 tok/s without regressing supported Qwen models.
    and exact teardown. Exercise both successful canonical commits and malformed
    output rollback without model-name branches.
 
+   Sampling provenance is part of this contract. DeepSeek's compiled package
+   owns its source `generation_config.json` defaults (temperature 1.0, top-p
+   1.0, no top-k or penalties); never reuse Qwen's top-k/presence-penalty
+   profile for it. A rejected gate using the Qwen overrides entered a repeated
+   cutoff/identity reasoning loop, while the package-owned profile completed
+   coherently with correct Greece/Athens recall.
+
 3. Raise DeepSeek's accepted decode rate past 30 tok/s and continue until no
    material bottleneck remains. The fresh native-MXFP4 package and the current
    demand-paged runtime now complete the authoritative thinking-enabled product
    gate at 128K context and a 65,536-token output allowance. The gate discards
    one complete conversation, measures a second conversation without unloading
    the model, preserves Greece/Athens turn recall, and releases every acquired
-   allocation. Its current truth baseline is **6.6966 decode tok/s** and
-   **8.5176 prefill tok/s**. The shared, borrowable physical host cache replaced
+   allocation. Its current official-profile truth baseline is **8.0818 decode
+   tok/s** and **8.4564 prefill tok/s**. The shared, borrowable physical host cache replaced
    isolated per-store budgets and enforces one measured global hard bound. It
    reduced the measured truth conversation from 108.68 GB and 7,866 source
    reloads to 4.13 GB and 6 reloads, with one 80.2 MB eviction and 6.59 seconds
@@ -59,10 +66,18 @@ toward 50 tok/s without regressing supported Qwen models.
      current five-token target window accepts roughly 20-34% and executes far
      more routed branches than it commits. Measure scalar and each useful block
      width on the same resident model, then select speculation only when useful
-     committed tokens per complete cycle win. Compile draft generation, target
-     projection, comparison, state selection, commit, and draft catch-up into
-     one device-resident transaction with no host wait until a real residency
-     miss or completed emitted block.
+     committed tokens per complete cycle win. The runtime now calibrates scalar,
+     resident-loop (when available), and useful speculative widths using complete
+     cycle elapsed time; mode-specific residency loads are charged instead of
+     discarded. On this sparse package it selects scalar and improves decode by
+     20.7% over the previous 6.6966 baseline, but remains far below the 30 tok/s
+     floor. Before treating modes as interchangeable, certify committed-token,
+     routed-expert, sampler, and state-digest equivalence from identical
+     checkpoints; scalar and batched verification currently follow different
+     deterministic token paths. Then compile draft generation, target projection,
+     comparison, state selection, commit, and draft catch-up into one
+     device-resident transaction with no host wait until a real residency miss or
+     completed emitted block.
    - Optimize the independently material MXFP4 expert path. Retain the source's
      packed 4-bit payload, amortize or fuse unpacking and activation conversion,
      and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8
@@ -111,9 +126,9 @@ toward 50 tok/s without regressing supported Qwen models.
    current thinking-enabled gates each discard one complete in-process warmup
    conversation, reset model state without unloading, pass correct Greece
    recall, and release their exact recorded reservations. On the current
-   pressure-safe runtime, Qwen3.6-35B-A3B reaches 96.2418 decode tok/s and
-   121.7564 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches
-   54.1696 decode tok/s and 135.7208 prefill tok/s on one AMD using the official
+   pressure-safe runtime, Qwen3.6-35B-A3B reaches 99.8296 decode tok/s and
+   125.0604 prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches
+   54.6634 decode tok/s and 129.1822 prefill tok/s on one AMD using the official
    temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
    repetition-penalty 1.0 thinking profile. Keep repetition,
    structured-protocol, conversation, and teardown checks active so throughput

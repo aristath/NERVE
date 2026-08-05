@@ -825,22 +825,50 @@ fn adaptive_window_cycle(
     }
 }
 
-#[test]
-fn adaptive_speculative_windows_probe_execution_shape_boundaries() {
-    assert_eq!(
-        adaptive_speculative_window_candidates(5),
-        vec![5, 1, 2, 3, 4]
-    );
-    assert_eq!(
-        adaptive_speculative_window_candidates(15),
-        vec![15, 1, 2, 3, 4, 7, 8]
-    );
-    assert_eq!(adaptive_speculative_window_candidates(1), vec![1]);
+fn speculative_candidate(draft_width: usize) -> VulkanFeedbackExecutionCandidate {
+    VulkanFeedbackExecutionCandidate::Speculative { draft_width }
 }
 
 #[test]
-fn adaptive_speculative_window_selects_measured_accepted_throughput() {
-    let mut selector = VulkanAdaptiveSpeculativeWindowSelector::new(5);
+fn adaptive_feedback_execution_probes_resident_and_speculative_shape_boundaries() {
+    assert_eq!(
+        adaptive_feedback_execution_candidates(5, true),
+        vec![
+            VulkanFeedbackExecutionCandidate::Scalar,
+            VulkanFeedbackExecutionCandidate::Resident,
+            speculative_candidate(5),
+            speculative_candidate(1),
+            speculative_candidate(2),
+            speculative_candidate(3),
+            speculative_candidate(4),
+        ]
+    );
+    assert_eq!(
+        adaptive_feedback_execution_candidates(15, false),
+        vec![
+            VulkanFeedbackExecutionCandidate::Scalar,
+            speculative_candidate(15),
+            speculative_candidate(1),
+            speculative_candidate(2),
+            speculative_candidate(3),
+            speculative_candidate(4),
+            speculative_candidate(7),
+            speculative_candidate(8),
+        ]
+    );
+    assert_eq!(
+        adaptive_feedback_execution_candidates(1, true),
+        vec![
+            VulkanFeedbackExecutionCandidate::Scalar,
+            VulkanFeedbackExecutionCandidate::Resident,
+            speculative_candidate(1),
+        ]
+    );
+}
+
+#[test]
+fn adaptive_feedback_execution_selects_measured_committed_throughput() {
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(5, false);
     let scores = BTreeMap::from([
         (1, (2, 100)),
         (2, (2, 160)),
@@ -849,24 +877,77 @@ fn adaptive_speculative_window_selects_measured_accepted_throughput() {
         (5, (3, 400)),
     ]);
 
+    for _ in 0..3 {
+        assert_eq!(
+            selector.next_candidate(),
+            VulkanFeedbackExecutionCandidate::Scalar
+        );
+        selector.record_scalar_tick(200);
+    }
+
     for expected_width in [5, 1, 2, 3, 4] {
         for _ in 0..3 {
-            assert_eq!(selector.next_window_width(), expected_width);
+            assert_eq!(selector.next_candidate(), speculative_candidate(expected_width));
             let (emitted, elapsed) = scores[&expected_width];
-            selector.record_cycle(
+            selector.record_speculative_cycle(
                 expected_width,
                 &adaptive_window_cycle(expected_width, emitted, elapsed),
+                false,
             );
         }
     }
 
     assert!(selector.is_calibrated());
-    assert_eq!(selector.next_window_width(), 1);
+    assert_eq!(selector.next_candidate(), speculative_candidate(1));
 }
 
 #[test]
-fn adaptive_speculative_window_excludes_first_shape_warmup() {
-    let mut selector = VulkanAdaptiveSpeculativeWindowSelector::new(2);
+fn adaptive_feedback_execution_can_disable_slower_speculation() {
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(2, true);
+
+    for _ in 0..3 {
+        assert_eq!(
+            selector.next_candidate(),
+            VulkanFeedbackExecutionCandidate::Scalar
+        );
+        selector.record_scalar_tick(100);
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            selector.next_candidate(),
+            VulkanFeedbackExecutionCandidate::Resident
+        );
+        selector.record_resident_window(1, 100, false);
+    }
+    for expected_width in [2, 1] {
+        for _ in 0..3 {
+            assert_eq!(selector.next_candidate(), speculative_candidate(expected_width));
+            selector.record_speculative_cycle(
+                expected_width,
+                &adaptive_window_cycle(expected_width, 2, 300),
+                false,
+            );
+        }
+    }
+
+    assert!(selector.is_calibrated());
+    assert_eq!(
+        selector.next_candidate(),
+        VulkanFeedbackExecutionCandidate::Scalar
+    );
+}
+
+#[test]
+fn adaptive_feedback_execution_excludes_first_shape_warmup() {
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(2, false);
+
+    for elapsed in [10_000, 100, 100] {
+        assert_eq!(
+            selector.next_candidate(),
+            VulkanFeedbackExecutionCandidate::Scalar
+        );
+        selector.record_scalar_tick(elapsed);
+    }
 
     for (width, emitted, elapsed) in [
         (2, 3, 10),
@@ -876,22 +957,52 @@ fn adaptive_speculative_window_excludes_first_shape_warmup() {
         (1, 2, 100),
         (1, 2, 100),
     ] {
-        assert_eq!(selector.next_window_width(), width);
-        selector.record_cycle(width, &adaptive_window_cycle(width, emitted, elapsed));
+        assert_eq!(selector.next_candidate(), speculative_candidate(width));
+        selector.record_speculative_cycle(
+            width,
+            &adaptive_window_cycle(width, emitted, elapsed),
+            false,
+        );
     }
 
     assert!(selector.is_calibrated());
-    assert_eq!(selector.next_window_width(), 1);
+    assert_eq!(selector.next_candidate(), speculative_candidate(1));
 }
 
 #[test]
-fn adaptive_speculative_window_ignores_truncated_or_failed_measurements() {
-    let mut selector = VulkanAdaptiveSpeculativeWindowSelector::new(2);
+fn adaptive_feedback_execution_ignores_truncated_or_failed_measurements() {
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(2, false);
 
-    selector.record_cycle(2, &adaptive_window_cycle(1, 2, 100));
-    assert_eq!(selector.next_window_width(), 2);
-    selector.record_cycle(2, &adaptive_window_cycle(2, 2, 0));
-    assert_eq!(selector.next_window_width(), 2);
+    selector.record_scalar_tick(0);
+    assert_eq!(
+        selector.next_candidate(),
+        VulkanFeedbackExecutionCandidate::Scalar
+    );
+    for _ in 0..3 {
+        selector.record_scalar_tick(100);
+    }
+    selector.record_speculative_cycle(2, &adaptive_window_cycle(1, 2, 100), false);
+    assert_eq!(selector.next_candidate(), speculative_candidate(2));
+    selector.record_speculative_cycle(2, &adaptive_window_cycle(2, 2, 0), false);
+    assert_eq!(selector.next_candidate(), speculative_candidate(2));
+}
+
+#[test]
+fn adaptive_feedback_execution_charges_mode_specific_residency_cost() {
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, false);
+    for _ in 0..3 {
+        selector.record_scalar_tick(100);
+    }
+    assert_eq!(selector.next_candidate(), speculative_candidate(1));
+
+    selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 1_000), true);
+    selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 100), false);
+
+    assert!(selector.is_calibrated());
+    assert_eq!(
+        selector.next_candidate(),
+        VulkanFeedbackExecutionCandidate::Scalar
+    );
 }
 
 #[test]

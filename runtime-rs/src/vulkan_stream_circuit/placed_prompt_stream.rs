@@ -1,6 +1,7 @@
 struct VulkanResidentInProcessPlacedPendingStreamFeedbackWindow {
     window: VulkanResidentInProcessPlacedPendingFeedbackWindow,
     started_at: Instant,
+    adaptive_feedback_loads_before: Option<u64>,
 }
 
 pub struct VulkanResidentInProcessPlacedPromptStream {
@@ -14,7 +15,7 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     pending_input_events: VecDeque<VulkanResidentTokenInputEvent>,
     speculative_draft_tokens: usize,
     speculative_confidence_threshold: f32,
-    speculative_window_selector: Option<VulkanAdaptiveSpeculativeWindowSelector>,
+    feedback_execution_selector: Option<VulkanAdaptiveFeedbackExecutionSelector>,
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
@@ -39,10 +40,11 @@ impl VulkanResidentInProcessPlacedPromptStream {
             ));
         }
         self.speculative_draft_tokens = speculative_draft_tokens;
-        self.speculative_window_selector = (speculative_draft_tokens > 0).then(|| {
-            VulkanAdaptiveSpeculativeWindowSelector::new(
+        self.feedback_execution_selector = (speculative_draft_tokens > 0).then(|| {
+            VulkanAdaptiveFeedbackExecutionSelector::new(
                 self.processor
                     .effective_speculative_draft_token_count(speculative_draft_tokens),
+                self.processor.resident_feedback_next_window_tick_count() >= 2,
             )
         });
         Ok(self)
@@ -157,7 +159,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: 0,
             speculative_confidence_threshold: 0.0,
-            speculative_window_selector: None,
+            feedback_execution_selector: None,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -197,10 +199,11 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.session.transport = VulkanInProcessPlacedEdgeTransport::new();
         self.package = package;
         self.processor = processor;
-        self.speculative_window_selector = (self.speculative_draft_tokens > 0).then(|| {
-            VulkanAdaptiveSpeculativeWindowSelector::new(
+        self.feedback_execution_selector = (self.speculative_draft_tokens > 0).then(|| {
+            VulkanAdaptiveFeedbackExecutionSelector::new(
                 self.processor
                     .effective_speculative_draft_token_count(self.speculative_draft_tokens),
+                self.processor.resident_feedback_next_window_tick_count() >= 2,
             )
         });
         self.resident_feedback_template_catalog.clear();
@@ -241,7 +244,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
             speculative_confidence_threshold: self.speculative_confidence_threshold,
-            speculative_window_selector: self.speculative_window_selector.clone(),
+            feedback_execution_selector: self.feedback_execution_selector.clone(),
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -385,6 +388,16 @@ impl VulkanResidentInProcessPlacedPromptStream {
 
     pub fn is_idle(&self) -> bool {
         self.active_input_event.is_none() && self.pending_input_events.is_empty()
+    }
+
+    fn adaptive_feedback_uses_resident_loop(&self) -> bool {
+        self.feedback_execution_selector
+            .as_ref()
+            .filter(|_| self.speculative_confidence_threshold == 0.0)
+            .map(|selector| {
+                selector.next_candidate() == VulkanFeedbackExecutionCandidate::Resident
+            })
+            .unwrap_or(self.speculative_draft_tokens == 0)
     }
 
     pub fn resident_state_digest(
@@ -613,6 +626,30 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .id
             .clone();
         let stream_tick = self.session.next_stream_tick;
+        let adaptive_scalar_loads_before = self
+            .feedback_execution_selector
+            .as_ref()
+            .filter(|selector| {
+                self.speculative_confidence_threshold == 0.0
+                    && !selector.is_calibrated()
+                    && selector.next_candidate() == VulkanFeedbackExecutionCandidate::Scalar
+                    && activation.input_is_feedback
+                    && activation.should_emit_public_output
+                    && !activation.input_closes_loop_after_processing
+            })
+            .map(|_| {
+                self.package
+                    .compiled_resource_load_required_count()
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to read scalar-feedback calibration residency: {error}"
+                            )),
+                        )
+                    })
+            })
+            .transpose()?;
+        let adaptive_scalar_started_at = adaptive_scalar_loads_before.map(|_| Instant::now());
         let tail = if activation.should_emit_public_output {
             VulkanResidentPlacedTokenTickTail::Sample
         } else if self.processor.speculative_decoder_count() > 0 {
@@ -675,6 +712,39 @@ impl VulkanResidentInProcessPlacedPromptStream {
         } else {
             None
         };
+
+        let adaptive_scalar_had_no_loads = adaptive_scalar_loads_before
+            .map(|before| {
+                self.package
+                    .compiled_resource_load_required_count()
+                    .map(|after| after == before)
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to verify scalar-feedback calibration residency: {error}"
+                            )),
+                        )
+                    })
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if output_event.is_some()
+            && completed_input_run.is_none()
+            && adaptive_scalar_had_no_loads
+        {
+            self.feedback_execution_selector
+                .as_mut()
+                .expect("scalar-feedback calibration requires an execution selector")
+                .record_scalar_tick(
+                    u64::try_from(
+                        adaptive_scalar_started_at
+                            .expect("scalar calibration start accompanies residency counter")
+                            .elapsed()
+                            .as_nanos(),
+                    )
+                    .unwrap_or(u64::MAX),
+                );
+        }
 
         Ok(Some(
             VulkanResidentInProcessPlacedPromptStreamActivationRun {
@@ -789,10 +859,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 .processor
                 .resident_feedback_next_window_tick_count()
                 .max(1);
-            if self.run_resident_feedback_window_limited_with_output(
-                resident_tick_limit,
-                &mut on_output_event,
-            )? {
+            if self.adaptive_feedback_uses_resident_loop()
+                && self.run_resident_feedback_window_limited_with_output(
+                    resident_tick_limit,
+                    &mut on_output_event,
+                )?
+            {
                 if self
                     .active_input_event
                     .as_ref()
@@ -839,13 +911,22 @@ impl VulkanResidentInProcessPlacedPromptStream {
         {
             return Ok(false);
         }
-        let selected_window_width = if self.speculative_confidence_threshold == 0.0 {
-            self.speculative_window_selector
+        let selected_candidate = if self.speculative_confidence_threshold == 0.0 {
+            self.feedback_execution_selector
                 .as_ref()
-                .map(VulkanAdaptiveSpeculativeWindowSelector::next_window_width)
-                .unwrap_or(self.speculative_draft_tokens)
+                .map(VulkanAdaptiveFeedbackExecutionSelector::next_candidate)
+                .unwrap_or(VulkanFeedbackExecutionCandidate::Speculative {
+                    draft_width: self.speculative_draft_tokens,
+                })
         } else {
-            self.speculative_draft_tokens
+            VulkanFeedbackExecutionCandidate::Speculative {
+                draft_width: self.speculative_draft_tokens,
+            }
+        };
+        let selected_window_width = match selected_candidate {
+            VulkanFeedbackExecutionCandidate::Scalar
+            | VulkanFeedbackExecutionCandidate::Resident => return Ok(false),
+            VulkanFeedbackExecutionCandidate::Speculative { draft_width } => draft_width,
         };
         let draft_token_count = selected_window_width
             .min(active.remaining_public_outputs - 1)
@@ -857,8 +938,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .copied()
             .collect::<BTreeSet<_>>();
         let start_stream_tick = self.session.next_stream_tick;
-        let calibration_loads_before = self
-            .speculative_window_selector
+        let adaptive_feedback_loads_before = self
+            .feedback_execution_selector
             .as_ref()
             .filter(|selector| {
                 self.speculative_confidence_threshold == 0.0 && !selector.is_calibrated()
@@ -888,29 +969,30 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .emitted_tokens
             .last()
             .is_some_and(|token| stop_token_ids.contains(&token.token_id));
-        let calibration_had_no_loads = calibration_loads_before
-            .map(|before| {
-                self.package
-                    .compiled_resource_load_required_count()
-                    .map(|after| after == before)
-                    .map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "failed to verify speculative calibration residency: {error}"
-                            )),
-                        )
-                    })
-            })
-            .transpose()?
-            .unwrap_or(false);
-        if self.speculative_confidence_threshold == 0.0
-            && !stopped
-            && calibration_had_no_loads
-        {
-            self.speculative_window_selector
+        if self.speculative_confidence_threshold == 0.0 && !stopped {
+            let adaptive_feedback_residency_changed = adaptive_feedback_loads_before
+                .map(|before| {
+                    self.package
+                        .compiled_resource_load_required_count()
+                        .map(|after| after != before)
+                        .map_err(|error| {
+                            VulkanResidentInProcessPlacedRuntimeError::Package(
+                                VulkanResidentTokenModelPackageError::new(format!(
+                                    "failed to verify speculative calibration residency: {error}"
+                                )),
+                            )
+                        })
+                })
+                .transpose()?
+                .unwrap_or(false);
+            self.feedback_execution_selector
                 .as_mut()
-                .expect("configured speculative decoding has a window selector")
-                .record_cycle(selected_window_width, &cycle);
+                .expect("configured speculative decoding has an execution selector")
+                .record_speculative_cycle(
+                    selected_window_width,
+                    &cycle,
+                    adaptive_feedback_residency_changed,
+                );
         }
         self.active_input_event
             .as_mut()
@@ -1063,6 +1145,26 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .as_ref()
             .is_some_and(|feedback_loop| feedback_loop.replayable)
             .then_some(&mut self.resident_feedback_template_catalog);
+        let adaptive_feedback_loads_before = self
+            .feedback_execution_selector
+            .as_ref()
+            .filter(|selector| {
+                self.speculative_confidence_threshold == 0.0
+                    && !selector.is_calibrated()
+                    && selector.next_candidate() == VulkanFeedbackExecutionCandidate::Resident
+            })
+            .map(|_| {
+                self.package
+                    .compiled_resource_load_required_count()
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to read resident-feedback calibration residency: {error}"
+                            )),
+                        )
+                    })
+            })
+            .transpose()?;
         let started_at = Instant::now();
         let window = self.processor.submit_resident_feedback_window(
             &self.devices,
@@ -1075,6 +1177,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             VulkanResidentInProcessPlacedPendingStreamFeedbackWindow {
                 window,
                 started_at,
+                adaptive_feedback_loads_before,
             },
         ))
     }
@@ -1112,6 +1215,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
     {
         let planned_tick_count = pending.window.tick_count;
         let start_stream_tick = pending.window.start_stream_tick;
+        let adaptive_feedback_loads_before = pending.adaptive_feedback_loads_before;
         let processor = &self.processor;
         let devices = &self.devices;
         let active_input_event = &mut self.active_input_event;
@@ -1226,6 +1330,33 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 elapsed_time_ns,
                 completion.stop_reason != VULKAN_FEEDBACK_STOP_REASON_NONE,
             );
+        if completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
+            && planned_tick_count == completion.executed_tick_count
+        {
+            let adaptive_feedback_residency_changed = adaptive_feedback_loads_before
+                .map(|before| {
+                    self.package
+                        .compiled_resource_load_required_count()
+                        .map(|after| after != before)
+                        .map_err(|error| {
+                            VulkanResidentInProcessPlacedRuntimeError::Package(
+                                VulkanResidentTokenModelPackageError::new(format!(
+                                    "failed to verify resident-feedback calibration residency: {error}"
+                                )),
+                            )
+                        })
+                })
+                .transpose()?
+                .unwrap_or(false);
+            self.feedback_execution_selector
+                .as_mut()
+                .expect("resident-feedback calibration requires an execution selector")
+                .record_resident_window(
+                    completion.sampled_tick_count,
+                    elapsed_time_ns,
+                    adaptive_feedback_residency_changed,
+                );
+        }
         Ok(completion)
     }
 

@@ -663,10 +663,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
                     .resident_feedback_next_window_tick_count()
                     .max(1),
             );
-            if self.run_resident_feedback_window_limited_with_output(
-                resident_tick_limit,
-                on_output_event,
-            )? {
+            if self.adaptive_feedback_uses_resident_loop()
+                && self.run_resident_feedback_window_limited_with_output(
+                    resident_tick_limit,
+                    on_output_event,
+                )?
+            {
                 let generated_delta = self.scheduled_feedback_generated_delta(
                     generated_before,
                     remaining,

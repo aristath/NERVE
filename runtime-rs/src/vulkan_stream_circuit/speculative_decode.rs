@@ -56,22 +56,32 @@ const ADAPTIVE_SPECULATIVE_WINDOW_WARMUP_CYCLES: usize = 1;
 const ADAPTIVE_SPECULATIVE_WINDOW_MEASURED_CYCLES: usize = 2;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct VulkanSpeculativeWindowObservation {
+struct VulkanFeedbackExecutionObservation {
     valid_cycle_count: usize,
     measured_cycle_count: usize,
     emitted_token_count: usize,
     total_time_ns: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct VulkanAdaptiveSpeculativeWindowSelector {
-    candidates: Vec<usize>,
-    candidate_index: usize,
-    selected_width: usize,
-    observations: BTreeMap<usize, VulkanSpeculativeWindowObservation>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum VulkanFeedbackExecutionCandidate {
+    Scalar,
+    Resident,
+    Speculative { draft_width: usize },
 }
 
-fn adaptive_speculative_window_candidates(maximum_width: usize) -> Vec<usize> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanAdaptiveFeedbackExecutionSelector {
+    candidates: Vec<VulkanFeedbackExecutionCandidate>,
+    candidate_index: usize,
+    selected_candidate: VulkanFeedbackExecutionCandidate,
+    observations: BTreeMap<VulkanFeedbackExecutionCandidate, VulkanFeedbackExecutionObservation>,
+}
+
+fn adaptive_feedback_execution_candidates(
+    maximum_width: usize,
+    resident_feedback_available: bool,
+) -> Vec<VulkanFeedbackExecutionCandidate> {
     assert!(maximum_width > 0, "speculative window width must be nonzero");
     let mut widths = BTreeSet::from([1, maximum_width]);
     let mut class_start = 2usize;
@@ -88,20 +98,34 @@ fn adaptive_speculative_window_candidates(maximum_width: usize) -> Vec<usize> {
         };
         class_start = next;
     }
-    let mut candidates = Vec::with_capacity(widths.len());
-    candidates.push(maximum_width);
-    candidates.extend(widths.into_iter().filter(|width| *width != maximum_width));
+    let mut candidates =
+        Vec::with_capacity(widths.len() + 1 + usize::from(resident_feedback_available));
+    candidates.push(VulkanFeedbackExecutionCandidate::Scalar);
+    if resident_feedback_available {
+        candidates.push(VulkanFeedbackExecutionCandidate::Resident);
+    }
+    candidates.push(VulkanFeedbackExecutionCandidate::Speculative {
+        draft_width: maximum_width,
+    });
+    candidates.extend(
+        widths
+            .into_iter()
+            .filter(|width| *width != maximum_width)
+            .map(|draft_width| VulkanFeedbackExecutionCandidate::Speculative { draft_width }),
+    );
     candidates
 }
 
-impl VulkanAdaptiveSpeculativeWindowSelector {
-    fn new(maximum_width: usize) -> Self {
-        let candidates = adaptive_speculative_window_candidates(maximum_width);
+impl VulkanAdaptiveFeedbackExecutionSelector {
+    fn new(maximum_width: usize, resident_feedback_available: bool) -> Self {
+        let candidates =
+            adaptive_feedback_execution_candidates(maximum_width, resident_feedback_available);
         let candidate_index = usize::from(candidates.len() == 1);
+        let selected_candidate = candidates[0];
         Self {
             candidates,
             candidate_index,
-            selected_width: maximum_width,
+            selected_candidate,
             observations: BTreeMap::new(),
         }
     }
@@ -110,44 +134,102 @@ impl VulkanAdaptiveSpeculativeWindowSelector {
         self.candidate_index >= self.candidates.len()
     }
 
-    fn next_window_width(&self) -> usize {
+    fn next_candidate(&self) -> VulkanFeedbackExecutionCandidate {
         self.candidates
             .get(self.candidate_index)
             .copied()
-            .unwrap_or(self.selected_width)
+            .unwrap_or(self.selected_candidate)
     }
 
-    fn record_cycle(&mut self, requested_width: usize, cycle: &VulkanSpeculativeCycleRun) {
+    fn record_speculative_cycle(
+        &mut self,
+        requested_width: usize,
+        cycle: &VulkanSpeculativeCycleRun,
+        residency_changed: bool,
+    ) {
+        let candidate = VulkanFeedbackExecutionCandidate::Speculative {
+            draft_width: requested_width,
+        };
         if self.is_calibrated()
-            || requested_width != self.next_window_width()
+            || candidate != self.next_candidate()
             || cycle.draft_token_ids.len() != requested_width
             || cycle.total_time_ns == 0
             || cycle.verification.emitted_tokens.is_empty()
         {
             return;
         }
-        let observation = self.observations.entry(requested_width).or_default();
+        self.record_observation(
+            candidate,
+            cycle.verification.emitted_tokens.len(),
+            cycle.total_time_ns,
+            residency_changed,
+        );
+    }
+
+    fn record_resident_window(
+        &mut self,
+        emitted_token_count: usize,
+        total_time_ns: u64,
+        residency_changed: bool,
+    ) {
+        let candidate = VulkanFeedbackExecutionCandidate::Resident;
+        if self.is_calibrated()
+            || candidate != self.next_candidate()
+            || total_time_ns == 0
+            || emitted_token_count == 0
+        {
+            return;
+        }
+        self.record_observation(
+            candidate,
+            emitted_token_count,
+            total_time_ns,
+            residency_changed,
+        );
+    }
+
+    fn record_scalar_tick(&mut self, total_time_ns: u64) {
+        let candidate = VulkanFeedbackExecutionCandidate::Scalar;
+        if self.is_calibrated()
+            || candidate != self.next_candidate()
+            || total_time_ns == 0
+        {
+            return;
+        }
+        self.record_observation(candidate, 1, total_time_ns, false);
+    }
+
+    fn record_observation(
+        &mut self,
+        candidate: VulkanFeedbackExecutionCandidate,
+        emitted_token_count: usize,
+        total_time_ns: u64,
+        force_measurement: bool,
+    ) {
+        let observation = self.observations.entry(candidate).or_default();
         observation.valid_cycle_count = observation.valid_cycle_count.saturating_add(1);
-        if observation.valid_cycle_count > ADAPTIVE_SPECULATIVE_WINDOW_WARMUP_CYCLES {
+        if force_measurement
+            || observation.valid_cycle_count > ADAPTIVE_SPECULATIVE_WINDOW_WARMUP_CYCLES
+        {
             observation.measured_cycle_count = observation.measured_cycle_count.saturating_add(1);
             observation.emitted_token_count = observation
                 .emitted_token_count
-                .saturating_add(cycle.verification.emitted_tokens.len());
+                .saturating_add(emitted_token_count);
             observation.total_time_ns = observation
                 .total_time_ns
-                .saturating_add(cycle.total_time_ns);
+                .saturating_add(total_time_ns);
         }
         if observation.measured_cycle_count < ADAPTIVE_SPECULATIVE_WINDOW_MEASURED_CYCLES {
             return;
         }
         self.candidate_index = self.candidate_index.saturating_add(1);
         if self.is_calibrated() {
-            self.selected_width = self.measured_winner();
+            self.selected_candidate = self.measured_winner();
         }
     }
 
-    fn measured_winner(&self) -> usize {
-        let mut winner = self.selected_width;
+    fn measured_winner(&self) -> VulkanFeedbackExecutionCandidate {
+        let mut winner = self.selected_candidate;
         for candidate in &self.candidates {
             let Some(candidate_observation) = self.observations.get(candidate) else {
                 continue;
@@ -165,9 +247,7 @@ impl VulkanAdaptiveSpeculativeWindowSelector {
                 .saturating_mul(winner_observation.total_time_ns as u128);
             let winner_score = (winner_observation.emitted_token_count as u128)
                 .saturating_mul(candidate_observation.total_time_ns as u128);
-            if candidate_score > winner_score
-                || (candidate_score == winner_score && *candidate < winner)
-            {
+            if candidate_score > winner_score {
                 winner = *candidate;
             }
         }
