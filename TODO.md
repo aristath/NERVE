@@ -53,6 +53,30 @@ toward 50 tok/s without regressing supported Qwen models.
    the 30 tok/s floor and must be remeasured on the current runtime before
    attribution work continues.
 
+   Complete heterogeneous cost-based auto-placement. The runtime now uses exact
+   fixed, transient, resource-store, speculative-window, and eventually retained
+   lazy-resource bytes to choose the smallest capacity-safe prefix of a
+   caller-ranked device list; it fills contiguous component segments, respects
+   partial VRAM reservations, leaves explicit wiring untouched, excludes
+   integrated display GPUs from automatic placement, and has real one- and
+   two-device product proof. The remaining gap is candidate ranking and spill
+   across different capability classes. Rank devices from measured execution
+   and transfer costs rather than vendor names; on this workstation that means
+   the five AMD GPUs before the slower Intel GPU, and CPU only after compatible
+   GPU capacity. Select each component's representation for its actual target
+   device, reject an incompatible boundary before model allocation, and permit
+   a model that exhausts the AMD group to continue contiguously onto a
+   compatible Intel or CPU implementation without recompilation.
+
+   Make temporal and speculative batch execution device-segment aware. A valid
+   component path may revisit one physical device after traversing others, but
+   the current one-slice-per-device batch runner cannot distinguish the early
+   and late segments and fails only after scalar decoding begins. Represent and
+   execute ordered component segments, add a regression graph such as
+   `gpu0 -> gpu1 -> gpu0`, and preserve batched verification without silently
+   disabling speculation. Until that is complete, product performance gates
+   must use a non-revisiting contiguous device pipeline.
+
    Compile the complete speculative cycle as a device-resident transaction:
    generate the draft window without a host wait per proposal, append target
    projection and sampling, compare draft and target tokens on-device, produce
@@ -106,9 +130,9 @@ toward 50 tok/s without regressing supported Qwen models.
    current thinking-enabled gates each discard one complete in-process warmup
    conversation, reset model state without unloading, pass correct Greece
    recall, and release their exact recorded reservations. On the current
-   pressure-safe runtime, Qwen3.6-35B-A3B reaches 101.05 decode tok/s and 196.34
-   prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches 48.96
-   decode tok/s and 123.65 prefill tok/s on one AMD using the official
+   pressure-safe runtime, Qwen3.6-35B-A3B reaches 96.71 decode tok/s and 119.79
+   prefill tok/s with a contiguous two-AMD split. Qwen3.5-9B reaches 53.65
+   decode tok/s and 133.15 prefill tok/s on one AMD using the official
    temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
    repetition-penalty 1.0 thinking profile. Keep repetition,
    structured-protocol, conversation, and teardown checks active so throughput
