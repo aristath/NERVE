@@ -252,7 +252,7 @@ mod mxfp4_tests {
     }
 
     #[test]
-    fn native_mxfp4_batch_width_six_matches_and_times_real_sparse_geometry() {
+    fn native_mxfp4_batch_real_geometry_matches_and_finishes_under_one_minute() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!(
                 "skipping native MXFP4 real batch geometry: explicit Vulkan device index unset"
@@ -267,10 +267,20 @@ mod mxfp4_tests {
         let intermediate_size = 2048usize;
         let num_experts = 256usize;
         let experts_per_token = 6usize;
-        // Target verification evaluates the anchor plus DeepSeek's five trained
-        // DSpark proposals as one causal block.  Keep this conformance and
-        // microbenchmark geometry equal to that real six-lane workload.
-        let batch_width = 6usize;
+        // Six lanes cover the full trained proposal width. An explicit smaller
+        // width lets the same conformance test measure the adaptive selector's
+        // actual execution shape without inventing a reduced tensor geometry.
+        let batch_width = std::env::var("NERVE_TEST_MXFP4_BATCH_WIDTH")
+            .ok()
+            .map(|raw| {
+                raw.parse::<usize>()
+                    .expect("NERVE_TEST_MXFP4_BATCH_WIDTH must be an integer")
+            })
+            .unwrap_or(6);
+        assert!(
+            (1..=6).contains(&batch_width),
+            "NERVE_TEST_MXFP4_BATCH_WIDTH must be in 1..=6"
+        );
         let selected_experts = [2usize, 17, 63, 127, 191, 255];
         let gate_shader = render_mxfp4_shader_geometry(
             "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
