@@ -8,13 +8,11 @@ from typing import Callable, Iterable
 
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 
-RUNTIME_RESIDENCY_PLANNER_REQUEST_SCHEMA = (
-    "nerve.runtime_residency_planner_request.v2"
-)
+RUNTIME_RESIDENCY_PLANNER_REQUEST_SCHEMA = "nerve.runtime_residency_planner_request.v3"
 RUNTIME_RESIDENCY_PLANNER_RESPONSE_SCHEMA = (
-    "nerve.runtime_residency_planner_response.v2"
+    "nerve.runtime_residency_planner_response.v3"
 )
-RUNTIME_RESIDENCY_PLAN_SCHEMA = "nerve.vulkan_runtime_residency_plan.v2"
+RUNTIME_RESIDENCY_PLAN_SCHEMA = "nerve.vulkan_runtime_residency_plan.v3"
 RESIDENCY_POLICIES = frozenset(("demand_retained", "eager"))
 PARAMETER_RESIDENCY_FIELDS = frozenset(
     (
@@ -25,8 +23,19 @@ PARAMETER_RESIDENCY_FIELDS = frozenset(
         "staging_headroom_bytes",
     )
 )
-WORKING_SET_FIELDS = frozenset(
-    ("transient_state_bytes", "activation_headroom_bytes")
+WORKING_SET_FIELDS = frozenset(("transient_state_bytes", "activation_headroom_bytes"))
+RESOURCE_STORE_FIELDS = frozenset(
+    (
+        "address_table_device_bytes",
+        "parameter_slot_table_device_bytes",
+        "metadata_device_bytes",
+        "transfer_staging_slot_count",
+        "transfer_staging_slot_byte_capacity",
+        "transfer_staging_device_bytes",
+        "maximum_load_wave_group_count",
+        "maximum_load_wave_payload_bytes",
+        "maximum_dynamic_allocation_padding_bytes",
+    )
 )
 TRANSIENT_BREAKDOWN_FIELDS = frozenset(
     (
@@ -34,6 +43,7 @@ TRANSIENT_BREAKDOWN_FIELDS = frozenset(
         "state_transaction_bytes",
         "stream_control_bytes",
         "speculative_decoder_state_bytes",
+        "causal_verification_snapshot_bytes",
     )
 )
 ACTIVATION_BREAKDOWN_FIELDS = frozenset(
@@ -56,7 +66,7 @@ class RuntimeResidencyPlanningCase:
     default_device_id: str
     component_placement: dict[str, str]
     context_capacity_activations: int
-    mount_speculative_decoders: bool
+    speculative_draft_tokens: int
     residency_policy: str
 
     def to_json(self) -> Json:
@@ -68,21 +78,25 @@ class RuntimeResidencyPlanningCase:
             raise ModelCompileError(
                 "runtime residency context capacity must be positive"
             )
+        if (
+            isinstance(self.speculative_draft_tokens, bool)
+            or not isinstance(self.speculative_draft_tokens, int)
+            or self.speculative_draft_tokens < 0
+        ):
+            raise ModelCompileError(
+                "runtime residency speculative draft token count must be "
+                "a nonnegative integer"
+            )
         if self.residency_policy not in RESIDENCY_POLICIES:
             raise ModelCompileError(
-                f"unsupported runtime residency policy "
-                f"{self.residency_policy!r}"
+                f"unsupported runtime residency policy {self.residency_policy!r}"
             )
         return {
             "case_id": self.case_id,
             "default_device_id": self.default_device_id,
-            "component_placement": dict(
-                sorted(self.component_placement.items())
-            ),
-            "context_capacity_activations": (
-                self.context_capacity_activations
-            ),
-            "mount_speculative_decoders": self.mount_speculative_decoders,
+            "component_placement": dict(sorted(self.component_placement.items())),
+            "context_capacity_activations": (self.context_capacity_activations),
+            "speculative_draft_tokens": self.speculative_draft_tokens,
             "residency_policy": self.residency_policy,
         }
 
@@ -151,8 +165,7 @@ def plan_runtime_residency_cases(
     if (
         not isinstance(response, dict)
         or set(response) != {"schema", "plans"}
-        or response.get("schema")
-        != RUNTIME_RESIDENCY_PLANNER_RESPONSE_SCHEMA
+        or response.get("schema") != RUNTIME_RESIDENCY_PLANNER_RESPONSE_SCHEMA
         or not isinstance(response.get("plans"), list)
     ):
         raise ModelCompileError(
@@ -190,7 +203,7 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
         "package_id",
         "residency_policy",
         "context_capacity_activations",
-        "speculative_decoders_mounted",
+        "speculative_draft_tokens",
         "device_plans",
         "total_initial_device_resident_bytes",
         "total_current_resident_parameter_bytes",
@@ -203,22 +216,14 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
         or not plan["package_id"]
         or plan.get("residency_policy") not in RESIDENCY_POLICIES
         or not _positive_int(plan.get("context_capacity_activations"))
-        or not isinstance(plan.get("speculative_decoders_mounted"), bool)
+        or not _nonnegative_int(plan.get("speculative_draft_tokens"))
         or not isinstance(plan.get("device_plans"), list)
         or not plan["device_plans"]
-        or not _nonnegative_int(
-            plan.get("total_initial_device_resident_bytes")
-        )
-        or not _nonnegative_int(
-            plan.get("total_current_resident_parameter_bytes")
-        )
-        or not _nonnegative_int(
-            plan.get("total_maximum_addressable_parameter_bytes")
-        )
+        or not _nonnegative_int(plan.get("total_initial_device_resident_bytes"))
+        or not _nonnegative_int(plan.get("total_current_resident_parameter_bytes"))
+        or not _nonnegative_int(plan.get("total_maximum_addressable_parameter_bytes"))
     ):
-        raise ModelCompileError(
-            "runtime residency planner returned a malformed plan"
-        )
+        raise ModelCompileError("runtime residency planner returned a malformed plan")
     device_ids: set[str] = set()
     computed_initial_total = 0
     computed_current_parameter_total = 0
@@ -230,6 +235,7 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
             != {
                 "device_id",
                 "parameter_residency",
+                "resource_store",
                 "working_set",
                 "breakdown",
                 "initial_device_resident_bytes",
@@ -238,30 +244,26 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
             or not device["device_id"]
             or device["device_id"] in device_ids
             or not isinstance(device.get("parameter_residency"), dict)
+            or not isinstance(device.get("resource_store"), dict)
             or not isinstance(device.get("working_set"), dict)
             or not isinstance(device.get("breakdown"), dict)
-            or not _nonnegative_int(
-                device.get("initial_device_resident_bytes")
-            )
+            or not _nonnegative_int(device.get("initial_device_resident_bytes"))
         ):
             raise ModelCompileError(
                 "runtime residency planner returned a malformed device plan"
             )
         device_ids.add(device["device_id"])
         parameters = device["parameter_residency"]
+        resource_store = device["resource_store"]
         working_set = device["working_set"]
         breakdown = device["breakdown"]
         if (
             set(parameters) != PARAMETER_RESIDENCY_FIELDS
-            or any(
-                not _nonnegative_int(value)
-                for value in parameters.values()
-            )
+            or any(not _nonnegative_int(value) for value in parameters.values())
             or set(working_set) != WORKING_SET_FIELDS
-            or any(
-                not _nonnegative_int(value)
-                for value in working_set.values()
-            )
+            or any(not _nonnegative_int(value) for value in working_set.values())
+            or set(resource_store) != RESOURCE_STORE_FIELDS
+            or any(not _nonnegative_int(value) for value in resource_store.values())
             or set(breakdown)
             != TRANSIENT_BREAKDOWN_FIELDS | ACTIVATION_BREAKDOWN_FIELDS
             or any(
@@ -273,9 +275,21 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
                 "runtime residency planner returned an invalid byte breakdown"
             )
         if (
+            resource_store["metadata_device_bytes"]
+            != resource_store["address_table_device_bytes"]
+            + resource_store["parameter_slot_table_device_bytes"]
+            or resource_store["transfer_staging_device_bytes"]
+            != resource_store["transfer_staging_slot_count"]
+            * resource_store["transfer_staging_slot_byte_capacity"]
+            or resource_store["maximum_load_wave_payload_bytes"]
+            > resource_store["transfer_staging_slot_byte_capacity"]
+        ):
+            raise ModelCompileError(
+                "runtime residency resource-store accounting is inconsistent"
+            )
+        if (
             parameters["current_resident_bytes"]
-            != parameters["always_resident_bytes"]
-            + parameters["initial_dynamic_bytes"]
+            != parameters["always_resident_bytes"] + parameters["initial_dynamic_bytes"]
             or parameters["maximum_addressable_bytes"]
             < parameters["current_resident_bytes"]
             or (
@@ -299,9 +313,18 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
             raise ModelCompileError(
                 "runtime residency working set disagrees with its breakdown"
             )
+        resource_store_initial = (
+            resource_store["metadata_device_bytes"]
+            + resource_store["transfer_staging_device_bytes"]
+            + (
+                resource_store["maximum_dynamic_allocation_padding_bytes"]
+                if plan["residency_policy"] == "eager"
+                else 0
+            )
+        )
         device_initial = (
             parameters["current_resident_bytes"]
-            + parameters["staging_headroom_bytes"]
+            + resource_store_initial
             + working_set["transient_state_bytes"]
             + working_set["activation_headroom_bytes"]
         )
@@ -310,23 +333,16 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
                 "runtime residency initial total disagrees with its categories"
             )
         computed_initial_total += device_initial
-        computed_current_parameter_total += parameters[
-            "current_resident_bytes"
-        ]
-        computed_maximum_parameter_total += parameters[
-            "maximum_addressable_bytes"
-        ]
+        computed_current_parameter_total += parameters["current_resident_bytes"]
+        computed_maximum_parameter_total += parameters["maximum_addressable_bytes"]
     if (
-        computed_initial_total
-        != plan["total_initial_device_resident_bytes"]
+        computed_initial_total != plan["total_initial_device_resident_bytes"]
         or computed_current_parameter_total
         != plan["total_current_resident_parameter_bytes"]
         or computed_maximum_parameter_total
         != plan["total_maximum_addressable_parameter_bytes"]
     ):
-        raise ModelCompileError(
-            "runtime residency total disagrees with device plans"
-        )
+        raise ModelCompileError("runtime residency total disagrees with device plans")
 
 
 def _positive_int(value: object) -> bool:
@@ -334,8 +350,4 @@ def _positive_int(value: object) -> bool:
 
 
 def _nonnegative_int(value: object) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and value >= 0
-    )
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0

@@ -103,7 +103,7 @@ pub fn admit_vulkan_runtime_residency_growth(
         )));
     }
     let fixed_residency_bytes = [
-        parameters.staging_headroom_bytes,
+        device_plan.resource_store.fixed_device_bytes()?,
         device_plan.working_set.transient_state_bytes,
         device_plan.working_set.activation_headroom_bytes,
     ]

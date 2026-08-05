@@ -39,48 +39,15 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                 "resident dynamic state capacity must be at least 1 activation",
             ));
         }
-        let missing_device_extensions = runtime_model
-            .package
-            .required_vulkan_device_extensions
-            .iter()
-            .filter(|extension| !device.has_enabled_device_extension(extension))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !missing_device_extensions.is_empty() {
-            return Err(VulkanResidentTokenModelPackageError::new(format!(
-                "resident model package {:?} requires unavailable Vulkan device extensions: {}",
-                runtime_model.package.package_id,
-                missing_device_extensions.join(", ")
-            )));
-        }
-        let missing_device_features = runtime_model
-            .package
-            .required_vulkan_features
-            .iter()
-            .filter(|feature| !device.has_enabled_shader_feature(**feature))
-            .map(|feature| feature.label())
-            .collect::<Vec<_>>();
-        if !missing_device_features.is_empty() {
-            return Err(VulkanResidentTokenModelPackageError::new(format!(
-                "resident model package {:?} requires Vulkan features that are not enabled on the logical device: {}",
-                runtime_model.package.package_id,
-                missing_device_features.join(", ")
-            )));
-        }
-        let missing_subgroup_operations = runtime_model
-            .package
-            .required_vulkan_subgroup_operations
-            .iter()
-            .filter(|operation| !device.supports_subgroup_operation(**operation))
-            .map(|operation| operation.label())
-            .collect::<Vec<_>>();
-        if !missing_subgroup_operations.is_empty() {
-            return Err(VulkanResidentTokenModelPackageError::new(format!(
-                "resident model package {:?} requires unsupported Vulkan subgroup operations: {}",
-                runtime_model.package.package_id,
-                missing_subgroup_operations.join(", ")
-            )));
-        }
+        // The package-level requirement sets are the union of every mandatory
+        // shader in the self-contained package.  They are useful for package
+        // inspection, but they are not a placement constraint: a heterogeneous
+        // device only has to execute the shaders assigned to its slice.  Every
+        // primary, batch, and transducer SPIR-V module is validated against the
+        // actual device when its compute pipeline is created below.  Applying
+        // the package union here would incorrectly reject compatible slices
+        // (for example, a BF16 input transducer on a device that does not expose
+        // the FP8 extensions needed by layers hosted elsewhere).
         validate_component_executions(
             &runtime_model.package.package_id,
             &runtime_model.component_executions,

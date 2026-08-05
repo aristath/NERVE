@@ -27,7 +27,9 @@ mod tests {
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
         resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
         runtime_chat_repl_control, runtime_physical_device_bindings_in, submit_chat_turn, usage,
-        validate_explicit_logical_device_bindings,
+        validate_explicit_logical_device_bindings, runtime_uses_explicit_placement,
+        runtime_auto_placement_device_is_eligible,
+        rank_runtime_auto_placement_candidates,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -39,6 +41,33 @@ mod tests {
                 .with_ymd_and_hms(2026, 7, 18, 12, 0, 0)
                 .unwrap(),
             compiled_codec: None,
+        }
+    }
+
+    fn test_compute_device(
+        physical_device_index: usize,
+        device_uuid: [u8; 16],
+    ) -> VulkanComputeDeviceInfo {
+        VulkanComputeDeviceInfo {
+            physical_device_index,
+            physical_device_id: format!(
+                "vulkan-uuid:{}",
+                device_uuid
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+            ),
+            device_uuid,
+            device_name: format!("device {physical_device_index}"),
+            pci_address: None,
+            device_type: "discrete_gpu".to_string(),
+            vendor_id: 1,
+            device_id: physical_device_index as u32,
+            api_version: 1,
+            driver_version: 1,
+            compute_queue_family_indices: vec![0],
+            memory_heaps: Vec::new(),
+            selected_by_default: false,
         }
     }
 
@@ -75,6 +104,84 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "--device may only be supplied once");
+    }
+
+    #[test]
+    fn automatic_capacity_packing_yields_only_to_explicit_placement_controls() {
+        assert!(!runtime_uses_explicit_placement(&Args::default()));
+
+        let mut allowed_inventory = Args::default();
+        allowed_inventory.allowed_physical_device_ids.insert(
+            "vulkan-uuid:00000000030000000000000000000000".to_string(),
+        );
+        assert!(!runtime_uses_explicit_placement(&allowed_inventory));
+
+        let mut logical = Args::default();
+        logical.default_device_id = Some("chosen".to_string());
+        assert!(runtime_uses_explicit_placement(&logical));
+
+        let mut physical = Args::default();
+        physical.vulkan_device_index = Some(2);
+        assert!(runtime_uses_explicit_placement(&physical));
+
+        let mut custom = Args::default();
+        custom
+            .node_devices
+            .insert("block_0".to_string(), "gpu1".to_string());
+        assert!(runtime_uses_explicit_placement(&custom));
+    }
+
+    #[test]
+    fn automatic_capacity_packing_excludes_integrated_display_gpus() {
+        let mut integrated = test_compute_device(4, [4; 16]);
+        integrated.device_type = "integrated_gpu".to_string();
+        assert!(!runtime_auto_placement_device_is_eligible(&integrated));
+
+        let mut discrete = test_compute_device(5, [5; 16]);
+        discrete.device_type = "discrete_gpu".to_string();
+        assert!(runtime_auto_placement_device_is_eligible(&discrete));
+
+        let mut cpu = test_compute_device(6, [6; 16]);
+        cpu.device_type = "cpu".to_string();
+        assert!(runtime_auto_placement_device_is_eligible(&cpu));
+    }
+
+    #[test]
+    fn automatic_capacity_packing_prefers_one_unreserved_gpu_over_spilling_from_default() {
+        let ranked = rank_runtime_auto_placement_candidates(vec![
+            (
+                true,
+                0,
+                nerve_runtime::VulkanRuntimePlacementCandidate {
+                    device_id: "reserved-default".to_string(),
+                    safe_capacity_bytes: 4,
+                },
+            ),
+            (
+                false,
+                1,
+                nerve_runtime::VulkanRuntimePlacementCandidate {
+                    device_id: "roomy".to_string(),
+                    safe_capacity_bytes: 32,
+                },
+            ),
+            (
+                false,
+                2,
+                nerve_runtime::VulkanRuntimePlacementCandidate {
+                    device_id: "also-roomy".to_string(),
+                    safe_capacity_bytes: 32,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|candidate| candidate.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["roomy", "also-roomy", "reserved-default"],
+        );
     }
 
     #[test]

@@ -30,6 +30,14 @@ struct VulkanResidentInProcessPlacedPreparedBatchLane {
     should_sample: bool,
 }
 
+struct VulkanResidentTransactionPageCopy {
+    key: TransientStateKey,
+    device_id: String,
+    source_byte_offset: usize,
+    destination_byte_offset: usize,
+    byte_len: usize,
+}
+
 impl VulkanResidentInProcessPlacedPromptStream {
     fn prepare_runtime_scheduler_batch_lane(
         &mut self,
@@ -771,8 +779,47 @@ impl VulkanResidentInProcessPlacedPromptStream {
         VulkanResidentInProcessPlacedRuntimeError,
     > {
         let mut bindings = Vec::new();
+        let mut transaction_page_copies = Vec::new();
         for reservation in &activation.state_reservations {
-            bindings.extend(self.scheduler_state_reservation_bindings(reservation)?);
+            bindings.extend(self.scheduler_state_reservation_bindings(
+                reservation,
+                &mut transaction_page_copies,
+            )?);
+        }
+        let device_ids = transaction_page_copies
+            .iter()
+            .map(|copy| copy.device_id.clone())
+            .collect::<BTreeSet<_>>();
+        for device_id in device_ids {
+            let device = self.devices.get(&device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.clone(),
+                }
+            })?;
+            let copies = transaction_page_copies
+                .iter()
+                .filter(|copy| copy.device_id == device_id)
+                .map(|copy| {
+                    let state = self
+                        .processor
+                        .mounted_state_buffer(&copy.key)
+                        .expect("transaction page-copy state remains mounted");
+                    VulkanResidentBufferRangeCopy::new(
+                        &state.buffer,
+                        &state.buffer,
+                        copy.source_byte_offset,
+                        copy.destination_byte_offset,
+                        copy.byte_len,
+                    )
+                })
+                .collect::<Result<Vec<_>, VulkanError>>()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if !copies.is_empty() {
+                device
+                    .create_resident_buffer_copy_batch(&copies)
+                    .and_then(|copy| copy.run())
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
         }
         Ok(bindings)
     }
@@ -780,13 +827,17 @@ impl VulkanResidentInProcessPlacedPromptStream {
     fn scheduler_state_reservation_bindings(
         &mut self,
         reservation: &RuntimeStreamStateReservation,
+        transaction_page_copies: &mut Vec<VulkanResidentTransactionPageCopy>,
     ) -> Result<
         Vec<VulkanResidentScheduledActivationStateBinding>,
         VulkanResidentInProcessPlacedRuntimeError,
     > {
         let mut bindings = Vec::with_capacity(reservation.slots.len());
         for slot in &reservation.slots {
-            let state = self.processor.mounted_state_buffer(&slot.key).ok_or_else(|| {
+            let (device_id, state) = self
+                .processor
+                .mounted_state_buffer_with_device_id(&slot.key)
+                .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
                         "scheduled transient state {}.{} is not resident in package {:?}",
@@ -796,8 +847,20 @@ impl VulkanResidentInProcessPlacedPromptStream {
             })?;
             let page_binding = self
                 .transient_state_pages
-                .bind_slot(state, slot)
+                .bind_slot(state, slot, self.transaction_page_cow_depth > 0)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+            if let Some(source_byte_offset) = page_binding.copy_from_resident_byte_offset {
+                transaction_page_copies.push(VulkanResidentTransactionPageCopy {
+                    key: slot.key.clone(),
+                    device_id: device_id.to_string(),
+                    source_byte_offset,
+                    destination_byte_offset: state
+                        .layout
+                        .dynamic_physical_page_offset(page_binding.resident_page_index)
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    byte_len: page_binding.copy_byte_len,
+                });
+            }
             bindings.push(VulkanResidentScheduledActivationStateBinding {
                 key: page_binding.key,
                 logical_activation_index: page_binding.logical_activation_index,

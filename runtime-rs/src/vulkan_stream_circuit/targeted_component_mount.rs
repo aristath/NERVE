@@ -32,7 +32,7 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
             &runtime_model,
             &tensor_index,
             capacity,
-            false,
+            0,
             ResourceResidencyPolicy::DemandRetained,
             &contract,
         )
@@ -104,24 +104,17 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                 "targeted demand-resident component has no upload staging headroom",
             );
         }
-        let component_ids = BTreeSet::from([component_id.to_string()]);
-        let metadata_bytes = layout
-            .address_table_byte_count()
-            .and_then(|address_bytes| {
-                layout
-                    .parameter_slot_table_byte_count_for_components(
-                        &execution_scope,
-                        &component_ids,
-                    )
-                    .and_then(|slot_bytes| {
-                        address_bytes.checked_add(slot_bytes).ok_or_else(|| {
-                            VulkanCompiledResourceAddressLayoutError(
-                                "targeted resource metadata accounting overflowed".to_string(),
-                            )
-                        })
-                    })
-            })
+        let upload_alignment = compiled_resource_upload_alignment(&contract, device)
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
+        let store_residency = plan_compiled_resource_store_residency(
+            &contract,
+            &layout,
+            &allowed_selector_ids,
+            maximum_group_bytes,
+            upload_alignment,
+        )
+        .map_err(|error| targeted_component_error_value(error.to_string()))?;
+        let component_ids = BTreeSet::from([component_id.to_string()]);
         let working_set_bytes = parameter_residency
             .working_set
             .transient_state_bytes
@@ -130,8 +123,11 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                 targeted_component_error_value("targeted working-set accounting overflowed")
             })?;
         let pending_fixed_bytes = working_set_bytes
-            .checked_add(maximum_group_bytes)
-            .and_then(|bytes| bytes.checked_add(metadata_bytes))
+            .checked_add(
+                store_residency
+                    .fixed_device_bytes()
+                    .map_err(|error| targeted_component_error_value(error.to_string()))?,
+            )
             .ok_or_else(|| {
                 targeted_component_error_value("targeted fixed-residency accounting overflowed")
             })?;
@@ -140,8 +136,6 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
         let safe_dynamic_bytes =
             usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
-        let upload_alignment = compiled_resource_upload_alignment(&contract, device)
-            .map_err(|error| targeted_component_error_value(error.to_string()))?;
         let addressable_slot_count = layout
             .addressable_slot_count_for_selectors(&allowed_selector_ids)
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
@@ -184,7 +178,7 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                     .parameter_residency
                     .always_resident_bytes,
                 working_set_bytes,
-                metadata_bytes,
+                store_residency.metadata_device_bytes,
             )
             .map_err(|error| {
                 targeted_component_error_value(format!(

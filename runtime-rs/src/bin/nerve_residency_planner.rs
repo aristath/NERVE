@@ -9,8 +9,8 @@ use nerve_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-const REQUEST_SCHEMA: &str = "nerve.runtime_residency_planner_request.v2";
-const RESPONSE_SCHEMA: &str = "nerve.runtime_residency_planner_response.v2";
+const REQUEST_SCHEMA: &str = "nerve.runtime_residency_planner_request.v3";
+const RESPONSE_SCHEMA: &str = "nerve.runtime_residency_planner_response.v3";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +27,7 @@ struct ResidencyPlannerCase {
     default_device_id: String,
     component_placement: BTreeMap<String, String>,
     context_capacity_activations: usize,
-    mount_speculative_decoders: bool,
+    speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
 }
 
@@ -107,7 +107,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .expect("tensor index was initialized above"),
             case.context_capacity_activations,
-            case.mount_speculative_decoders,
+            case.speculative_draft_tokens,
             case.residency_policy,
         )?;
         if plan.schema != VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA {

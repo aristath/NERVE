@@ -9,6 +9,7 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
     session: VulkanResidentInProcessPlacedPromptSession,
     transient_state_pages: VulkanResidentTransientStatePageTable,
+    transaction_page_cow_depth: usize,
     active_input_event: Option<VulkanResidentInProcessPlacedActivePromptEvent>,
     pending_input_events: VecDeque<VulkanResidentTokenInputEvent>,
     speculative_draft_tokens: usize,
@@ -120,7 +121,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 manifest_dir,
                 runtime_model,
                 dynamic_state_capacity_activations,
-                speculative_draft_tokens > 0,
+                speculative_draft_tokens,
                 resource_residency_policy,
             )?,
         );
@@ -151,6 +152,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             devices,
             session,
             transient_state_pages: VulkanResidentTransientStatePageTable::default(),
+            transaction_page_cow_depth: 0,
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: 0,
@@ -234,6 +236,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 transport: VulkanInProcessPlacedEdgeTransport::new(),
             },
             transient_state_pages: self.transient_state_pages.clone(),
+            transaction_page_cow_depth: 0,
             active_input_event: None,
             pending_input_events: VecDeque::new(),
             speculative_draft_tokens: self.speculative_draft_tokens,
@@ -272,6 +275,69 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.transient_state_pages.clear();
         self.session.next_stream_tick = 0;
         Ok(initialized)
+    }
+
+    fn can_checkpoint_transaction_with_page_cow(
+        &self,
+        state: &TransientStateTableSnapshot,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        for entry in state
+            .entries
+            .iter()
+            .filter(|entry| entry.shape.retention == TransientStateRetention::Append)
+        {
+            let resident_state = self
+                .processor
+                .mounted_state_buffer(&entry.key)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "cannot checkpoint non-resident transaction state {}.{}",
+                            entry.key.node_instance_id, entry.key.state_id,
+                        )),
+                    )
+                })?;
+            if !entry.block_ids.is_empty()
+                && !self
+                    .transient_state_pages
+                    .has_free_physical_page_for(&entry.key, resident_state)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn restore_transaction_page_checkpoint(
+        &mut self,
+        checkpoint: VulkanResidentTransientStatePageTable,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        checkpoint
+            .sync_page_tables(&self.processor)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        self.transient_state_pages = checkpoint;
+        Ok(())
+    }
+
+    fn release_transaction_page_checkpoint(
+        &mut self,
+        state: &TransientStateTableSnapshot,
+    ) {
+        self.transient_state_pages.retain_blocks(state);
+    }
+
+    fn begin_transaction_page_cow(
+        &mut self,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.transaction_page_cow_depth = self
+            .transaction_page_cow_depth
+            .checked_add(1)
+            .ok_or_else(|| placed_scheduler_divergence("transaction page-COW depth overflowed"))?;
+        Ok(())
+    }
+
+    fn end_transaction_page_cow(&mut self) {
+        self.transaction_page_cow_depth = self.transaction_page_cow_depth.saturating_sub(1);
     }
 
     pub fn reset_for_new_session(

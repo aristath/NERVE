@@ -51,9 +51,7 @@ from nerve.representation_optimizer.validation.proofs import (
     ProofVerifierRegistry,
 )
 
-RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA = (
-    "nerve.runtime_implementation_sha256.v1"
-)
+RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA = "nerve.runtime_implementation_sha256.v1"
 
 
 @dataclass(frozen=True)
@@ -121,9 +119,7 @@ def prepare_runtime_optimization_targets(
         speculative_draft_tokens=speculative_draft_tokens,
     )
     package_manifest = package_manifest.resolve()
-    source_artifacts = PackageSourceArtifactResolver(
-        package_manifest.parent
-    )
+    source_artifacts = PackageSourceArtifactResolver(package_manifest.parent)
     manifest = _read_json(package_manifest, "compiled package manifest")
     component_command = runtime_executor_command(
         "nerve-optimizer-executor",
@@ -162,13 +158,10 @@ def prepare_runtime_optimization_targets(
         )
         if command is not None
     )
-    runtime_fingerprint = (
-        _require_current_runtime_implementation_fingerprints(
-            commands=executor_commands,
-            runtime_root=Path(__file__).resolve().parents[3]
-            / "runtime-rs",
-            cancel_requested=cancel_requested,
-        )
+    runtime_fingerprint = _require_current_runtime_implementation_fingerprints(
+        commands=executor_commands,
+        runtime_root=Path(__file__).resolve().parents[3] / "runtime-rs",
+        cancel_requested=cancel_requested,
     )
     package_target = CompilerTarget.from_json(
         _required_object(manifest, "compiler_target")
@@ -261,8 +254,7 @@ def prepare_runtime_optimization_targets(
     if not eligible_ids.issubset(live_profiles):
         missing_live = sorted(eligible_ids - set(live_profiles))
         raise ModelCompileError(
-            "live AMD discovery omitted package-compatible AMD devices: "
-            f"{missing_live}"
+            f"live AMD discovery omitted package-compatible AMD devices: {missing_live}"
         )
     _require_live_identity_match(
         by_id,
@@ -283,6 +275,7 @@ def prepare_runtime_optimization_targets(
         package_manifest=package_manifest,
         manifest=manifest,
         residency_planner_command=residency_planner_command,
+        speculative_draft_tokens=(qualification_regime.speculative_draft_tokens),
         explicit_selection=bool(requested),
         cancel_requested=cancel_requested,
     )
@@ -311,10 +304,7 @@ def prepare_runtime_optimization_targets(
     live_groups = tuple(
         (
             group,
-            tuple(
-                live_profiles[_device_id(profile)]
-                for profile in group.profiles
-            ),
+            tuple(live_profiles[_device_id(profile)] for profile in group.profiles),
         )
         for group in selected_groups
     )
@@ -356,9 +346,7 @@ def prepare_runtime_optimization_targets(
             sorted(excluded_records, key=lambda item: item["device_id"])
         ),
         parameter_bytes=parameter_bytes,
-        residency_plans=tuple(
-            group.residency_plan for group in selected_groups
-        ),
+        residency_plans=tuple(group.residency_plan for group in selected_groups),
         vulkan_driver_files=drivers,
     )
 
@@ -433,15 +421,10 @@ def runtime_implementation_fingerprint(runtime_root: Path) -> str:
             if path.is_file()
         ),
     ]
-    missing = [
-        relative
-        for relative, path in inputs
-        if not path.is_file()
-    ]
+    missing = [relative for relative, path in inputs if not path.is_file()]
     if missing:
         raise ModelCompileError(
-            "runtime implementation fingerprint inputs are missing: "
-            f"{sorted(missing)}"
+            f"runtime implementation fingerprint inputs are missing: {sorted(missing)}"
         )
     digest = sha256()
     for relative, path in sorted(inputs):
@@ -451,10 +434,7 @@ def runtime_implementation_fingerprint(runtime_root: Path) -> str:
         digest.update(relative_bytes)
         digest.update(len(source).to_bytes(8, "little"))
         digest.update(source)
-    return (
-        f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:"
-        f"{digest.hexdigest()}"
-    )
+    return f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:{digest.hexdigest()}"
 
 
 def _require_current_runtime_implementation_fingerprints(
@@ -525,9 +505,7 @@ def _query_runtime_implementation_fingerprint(
         )
     fingerprint = stdout.strip()
     if (
-        not fingerprint.startswith(
-            f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:"
-        )
+        not fingerprint.startswith(f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:")
         or "\n" in fingerprint
     ):
         raise ModelCompileError(
@@ -613,20 +591,13 @@ def _build_current_repo_executor(
             f"could not build current optimizer executable {binary_name!r}"
             + (f": {diagnostic}" if diagnostic else "")
         )
-    binary = (
-        manifest.parent
-        / "target"
-        / "release"
-        / binary_name
-    ).resolve()
+    binary = (manifest.parent / "target" / "release" / binary_name).resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise ModelCompileError(
-            f"cargo did not produce optimizer executable {binary}"
-        )
+        raise ModelCompileError(f"cargo did not produce optimizer executable {binary}")
     return (str(binary),)
 
 
-def capacity_weighted_component_placement(
+def capacity_packed_component_placement(
     package_root: Path,
     manifest: Json,
     device_capacity_bytes: dict[str, int],
@@ -635,12 +606,38 @@ def capacity_weighted_component_placement(
     if not device_ids:
         raise ModelCompileError("component placement requires devices")
     if any(
-        isinstance(capacity, bool)
-        or not isinstance(capacity, int)
-        or capacity <= 0
+        isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0
         for capacity in device_capacity_bytes.values()
     ):
-        raise ModelCompileError("component placement requires positive device capacities")
+        raise ModelCompileError(
+            "component placement requires positive device capacities"
+        )
+    weighted, output_transducer_ids = _weighted_signal_components(
+        package_root,
+        manifest,
+    )
+    if not weighted:
+        raise ModelCompileError(
+            "compiled package has no independently placeable signal processors"
+        )
+    if len(device_ids) == 1:
+        placement = {component_id: device_ids[0] for component_id, _ in weighted}
+    else:
+        placement = _contiguous_capacity_packed_partition(
+            weighted,
+            device_capacity_bytes,
+        )
+    output_device = placement[weighted[-1][0]]
+    placement.update(
+        (component_id, output_device) for component_id in output_transducer_ids
+    )
+    return placement
+
+
+def _weighted_signal_components(
+    package_root: Path,
+    manifest: Json,
+) -> tuple[list[tuple[str, int]], list[str]]:
     components = manifest.get("circuit_graph", {}).get("components")
     if not isinstance(components, list) or not components:
         raise ModelCompileError("compiled package has no component graph")
@@ -651,6 +648,7 @@ def capacity_weighted_component_placement(
     }
     weighted: list[tuple[str, int]] = []
     output_transducer_ids: list[str] = []
+    charged_tensors: set[str] = set()
     for component in components:
         if not isinstance(component, dict):
             raise ModelCompileError("compiled component graph is malformed")
@@ -680,27 +678,12 @@ def capacity_weighted_component_placement(
             raise ModelCompileError(
                 f"component {component_id!r} references unknown tensors: {missing}"
             )
-        weighted.append((component_id, sum(tensor_sizes[name] for name in names)))
-    if not weighted:
-        raise ModelCompileError(
-            "compiled package has no independently placeable signal processors"
+        newly_charged = names - charged_tensors
+        charged_tensors.update(names)
+        weighted.append(
+            (component_id, sum(tensor_sizes[name] for name in newly_charged))
         )
-    if len(device_ids) == 1:
-        placement = {
-            component_id: device_ids[0]
-            for component_id, _ in weighted
-        }
-    else:
-        placement = _contiguous_capacity_weighted_partition(
-            weighted,
-            device_capacity_bytes,
-        )
-    output_device = placement[weighted[-1][0]]
-    placement.update(
-        (component_id, output_device)
-        for component_id in output_transducer_ids
-    )
-    return placement
+    return weighted, output_transducer_ids
 
 
 def _build_target(
@@ -730,10 +713,9 @@ def _build_target(
             "one optimization execution target must have one capability class"
         )
     device_ids = tuple(_device_id(profile) for profile in profiles)
-    if (
-        set(device_ids) != set(available_device_capacity_bytes)
-        or set(device_ids) != set(reserved_device_capacity_bytes)
-    ):
+    if set(device_ids) != set(available_device_capacity_bytes) or set(
+        device_ids
+    ) != set(reserved_device_capacity_bytes):
         raise ModelCompileError(
             "residency admission capacities do not match live target devices"
         )
@@ -760,14 +742,10 @@ def _build_target(
         "controls": {
             "scheduler": "normal",
             "maximum_quantum_wait_ns": policy.component_quantum_wait_ns,
-            "speculative_draft_tokens": (
-                qualification_regime.speculative_draft_tokens
-            ),
+            "speculative_draft_tokens": (qualification_regime.speculative_draft_tokens),
         },
         "environment": {
-            "runtime_implementation_fingerprint": (
-                runtime_implementation_fingerprint
-            ),
+            "runtime_implementation_fingerprint": (runtime_implementation_fingerprint),
             "vulkan_driver_manifests": [str(path) for path in driver_files],
             "device_capacity_policy": capacity_probe.policy.to_json(),
             "capacity_observations": [
@@ -853,6 +831,7 @@ def _select_capability_groups(
     package_manifest: Path,
     manifest: Json,
     residency_planner_command: tuple[str, ...],
+    speculative_draft_tokens: int,
     explicit_selection: bool,
     cancel_requested: Callable[[], bool] | None,
 ) -> tuple[_SelectedCapabilityGroup, ...]:
@@ -873,10 +852,7 @@ def _select_capability_groups(
         or not isinstance(max_context, int)
         or max_context <= 0
     ):
-        raise ModelCompileError(
-            "compiled package max_context_activations is invalid"
-        )
-    mount_speculative_decoders = bool(manifest.get("speculative_decoders"))
+        raise ModelCompileError("compiled package max_context_activations is invalid")
     components = manifest.get("circuit_graph", {}).get("components")
     if not isinstance(components, list):
         raise ModelCompileError("compiled package has no component graph")
@@ -898,96 +874,113 @@ def _select_capability_groups(
             (tuple(group),)
             if explicit_selection
             else tuple(
-                tuple(sorted(ranked[:device_count], key=_device_topology_key))
+                tuple(ranked[:device_count])
                 for device_count in range(
                     1,
                     min(len(group), placeable_component_count) + 1,
                 )
             )
         )
-        cases = []
-        placements: dict[str, dict[str, str]] = {}
-        profiles_by_case: dict[str, tuple[Json, ...]] = {}
+        selected_group = None
+        case_failures = []
+        weighted_components, _ = _weighted_signal_components(
+            package_manifest.parent,
+            manifest,
+        )
         for index, candidate_profiles in enumerate(candidate_groups, start=1):
-            device_ids = tuple(
-                _device_id(profile) for profile in candidate_profiles
-            )
+            device_ids = tuple(_device_id(profile) for profile in candidate_profiles)
             capacities = {
                 device_id: available_capacity_by_device[device_id]
                 for device_id in device_ids
             }
-            placement = capacity_weighted_component_placement(
-                package_manifest.parent,
-                manifest,
-                capacities,
-            )
-            case_id = f"{capability}:{index}"
-            placements[case_id] = placement
-            profiles_by_case[case_id] = candidate_profiles
-            cases.append(
-                RuntimeResidencyPlanningCase(
+            effective_capacities = dict(capacities)
+            previous_placement = None
+            refinement_failure = None
+            for refinement in range(
+                1,
+                placeable_component_count + len(device_ids) + 1,
+            ):
+                placement = capacity_packed_component_placement(
+                    package_manifest.parent,
+                    manifest,
+                    effective_capacities,
+                )
+                if placement == previous_placement:
+                    refinement_failure = (
+                        "exact residency correction converged to an "
+                        "over-capacity placement"
+                    )
+                    break
+                case_id = f"{capability}:{index}:{refinement}"
+                case = RuntimeResidencyPlanningCase(
                     case_id=case_id,
                     default_device_id=device_ids[0],
                     component_placement=placement,
                     context_capacity_activations=max_context,
-                    mount_speculative_decoders=(
-                        mount_speculative_decoders
-                    ),
+                    speculative_draft_tokens=speculative_draft_tokens,
                     residency_policy="demand_retained",
                 )
-            )
-        plans = plan_runtime_residency_cases(
-            command=residency_planner_command,
-            package_manifest=package_manifest,
-            cases=cases,
-            cancel_requested=cancel_requested,
-        )
-        selected_group = None
-        case_failures = []
-        for case in cases:
-            candidate_profiles = profiles_by_case[case.case_id]
-            capacities = {
-                _device_id(profile): available_capacity_by_device[
-                    _device_id(profile)
-                ]
-                for profile in candidate_profiles
-            }
-            plan = plans[case.case_id]
-            planned_devices = {
-                str(device["device_id"]): int(
-                    device["initial_device_resident_bytes"]
-                )
-                for device in plan["device_plans"]
-            }
-            if set(planned_devices) != set(capacities):
-                raise ModelCompileError(
-                    "runtime residency plan devices do not match the "
-                    "requested placement topology"
-                )
-            oversized = {
-                device_id: {
-                    "planned": planned_devices[device_id],
-                    "available_capacity": capacities[device_id],
+                plan = plan_runtime_residency_cases(
+                    command=residency_planner_command,
+                    package_manifest=package_manifest,
+                    cases=(case,),
+                    cancel_requested=cancel_requested,
+                )[case_id]
+                planned_devices = _maximum_retained_bytes_by_device(plan)
+                if set(planned_devices) != set(capacities):
+                    raise ModelCompileError(
+                        "runtime residency plan devices do not match the "
+                        "requested placement topology"
+                    )
+                oversized = {
+                    device_id: {
+                        "planned": planned_devices[device_id],
+                        "available_capacity": capacities[device_id],
+                    }
+                    for device_id in capacities
+                    if planned_devices[device_id] > capacities[device_id]
                 }
-                for device_id in sorted(capacities)
-                if planned_devices[device_id] > capacities[device_id]
-            }
-            if oversized:
-                case_failures.append(
-                    f"{len(candidate_profiles)} device(s): {oversized}"
-                )
-                continue
-            selected_group = _SelectedCapabilityGroup(
-                profiles=candidate_profiles,
-                placement=placements[case.case_id],
-                residency_plan=plan,
-                available_device_capacity_bytes=capacities,
-                # Demand residency may grow until the runtime's bounded
-                # device-local tier is full. Reserve that complete authorized
-                # tier, not merely the initially mounted working set.
-                reserved_device_capacity_bytes=capacities,
+                if not oversized:
+                    selected_group = _SelectedCapabilityGroup(
+                        profiles=candidate_profiles,
+                        placement=placement,
+                        residency_plan=plan,
+                        available_device_capacity_bytes=capacities,
+                        # Demand-retained resources are admitted against their
+                        # complete eventual set; reserve the measured tier that
+                        # was proven safe so later expert loads cannot fail.
+                        reserved_device_capacity_bytes=capacities,
+                    )
+                    break
+                weights_by_device = {
+                    device_id: sum(
+                        weight
+                        for component_id, weight in weighted_components
+                        if placement[component_id] == device_id
+                    )
+                    for device_id in device_ids
+                }
+                corrected = {
+                    device_id: capacities[device_id]
+                    - max(
+                        0,
+                        planned_devices[device_id] - weights_by_device[device_id],
+                    )
+                    for device_id in device_ids
+                }
+                if any(capacity <= 0 for capacity in corrected.values()):
+                    refinement_failure = (
+                        f"fixed runtime residency exhausts capacity: {oversized}"
+                    )
+                    break
+                previous_placement = placement
+                effective_capacities = corrected
+            if selected_group is not None:
+                break
+            case_failures.append(
+                f"{len(candidate_profiles)} device(s): "
+                + (refinement_failure or "residency correction did not converge")
             )
-            break
         if selected_group is None:
             failures.append(
                 f"{capability} cannot safely host the planned runtime "
@@ -1001,6 +994,49 @@ def _select_capability_groups(
             + "; ".join(failures)
         )
     return tuple(groups)
+
+
+def _maximum_retained_bytes_by_device(plan: Json) -> dict[str, int]:
+    device_plans = plan.get("device_plans")
+    if not isinstance(device_plans, list) or not device_plans:
+        raise ModelCompileError("runtime residency plan has no device plans")
+    retained: dict[str, int] = {}
+    for device in device_plans:
+        if not isinstance(device, dict):
+            raise ModelCompileError("runtime residency device plan is malformed")
+        device_id = device.get("device_id")
+        parameters = device.get("parameter_residency")
+        resource_store = device.get("resource_store")
+        working_set = device.get("working_set")
+        if (
+            not isinstance(device_id, str)
+            or not device_id
+            or not isinstance(parameters, dict)
+            or not isinstance(resource_store, dict)
+            or not isinstance(working_set, dict)
+        ):
+            raise ModelCompileError("runtime residency device plan is malformed")
+        fields = (
+            parameters.get("maximum_addressable_bytes"),
+            resource_store.get("metadata_device_bytes"),
+            resource_store.get("transfer_staging_device_bytes"),
+            resource_store.get("maximum_dynamic_allocation_padding_bytes"),
+            working_set.get("transient_state_bytes"),
+            working_set.get("activation_headroom_bytes"),
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in fields
+        ):
+            raise ModelCompileError(
+                f"runtime residency device {device_id!r} has invalid retained-byte accounting"
+            )
+        if device_id in retained:
+            raise ModelCompileError(
+                f"runtime residency plan repeats device {device_id!r}"
+            )
+        retained[device_id] = sum(fields)
+    return retained
 
 
 def _package_parameter_bytes(package_root: Path, manifest: Json) -> int:
@@ -1029,27 +1065,26 @@ def _tensor_index(package_root: Path, manifest: Json) -> Json:
     return document
 
 
-def _contiguous_capacity_weighted_partition(
+def _contiguous_capacity_packed_partition(
     components: list[tuple[str, int]],
     device_capacity_bytes: dict[str, int],
 ) -> dict[str, str]:
-    device_ids = tuple(sorted(device_capacity_bytes))
+    # Mapping order is the runtime's device preference order. Pack each device
+    # before crossing a physical boundary; sorting identifiers here would turn
+    # an execution-cost decision back into an arbitrary naming decision.
+    device_ids = tuple(device_capacity_bytes)
     if len(components) < len(device_ids):
         raise ModelCompileError(
             "contiguous placement cannot assign more devices than components"
         )
     placement: dict[str, str] = {}
     cursor = 0
-    remaining_weight = sum(weight for _, weight in components)
     for device_index, device_id in enumerate(device_ids):
         remaining_devices = len(device_ids) - device_index
-        remaining_capacity = sum(
-            device_capacity_bytes[remaining_device_id]
-            for remaining_device_id in device_ids[device_index:]
-        )
         device_capacity = device_capacity_bytes[device_id]
         if device_index == len(device_ids) - 1:
-            for component_id, _ in components[cursor:]:
+            remaining = components[cursor:]
+            for component_id, _ in remaining:
                 placement[component_id] = device_id
             break
         current_weight = 0
@@ -1059,15 +1094,7 @@ def _contiguous_capacity_weighted_partition(
             if components_after < devices_after:
                 break
             component_id, weight = components[cursor]
-            before_error = abs(
-                current_weight * remaining_capacity
-                - remaining_weight * device_capacity
-            )
-            after_error = abs(
-                (current_weight + weight) * remaining_capacity
-                - remaining_weight * device_capacity
-            )
-            if current_weight > 0 and before_error <= after_error:
+            if current_weight + weight > device_capacity:
                 break
             placement[component_id] = device_id
             current_weight += weight
@@ -1075,13 +1102,9 @@ def _contiguous_capacity_weighted_partition(
         if current_weight == 0:
             component_id, weight = components[cursor]
             placement[component_id] = device_id
-            current_weight = weight
             cursor += 1
-        remaining_weight -= current_weight
     if set(placement) != {component_id for component_id, _ in components}:
-        raise ModelCompileError(
-            "capacity-weighted placement omitted compiled components"
-        )
+        raise ModelCompileError("capacity-packed placement omitted compiled components")
     return placement
 
 

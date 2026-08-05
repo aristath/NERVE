@@ -19,16 +19,17 @@ use crate::execution_schedule::{
     RuntimeExecutionCost, RuntimeExecutionQuantumCalibrator, RuntimeExecutionRegion,
 };
 use crate::stream_circuit::{
-    CircuitNode, CircuitParamsArtifact, CircuitRuntimeRole, CircuitStateArtifact,
-    ComponentEdgePlacement, EdgeTransport, LOWERED_EXECUTION_GRAPH_SCHEMA, LoweredCircuitRef,
-    LoweredExecutionGraph, LoweredExecutionGraphGraph, LoweredExecutionGraphSource,
-    LoweredExecutionGraphSummary, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, ResolvedCircuitArtifact,
-    ResolvedLoweredExecutionGraph, RuntimeSelectedResourceCountReport,
-    RuntimeSelectionCoverageReport, RuntimeSelectionDomainCoverageReport,
-    RuntimeSparseMoeWorkReport, StreamCircuit, StreamCircuitConnection, StreamCircuitGraphBoundary,
-    StreamCircuitGraphSourceTap, StreamCircuitGraphSourceTapInstanceSelection,
-    StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan, StreamCircuitPlacementSpec,
-    StreamCircuitRuntimeGraph,
+    CapacityPackedPlacementComponent, CapacityPackedPlacementDevice, CircuitNode,
+    CircuitParamsArtifact, CircuitRuntimeRole, CircuitStateArtifact, ComponentEdgePlacement,
+    EdgeTransport, LOWERED_EXECUTION_GRAPH_SCHEMA, LoweredCircuitRef, LoweredExecutionGraph,
+    LoweredExecutionGraphGraph, LoweredExecutionGraphSource, LoweredExecutionGraphSummary,
+    RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, ResolvedCircuitArtifact, ResolvedLoweredExecutionGraph,
+    RuntimeSelectedResourceCountReport, RuntimeSelectionCoverageReport,
+    RuntimeSelectionDomainCoverageReport, RuntimeSparseMoeWorkReport, StreamCircuit,
+    StreamCircuitConnection, StreamCircuitGraphBoundary, StreamCircuitGraphSourceTap,
+    StreamCircuitGraphSourceTapInstanceSelection, StreamCircuitNodeInstanceStatePolicy,
+    StreamCircuitPlacementPlan, StreamCircuitPlacementSpec, StreamCircuitRuntimeGraph,
+    capacity_packed_component_placement,
 };
 use crate::stream_plan::{
     CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort,
@@ -146,6 +147,7 @@ include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
 include!("vulkan_stream_circuit/runtime_resource_contract.rs");
+include!("vulkan_stream_circuit/compiled_resource_store_residency.rs");
 include!("vulkan_stream_circuit/sparse_moe_execution.rs");
 include!("vulkan_stream_circuit/selection_telemetry.rs");
 include!("vulkan_stream_circuit/host_memory_capacity.rs");
@@ -169,6 +171,7 @@ include!("vulkan_stream_circuit/compiled_resource_physical_placement.rs");
 include!("vulkan_stream_circuit/physical_residency_checkpoint.rs");
 include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
+include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");

@@ -265,6 +265,33 @@ fn package_device_slice_mounts_only_components_assigned_to_device() {
     );
 }
 
+#[test]
+fn package_device_slice_does_not_require_extensions_used_only_by_other_slices() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let mut runtime_model = fixture_model_runtime_model_with_remote_middle();
+    runtime_model.package.required_vulkan_device_extensions =
+        vec!["VK_NERVE_remote_slice_only".to_string()];
+    let manifest_path = fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+
+    let slice = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+        &device,
+        manifest_dir,
+        runtime_model,
+        "gpu1",
+        Some(4),
+    )
+    .unwrap();
+
+    assert_eq!(slice.device_id, "gpu1");
+    assert_eq!(slice.hosted_component_count, 1);
+    let mounted = slice.create_mounted_stream_circuit(&device).unwrap();
+    let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
+    mounted
+        .mounted_placed_bound_dispatch_plan(&reusable_manifest)
+        .unwrap();
+}
+
 fn fixture_model_embedding_row_bytes(tensor_index: &TensorIndex, token_id: u32) -> Vec<u8> {
     let metadata = tensor_index
         .tensors

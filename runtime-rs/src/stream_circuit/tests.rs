@@ -31,6 +31,7 @@ mod tests {
 
     include!("tests/circuit_contracts.rs");
     include!("tests/placement_routes.rs");
+    include!("tests/capacity_packed_placement.rs");
     include!("tests/runtime_reports.rs");
     include!("tests/runtime_graph.rs");
 }

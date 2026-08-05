@@ -1,5 +1,5 @@
 #[test]
-fn temporal_prompt_replays_recorded_commands_across_active_widths() {
+fn temporal_prompt_reuses_canonical_buffers_across_active_widths() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
         Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
@@ -31,7 +31,16 @@ fn temporal_prompt_replays_recorded_commands_across_active_widths() {
         .processor
         .run_temporal_prompt_block(&devices, &tokens, 0, false)
         .unwrap();
+    assert_eq!(
+        stream.processor.temporal_block_executions.borrow().len(),
+        1,
+        "the first active width must mount one canonical temporal runner",
+    );
     let after_first = vulkan_resident_execution_counters();
+    let tracked_bytes_after_first = devices["gpu0"]
+        .device_local_memory_accounting()
+        .unwrap()
+        .tracked_allocation_bytes;
     assert!(after_first.resident_sequence_recorded_command_buffers > 0);
 
     stream
@@ -51,10 +60,19 @@ fn temporal_prompt_replays_recorded_commands_across_active_widths() {
         .processor
         .run_temporal_prompt_block(&devices, &tokens[..2], 8, false)
         .unwrap();
+    assert_eq!(
+        stream.processor.temporal_block_executions.borrow().len(),
+        1,
+        "a narrower prompt remainder must reuse the canonical temporal runner",
+    );
     let after_third = vulkan_resident_execution_counters();
     assert_eq!(
-        after_third.resident_sequence_recorded_command_buffers,
-        after_second.resident_sequence_recorded_command_buffers
+        devices["gpu0"]
+            .device_local_memory_accounting()
+            .unwrap()
+            .tracked_allocation_bytes,
+        tracked_bytes_after_first,
+        "a narrower prompt remainder must not retain another set of device buffers",
     );
     assert!(
         after_third.resident_queue_batch_commands > after_second.resident_queue_batch_commands
@@ -62,15 +80,94 @@ fn temporal_prompt_replays_recorded_commands_across_active_widths() {
 
     stream
         .processor
-        .run_temporal_prompt_block(&devices, &tokens, 10, false)
+        .run_temporal_prompt_block(&devices, &tokens[..2], 10, false)
         .unwrap();
     let after_fourth = vulkan_resident_execution_counters();
     assert_eq!(
         after_fourth.resident_sequence_recorded_command_buffers,
-        after_third.resident_sequence_recorded_command_buffers
+        after_third.resident_sequence_recorded_command_buffers,
+        "a repeated active width must replay its recorded commands",
     );
     assert!(
         after_fourth.resident_queue_batch_commands > after_third.resident_queue_batch_commands
+    );
+
+    stream
+        .processor
+        .run_temporal_prompt_block(&devices, &tokens, 12, false)
+        .unwrap();
+    let after_fifth = vulkan_resident_execution_counters();
+    assert_eq!(
+        devices["gpu0"]
+            .device_local_memory_accounting()
+            .unwrap()
+            .tracked_allocation_bytes,
+        tracked_bytes_after_first,
+        "switching among active widths must keep one canonical device allocation set",
+    );
+    assert!(
+        after_fifth.resident_queue_batch_commands > after_fourth.resident_queue_batch_commands
+    );
+}
+
+#[test]
+fn speculative_verification_keeps_one_right_sized_causal_runner() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan verification device was unavailable: {error}")
+        }
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID").is_some() => {
+            panic!("explicit Vulkan verification device was unavailable: {error}")
+        }
+        Err(_) => return,
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices.clone(),
+        manifest_path.parent().unwrap(),
+        runtime_model,
+        Some(64),
+        0,
+        0,
+    )
+    .unwrap();
+
+    stream
+        .processor
+        .ensure_temporal_block_execution(&devices, 3, true)
+        .unwrap();
+    assert_eq!(
+        stream
+            .processor
+            .temporal_block_executions
+            .borrow()
+            .get(&true)
+            .unwrap()
+            .execution_graph
+            .lane_capacity,
+        4,
+        "a three-token verification window must not allocate the 64-lane prompt snapshot bank",
+    );
+
+    stream
+        .processor
+        .ensure_temporal_block_execution(&devices, 5, true)
+        .unwrap();
+    let executions = stream.processor.temporal_block_executions.borrow();
+    assert_eq!(executions.len(), 1);
+    assert_eq!(
+        executions
+            .get(&true)
+            .unwrap()
+            .execution_graph
+            .lane_capacity,
+        8,
+        "a larger verification request must replace, not accumulate beside, the old runner",
     );
 }
 
@@ -127,7 +224,7 @@ fn temporal_prompt_block_matches_scalar_ticks_and_component_state() {
             manifest_path.parent().unwrap(),
             runtime_model,
             Some(256),
-            false,
+            0,
         )
         .unwrap(),
     );

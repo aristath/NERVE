@@ -18,7 +18,7 @@ from nerve.representation_optimizer.automation.device_state import (
     declared_capacity_reservation_digest,
 )
 from nerve.representation_optimizer.automation.runtime_target import (
-    capacity_weighted_component_placement,
+    capacity_packed_component_placement,
     prepare_runtime_optimization_targets,
     runtime_executor_command,
     runtime_implementation_fingerprint,
@@ -90,10 +90,14 @@ def test_runtime_executor_command_asks_cargo_to_verify_source_freshness(
 def test_linux_amd_probe_reserves_remaining_capacity_without_excluding_workloads(
     tmp_path: Path,
 ) -> None:
-    profile = _target(
-        ("0000:03:00.0",),
-        capacity_bytes=1_000_000_000,
-    ).hardware_profiles[0].to_json()
+    profile = (
+        _target(
+            ("0000:03:00.0",),
+            capacity_bytes=1_000_000_000,
+        )
+        .hardware_profiles[0]
+        .to_json()
+    )
     sysfs, proc = _device_filesystem(
         tmp_path,
         pci_address="0000:03:00.0",
@@ -136,7 +140,7 @@ def test_linux_amd_probe_reserves_remaining_capacity_without_excluding_workloads
                 "capacity_observations": list(observation),
                 "residency_admission": {
                     "reserved_device_capacity_bytes": reservation,
-                }
+                },
             }
         },
     )
@@ -152,7 +156,9 @@ def test_linux_amd_probe_reserves_remaining_capacity_without_excluding_workloads
     with pytest.raises(ModelCompileError, match="insufficient unreserved VRAM"):
         probe.target_capacity_reservation_state(target)
     used.write_text("100000000\n")
-    assert probe.target_capacity_reservation_state(target).reservation_digest == expected
+    assert (
+        probe.target_capacity_reservation_state(target).reservation_digest == expected
+    )
     (process / "fdinfo" / "7").unlink()
     with pytest.raises(ModelCompileError, match="no longer present"):
         probe.target_capacity_reservation_state(target)
@@ -212,9 +218,11 @@ def test_capacity_probe_tolerates_counter_drift_but_not_real_capacity_loss(
     tmp_path: Path,
 ) -> None:
     pci_address = "0000:03:00.0"
-    profile = _target((pci_address,), capacity_bytes=1_000_000_000).hardware_profiles[
-        0
-    ].to_json()
+    profile = (
+        _target((pci_address,), capacity_bytes=1_000_000_000)
+        .hardware_profiles[0]
+        .to_json()
+    )
     sysfs, proc = _device_filesystem(
         tmp_path,
         pci_address=pci_address,
@@ -376,7 +384,61 @@ def test_runtime_target_counts_transient_working_set_before_selecting_topology(
     ]
 
 
-def test_demand_admission_reserves_the_complete_bounded_device_tier(
+def test_runtime_target_repacks_boundaries_after_exact_fixed_residency(
+    tmp_path: Path,
+) -> None:
+    pci_addresses = ("0000:03:00.0", "0000:07:00.0")
+    target = _target(pci_addresses, capacity_bytes=1_000)
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(300, 300, 300, 300),
+    )
+    sysfs = tmp_path / "sys" / "class" / "drm"
+    proc = tmp_path / "proc"
+    for index, pci_address in enumerate(pci_addresses):
+        _device_filesystem(
+            tmp_path,
+            pci_address=pci_address,
+            used_vram=1,
+            busy_percent=0,
+            card_index=index,
+            roots=(sysfs, proc),
+            total_vram=1_000,
+        )
+
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(
+            tmp_path / "residency",
+            extra_bytes_per_device_by_count={1: 200, 2: 200},
+        ),
+        vulkan_driver_files=(_driver(tmp_path),),
+        capacity_probe=LinuxAmdDeviceCapacityProbe(
+            sysfs_drm_root=sysfs,
+            proc_root=proc,
+        ),
+        live_target=target,
+    )
+
+    placement = prepared.targets[0].matched_conditions["placement"]
+    first, second = map(_device_id, pci_addresses)
+    assert [placement[f"component_{index}"] for index in range(4)] == [
+        first,
+        first,
+        second,
+        second,
+    ]
+    assert [
+        device["initial_device_resident_bytes"]
+        for device in prepared.residency_plans[0]["device_plans"]
+    ] == [800, 800]
+
+
+def test_demand_retained_rejects_a_device_that_only_fits_the_cold_mount(
     tmp_path: Path,
 ) -> None:
     pci_address = "0000:07:00.0"
@@ -394,42 +456,26 @@ def test_demand_admission_reserves_the_complete_bounded_device_tier(
         total_vram=1_000,
     )
 
-    prepared = prepare_runtime_optimization_targets(
-        package_manifest=package,
-        run_root=tmp_path / "run",
-        component_executor_bin=_executable(tmp_path / "component"),
-        validation_executor_bin=_executable(tmp_path / "validation"),
-        residency_planner_bin=_residency_planner(
-            tmp_path / "residency",
-            maximum_dynamic_bytes_per_device_by_count={1: 10_000},
-        ),
-        vulkan_driver_files=(_driver(tmp_path),),
-        capacity_probe=LinuxAmdDeviceCapacityProbe(
-            sysfs_drm_root=sysfs,
-            proc_root=proc,
-        ),
-        live_target=target,
-    )
+    with pytest.raises(ModelCompileError, match="cannot safely host") as caught:
+        prepare_runtime_optimization_targets(
+            package_manifest=package,
+            run_root=tmp_path / "run",
+            component_executor_bin=_executable(tmp_path / "component"),
+            validation_executor_bin=_executable(tmp_path / "validation"),
+            residency_planner_bin=_residency_planner(
+                tmp_path / "residency",
+                maximum_dynamic_bytes_per_device_by_count={1: 10_000},
+            ),
+            vulkan_driver_files=(_driver(tmp_path),),
+            capacity_probe=LinuxAmdDeviceCapacityProbe(
+                sysfs_drm_root=sysfs,
+                proc_root=proc,
+            ),
+            live_target=target,
+        )
 
-    plan = prepared.residency_plans[0]
-    device = plan["device_plans"][0]
-    admission = prepared.targets[0].matched_conditions["environment"][
-        "residency_admission"
-    ]
-    available_capacity = next(
-        iter(admission["available_device_capacity_bytes"].values())
-    )
-    assert next(iter(admission["reserved_device_capacity_bytes"].values())) == (
-        available_capacity
-    )
-    assert plan["residency_policy"] == "demand_retained"
-    assert device["initial_device_resident_bytes"] == 100
-    assert device["parameter_residency"]["maximum_addressable_bytes"] == 10_100
-    assert device["initial_device_resident_bytes"] < available_capacity
-    assert (
-        device["parameter_residency"]["maximum_addressable_bytes"]
-        > available_capacity
-    )
+    assert "planned': 10100" in str(caught.value)
+    assert "available_capacity': 949" in str(caught.value)
 
 
 def test_runtime_target_records_post_context_capacity(
@@ -487,9 +533,9 @@ def test_runtime_target_records_post_context_capacity(
     assert discovery_count == 1
     assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
     assert (
-        prepared.targets[0].matched_conditions["environment"][
-            "capacity_observations"
-        ][0]["vram_used_bytes"]
+        prepared.targets[0].matched_conditions["environment"]["capacity_observations"][
+            0
+        ]["vram_used_bytes"]
         == expected_vram
     )
 
@@ -570,7 +616,7 @@ def test_explicit_busy_optimizer_device_uses_its_remaining_capacity(
     assert prepared.selected_devices[0]["vram_used_bytes"] == 100_000_000
 
 
-def test_capacity_weighted_placement_preserves_component_order_and_all_members(
+def test_capacity_packed_placement_fills_first_device_before_spilling(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -585,17 +631,17 @@ def test_capacity_weighted_placement_preserves_component_order_and_all_members(
         _device_id("0000:07:00.0"),
     )
 
-    placement = capacity_weighted_component_placement(
+    placement = capacity_packed_component_placement(
         package.parent,
         manifest,
         {first: 1_000, second: 1_000},
     )
 
     assigned = [placement[f"component_{index}"] for index in range(4)]
-    assert assigned == [first, first, second, second]
+    assert assigned == [first, first, first, second]
 
 
-def test_capacity_weighted_placement_uses_partially_reserved_vram_proportionally(
+def test_capacity_packed_placement_spills_at_measured_remaining_capacity(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -608,21 +654,21 @@ def test_capacity_weighted_placement_uses_partially_reserved_vram_proportionally
     first = _device_id("0000:03:00.0")
     second = _device_id("0000:07:00.0")
 
-    placement = capacity_weighted_component_placement(
+    placement = capacity_packed_component_placement(
         package.parent,
         manifest,
-        {first: 3_000, second: 1_000},
+        {first: 250, second: 1_000},
     )
 
     assert [placement[f"component_{index}"] for index in range(4)] == [
         first,
         first,
-        first,
+        second,
         second,
     ]
 
 
-def test_capacity_weighted_placement_excludes_processor_boundary_components(
+def test_capacity_packed_placement_excludes_processor_boundary_components(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -639,7 +685,7 @@ def test_capacity_weighted_placement_excludes_processor_boundary_components(
         _device_id("0000:07:00.0"),
     )
 
-    placement = capacity_weighted_component_placement(
+    placement = capacity_packed_component_placement(
         package.parent,
         manifest,
         {first: 1_000, second: 1_000},
@@ -651,7 +697,7 @@ def test_capacity_weighted_placement_excludes_processor_boundary_components(
     }
 
 
-def test_capacity_weighted_placement_attaches_output_to_last_processor_device(
+def test_capacity_packed_placement_attaches_output_to_last_processor_device(
     tmp_path: Path,
 ) -> None:
     target = _target(("0000:03:00.0", "0000:07:00.0"))
@@ -668,7 +714,7 @@ def test_capacity_weighted_placement_attaches_output_to_last_processor_device(
         _device_id("0000:07:00.0"),
     )
 
-    placement = capacity_weighted_component_placement(
+    placement = capacity_packed_component_placement(
         package.parent,
         manifest,
         {first: 1_000, second: 1_000},
@@ -921,6 +967,16 @@ def _residency_planner(
         "             'current_resident_bytes': current[device_id],\n"
         "             'maximum_addressable_bytes': always[device_id] + dynamic[device_id],\n"
         "             'staging_headroom_bytes': 0},\n"
+        "         'resource_store': {\n"
+        "             'address_table_device_bytes': 0,\n"
+        "             'parameter_slot_table_device_bytes': 0,\n"
+        "             'metadata_device_bytes': 0,\n"
+        "             'transfer_staging_slot_count': 0,\n"
+        "             'transfer_staging_slot_byte_capacity': 0,\n"
+        "             'transfer_staging_device_bytes': 0,\n"
+        "             'maximum_load_wave_group_count': 0,\n"
+        "             'maximum_load_wave_payload_bytes': 0,\n"
+        "             'maximum_dynamic_allocation_padding_bytes': 0},\n"
         "         'working_set': {'transient_state_bytes': 0, 'activation_headroom_bytes': activation[device_id]},\n"
         "         'breakdown': {\n"
         "             'stream_state_bytes': 0,\n"
@@ -933,23 +989,24 @@ def _residency_planner(
         "             'sampler_workspace_bytes': 0,\n"
         "             'feedback_workspace_bytes': 0,\n"
         "             'speculative_decoder_state_bytes': 0,\n"
+        "             'causal_verification_snapshot_bytes': 0,\n"
         "             'speculative_decoder_activation_bytes': 0,\n"
         "             'speculative_decoder_workspace_bytes': 0},\n"
         "         'initial_device_resident_bytes': initial[device_id]}\n"
         "        for device_id in device_ids\n"
         "    ]\n"
         "    plans.append({'case_id': case['case_id'], 'plan': {\n"
-        "        'schema': 'nerve.vulkan_runtime_residency_plan.v2',\n"
+        "        'schema': 'nerve.vulkan_runtime_residency_plan.v3',\n"
         "        'package_id': manifest['package_id'],\n"
         "        'residency_policy': case['residency_policy'],\n"
         "        'context_capacity_activations': case['context_capacity_activations'],\n"
-        "        'speculative_decoders_mounted': case['mount_speculative_decoders'],\n"
+        "        'speculative_draft_tokens': case['speculative_draft_tokens'],\n"
         "        'device_plans': device_plans,\n"
         "        'total_initial_device_resident_bytes': sum(initial.values()),\n"
         "        'total_current_resident_parameter_bytes': sum(current.values()),\n"
         "        'total_maximum_addressable_parameter_bytes': sum(always[device_id] + dynamic[device_id] for device_id in device_ids),\n"
         "    }})\n"
-        "json.dump({'schema': 'nerve.runtime_residency_planner_response.v2', 'plans': plans}, sys.stdout)\n"
+        "json.dump({'schema': 'nerve.runtime_residency_planner_response.v3', 'plans': plans}, sys.stdout)\n"
     )
     path.chmod(path.stat().st_mode | 0o111)
     return path

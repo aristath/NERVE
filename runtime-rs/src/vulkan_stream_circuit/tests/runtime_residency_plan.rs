@@ -11,7 +11,7 @@ fn runtime_residency_plan_uses_physical_transient_layout_without_opening_vulkan(
         &runtime_model,
         &tensor_index,
         16,
-        false,
+        0,
         ResourceResidencyPolicy::Eager,
     )
     .unwrap();
@@ -20,7 +20,7 @@ fn runtime_residency_plan_uses_physical_transient_layout_without_opening_vulkan(
         &runtime_model,
         &tensor_index,
         64,
-        false,
+        0,
         ResourceResidencyPolicy::Eager,
     )
     .unwrap();
@@ -60,12 +60,73 @@ fn runtime_residency_plan_uses_physical_transient_layout_without_opening_vulkan(
         short_device
             .parameter_residency
             .current_resident_bytes
-            + short_device
-                .parameter_residency
-                .staging_headroom_bytes
+            + short_device.resource_store.maximum_extra_device_bytes().unwrap()
             + short_device.working_set.transient_state_bytes
             + short_device.working_set.activation_headroom_bytes,
         short_device.initial_device_resident_bytes
+    );
+}
+
+#[test]
+fn runtime_residency_plan_sizes_verification_snapshots_to_the_requested_window() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter_mut()
+        .find(|component| component.runtime_role.is_signal_processor())
+        .unwrap();
+    for state in component
+        .state
+        .state_ports
+        .iter_mut()
+        .chain(component.circuit.state_ports.iter_mut())
+    {
+        state.shape = Some(vec![128]);
+        state.shape_per_token = None;
+        state.key_shape_per_token = None;
+        state.value_shape_per_token = None;
+        state.capacity = None;
+        state.dtype = Some("F32".to_string());
+        state.max_dynamic_activations = None;
+    }
+    let package_root = tiny_model_dir();
+    let tensor_index = runtime_model
+        .load_runtime_tensor_index(&package_root)
+        .unwrap();
+
+    let one_draft = plan_vulkan_runtime_residency(
+        &package_root,
+        &runtime_model,
+        &tensor_index,
+        64,
+        1,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let two_drafts = plan_vulkan_runtime_residency(
+        &package_root,
+        &runtime_model,
+        &tensor_index,
+        64,
+        2,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+
+    assert_eq!(one_draft.speculative_draft_tokens, 1);
+    assert_eq!(two_drafts.speculative_draft_tokens, 2);
+    let one_snapshot_bytes = one_draft.device_plans[0]
+        .breakdown
+        .causal_verification_snapshot_bytes;
+    let two_snapshot_bytes = two_drafts.device_plans[0]
+        .breakdown
+        .causal_verification_snapshot_bytes;
+    assert!(one_snapshot_bytes > 0);
+    assert_eq!(two_snapshot_bytes, one_snapshot_bytes * 2);
+    assert!(
+        two_drafts.device_plans[0].initial_device_resident_bytes
+            > one_draft.device_plans[0].initial_device_resident_bytes
     );
 }
 
@@ -90,7 +151,7 @@ fn runtime_residency_plan_keeps_internal_shards_out_of_component_ownership() {
         &runtime_model,
         &tensor_index,
         16,
-        false,
+        0,
         ResourceResidencyPolicy::Eager,
     )
     .unwrap();
@@ -242,7 +303,7 @@ fn runtime_resource_contract_instantiates_duplicates_without_copying_resources()
         &runtime_model,
         &tensor_index,
         16,
-        false,
+        0,
         ResourceResidencyPolicy::DemandRetained,
     )
     .unwrap();
@@ -262,7 +323,7 @@ fn runtime_resource_contract_instantiates_duplicates_without_copying_resources()
         &runtime_model,
         &tensor_index,
         16,
-        false,
+        0,
         ResourceResidencyPolicy::DemandPaged,
     )
     .expect("runtime paging must reuse the package demand-loading contract");
@@ -397,77 +458,7 @@ fn compiled_resource_cross_device_access_requires_an_explicit_choice() {
 
 #[test]
 fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
-    let mut runtime_model = fixture_model_runtime_model();
-    let contract = &mut runtime_model.package.resource_residency;
-    let binding = contract
-        .bindings
-        .iter_mut()
-        .find(|binding| binding.parameter_id == "ffn_down")
-        .unwrap();
-    let (
-        CompiledResourceBindingMapping::AtomicGroup {
-            atomic_group_id,
-            resource_id,
-        },
-        template_id,
-        member_seed,
-    ) = (
-        binding.mapping.clone(),
-        format!("sha256:{}", "1".repeat(64)),
-        format!("sha256:{}", "2".repeat(64)),
-    )
-    else {
-        panic!("fixture ffn_down binding is not concrete");
-    };
-    contract
-        .resources
-        .retain(|resource| resource.id != resource_id);
-    contract
-        .atomic_groups
-        .iter_mut()
-        .find(|group| group.id == atomic_group_id)
-        .unwrap()
-        .resource_ids
-        .retain(|id| id != &resource_id);
-    binding.mapping =
-        CompiledResourceBindingMapping::PartitionTemplateMember {
-            partition_template_id: template_id.clone(),
-            resource_identity_seed: member_seed.clone(),
-            selection_signal: "selection".to_string(),
-            parameter_slot: 0,
-        };
-    contract.partition_templates.push(CompiledPartitionTemplate {
-        id: template_id,
-        partition_count: 1_000,
-        lifetime: CompiledResourceLifetime::Dynamic,
-        group_identity_seed: format!("sha256:{}", "3".repeat(64)),
-        member_templates: vec![CompiledPartitionMemberTemplate {
-            resource_identity_seed: member_seed,
-            range_templates: vec![CompiledResourceRangeTemplate {
-                artifact_path: "weights/parameter.safetensors".to_string(),
-                base_byte_offset: 0,
-                stride_bytes: 64,
-                byte_count: 64,
-                alignment_bytes: 64,
-                integrity: CompiledResourceRangeIntegrityTemplate {
-                    algorithm: "sha256_table".to_string(),
-                    digest_table_path:
-                        "integrity/partitions.sha256".to_string(),
-                    digest_table_byte_offset: 0,
-                    digest_stride_bytes: 32,
-                    table_sha256: "0".repeat(64),
-                },
-            }],
-            compatibility: CompiledResourceCompatibility {
-                device_api: "vulkan".to_string(),
-                storage_class: "storage_buffer".to_string(),
-                read_only: true,
-                required_features: Vec::new(),
-            },
-            resident_derivation: None,
-        }],
-        dependencies: Vec::new(),
-    });
+    let runtime_model = fixture_model_runtime_model_with_dynamic_partition(1_000, 64);
     let package_root = tiny_model_dir();
     let tensor_index = runtime_model
         .load_runtime_tensor_index(&package_root)
@@ -478,7 +469,7 @@ fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
         &runtime_model,
         &tensor_index,
         16,
-        false,
+        0,
         ResourceResidencyPolicy::DemandRetained,
     )
     .unwrap();
@@ -487,7 +478,7 @@ fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
         &runtime_model,
         &tensor_index,
         16,
-        false,
+        0,
         ResourceResidencyPolicy::Eager,
     )
     .unwrap();
@@ -525,6 +516,33 @@ fn demand_plan_does_not_allocate_its_maximum_parameter_address_space() {
         eager_device.initial_device_resident_bytes
             - demand_device.initial_device_resident_bytes,
         64_000
+            + eager_device
+                .resource_store
+                .maximum_dynamic_allocation_padding_bytes
+    );
+    assert_eq!(demand_device.resource_store.transfer_staging_slot_count, 2);
+    assert_eq!(
+        demand_device.resource_store.transfer_staging_device_bytes,
+        demand_device
+            .resource_store
+            .transfer_staging_slot_byte_capacity
+            * 2
+    );
+    assert!(demand_device.resource_store.address_table_device_bytes > 0);
+    assert!(demand_device.resource_store.metadata_device_bytes > 0);
+    assert_eq!(
+        demand_device.initial_device_resident_bytes,
+        demand_device.parameter_residency.current_resident_bytes
+            + demand_device.resource_store.fixed_device_bytes().unwrap()
+            + demand_device.working_set.transient_state_bytes
+            + demand_device.working_set.activation_headroom_bytes
+    );
+    assert_eq!(
+        vulkan_runtime_maximum_device_resident_bytes(demand_device).unwrap(),
+        demand_device.parameter_residency.maximum_addressable_bytes
+            + demand_device.resource_store.maximum_extra_device_bytes().unwrap()
+            + demand_device.working_set.transient_state_bytes
+            + demand_device.working_set.activation_headroom_bytes
     );
 
     let safe_capacity = demand_device.initial_device_resident_bytes + 64;
@@ -587,11 +605,12 @@ fn initial_runtime_residency_aggregates_logical_slices_on_one_physical_device() 
         package_id: "package".to_string(),
         residency_policy: ResourceResidencyPolicy::DemandRetained,
         context_capacity_activations: 1,
-        speculative_decoders_mounted: false,
+        speculative_draft_tokens: 0,
         device_plans: vec![
             VulkanRuntimeDeviceResidencyPlan {
                 device_id: "logical-a".to_string(),
                 parameter_residency: VulkanRuntimeParameterResidencyBytes::default(),
+                resource_store: VulkanCompiledResourceStoreResidencyBytes::default(),
                 working_set: VulkanRuntimeWorkingSetBytes::default(),
                 breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
                 initial_device_resident_bytes: 600,
@@ -599,6 +618,7 @@ fn initial_runtime_residency_aggregates_logical_slices_on_one_physical_device() 
             VulkanRuntimeDeviceResidencyPlan {
                 device_id: "logical-b".to_string(),
                 parameter_residency: VulkanRuntimeParameterResidencyBytes::default(),
+                resource_store: VulkanCompiledResourceStoreResidencyBytes::default(),
                 working_set: VulkanRuntimeWorkingSetBytes::default(),
                 breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
                 initial_device_resident_bytes: 401,

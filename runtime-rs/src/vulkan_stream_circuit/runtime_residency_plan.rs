@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v2";
+    "nerve.vulkan_runtime_residency_plan.v3";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -7,7 +7,7 @@ pub struct VulkanRuntimeResidencyPlan {
     pub package_id: String,
     pub residency_policy: ResourceResidencyPolicy,
     pub context_capacity_activations: usize,
-    pub speculative_decoders_mounted: bool,
+    pub speculative_draft_tokens: usize,
     pub device_plans: Vec<VulkanRuntimeDeviceResidencyPlan>,
     pub total_initial_device_resident_bytes: usize,
     pub total_current_resident_parameter_bytes: usize,
@@ -28,6 +28,7 @@ pub struct VulkanRuntimeDeviceResidencyBreakdown {
     pub speculative_decoder_state_bytes: usize,
     pub speculative_decoder_activation_bytes: usize,
     pub speculative_decoder_workspace_bytes: usize,
+    pub causal_verification_snapshot_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -40,6 +41,7 @@ pub struct VulkanRuntimeWorkingSetBytes {
 pub struct VulkanRuntimeDeviceResidencyPlan {
     pub device_id: String,
     pub parameter_residency: VulkanRuntimeParameterResidencyBytes,
+    pub resource_store: VulkanCompiledResourceStoreResidencyBytes,
     pub working_set: VulkanRuntimeWorkingSetBytes,
     pub breakdown: VulkanRuntimeDeviceResidencyBreakdown,
     pub initial_device_resident_bytes: usize,
@@ -65,7 +67,7 @@ pub fn plan_vulkan_runtime_residency(
     runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
     context_capacity_activations: usize,
-    mount_speculative_decoders: bool,
+    speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
     let resource_contract =
@@ -76,7 +78,7 @@ pub fn plan_vulkan_runtime_residency(
         runtime_model,
         tensor_index,
         context_capacity_activations,
-        mount_speculative_decoders,
+        speculative_draft_tokens,
         residency_policy,
         &resource_contract,
     )
@@ -88,10 +90,11 @@ fn plan_vulkan_runtime_residency_with_contract(
     runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
     context_capacity_activations: usize,
-    mount_speculative_decoders: bool,
+    speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
     resource_contract: &CompiledResourceResidencyContract,
 ) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
+    let mount_speculative_decoders = speculative_draft_tokens > 0;
     if context_capacity_activations == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
             "runtime residency context capacity must be positive".to_string(),
@@ -155,6 +158,12 @@ fn plan_vulkan_runtime_residency_with_contract(
             mount_speculative_decoders,
             residency_policy,
         )?;
+    let compiled_resource_layout = VulkanCompiledResourceAddressLayout::from_contract(
+        resource_contract,
+    )
+    .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    let minimum_upload_alignment =
+        compiled_resource_contract_minimum_upload_alignment(resource_contract)?;
 
     for device_id in &device_ids {
         let (_resources, _placement, placed_plan) =
@@ -174,12 +183,15 @@ fn plan_vulkan_runtime_residency_with_contract(
             &placed_plan,
             context_capacity_activations,
             mount_speculative_decoders,
+            speculative_draft_tokens,
         )?;
         breakdown.stream_state_bytes = stream.state_bytes;
         breakdown.state_transaction_bytes = stream.transaction_bytes;
         breakdown.activation_slot_bytes = stream.activation_bytes;
         breakdown.boundary_buffer_bytes = stream.boundary_bytes;
         breakdown.edge_buffer_bytes = stream.edge_bytes;
+        breakdown.causal_verification_snapshot_bytes =
+            stream.causal_verification_snapshot_bytes;
         // The placed runtime aliases a single stream-control allocation across
         // devices when possible. Charging every importing device is a safe
         // admission bound and remains negligible.
@@ -237,15 +249,42 @@ fn plan_vulkan_runtime_residency_with_contract(
                     "runtime parameter plan omitted device {device_id:?}"
                 ))
             })?;
+        let resource_store = if parameter_residency.maximum_addressable_bytes
+            > parameter_residency.always_resident_bytes
+        {
+            let logical_device_ids = BTreeSet::from([device_id.clone()]);
+            let allowed_selector_ids = compiled_resource_selector_ids_for_device_set(
+                runtime_model,
+                resource_contract,
+                &input_device_id,
+                &output_device_id,
+                &logical_device_ids,
+                mount_speculative_decoders,
+            )?;
+            plan_compiled_resource_store_residency(
+                resource_contract,
+                &compiled_resource_layout,
+                &allowed_selector_ids,
+                parameter_residency.staging_headroom_bytes,
+                minimum_upload_alignment,
+            )?
+        } else {
+            VulkanCompiledResourceStoreResidencyBytes::default()
+        };
         let working_set = VulkanRuntimeWorkingSetBytes {
             transient_state_bytes:
                 sum_transient_state_breakdown(&breakdown)?,
             activation_headroom_bytes:
                 sum_activation_headroom_breakdown(&breakdown)?,
         };
+        let initial_resource_store_bytes = if residency_policy == ResourceResidencyPolicy::Eager {
+            resource_store.maximum_extra_device_bytes()?
+        } else {
+            resource_store.fixed_device_bytes()?
+        };
         let initial_device_resident_bytes = [
             parameter_residency.current_resident_bytes,
-            parameter_residency.staging_headroom_bytes,
+            initial_resource_store_bytes,
             working_set.transient_state_bytes,
             working_set.activation_headroom_bytes,
         ]
@@ -275,6 +314,7 @@ fn plan_vulkan_runtime_residency_with_contract(
         device_plans.push(VulkanRuntimeDeviceResidencyPlan {
             device_id,
             parameter_residency,
+            resource_store,
             working_set,
             breakdown,
             initial_device_resident_bytes,
@@ -290,7 +330,7 @@ fn plan_vulkan_runtime_residency_with_contract(
         package_id: runtime_model.package.package_id.clone(),
         residency_policy,
         context_capacity_activations,
-        speculative_decoders_mounted: mount_speculative_decoders,
+        speculative_draft_tokens,
         device_plans,
         total_initial_device_resident_bytes,
         total_current_resident_parameter_bytes,
@@ -305,16 +345,31 @@ struct StreamCircuitResidencyBytes {
     activation_bytes: usize,
     boundary_bytes: usize,
     edge_bytes: usize,
+    causal_verification_snapshot_bytes: usize,
 }
 
 fn plan_stream_circuit_residency(
     placed_plan: &VulkanPlacedStreamCircuitPlan,
     context_capacity_activations: usize,
     transactional: bool,
+    speculative_draft_tokens: usize,
 ) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
     let resident = &placed_plan.placed_resident_plan.resident_plan;
     let mut state_bytes = 0usize;
     let mut transaction_bytes = 0usize;
+    let verification_lane_capacity = if speculative_draft_tokens == 0 {
+        0
+    } else {
+        causal_component_block_lane_capacity(
+            speculative_draft_tokens.checked_add(1).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "speculative verification width overflowed".to_string(),
+                )
+            })?,
+        )
+        .map_err(residency_display_error)?
+    };
+    let mut causal_verification_snapshot_bytes = 0usize;
     for state in &resident.stream_state_buffers {
         let layout = VulkanTransientStateBufferLayout::for_state(
             state,
@@ -334,6 +389,17 @@ fn plan_stream_circuit_residency(
                     "state transaction bytes",
                 )?,
                 "state transaction bytes",
+            )?;
+        }
+        if let Some(static_bytes) = state.static_bytes {
+            causal_verification_snapshot_bytes = checked_residency_add(
+                causal_verification_snapshot_bytes,
+                checked_residency_mul(
+                    static_bytes,
+                    verification_lane_capacity,
+                    "causal verification snapshots",
+                )?,
+                "causal verification snapshots",
             )?;
         }
     }
@@ -373,6 +439,7 @@ fn plan_stream_circuit_residency(
         activation_bytes,
         boundary_bytes,
         edge_bytes,
+        causal_verification_snapshot_bytes,
     })
 }
 
@@ -404,7 +471,7 @@ fn plan_speculative_decoder_residency(
         ))
     })?;
     let stream =
-        plan_stream_circuit_residency(&placed_plan, context_capacity_activations, true)?;
+        plan_stream_circuit_residency(&placed_plan, context_capacity_activations, true, 0)?;
     let state_bytes = [
         stream.state_bytes,
         stream.transaction_bytes,
@@ -664,6 +731,7 @@ fn sum_transient_state_breakdown(
         breakdown.state_transaction_bytes,
         breakdown.stream_control_bytes,
         breakdown.speculative_decoder_state_bytes,
+        breakdown.causal_verification_snapshot_bytes,
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| {

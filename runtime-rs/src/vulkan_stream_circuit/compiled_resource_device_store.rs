@@ -553,22 +553,21 @@ impl VulkanCompiledResourceDeviceStore {
             ))
         })?;
         let upload_alignment = compiled_resource_upload_alignment(&contract, device)?;
-        let maximum_load_wave_group_count = contract
-            .selectors
-            .iter()
-            .filter(|selector| allowed_selector_ids.contains(&selector.id))
-            .map(|selector| selector.encoding.selection_count_per_activation)
-            .max()
-            .ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled device-resource store has no allowed selector load wave",
-                )
-            })?;
-        if maximum_load_wave_group_count == 0 {
-            return Err(VulkanCompiledResourceDeviceStoreError::new(
-                "compiled device-resource store selector load wave is empty",
-            ));
+        let store_residency = plan_compiled_resource_store_residency(
+            &contract,
+            &layout,
+            &allowed_selector_ids,
+            maximum_group_byte_count,
+            upload_alignment,
+        )
+        .map_err(|error| VulkanCompiledResourceDeviceStoreError::new(error.to_string()))?;
+        if metadata_device_bytes != store_residency.metadata_device_bytes {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled device-resource metadata plan declares {metadata_device_bytes} bytes but the store requires {}",
+                store_residency.metadata_device_bytes,
+            )));
         }
+        let maximum_load_wave_group_count = store_residency.maximum_load_wave_group_count;
         let maximum_addressable_resource_count = layout
             .addressable_slot_count_for_selectors(&allowed_selector_ids)
             .map_err(|error| {
@@ -588,21 +587,8 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled device-resource store selector ownership is invalid",
             ));
         }
-        let per_resource_alignment_slack = upload_alignment.checked_sub(1).ok_or_else(|| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource upload alignment underflowed",
-            )
-        })?;
         let maximum_allocation_byte_capacity = maximum_dynamic_device_payload_bytes
-            .checked_add(
-                maximum_addressable_resource_count
-                    .checked_mul(per_resource_alignment_slack)
-                    .ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "compiled resource allocation-padding capacity overflowed",
-                        )
-                    })?,
-            )
+            .checked_add(store_residency.maximum_dynamic_allocation_padding_bytes)
             .ok_or_else(|| {
                 VulkanCompiledResourceDeviceStoreError::new(
                     "compiled resource allocation capacity overflowed",
@@ -613,21 +599,12 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resources require up to {maximum_allocation_byte_capacity} physical allocation bytes for {maximum_dynamic_payload_bytes} payload bytes, but only {available_dynamic_device_bytes} device bytes are available"
             )));
         }
-        let address_table_byte_count = layout.slot_count().checked_mul(32).ok_or_else(|| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource address-table capacity overflowed",
-            )
-        })?;
-        let maximum_load_wave_payload_bytes = maximum_group_byte_count
-            .checked_mul(maximum_load_wave_group_count)
-            .ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled resource load-wave payload capacity overflowed",
-                )
-            })?;
-        let staging_byte_capacity = maximum_load_wave_payload_bytes.max(address_table_byte_count);
+        let staging_byte_capacity = store_residency.transfer_staging_slot_byte_capacity;
         let mut transfer = device
-            .create_resident_transfer_stream(2, staging_byte_capacity)
+            .create_resident_transfer_stream(
+                store_residency.transfer_staging_slot_count,
+                staging_byte_capacity,
+            )
             .map_err(compiled_device_store_vulkan_error)?;
         let address_table =
             VulkanStableResourceAddressTable::new(device, &mut transfer, layout.slot_count())
@@ -685,7 +662,7 @@ impl VulkanCompiledResourceDeviceStore {
             let host_visible_allocation_capacity = maximum_dynamic_host_visible_payload_bytes
                 .checked_add(
                     maximum_addressable_resource_count
-                        .checked_mul(per_resource_alignment_slack)
+                        .checked_mul(upload_alignment.saturating_sub(1))
                         .ok_or_else(|| {
                             VulkanCompiledResourceDeviceStoreError::new(
                                 "compiled host-visible allocation-padding capacity overflowed",
@@ -732,7 +709,7 @@ impl VulkanCompiledResourceDeviceStore {
                 queued_request_capacity: maximum_load_wave_group_count,
                 maximum_ranges_per_group,
                 maximum_logical_bytes_per_group: maximum_group_byte_count,
-                maximum_retained_payload_bytes: maximum_load_wave_payload_bytes,
+                maximum_retained_payload_bytes: store_residency.maximum_load_wave_payload_bytes,
                 maximum_coalesced_read_bytes: maximum_group_byte_count,
                 maximum_coalescing_gap_bytes: 64 * 1024,
             },
@@ -782,11 +759,7 @@ impl VulkanCompiledResourceDeviceStore {
             always_resident_parameter_bytes,
             runtime_working_set_device_bytes,
             metadata_device_bytes,
-            transfer_staging_host_bytes: staging_byte_capacity.checked_mul(2).ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled resource transfer staging byte count overflowed",
-                )
-            })?,
+            transfer_staging_host_bytes: store_residency.transfer_staging_device_bytes,
             maximum_load_wave_group_count,
             group_selector_ids: selector_cache_policy.group_selector_ids,
             selector_payload_budgets: selector_cache_policy.selector_payload_budgets,

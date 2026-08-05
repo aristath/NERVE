@@ -548,7 +548,7 @@ fn mount(
                 &package_root,
                 runtime_model,
                 Some(context_capacity),
-                speculative_draft_tokens > 0,
+                speculative_draft_tokens,
                 residency_policy,
                 parameter_pool,
             )?,

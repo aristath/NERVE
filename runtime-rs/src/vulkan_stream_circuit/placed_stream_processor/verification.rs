@@ -126,11 +126,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .iter()
                     .all(|transaction| transaction.cycle_width >= 1)
             });
-        let batch_capacity = self.causal_block_lane_capacity(batch_width)?;
         let causal_window_is_sufficient = self
             .temporal_block_executions
             .borrow()
-            .contains_key(&(batch_capacity, true));
+            .get(&true)
+            .is_some_and(|runner| {
+                self.causal_block_lane_capacity(batch_width)
+                    .is_ok_and(|required| required <= runner.execution_graph.lane_capacity)
+            });
         if transactions_are_sufficient && causal_window_is_sufficient {
             return Ok(());
         }
@@ -206,9 +209,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let token_prefixes = (0..input_token_ids.len())
             .map(|lane| &input_token_ids[..=lane])
             .collect::<Vec<_>>();
-        let block_capacity = self.causal_block_lane_capacity(input_token_ids.len())?;
         let runner_guard = self.temporal_block_executions.borrow();
-        let runner = runner_guard.get(&(block_capacity, true)).ok_or_else(|| {
+        let runner = runner_guard.get(&true).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "causal verification execution is not mounted".to_string(),
             ))
@@ -241,16 +243,24 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         target_tick_count: usize,
         committed_tick_count: usize,
     ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
-        let verification_capacity =
-            self.causal_block_lane_capacity(target_tick_count)?;
-        self.temporal_block_executions
-            .borrow()
-            .get(&(verification_capacity, true))
+        let required_capacity = self.causal_block_lane_capacity(target_tick_count)?;
+        let executions = self.temporal_block_executions.borrow();
+        let runner = executions
+            .get(&true)
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "speculative causal target window was not initialized".to_string(),
                 ))
-            })?
+            })?;
+        if required_capacity > runner.execution_graph.lane_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "speculative causal target width {required_capacity} exceeds canonical capacity {}",
+                    runner.execution_graph.lane_capacity,
+                )),
+            ));
+        }
+        runner
             .execution_graph
             .commit_causal_state_prefix(committed_tick_count)
     }
@@ -267,16 +277,24 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 )),
             ));
         }
-        let verification_capacity = self.causal_block_lane_capacity(target_tick_count)?;
-        self.temporal_block_executions
-            .borrow()
-            .get(&(verification_capacity, true))
+        let required_capacity = self.causal_block_lane_capacity(target_tick_count)?;
+        let executions = self.temporal_block_executions.borrow();
+        let runner = executions
+            .get(&true)
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "speculative causal target window was not initialized".to_string(),
                 ))
-            })?
-            .publish_speculative_source_tap_frame(committed_tick_count - 1)
+            })?;
+        if required_capacity > runner.execution_graph.lane_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "speculative causal target width {required_capacity} exceeds canonical capacity {}",
+                    runner.execution_graph.lane_capacity,
+                )),
+            ));
+        }
+        runner.publish_speculative_source_tap_frame(committed_tick_count - 1)
     }
 
     fn catch_up_speculative_decoder_after_verification(
@@ -287,16 +305,23 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         start_stream_tick: u64,
         target_tick_count: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let verification_capacity =
-            self.causal_block_lane_capacity(target_tick_count)?;
+        let required_capacity = self.causal_block_lane_capacity(target_tick_count)?;
         let causal_verification = self.temporal_block_executions.borrow();
         let runner = causal_verification
-            .get(&(verification_capacity, true))
+            .get(&true)
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "speculative causal target window was not initialized".to_string(),
                 ))
         })?;
+        if required_capacity > runner.execution_graph.lane_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "speculative causal target width {required_capacity} exceeds canonical capacity {}",
+                    runner.execution_graph.lane_capacity,
+                )),
+            ));
+        }
         if decoder.is_parallel_block() {
             return runner.run_parallel_speculative_state_ingestion(
                 decoder,

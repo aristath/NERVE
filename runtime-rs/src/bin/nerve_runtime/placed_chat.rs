@@ -20,8 +20,12 @@ fn run_placed_chat(
     let logical_device_ids = runtime_model.placement_device_ids();
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
-    let (runtime_model, implementation_selection) = runtime_model
-        .select_and_apply_runtime_implementations(
+    let (runtime_model, implementation_selection) = if let Some(selection) =
+        runtime_model.implementation_selection.clone()
+    {
+        (runtime_model, selection)
+    } else {
+        runtime_model.select_and_apply_runtime_implementations(
             manifest_dir,
             &bound_devices.hardware_profiles,
             RuntimeExecutionEnvelope {
@@ -43,7 +47,8 @@ fn run_placed_chat(
                 },
                 speculative_draft_tokens: args.speculative_draft_tokens,
             },
-        )?;
+        )?
+    };
     let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config_and_residency_policy(
         bound_devices.devices.clone(),
         manifest_dir,

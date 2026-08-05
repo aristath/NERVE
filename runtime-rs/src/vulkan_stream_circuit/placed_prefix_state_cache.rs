@@ -25,6 +25,12 @@ struct VulkanResidentPlacedPrefixStateEntry {
     byte_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanResidentPlacedStateCaptureKind {
+    Complete,
+    StaticOnly,
+}
+
 struct VulkanResidentPlacedPrefixPendingCopy {
     copy: Option<VulkanResidentBufferCopyBatch>,
     device: Rc<VulkanComputeDevice>,
@@ -119,6 +125,41 @@ impl VulkanResidentPlacedPrefixStateCache {
         VulkanResidentPlacedPrefixStateEntry,
         VulkanResidentInProcessPlacedRuntimeError,
     > {
+        self.prepare_capture_with_kind(
+            key,
+            source,
+            state,
+            VulkanResidentPlacedStateCaptureKind::Complete,
+        )
+    }
+
+    fn prepare_transaction_capture(
+        &self,
+        key: RuntimePrefixStateCacheKey,
+        source: &VulkanResidentInProcessPlacedPromptStream,
+        state: &TransientStateTableSnapshot,
+    ) -> Result<
+        VulkanResidentPlacedPrefixStateEntry,
+        VulkanResidentInProcessPlacedRuntimeError,
+    > {
+        self.prepare_capture_with_kind(
+            key,
+            source,
+            state,
+            VulkanResidentPlacedStateCaptureKind::StaticOnly,
+        )
+    }
+
+    fn prepare_capture_with_kind(
+        &self,
+        key: RuntimePrefixStateCacheKey,
+        source: &VulkanResidentInProcessPlacedPromptStream,
+        state: &TransientStateTableSnapshot,
+        capture_kind: VulkanResidentPlacedStateCaptureKind,
+    ) -> Result<
+        VulkanResidentPlacedPrefixStateEntry,
+        VulkanResidentInProcessPlacedRuntimeError,
+    > {
         let mut ranges = Vec::new();
         let mut device_byte_counts = BTreeMap::<String, usize>::new();
         for state_entry in &state.entries {
@@ -147,7 +188,9 @@ impl VulkanResidentPlacedPrefixStateCache {
                     kind: VulkanResidentPlacedPrefixStateRangeKind::Static,
                 });
             }
-            if state_entry.shape.retention == TransientStateRetention::Append {
+            if capture_kind == VulkanResidentPlacedStateCaptureKind::Complete
+                && state_entry.shape.retention == TransientStateRetention::Append
+            {
                 for (logical_page_index, block_id) in
                     state_entry.block_ids.iter().copied().enumerate()
                 {
@@ -348,6 +391,7 @@ impl VulkanResidentPlacedPrefixStateCache {
                         allocated_block: false,
                         copy_from_block_id: None,
                     },
+                    false,
                 )?;
             }
         }
@@ -384,6 +428,82 @@ impl VulkanResidentPlacedPrefixStateCache {
                         &resident_state.buffer,
                         range.cache_byte_offset,
                         destination_offset,
+                        range.byte_len,
+                    )
+                })
+                .collect::<Result<Vec<_>, VulkanError>>()
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if !copies.is_empty() {
+                device
+                    .create_resident_buffer_copy_batch(&copies)
+                    .and_then(|copy| copy.run())
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
+        }
+        let output_device = target
+            .devices
+            .get(&target.package.output_device_id)
+            .ok_or_else(|| VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: target.package.output_device_id.clone(),
+            })?;
+        target
+            .processor
+            .sampler
+            .reset_token_state()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        for token_batch in entry.key.token_ids.chunks(VULKAN_BACKEND_LOOP_MAX_WINDOW) {
+            target
+                .processor
+                .sampler
+                .record_input_tokens(output_device, token_batch)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        }
+        target.session.next_stream_tick = u64::try_from(entry.key.token_count)
+            .map_err(|_| VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+        Ok(())
+    }
+
+    fn restore_transaction_entry(
+        entry: &mut VulkanResidentPlacedPrefixStateEntry,
+        target: &mut VulkanResidentInProcessPlacedPromptStream,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !target.is_idle() || target.pending_scheduler_activation.is_some() {
+            return Err(placed_scheduler_divergence(
+                "resident transaction state can only be restored into an idle stream",
+            ));
+        }
+        if entry.ranges.iter().any(|range| {
+            !matches!(range.kind, VulkanResidentPlacedPrefixStateRangeKind::Static)
+        }) {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "resident transaction checkpoint contains dynamic state pages",
+                ),
+            ));
+        }
+        entry
+            .wait_for_capture()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        for (device_id, cache_device_buffer) in &entry.device_buffers {
+            let device = target.devices.get(device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.clone(),
+                }
+            })?;
+            let copies = entry
+                .ranges
+                .iter()
+                .filter(|range| range.device_id == *device_id)
+                .map(|range| {
+                    let (_, resident_state) = target
+                        .processor
+                        .mounted_state_buffer_with_device_id(&range.key)
+                        .expect("restored transaction state remains mounted");
+                    VulkanResidentBufferRangeCopy::new(
+                        &cache_device_buffer.buffer,
+                        &resident_state.buffer,
+                        range.cache_byte_offset,
+                        resident_state.layout.static_data_offset,
                         range.byte_len,
                     )
                 })

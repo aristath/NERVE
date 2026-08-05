@@ -833,6 +833,100 @@ fn fixture_model_runtime_model() -> VulkanResidentRuntimeModel {
         .unwrap()
 }
 
+fn fixture_model_runtime_model_with_dynamic_partition(
+    partition_count: usize,
+    member_bytes: usize,
+) -> VulkanResidentRuntimeModel {
+    let mut runtime_model = fixture_model_runtime_model();
+    let contract = &mut runtime_model.package.resource_residency;
+    let binding = contract
+        .bindings
+        .iter_mut()
+        .find(|binding| binding.parameter_id == "ffn_down")
+        .unwrap();
+    let (
+        CompiledResourceBindingMapping::AtomicGroup {
+            atomic_group_id,
+            resource_id,
+        },
+        template_id,
+        member_seed,
+    ) = (
+        binding.mapping.clone(),
+        format!("sha256:{}", "1".repeat(64)),
+        format!("sha256:{}", "2".repeat(64)),
+    ) else {
+        panic!("fixture ffn_down binding is not concrete");
+    };
+    let selector_component_id = binding.component_id.clone();
+    let selector_node_id = binding.node_id.clone();
+    contract.resources.retain(|resource| resource.id != resource_id);
+    contract
+        .atomic_groups
+        .iter_mut()
+        .find(|group| group.id == atomic_group_id)
+        .unwrap()
+        .resource_ids
+        .retain(|id| id != &resource_id);
+    binding.mapping = CompiledResourceBindingMapping::PartitionTemplateMember {
+        partition_template_id: template_id.clone(),
+        resource_identity_seed: member_seed.clone(),
+        selection_signal: "selection".to_string(),
+        parameter_slot: 0,
+    };
+    contract.partition_templates.push(CompiledPartitionTemplate {
+        id: template_id.clone(),
+        partition_count,
+        lifetime: CompiledResourceLifetime::Dynamic,
+        group_identity_seed: format!("sha256:{}", "3".repeat(64)),
+        member_templates: vec![CompiledPartitionMemberTemplate {
+            resource_identity_seed: member_seed,
+            range_templates: vec![CompiledResourceRangeTemplate {
+                artifact_path: "weights/parameter.safetensors".to_string(),
+                base_byte_offset: 0,
+                stride_bytes: member_bytes,
+                byte_count: member_bytes,
+                alignment_bytes: member_bytes,
+                integrity: CompiledResourceRangeIntegrityTemplate {
+                    algorithm: "sha256_table".to_string(),
+                    digest_table_path: "integrity/partitions.sha256".to_string(),
+                    digest_table_byte_offset: 0,
+                    digest_stride_bytes: 32,
+                    table_sha256: "0".repeat(64),
+                },
+            }],
+            compatibility: CompiledResourceCompatibility {
+                device_api: "vulkan".to_string(),
+                storage_class: "storage_buffer".to_string(),
+                read_only: true,
+                required_features: Vec::new(),
+            },
+            resident_derivation: None,
+        }],
+        dependencies: Vec::new(),
+    });
+    contract.selectors.push(CompiledResourceSelector {
+        id: format!("sha256:{}", "4".repeat(64)),
+        execution_scope: "target".to_string(),
+        component_id: selector_component_id,
+        node_id: selector_node_id,
+        domain_id: "fixture_partitions".to_string(),
+        resource_count: partition_count,
+        selection_signal: "selection".to_string(),
+        encoding: CompiledResourceSelectionEncoding {
+            element_type: CompiledResourceSelectionElementType::U32,
+            selection_count_per_activation: 1,
+            index_shift: 0,
+            index_mask: u32::MAX,
+        },
+        mapping: CompiledResourceSelectorMapping::PartitionTemplate {
+            partition_template_id: template_id,
+        },
+    });
+    contract.selectors.sort_by(|left, right| left.id.cmp(&right.id));
+    runtime_model
+}
+
 fn fixture_model_runtime_model_with_three_layer_series(
     middle_device_id: &str,
 ) -> VulkanResidentRuntimeModel {

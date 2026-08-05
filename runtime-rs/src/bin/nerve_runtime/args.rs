@@ -26,6 +26,8 @@ use nerve_runtime::{
     VulkanResidentHfTokenizerTextCodec, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageDeviceSlice,
     VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
+    VulkanRuntimePlacementCandidate, capacity_pack_vulkan_runtime_model,
+    vulkan_runtime_maximum_device_resident_bytes,
     VulkanResidentPlacedPrefixStateCacheStats,
     VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
     VulkanCompiledResourceResidencyReport,

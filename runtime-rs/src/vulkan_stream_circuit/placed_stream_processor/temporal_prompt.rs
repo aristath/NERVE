@@ -387,14 +387,37 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         block_width: usize,
         capture_causal_state_snapshots: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let block_width = self.causal_block_lane_capacity(block_width)?;
-        let execution_key = (block_width, capture_causal_state_snapshots);
-        if self
+        let requested_width = self.causal_block_lane_capacity(block_width)?;
+        let mounted_capacity = self
             .temporal_block_executions
             .borrow()
-            .contains_key(&execution_key)
-        {
+            .get(&capture_causal_state_snapshots)
+            .map(|runner| runner.execution_graph.lane_capacity);
+        if mounted_capacity.is_some_and(|capacity| requested_width <= capacity) {
             return Ok(());
+        }
+        // Normal prompt ingestion has no causal rollback snapshots, so one
+        // full-width runner avoids retaining a new activation bank for every
+        // prompt remainder. Verification is different: its snapshot storage
+        // scales with both the recurrent-state size and lane capacity. Keep a
+        // single right-sized verification runner and replace it only if the
+        // configured speculative window grows.
+        let block_width = if capture_causal_state_snapshots {
+            requested_width
+        } else {
+            self.causal_block_lane_capacity(self.temporal_block_lane_capacity(devices)?)?
+        };
+        if requested_width > block_width {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "causal component batch requested width {requested_width} exceeds canonical pipeline capacity {block_width}",
+                )),
+            ));
+        }
+        if mounted_capacity.is_some() {
+            self.temporal_block_executions
+                .borrow_mut()
+                .remove(&capture_causal_state_snapshots);
         }
         let pipeline = self.linear_pipeline_device_indices()?;
         let first_device_index = *pipeline.first().ok_or_else(|| {
@@ -566,7 +589,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 block_width,
             )?;
         self.temporal_block_executions.borrow_mut().insert(
-            execution_key,
+            capture_causal_state_snapshots,
             VulkanResidentPlacedTemporalBlockRunner {
                 execution_graph,
                 input_embedding,
@@ -595,7 +618,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             input_token_ids.len(),
             capture_causal_state_snapshots,
         )?;
-        let block_capacity = self.causal_block_lane_capacity(input_token_ids.len())?;
         let capacity =
             u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -604,7 +626,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             })?;
         let runner_guard = self.temporal_block_executions.borrow();
         let runner = runner_guard
-            .get(&(block_capacity, capture_causal_state_snapshots))
+            .get(&capture_causal_state_snapshots)
             .ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "causal component batch execution is not mounted".to_string(),
@@ -803,7 +825,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 start_stream_tick,
                 false,
             )?;
-        let block_capacity = self.causal_block_lane_capacity(input_token_ids.len())?;
         let capacity =
             u32::try_from(self.model.dynamic_state_capacity_activations).map_err(|_| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -811,7 +832,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 ))
             })?;
         let runner_guard = self.temporal_block_executions.borrow();
-        let runner = runner_guard.get(&(block_capacity, false)).ok_or_else(|| {
+        let runner = runner_guard.get(&false).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "temporal block execution is not mounted".to_string(),
                 ))

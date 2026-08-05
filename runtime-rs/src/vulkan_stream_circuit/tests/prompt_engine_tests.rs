@@ -214,7 +214,7 @@ fn placed_package_pool_reuses_immutable_parameters_across_graph_variants() {
                 manifest_dir,
                 exact_model,
                 Some(64),
-                false,
+                0,
                 ResourceResidencyPolicy::Eager,
                 &pool,
             )
@@ -244,7 +244,7 @@ fn placed_package_pool_reuses_immutable_parameters_across_graph_variants() {
                 manifest_dir,
                 duplicated_model,
                 Some(64),
-                false,
+                0,
                 ResourceResidencyPolicy::Eager,
                 &pool,
             )
@@ -402,6 +402,143 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
         transactional.generated_token_ids,
         committed.generated_token_ids
     );
+}
+
+#[test]
+fn placed_prompt_engine_transaction_checkpoint_memory_is_independent_of_prefix_length() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for page-COW transaction test was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping page-COW transaction test: {error}");
+            return;
+        }
+    };
+    let mut runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    runtime_model.package.max_context_activations = 128;
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(128),
+        7,
+        0,
+    )
+    .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("short_prefix", vec![4, 5], 0),
+        )
+        .unwrap();
+
+    let short = engine.begin_stream_transaction("main").unwrap();
+    assert!(short.page_cow);
+    let short_checkpoint_bytes = short.resident_state.as_ref().unwrap().byte_count;
+    engine.restore_stream_transaction(short).unwrap();
+
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("longer_prefix", vec![6; 32], 0),
+        )
+        .unwrap();
+    let before = engine.stream_resident_state_digest("main").unwrap();
+    let longer = engine.begin_stream_transaction("main").unwrap();
+    assert!(longer.page_cow);
+    let longer_checkpoint_bytes = longer.resident_state.as_ref().unwrap().byte_count;
+    assert_eq!(
+        longer_checkpoint_bytes, short_checkpoint_bytes,
+        "transaction storage must contain fixed mutable state only, not accumulated append state",
+    );
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("page_cow_branch", vec![7], 2),
+        )
+        .unwrap();
+    engine.restore_stream_transaction(longer).unwrap();
+    assert_eq!(engine.stream_resident_state_digest("main").unwrap(), before);
+}
+
+#[test]
+fn placed_prompt_engine_nested_transactions_use_page_cow_without_full_state_snapshots() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_INDEX").is_some() => {
+            panic!("explicit Vulkan device for nested page-COW transaction test was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping nested page-COW transaction test: {error}");
+            return;
+        }
+    };
+    let mut runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    runtime_model.package.max_context_activations = 192;
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(192),
+        7,
+        0,
+    )
+    .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("canonical_prefix", vec![4, 5], 0),
+        )
+        .unwrap();
+
+    let outer = engine.begin_stream_transaction("main").unwrap();
+    assert!(outer.page_cow);
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("canonical_user", vec![6], 0),
+        )
+        .unwrap();
+    let after_user = engine.stream_resident_state_digest("main").unwrap();
+    let inner = engine.begin_stream_transaction("main").unwrap();
+    assert!(inner.page_cow);
+    assert_eq!(
+        inner.resident_state.as_ref().unwrap().byte_count,
+        outer.resident_state.as_ref().unwrap().byte_count,
+    );
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("generation_branch", vec![7], 2),
+        )
+        .unwrap();
+    engine.restore_stream_transaction(inner).unwrap();
+    assert_eq!(engine.stream_resident_state_digest("main").unwrap(), after_user);
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("canonical_assistant", vec![8], 0),
+        )
+        .unwrap();
+    engine.commit_stream_transaction(outer).unwrap();
+    assert!(engine.active_transaction_depths.is_empty());
+    assert_eq!(engine.stream("main").unwrap().transaction_page_cow_depth, 0);
 }
 
 #[cfg(feature = "tokenizers")]
@@ -1299,7 +1436,7 @@ fn placed_prompt_engine_single_submit_runs_the_engine_queue() {
             manifest_dir,
             runtime_model,
             Some(64),
-            false,
+            0,
         )
         .unwrap(),
     );
@@ -1402,7 +1539,7 @@ fn placed_prompt_engine_batches_fairly_and_cancels_between_physical_batches() {
             manifest_dir,
             runtime_model.clone(),
             Some(64),
-            false,
+            0,
         )
         .unwrap(),
     );
@@ -1412,7 +1549,7 @@ fn placed_prompt_engine_batches_fairly_and_cancels_between_physical_batches() {
             manifest_dir,
             runtime_model,
             Some(64),
-            false,
+            0,
         )
         .unwrap(),
     );

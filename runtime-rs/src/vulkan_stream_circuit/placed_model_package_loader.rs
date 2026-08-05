@@ -46,7 +46,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             manifest_dir,
             runtime_model,
             dynamic_state_capacity_activations,
-            true,
+            1,
             ResourceResidencyPolicy::Eager,
             None,
             |_| Ok(device),
@@ -58,13 +58,13 @@ impl VulkanResidentInProcessPlacedModelPackage {
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
-        mount_speculative_decoders: bool,
+        speculative_draft_tokens: usize,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
             dynamic_state_capacity_activations,
-            mount_speculative_decoders,
+            speculative_draft_tokens,
             ResourceResidencyPolicy::Eager,
             None,
             |device_id| {
@@ -85,14 +85,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
-        mount_speculative_decoders: bool,
+        speculative_draft_tokens: usize,
         resource_residency_policy: ResourceResidencyPolicy,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
             dynamic_state_capacity_activations,
-            mount_speculative_decoders,
+            speculative_draft_tokens,
             resource_residency_policy,
             None,
             |device_id| {
@@ -113,7 +113,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
-        mount_speculative_decoders: bool,
+        speculative_draft_tokens: usize,
         resource_residency_policy: ResourceResidencyPolicy,
         parameter_pool: &VulkanResidentBufferPool,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
@@ -126,7 +126,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             manifest_dir,
             runtime_model,
             dynamic_state_capacity_activations,
-            mount_speculative_decoders,
+            speculative_draft_tokens,
             resource_residency_policy,
             Some(parameter_pool),
             |device_id| {
@@ -146,7 +146,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
         dynamic_state_capacity_activations: Option<usize>,
-        mount_speculative_decoders: bool,
+        speculative_draft_tokens: usize,
         resource_residency_policy: ResourceResidencyPolicy,
         parameter_pool: Option<&VulkanResidentBufferPool>,
         device_for: F,
@@ -155,6 +155,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
     {
         let manifest_dir = manifest_dir.as_ref();
+        let mount_speculative_decoders = speculative_draft_tokens > 0;
         let package_id = runtime_model.package.package_id.clone();
         let execution_scope = runtime_model.execution_scope.clone();
         if execution_scope.trim().is_empty() {
@@ -207,7 +208,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &runtime_model,
             &tensor_index,
             capacity,
-            mount_speculative_decoders,
+            speculative_draft_tokens,
             resource_residency_policy,
             &compiled_resource_contract,
         )
@@ -596,52 +597,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     ),
                 ));
             }
-            let mut components_by_scope = BTreeMap::<String, BTreeSet<String>>::new();
-            for selector in compiled_resource_contract
-                .selectors
-                .iter()
-                .filter(|selector| allowed_selector_ids.contains(&selector.id))
-            {
-                components_by_scope
-                    .entry(selector.execution_scope.clone())
-                    .or_default()
-                    .insert(selector.component_id.clone());
-            }
-            let parameter_slot_metadata_bytes =
-                components_by_scope
-                    .iter()
-                    .try_fold(0usize, |total, (scope, component_ids)| {
-                        compiled_resource_layout
-                            .parameter_slot_table_byte_count_for_components(scope, component_ids)
-                            .map_err(|error| {
-                                VulkanResidentInProcessPlacedRuntimeError::Package(
-                                    VulkanResidentTokenModelPackageError::new(error.to_string()),
-                                )
-                            })?
-                            .checked_add(total)
-                            .ok_or_else(|| {
-                                VulkanResidentInProcessPlacedRuntimeError::Package(
-                                    VulkanResidentTokenModelPackageError::new(
-                                        "physical resource metadata accounting overflowed",
-                                    ),
-                                )
-                            })
-                    })?;
-            let metadata_bytes = compiled_resource_layout
-                .address_table_byte_count()
-                .map_err(|error| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(error.to_string()),
-                    )
-                })?
-                .checked_add(parameter_slot_metadata_bytes)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(
-                            "physical resource metadata accounting overflowed",
-                        ),
-                    )
-                })?;
             let working_set_bytes = logical_device_ids.iter().try_fold(
                 0usize,
                 |total, device_id| {
@@ -671,9 +626,43 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         })
                 },
             )?;
+            let representative_device_id = device_slices[slice_indices[0]].device_id.clone();
+            let physical_device = device_for(&representative_device_id)?;
+            let physical_device_id = physical_device.physical_device_id().to_string();
+            let upload_alignment =
+                compiled_resource_upload_alignment(&compiled_resource_contract, physical_device)
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(error.to_string()),
+                        )
+                    })?;
+            let store_residency = plan_compiled_resource_store_residency(
+                &compiled_resource_contract,
+                &compiled_resource_layout,
+                &allowed_selector_ids,
+                physical_parameters.staging_headroom_bytes,
+                upload_alignment,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(error.to_string()),
+                )
+            })?;
+            let components_by_scope = compiled_resource_store_components_by_scope(
+                &compiled_resource_contract,
+                &allowed_selector_ids,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(error.to_string()),
+                )
+            })?;
             let pending_fixed_bytes = working_set_bytes
-                .checked_add(physical_parameters.staging_headroom_bytes)
-                .and_then(|bytes| bytes.checked_add(metadata_bytes))
+                .checked_add(store_residency.fixed_device_bytes().map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(error.to_string()),
+                    )
+                })?)
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(
@@ -681,9 +670,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         ),
                     )
                 })?;
-            let representative_device_id = device_slices[slice_indices[0]].device_id.clone();
-            let physical_device = device_for(&representative_device_id)?;
-            let physical_device_id = physical_device.physical_device_id().to_string();
             let admission = physical_device
                 .admit_device_local_memory(u64::try_from(pending_fixed_bytes).unwrap_or(u64::MAX))
                 .map_err(|error| {
@@ -695,13 +681,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })?;
             let safe_dynamic_bytes =
                 usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
-            let upload_alignment =
-                compiled_resource_upload_alignment(&compiled_resource_contract, physical_device)
-                    .map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(error.to_string()),
-                        )
-                    })?;
             let addressable_slot_count = compiled_resource_layout
                 .addressable_slot_count_for_selectors(&allowed_selector_ids)
                 .map_err(|error| {
@@ -827,7 +806,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     maximum_ranges_per_group,
                     physical_parameters.always_resident_bytes,
                     working_set_bytes,
-                    metadata_bytes,
+                    store_residency.metadata_device_bytes,
                 )
                 .map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(

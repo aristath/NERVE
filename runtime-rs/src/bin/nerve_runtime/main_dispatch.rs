@@ -66,6 +66,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         .with_skip_special_tokens(args.skip_special_tokens);
     if args.chat {
         let capacity = choose_chat_runtime_context_size(package_manifest, args.context_size)?;
+        let runtime_model = runtime_capacity_packed_model(
+            &args,
+            &manifest_dir,
+            runtime_model,
+            capacity,
+        )?;
         return run_placed_chat(
             &args,
             &manifest_dir,
@@ -92,6 +98,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         })?;
     let capacity =
         choose_runtime_context_size(package_manifest, args.context_size, prompt_ids.len())?;
+    let runtime_model = runtime_capacity_packed_model(
+        &args,
+        &manifest_dir,
+        runtime_model,
+        capacity,
+    )?;
     let context = PromptRunContext {
         args: &args,
         package_manifest,

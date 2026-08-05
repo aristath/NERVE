@@ -15,8 +15,13 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
         BTreeMap<String, Rc<RefCell<RuntimeExecutionQuantumCalibrator>>>,
     speculative_decoders: Vec<VulkanResidentSpeculativeDecoderProcessor>,
     verification_state_transactions: RefCell<Option<Vec<VulkanResidentStateTransactionBank>>>,
+    // One runner per state-snapshot mode. The runner is mounted at the
+    // pipeline's canonical lane capacity and executes narrower active widths
+    // through its runtime control buffers. Keying this cache by every observed
+    // prompt width would retain a second copy of all signal/state buffers for
+    // each remainder width encountered over a long conversation.
     temporal_block_executions:
-        RefCell<BTreeMap<(usize, bool), VulkanResidentPlacedTemporalBlockRunner>>,
+        RefCell<BTreeMap<bool, VulkanResidentPlacedTemporalBlockRunner>>,
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {

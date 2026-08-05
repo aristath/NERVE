@@ -63,6 +63,225 @@ fn runtime_model(
     Ok(model)
 }
 
+fn runtime_uses_explicit_placement(args: &Args) -> bool {
+    args.default_device_id.is_some()
+        || !args.node_devices.is_empty()
+        || !args.component_shard_devices.is_empty()
+        || !args.device_bindings.is_empty()
+        || args.vulkan_device_index.is_some()
+}
+
+fn runtime_auto_placement_device_is_eligible(device: &VulkanComputeDeviceInfo) -> bool {
+    device.device_type != "integrated_gpu"
+}
+
+fn rank_runtime_auto_placement_candidates(
+    mut measured: Vec<(bool, usize, VulkanRuntimePlacementCandidate)>,
+) -> Vec<VulkanRuntimePlacementCandidate> {
+    measured.sort_by_key(|(selected_by_default, index, candidate)| {
+        (
+            std::cmp::Reverse(candidate.safe_capacity_bytes),
+            !*selected_by_default,
+            *index,
+        )
+    });
+    measured
+        .into_iter()
+        .map(|(_, _, candidate)| candidate)
+        .collect()
+}
+
+fn runtime_capacity_packed_model(
+    args: &Args,
+    manifest_dir: &Path,
+    runtime_model: VulkanResidentRuntimeModel,
+    context_capacity_activations: usize,
+) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
+    if runtime_uses_explicit_placement(args) {
+        return Ok(runtime_model);
+    }
+    let catalog = runtime_vulkan_device_catalog(args)?;
+    let available_devices = catalog.available_compute_devices();
+    let profiles = catalog.available_hardware_profiles()?;
+    let default_physical_index = available_devices
+        .iter()
+        .find(|device| device.selected_by_default)
+        .or_else(|| available_devices.first())
+        .map(|device| device.physical_device_index);
+    let mut capability_groups = BTreeMap::<String, Vec<&VulkanComputeDeviceInfo>>::new();
+    for device in available_devices {
+        // Integrated display devices are not automatic inference targets. They
+        // commonly own scanout/compositor allocations and probing them would
+        // itself create a runtime context. A user can still target one through
+        // explicit placement controls when that trade-off is intentional.
+        if !runtime_auto_placement_device_is_eligible(device) {
+            continue;
+        }
+        let profile = profiles
+            .iter()
+            .find(|profile| {
+                profile.hardware_identity.stable_device_id == device.physical_device_id
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "physical device {:?} has no hardware-process profile",
+                        device.physical_device_id,
+                    ),
+                )
+            })?;
+        capability_groups
+            .entry(profile.capability_class.clone())
+            .or_default()
+            .push(device);
+    }
+    if capability_groups.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "automatic placement found no non-integrated Vulkan compute devices",
+        )
+        .into());
+    }
+    let mut groups = capability_groups.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.sort_by_key(|device| {
+            (
+                Some(device.physical_device_index) != default_physical_index,
+                device.physical_device_index,
+            )
+        });
+    }
+    groups.sort_by_key(|group| {
+        (
+            !group.iter().any(|device| {
+                Some(device.physical_device_index) == default_physical_index
+            }),
+            group
+                .first()
+                .map(|device| device.physical_device_index)
+                .unwrap_or(usize::MAX),
+        )
+    });
+
+    let mut failures = Vec::new();
+    for group in groups {
+        let mut measured_candidates = Vec::with_capacity(group.len());
+        let mut opened_devices = Vec::with_capacity(group.len());
+        for device_info in group {
+            let device = catalog.open_physical_device_index(device_info.physical_device_index)?;
+            let safe_capacity_bytes = usize::try_from(
+                device.device_local_memory_budget().reservable_bytes,
+            )
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Vulkan reservable device memory exceeds usize",
+                )
+            })?;
+            measured_candidates.push((
+                device_info.selected_by_default,
+                device_info.physical_device_index,
+                VulkanRuntimePlacementCandidate {
+                    device_id: device_info.physical_device_id.clone(),
+                    safe_capacity_bytes,
+                },
+            ));
+            opened_devices.push(device);
+        }
+        // Capacity is measured before ordering so a partially reserved default
+        // GPU cannot force an unnecessary spill when another compatible GPU
+        // can host the model alone. Equal capacities retain stable topology and
+        // catalog-default preference.
+        let candidates = rank_runtime_auto_placement_candidates(measured_candidates);
+        let first_candidate = candidates
+            .first()
+            .expect("nonempty capability group produced candidates");
+        let first_profile = profiles
+            .iter()
+            .find(|profile| {
+                profile.hardware_identity.stable_device_id == first_candidate.device_id
+            })
+            .expect("candidate hardware profile was validated above")
+            .clone();
+        let colocated = runtime_model
+            .clone()
+            .coalesce_placement_to_device(&first_candidate.device_id);
+        let selected_model = match colocated.select_and_apply_runtime_implementations(
+            manifest_dir,
+            &BTreeMap::from([(first_candidate.device_id.clone(), first_profile)]),
+            RuntimeExecutionEnvelope {
+                phases: vec!["decode".to_string(), "prefill".to_string()],
+                activation_batch: RuntimeInclusiveRange {
+                    minimum: 1,
+                    maximum: context_capacity_activations.max(1),
+                },
+                context_activations: RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: context_capacity_activations,
+                },
+                state_activations: RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: context_capacity_activations,
+                },
+                speculative_draft_tokens: args.speculative_draft_tokens,
+            },
+        ) {
+            Ok((selected, _)) => selected,
+            Err(error) => {
+                failures.push(format!(
+                    "{} compatible device(s) cannot select runtime representations: {error}",
+                    candidates.len(),
+                ));
+                drop(opened_devices);
+                continue;
+            }
+        };
+        let tensor_index = selected_model.load_runtime_tensor_index(manifest_dir)?;
+        match capacity_pack_vulkan_runtime_model(
+            manifest_dir,
+            &selected_model,
+            &tensor_index,
+            &candidates,
+            context_capacity_activations,
+            args.speculative_draft_tokens,
+            args.resource_residency_policy,
+        ) {
+            Ok(selected) => {
+                let retained_bytes = selected
+                    .residency_plan
+                    .device_plans
+                    .iter()
+                    .map(|plan| {
+                        vulkan_runtime_maximum_device_resident_bytes(plan)
+                            .map(|bytes| format!("{}={bytes}", plan.device_id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                eprintln!(
+                    "nerve runtime auto-placement: strategy=capacity_packed_minimum_devices, devices={:?}, maximum_retained_bytes={:?}",
+                    selected.selected_device_ids,
+                    retained_bytes,
+                );
+                drop(opened_devices);
+                return Ok(selected.runtime_model);
+            }
+            Err(error) => failures.push(format!(
+                "{} compatible device(s): {error}",
+                candidates.len(),
+            )),
+        }
+        drop(opened_devices);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        format!(
+            "no compatible capacity-packed device group can retain the runtime model: {}",
+            failures.join("; "),
+        ),
+    )
+    .into())
+}
+
 struct RuntimeBoundVulkanDevices {
     devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
     hardware_profiles: BTreeMap<String, HardwareProcessProfile>,

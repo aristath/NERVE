@@ -16,6 +16,8 @@ pub(crate) struct VulkanResidentInProcessPlacedPromptEngineStreamTransaction {
     depth: usize,
     scheduler_state: RuntimeStreamStateCheckpoint,
     resident_state: Option<VulkanResidentPlacedPrefixStateEntry>,
+    resident_page_checkpoint: VulkanResidentTransientStatePageTable,
+    page_cow: bool,
     history: VulkanResidentInProcessPlacedPromptEngineStreamHistory,
     session: VulkanResidentInProcessPlacedPromptSessionCheckpoint,
 }
@@ -70,6 +72,9 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         let state = self
             .runtime_scheduler
             .stream_transient_state_snapshot(stream_id)?;
+        let resident_page_checkpoint = stream.transient_state_pages.clone();
+        let page_cow = !history.committed_state_token_ids.is_empty()
+            && stream.can_checkpoint_transaction_with_page_cow(&state)?;
         let resident_state = if history.committed_state_token_ids.is_empty() {
             None
         } else {
@@ -81,10 +86,13 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 state.entries.iter().map(|entry| entry.key.clone()),
             )
             .map_err(RuntimeStreamSchedulerError::from)?;
-            Some(
+            Some(if page_cow {
                 self.resident_prefix_state_cache
-                    .prepare_capture(key, stream, &state)?,
-            )
+                    .prepare_transaction_capture(key, stream, &state)?
+            } else {
+                self.resident_prefix_state_cache
+                    .prepare_capture(key, stream, &state)?
+            })
         };
         let session = VulkanResidentInProcessPlacedPromptSessionCheckpoint {
             next_stream_tick: stream.session.next_stream_tick,
@@ -95,6 +103,12 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         let scheduler_state = self
             .runtime_scheduler
             .checkpoint_stream_state(stream_id)?;
+        if page_cow {
+            self.streams
+                .get_mut(stream_id)
+                .expect("transaction stream was validated")
+                .begin_transaction_page_cow()?;
+        }
         self.active_transaction_depths
             .insert(stream_id.to_string(), depth);
         Ok(
@@ -103,6 +117,8 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 depth,
                 scheduler_state,
                 resident_state,
+                resident_page_checkpoint,
+                page_cow,
                 history,
                 session,
             },
@@ -162,11 +178,21 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                     stream_id: stream_id.clone(),
                 }
             })?;
-            if let Some(resident_state) = &transaction.resident_state {
-                VulkanResidentPlacedPrefixStateCache::restore_entry(
-                    resident_state,
-                    stream,
-                )?;
+            if let Some(mut resident_state) = transaction.resident_state {
+                if transaction.page_cow {
+                    stream.restore_transaction_page_checkpoint(
+                        transaction.resident_page_checkpoint,
+                    )?;
+                    VulkanResidentPlacedPrefixStateCache::restore_transaction_entry(
+                        &mut resident_state,
+                        stream,
+                    )?;
+                } else {
+                    VulkanResidentPlacedPrefixStateCache::restore_entry(
+                        &resident_state,
+                        stream,
+                    )?;
+                }
             } else {
                 stream.restore_initial_transaction_state()?;
             }
@@ -179,6 +205,11 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 .insert(stream_id.clone(), transaction.history);
             Ok(())
         })();
+        if transaction.page_cow
+            && let Some(stream) = self.streams.get_mut(&stream_id)
+        {
+            stream.end_transaction_page_cow();
+        }
         self.close_stream_transaction_depth(&stream_id, depth);
         restore
     }
@@ -194,6 +225,27 @@ impl VulkanResidentInProcessPlacedPromptEngine {
             .runtime_scheduler
             .discard_stream_state_checkpoint(transaction.scheduler_state)
             .map_err(VulkanResidentInProcessPlacedPromptEngineError::from);
+        if transaction.page_cow
+            && let Some(stream) = self.streams.get_mut(&stream_id)
+        {
+            stream.end_transaction_page_cow();
+        }
+        let commit = commit.and_then(|_| {
+            if depth == 1 {
+                let state = self
+                    .runtime_scheduler
+                    .stream_transient_state_snapshot(&stream_id)?;
+                self.streams
+                    .get_mut(&stream_id)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                            stream_id: stream_id.clone(),
+                        }
+                    })?
+                    .release_transaction_page_checkpoint(&state);
+            }
+            Ok(())
+        });
         self.close_stream_transaction_depth(&stream_id, depth);
         commit
     }

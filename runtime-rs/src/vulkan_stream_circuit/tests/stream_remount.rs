@@ -19,7 +19,7 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
             manifest_dir,
             source_model,
             Some(4),
-            false,
+            0,
         )
         .unwrap(),
     );
@@ -57,7 +57,7 @@ fn placed_stream_remount_clones_live_component_state_without_sharing_it() {
             manifest_dir,
             clone_model,
             Some(4),
-            false,
+            0,
         )
         .unwrap(),
     );
