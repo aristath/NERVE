@@ -40,6 +40,9 @@ from nerve.representation_optimizer.providers.codebook import (
     ExactCodebookProofVerifier,
     ExactEmbeddedParameterProgramProofVerifier,
 )
+from nerve.representation_optimizer.providers.resident_expansion import (
+    ExactResidentExpansionProofVerifier,
+)
 from nerve.representation_optimizer.providers.source_artifacts import (
     PackageSourceArtifactResolver,
 )
@@ -809,6 +812,10 @@ def _build_target(
                     candidate_workspace_root=candidate_workspace,
                 ),
                 ExactEmbeddedParameterProgramProofVerifier(
+                    source_artifacts=source_artifacts,
+                    candidate_workspace_root=candidate_workspace,
+                ),
+                ExactResidentExpansionProofVerifier(
                     source_artifacts=source_artifacts,
                     candidate_workspace_root=candidate_workspace,
                 ),

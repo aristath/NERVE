@@ -24,6 +24,9 @@ from nerve.representation_optimizer.automation.runtime_target import (
     runtime_implementation_fingerprint,
 )
 from nerve.representation_optimizer.contracts import ContractDocument
+from nerve.representation_optimizer.providers.resident_expansion.contracts import (
+    PROOF_VERIFIER_ID as RESIDENT_EXPANSION_PROOF_VERIFIER_ID,
+)
 
 
 RUNTIME_IMPLEMENTATION_FINGERPRINT = runtime_implementation_fingerprint(
@@ -308,6 +311,10 @@ def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
     assert prepared.excluded_devices[0]["device_id"] == _device_id("0000:03:00.0")
     assert len(prepared.targets) == 1
     optimization_target = prepared.targets[0]
+    assert RESIDENT_EXPANSION_PROOF_VERIFIER_ID in {
+        verifier.verifier_id
+        for verifier in optimization_target.proof_verifiers._verifiers
+    }
     assert optimization_target.qualification_regime.speculative_draft_tokens == 2
     assert (
         optimization_target.matched_conditions["controls"]["speculative_draft_tokens"]

@@ -4,13 +4,18 @@ import pytest
 
 from nerve.compilation import ModelCompileError
 from nerve.quantized_transforms import (
+    MXFP4_E2M1_FP8_E4M3_BITS,
     MXFP4_E2M1_SINT8_CODES,
     e8m0_scale,
+    expand_mxfp4_e2m1_to_fp8_e4m3,
     expand_mxfp4_e2m1_to_sint8,
+    fp8_e4m3_value,
+    mxfp4_e2m1_fp8_e4m3_bits,
     mxfp4_e2m1_sint8_code,
     mxfp4_sint8_reconstruction_scale,
     mxfp4_value,
     reconstructed_mxfp4_value,
+    resident_mxfp4_value,
 )
 
 
@@ -25,8 +30,23 @@ def test_mxfp4_expands_low_nibble_first_to_signed_int8_codes() -> None:
 def test_sint8_reconstruction_is_exact_for_every_finite_mxfp4_value() -> None:
     for scale_byte in range(0xFF):
         for nibble in range(16):
-            assert reconstructed_mxfp4_value(
+            assert reconstructed_mxfp4_value(nibble, scale_byte) == mxfp4_value(
                 nibble, scale_byte
+            )
+
+
+def test_fp8_resident_expansion_is_exact_for_every_finite_mxfp4_value() -> None:
+    assert len(MXFP4_E2M1_FP8_E4M3_BITS) == 16
+    assert expand_mxfp4_e2m1_to_fp8_e4m3(bytes((0x10, 0xF8))) == bytes(
+        (0x00, 0x30, 0x80, 0xCC)
+    )
+    for nibble in range(16):
+        bits = mxfp4_e2m1_fp8_e4m3_bits(nibble)
+        assert fp8_e4m3_value(bits) == mxfp4_value(nibble, 127)
+        for scale_byte in range(0xFF):
+            assert resident_mxfp4_value(
+                nibble,
+                scale_byte,
             ) == mxfp4_value(nibble, scale_byte)
 
 

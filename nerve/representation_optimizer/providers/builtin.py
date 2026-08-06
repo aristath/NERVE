@@ -15,6 +15,10 @@ from nerve.representation_optimizer.providers.output_fp8 import (
     BlockScaledOutputProjectionProvider,
     BlockScaledOutputToolchainResolver,
 )
+from nerve.representation_optimizer.providers.resident_expansion import (
+    ExactResidentExpertExpansionProvider,
+    ResidentExpansionToolchainResolver,
+)
 from nerve.representation_optimizer.providers.registry import ProviderRegistry
 from nerve.representation_optimizer.providers.types import ProviderCandidatePlan
 
@@ -28,6 +32,7 @@ def load_builtin_provider_registry(
             ExactEmbeddedHeadNormParameterProgramProvider(),
             ExactHeadNormCodebookProvider(),
             BlockScaledOutputProjectionProvider(),
+            ExactResidentExpertExpansionProvider(),
         ),
     )
 
@@ -40,6 +45,7 @@ class BuiltinCandidateToolchainResolver:
             CodebookToolchainResolver(),
             EmbeddedParameterProgramToolchainResolver(),
             BlockScaledOutputToolchainResolver(),
+            ResidentExpansionToolchainResolver(),
         )
 
     def resolve(self, plan: ProviderCandidatePlan):

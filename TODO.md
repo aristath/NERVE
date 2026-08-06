@@ -27,10 +27,17 @@ toward 50 tok/s without regressing supported Qwen models.
    representation only through measured optimizer evidence that includes the
    whole routed working set, footprint, reload cost, and device headroom. The
    package/runtime contract can now materialize one explicitly selected MXFP4
-   to FP8 derivation without changing source artifacts. Complete the remaining
-   alternative-set contract, device-local measurement evidence, and runtime
-   choice so native and derived representations can coexist and be selected per
-   component on the component's actual target device.
+   to FP8 derivation without changing source artifacts. A generic optimizer
+   provider now discovers complete component-local sparse expert pairs from
+   semantic roles, tensor metadata, selector-addressable residency, and target
+   capabilities; constructs their exact resident FP8 shaders and overlay; and
+   independently proves exhaustive numeric equivalence plus complete source
+   weight/execution-path coverage. The real DeepSeek `layer_00` boundary passes
+   with 768 independently derived resources and four scalar/batch paths, but
+   capability still creates only a candidate and never promotes it. Complete
+   the remaining alternative-set contract, device-local measurement evidence,
+   and runtime choice so native and derived representations can coexist and be
+   selected per component on the component's actual target device.
 
 2. Extend the generic quality gate with a representative tool-call round trip
    and a long-stream continuity case. Use package-owned chat behavior, official
