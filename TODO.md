@@ -98,6 +98,24 @@ toward 50 tok/s without regressing supported Qwen models.
      draft generation, target projection, comparison, state selection, commit,
      and draft catch-up without a host wait until a true external residency miss
      or completed emitted block.
+     A fresh complete-conversation warmup followed by the canonical truth
+     conversation measured **8.1878 decode tok/s** and **8.4208 prefill tok/s**,
+     statistically flat against the accepted 8.0350/8.2372 run. The measured
+     1,485-token truth turn exposed the actual scalar path: demand-loaded token
+     execution deliberately bypasses deferred component batching and uses the
+     synchronous stream-tick executor, while demand-loaded packages are
+     categorically excluded from the resident feedback loop. That turn issued
+     27,000 resident-sequence submissions, waited on 28,919 sequence fences,
+     issued 8,260 copy submissions, and waited on 8,474 copies. Ordinary
+     component batches accounted for only 220.477 ms of device time and
+     404.528 ms of calibrated-quantum wall time within 191,078.849 ms of decode.
+     Build a demand-aware resident feedback transaction: record multiple causal
+     ticks with GPU residency gates, stop the graph at the first real miss,
+     materialize only the missing resource cohort, resume from that checkpoint,
+     and otherwise wait only at the emitted-window boundary. It must retain
+     bounded watchdog quanta and exact stop-token, sampler, state, and routed-
+     expert semantics. Do not disguise the synchronous scalar path behind a
+     larger host loop or revive the rejected suffix-retry batch.
    - Optimize the independently material MXFP4 expert path. Retain the source's
      packed 4-bit payload, amortize or fuse unpacking and activation conversion,
      and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8
