@@ -39,6 +39,17 @@ toward 50 tok/s without regressing supported Qwen models.
    and runtime choice so native and derived representations can coexist and be
    selected per component on the component's actual target device.
 
+   The fresh v7 run now qualifies that exact resident-FP8 alternative through
+   a complete matched hardware benchmark in less than the one-minute contract.
+   One pooled executor retains only sealed CPU-side runtime-model templates;
+   independent Vulkan sessions and dynamic resource stores remain trial-local.
+   All 20 observations and 24 residency events completed. Two scalar workloads
+   favored resident FP8, but three gate/up, down, or batch workloads crossed the
+   permitted regression floor, so the optimizer correctly retained native
+   compact MXFP4. This closes resident FP8 as an unmeasured possibility; add
+   INT4/INT8 and structured-sparse alternatives only as independently measured
+   candidates, never as capability-selected defaults.
+
 2. Extend the generic quality gate with a representative tool-call round trip
    and a long-stream continuity case. Use package-owned chat behavior, official
    thinking and sampling defaults, the 65,536-token output allowance, agentic
