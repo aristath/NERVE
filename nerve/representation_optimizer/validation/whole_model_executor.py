@@ -71,9 +71,7 @@ class _ProgressJournal:
         self.relative_path = relative_path
         self._payload = bytearray()
         self._reference: Json | None = None
-        self._partial = store.confined_path(
-            f"{relative_path}.partial-{uuid4().hex}"
-        )
+        self._partial = store.confined_path(f"{relative_path}.partial-{uuid4().hex}")
         self._partial.parent.mkdir(parents=True, exist_ok=True)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
@@ -87,9 +85,7 @@ class _ProgressJournal:
 
     def append(self, event: Json) -> None:
         if self._reference is not None or self._stream.closed:
-            raise ModelCompileError(
-                "validation progress journal is already finalized"
-            )
+            raise ModelCompileError("validation progress journal is already finalized")
         line = canonical_json_bytes(event) + b"\n"
         self._stream.write(line)
         self._stream.flush()
@@ -118,9 +114,7 @@ class _ProgressJournal:
 def _validation_residency_policy(matched_conditions: Json) -> str:
     environment = matched_conditions.get("environment", {})
     if not isinstance(environment, dict):
-        raise ModelCompileError(
-            "whole-model validation environment must be an object"
-        )
+        raise ModelCompileError("whole-model validation environment must be an object")
     admission = environment.get("residency_admission")
     if admission is None:
         return "eager"
@@ -134,11 +128,48 @@ def _validation_residency_policy(matched_conditions: Json) -> str:
             "whole-model validation residency admission requires a plan"
         )
     policy = plan.get("residency_policy")
-    if policy not in {"eager", "demand_retained"}:
+    if policy not in {"eager", "demand_paged", "demand_retained"}:
         raise ModelCompileError(
             "whole-model validation residency plan has an unsupported policy"
         )
     return policy
+
+
+def _conversation_set_policy(check: Json) -> Json:
+    execution_mode = check["controls"].get(
+        "execution_mode",
+        "conversation",
+    )
+    if execution_mode != "conversation":
+        return {
+            "minimum_sets": 0,
+            "maximum_sets": 0,
+            "repeat_second_set_if_residency_loaded": False,
+        }
+    if check["product_performance"]:
+        return {
+            "minimum_sets": 2,
+            "maximum_sets": 3,
+            "repeat_second_set_if_residency_loaded": True,
+        }
+    return {
+        "minimum_sets": 1,
+        "maximum_sets": 1,
+        "repeat_second_set_if_residency_loaded": False,
+    }
+
+
+def _turn_statistics(turn: Json) -> Json:
+    return {
+        "turn_index": turn["turn_index"],
+        "generated_tokens": len(turn["generated_token_ids"]),
+        "elapsed_ns": turn["elapsed_ns"],
+        "scheduler_steps": turn["scheduler_steps"],
+        "execution_counters": dict(turn["execution_counters"]),
+        "speculative": dict(turn["speculative"]),
+        "resident_feedback": dict(turn["resident_feedback"]),
+        "transport": dict(turn["transport"]),
+    }
 
 
 class ResidentWholeModelValidationBackend:
@@ -161,9 +192,7 @@ class ResidentWholeModelValidationBackend:
         self.candidate_workspace = candidate_workspace.resolve()
         self.trace_store = trace_store
         self.executor_command = executor_command
-        self.vulkan_driver_files = tuple(
-            path.resolve() for path in vulkan_driver_files
-        )
+        self.vulkan_driver_files = tuple(path.resolve() for path in vulkan_driver_files)
         self.executor_factory = executor_factory
         self.staged_candidate_loader = staged_candidate_loader
         self.run_nonce = run_nonce
@@ -208,18 +237,12 @@ class ResidentWholeModelValidationBackend:
             )
         check = request.check
         if check["regime"]["execution_scope"] != "whole_model":
-            raise ModelCompileError(
-                "whole-model validation received a component check"
-            )
-        turns, teacher_forced_assistant_turns = (
-            self._conversation_fixture(
+            raise ModelCompileError("whole-model validation received a component check")
+        turns, teacher_forced_assistant_turns = self._conversation_fixture(
             request.candidate_id,
             check["input"]["path"],
-            )
         )
-        physical_device_ids = _physical_device_ids(
-            request.matched_conditions
-        )
+        physical_device_ids = _physical_device_ids(request.matched_conditions)
         if self._stage_physical_device_ids is None:
             self._stage_physical_device_ids = physical_device_ids
         elif self._stage_physical_device_ids != physical_device_ids:
@@ -233,9 +256,7 @@ class ResidentWholeModelValidationBackend:
             physical_device_ids,
         )
         candidate_id, candidate_root = resolve_candidate_mount(
-            implementation_id=request.implementation[
-                "implementation_id"
-            ],
+            implementation_id=request.implementation["implementation_id"],
             workspace_root=self.candidate_workspace,
             package_dir=self.package_dir,
             loader=self.staged_candidate_loader,
@@ -263,9 +284,7 @@ class ResidentWholeModelValidationBackend:
             "command": "mount",
             "request_id": request_id("validation-mount", request.to_json()),
             "package_manifest": str(self.package_manifest),
-            "candidate_root": (
-                None if candidate_root is None else str(candidate_root)
-            ),
+            "candidate_root": (None if candidate_root is None else str(candidate_root)),
             "candidate_id": candidate_id,
             "physical_device_ids": list(physical_device_ids),
             "component_placement": placement,
@@ -278,21 +297,16 @@ class ResidentWholeModelValidationBackend:
                 else {"kind": "fixture_exact"}
             ),
             "validation_turns": list(turns),
-            "teacher_forced_assistant_turns": list(
-                teacher_forced_assistant_turns
-            ),
+            "teacher_forced_assistant_turns": list(teacher_forced_assistant_turns),
             "execution_mode": execution_mode,
+            "conversation_set_policy": _conversation_set_policy(check),
             "speculative_draft_tokens": speculative_draft_tokens,
             "random_seed": request.seed,
-            "sampler_config": dict(
-                check["controls"].get("sampler", {})
-            ),
+            "sampler_config": dict(check["controls"].get("sampler", {})),
             "residency_policy": _validation_residency_policy(
                 request.matched_conditions
             ),
-            "enable_thinking": (
-                check["controls"].get("enable_thinking") is True
-            ),
+            "enable_thinking": (check["controls"].get("enable_thinking") is True),
             "graph_operation": check["controls"].get(
                 "graph_operation",
                 "none",
@@ -333,18 +347,14 @@ class ResidentWholeModelValidationBackend:
                 time.monotonic_ns() - started,
             ),
             turns=turns,
-            teacher_forced_assistant_turns=(
-                teacher_forced_assistant_turns
-            ),
+            teacher_forced_assistant_turns=(teacher_forced_assistant_turns),
             physical_device_ids=physical_device_ids,
         )
 
     def role_released(self, transport: ExecutorTransport) -> None:
         if transport is not self._transport or not self._role_is_mounted:
             self._abort_stage_executor()
-            raise ModelCompileError(
-                "whole-model validation released an unowned role"
-            )
+            raise ModelCompileError("whole-model validation released an unowned role")
         self._role_is_mounted = False
 
     def role_failed(self, transport: ExecutorTransport) -> None:
@@ -468,8 +478,7 @@ class ResidentWholeModelValidationBackend:
             "state_mode": "exact_digest",
         }:
             raise ModelCompileError(
-                "whole-model validation received an unsupported comparison "
-                "contract"
+                "whole-model validation received an unsupported comparison contract"
             )
         return compare_exact_role_results(
             request.to_json(),
@@ -522,9 +531,7 @@ class ResidentWholeModelValidationBackend:
         for chunk in store.iter_file(relative_path):
             captured.extend(chunk)
             if len(captured) > 1_048_576:
-                raise ModelCompileError(
-                    "conversation validation fixture exceeds 1 MiB"
-                )
+                raise ModelCompileError("conversation validation fixture exceeds 1 MiB")
         try:
             document = json.loads(captured)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -533,8 +540,7 @@ class ResidentWholeModelValidationBackend:
             ) from error
         if (
             not isinstance(document, dict)
-            or document.get("schema")
-            != VALIDATION_CONVERSATION_SCHEMA
+            or document.get("schema") != VALIDATION_CONVERSATION_SCHEMA
             or not isinstance(document.get("turns"), list)
             or not document["turns"]
             or any(
@@ -545,18 +551,13 @@ class ResidentWholeModelValidationBackend:
                 document.get("teacher_forced_assistant_turns"),
                 list,
             )
-            or len(document["teacher_forced_assistant_turns"])
-            != len(document["turns"])
+            or len(document["teacher_forced_assistant_turns"]) != len(document["turns"])
             or any(
                 not isinstance(turn, str) or not turn.strip()
-                for turn in document[
-                    "teacher_forced_assistant_turns"
-                ]
+                for turn in document["teacher_forced_assistant_turns"]
             )
         ):
-            raise ModelCompileError(
-                "conversation validation fixture is invalid"
-            )
+            raise ModelCompileError("conversation validation fixture is invalid")
         if document.get("semantic_expectations") is not None:
             validate_semantic_expectations(
                 document,
@@ -576,16 +577,13 @@ class ResidentWholeModelValidationBackend:
         ]
         if len(matches) != 1:
             raise ModelCompileError(
-                f"whole-model validation result does not contain one "
-                f"{filename!r} trace"
+                f"whole-model validation result does not contain one {filename!r} trace"
             )
         captured = bytearray()
         for chunk in self.trace_store.iter_file(matches[0]):
             captured.extend(chunk)
             if len(captured) > 16 * 1024 * 1024:
-                raise ModelCompileError(
-                    "whole-model validation trace exceeds 16 MiB"
-                )
+                raise ModelCompileError("whole-model validation trace exceeds 16 MiB")
         try:
             document = json.loads(captured)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -593,9 +591,7 @@ class ResidentWholeModelValidationBackend:
                 "whole-model validation trace is not JSON"
             ) from error
         if not isinstance(document, dict):
-            raise ModelCompileError(
-                "whole-model validation trace is not an object"
-            )
+            raise ModelCompileError("whole-model validation trace is not an object")
         return document
 
 
@@ -618,18 +614,14 @@ class ResidentWholeModelValidationSession:
         self.mount_payload = mount_payload
         self.mount_duration_ns = mount_duration_ns
         self.turns = turns
-        self.teacher_forced_assistant_turns = (
-            teacher_forced_assistant_turns
-        )
+        self.teacher_forced_assistant_turns = teacher_forced_assistant_turns
         self.physical_device_ids = physical_device_ids
         self.session_nonce = uuid4().hex
         self.closed = False
         self._mount_event = self._event(
             action="mount",
             duration_ns=mount_duration_ns,
-            before=request.matched_conditions[
-                "capacity_reservation_digest"
-            ],
+            before=request.matched_conditions["capacity_reservation_digest"],
             after=mount_payload["mounted_state_digest"],
             released=False,
         )
@@ -643,13 +635,9 @@ class ResidentWholeModelValidationSession:
         request: ValidationRoleExecutionRequest,
     ) -> Json:
         if self.closed:
-            raise ModelCompileError(
-                "whole-model validation session is closed"
-            )
+            raise ModelCompileError("whole-model validation session is closed")
         _require_same_role_request(self.request, request)
-        max_output_tokens = request.check["horizon"][
-            "output_allowance"
-        ]
+        max_output_tokens = request.check["horizon"]["output_allowance"]
         execution_mode = request.check["controls"].get(
             "execution_mode",
             "conversation",
@@ -682,10 +670,9 @@ class ResidentWholeModelValidationSession:
                 request.to_json(),
             ),
             "turns": list(self.turns),
-            "teacher_forced_assistant_turns": list(
-                self.teacher_forced_assistant_turns
-            ),
+            "teacher_forced_assistant_turns": list(self.teacher_forced_assistant_turns),
             "execution_mode": execution_mode,
+            "conversation_set_policy": _conversation_set_policy(request.check),
             "step_unit": request.check["horizon"]["unit"],
             "max_output_tokens": max_output_tokens,
         }
@@ -730,13 +717,13 @@ class ResidentWholeModelValidationSession:
             report,
             expected_step_unit=request.check["horizon"]["unit"],
             expected_turns=self.turns,
+            expected_conversation_set_policy=_conversation_set_policy(
+                request.check
+            ),
         )
         horizon = request.check["horizon"]
         completion_condition = horizon["completion_condition"]
-        stop_reasons = [
-            str(turn["stop_reason"])
-            for turn in report["turns"]
-        ]
+        stop_reasons = [str(turn["stop_reason"]) for turn in report["turns"]]
         if completion_condition == "minimum_steps":
             horizon_completion = {
                 "condition": completion_condition,
@@ -762,13 +749,9 @@ class ResidentWholeModelValidationSession:
                 "completed_turns": len(report["turns"]),
                 "stop_reasons": stop_reasons,
             }
-        elif (
-            completion_condition
-            == "semantic_stop_or_allowance_per_turn"
-        ):
+        elif completion_condition == "semantic_stop_or_allowance_per_turn":
             if any(
-                reason not in {"eos", "output_allowance"}
-                for reason in stop_reasons
+                reason not in {"eos", "output_allowance"} for reason in stop_reasons
             ):
                 raise ModelCompileError(
                     "free-running validation did not reach an ordinary "
@@ -798,27 +781,23 @@ class ResidentWholeModelValidationSession:
                 "steps": report["steps"],
                 "step_unit": report["step_unit"],
                 "scheduler_steps": report["scheduler_steps"],
-                "execution_counters": report[
-                    "execution_counters"
-                ],
+                "execution_counters": report["execution_counters"],
                 "turn_statistics": [
+                    _turn_statistics(turn) for turn in report["turns"]
+                ],
+                "conversation_sets": [
                     {
-                        "turn_index": turn["turn_index"],
-                        "generated_tokens": len(
-                            turn["generated_token_ids"]
+                        "set_index": conversation_set["set_index"],
+                        "disposition": conversation_set["disposition"],
+                        "residency_activity": dict(
+                            conversation_set["residency_activity"]
                         ),
-                        "elapsed_ns": turn["elapsed_ns"],
-                        "scheduler_steps": turn["scheduler_steps"],
-                        "execution_counters": dict(
-                            turn["execution_counters"]
-                        ),
-                        "speculative": dict(turn["speculative"]),
-                        "resident_feedback": dict(
-                            turn["resident_feedback"]
-                        ),
-                        "transport": dict(turn["transport"]),
+                        "turn_statistics": [
+                            _turn_statistics(turn)
+                            for turn in conversation_set["turns"]
+                        ],
                     }
-                    for turn in report["turns"]
+                    for conversation_set in report["conversation_sets"]
                 ],
             },
         }
@@ -829,9 +808,7 @@ class ResidentWholeModelValidationSession:
                         f"{prefix}/{name}.json",
                         canonical_json_bytes(payload) + b"\n",
                     )
-                    for name, payload in sorted(
-                        trace_payloads.items()
-                    )
+                    for name, payload in sorted(trace_payloads.items())
                 ),
                 progress_ref,
             ],
@@ -845,9 +822,7 @@ class ResidentWholeModelValidationSession:
             "stage": request.check["stage"],
             "seed": request.seed,
             "role": request.role,
-            "implementation_id": request.implementation[
-                "implementation_id"
-            ],
+            "implementation_id": request.implementation["implementation_id"],
             "status": "completed",
             "output_digest": report["output_digest"],
             "state_digest": report["state_digest"],
@@ -865,12 +840,8 @@ class ResidentWholeModelValidationSession:
                     + 2
                 ),
                 "scheduler_steps": report["scheduler_steps"],
-                "execution_counters": report[
-                    "execution_counters"
-                ],
-                "turn_statistics": trace_payloads["schedule"][
-                    "turn_statistics"
-                ],
+                "execution_counters": report["execution_counters"],
+                "turn_statistics": trace_payloads["schedule"]["turn_statistics"],
             },
             "diagnostics": [],
         }
@@ -879,9 +850,7 @@ class ResidentWholeModelValidationSession:
 
     def close(self) -> Json:
         if self.closed:
-            raise ModelCompileError(
-                "whole-model validation session closed twice"
-            )
+            raise ModelCompileError("whole-model validation session closed twice")
         self.closed = True
         command = {
             "schema": VALIDATION_EXECUTOR_COMMAND_SCHEMA,
@@ -907,9 +876,7 @@ class ResidentWholeModelValidationSession:
             payload = response["payload"]
             validate_validation_release_payload(
                 payload,
-                mounted_state_digest=self.mount_payload[
-                    "mounted_state_digest"
-                ],
+                mounted_state_digest=self.mount_payload["mounted_state_digest"],
                 physical_device_ids=self.physical_device_ids,
             )
             self.backend.role_released(self.transport)
@@ -920,9 +887,7 @@ class ResidentWholeModelValidationSession:
             action="unmount",
             duration_ns=max(1, time.monotonic_ns() - started),
             before=self.mount_payload["mounted_state_digest"],
-            after=self.request.matched_conditions[
-                "capacity_reservation_digest"
-            ],
+            after=self.request.matched_conditions["capacity_reservation_digest"],
             released=True,
         )
 
@@ -943,9 +908,7 @@ class ResidentWholeModelValidationSession:
             "check_id": self.request.check["check_id"],
             "seed": self.request.seed,
             "role": self.request.role,
-            "implementation_id": self.request.implementation[
-                "implementation_id"
-            ],
+            "implementation_id": self.request.implementation["implementation_id"],
             "block_index": self.request.block_index,
             "action": action,
             "duration_ns": duration_ns,
@@ -954,17 +917,11 @@ class ResidentWholeModelValidationSession:
             "released": released,
             "default_statistics": {
                 "execution_path": "resident_whole_model_chat",
-                "physical_device_ids": list(
-                    self.physical_device_ids
-                ),
-                "context_capacity": self.mount_payload[
-                    "context_capacity"
-                ],
+                "physical_device_ids": list(self.physical_device_ids),
+                "context_capacity": self.mount_payload["context_capacity"],
             },
         }
-        document["event_id"] = validation_residency_event_id(
-            document
-        )
+        document["event_id"] = validation_residency_event_id(document)
         return ValidationResidencyEvent.from_json(document).to_json()
 
 
@@ -975,8 +932,7 @@ def _require_same_role_request(
     if (
         execution.plan_id != mount.plan_id
         or execution.candidate_id != mount.candidate_id
-        or execution.check["check_id"]
-        != mount.check["check_id"]
+        or execution.check["check_id"] != mount.check["check_id"]
         or execution.role != mount.role
         or execution.implementation["implementation_id"]
         != mount.implementation["implementation_id"]
@@ -993,9 +949,7 @@ def _physical_device_ids(
 ) -> tuple[str, ...]:
     devices = matched_conditions.get("devices")
     if not isinstance(devices, list) or not devices:
-        raise ModelCompileError(
-            "whole-model validation requires declared devices"
-        )
+        raise ModelCompileError("whole-model validation requires declared devices")
     ids = tuple(
         str(device.get("device_id", ""))
         for device in devices
@@ -1003,10 +957,7 @@ def _physical_device_ids(
     )
     if (
         len(ids) != len(devices)
-        or any(
-            not value.startswith("vulkan-uuid:")
-            for value in ids
-        )
+        or any(not value.startswith("vulkan-uuid:") for value in ids)
         or len(set(ids)) != len(ids)
     ):
         raise ModelCompileError(
@@ -1022,29 +973,19 @@ def _role_placement(
 ) -> dict[str, str]:
     placement = matched_conditions.get("placement")
     if not isinstance(placement, dict):
-        raise ModelCompileError(
-            "whole-model validation requires explicit placement"
-        )
+        raise ModelCompileError("whole-model validation requires explicit placement")
     resolved = {
         str(component_id): str(device_id)
         for component_id, device_id in placement.items()
     }
     if any(
-        not component_id
-        or device_id not in physical_device_ids
+        not component_id or device_id not in physical_device_ids
         for component_id, device_id in resolved.items()
     ):
-        raise ModelCompileError(
-            "whole-model validation placement is invalid"
-        )
-    if (
-        check["kind"] == "placement"
-        and len(physical_device_ids) > 1
-    ):
+        raise ModelCompileError("whole-model validation placement is invalid")
+    if check["kind"] == "placement" and len(physical_device_ids) > 1:
         successor = {
-            device_id: physical_device_ids[
-                (index + 1) % len(physical_device_ids)
-            ]
+            device_id: physical_device_ids[(index + 1) % len(physical_device_ids)]
             for index, device_id in enumerate(physical_device_ids)
         }
         resolved = {

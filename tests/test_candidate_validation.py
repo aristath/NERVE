@@ -56,6 +56,9 @@ from nerve.representation_optimizer.validation.orchestrator import (
     prepare_candidate_for_benchmark,
     validate_benchmarked_candidate,
 )
+from nerve.representation_optimizer.validation.product_performance import (
+    _role_measurement,
+)
 from nerve.representation_optimizer.validation.planning import (
     build_validation_plan,
     create_behavioral_error_contract,
@@ -231,6 +234,7 @@ class ValidationBehavior:
     fail_execution_stage: str | None = None
     leak_residency: bool = False
     candidate_warmup_elapsed_ns: int = 100
+    candidate_second_conversation_load_bytes: int = 0
     candidate_measured_elapsed_ns: int = 90
     candidate_measured_generated_tokens: int = 8
     candidate_bounded_wait_timeout_count: int = 0
@@ -481,44 +485,10 @@ class FixtureValidationRoleSession:
                     "resident_copy_waits": 0,
                     "resident_sequence_fence_waits": 0,
                 },
-                "turn_statistics": [
-                    _fixture_turn_statistics(
-                        turn_index=0,
-                        elapsed_ns=(
-                            100
-                            if request.role == "reference"
-                            else behavior.candidate_warmup_elapsed_ns
-                        ),
-                    ),
-                    _fixture_turn_statistics(
-                        turn_index=1,
-                        elapsed_ns=(
-                            100
-                            if request.role == "reference"
-                            else behavior.candidate_measured_elapsed_ns
-                        ),
-                        bounded_wait_timeout_count=(
-                            0
-                            if request.role == "reference"
-                            else behavior.candidate_bounded_wait_timeout_count
-                        ),
-                        generated_tokens=(
-                            8
-                            if request.role == "reference"
-                            else behavior.candidate_measured_generated_tokens
-                        ),
-                        speculative_proposed=(
-                            behavior.reference_speculative_proposed
-                            if request.role == "reference"
-                            else behavior.candidate_speculative_proposed
-                        ),
-                        speculative_accepted=(
-                            behavior.reference_speculative_accepted
-                            if request.role == "reference"
-                            else behavior.candidate_speculative_accepted
-                        ),
-                    ),
-                ],
+                "conversation_sets": _fixture_conversation_sets(
+                    role=request.role,
+                    behavior=behavior,
+                ),
             },
             "diagnostics": [],
         }
@@ -612,6 +582,112 @@ def _fixture_turn_statistics(
             "direct_copy_byte_count": 0,
         },
     }
+
+
+def _fixture_conversation_sets(
+    *,
+    role: str,
+    behavior: ValidationBehavior,
+) -> list[dict]:
+    warmup_elapsed = (
+        100
+        if role == "reference"
+        else behavior.candidate_warmup_elapsed_ns
+    )
+    measured_elapsed = (
+        100
+        if role == "reference"
+        else behavior.candidate_measured_elapsed_ns
+    )
+    generated_tokens = (
+        8
+        if role == "reference"
+        else behavior.candidate_measured_generated_tokens
+    )
+    second_load_bytes = (
+        0
+        if role == "reference"
+        else behavior.candidate_second_conversation_load_bytes
+    )
+    set_count = 3 if second_load_bytes else 2
+    conversation_sets = []
+    for set_index in range(set_count):
+        measured = set_index == set_count - 1
+        conversation_sets.append(
+            {
+                "set_index": set_index,
+                "disposition": (
+                    "measured" if measured else "discarded_warmup"
+                ),
+                "residency_activity": {
+                    "load_required_count": int(
+                        set_index == 1 and second_load_bytes > 0
+                    ),
+                    "physical_bytes_read": (
+                        second_load_bytes if set_index == 1 else 0
+                    ),
+                    "uploaded_bytes": (
+                        second_load_bytes if set_index == 1 else 0
+                    ),
+                    "reload_count": 0,
+                },
+                "turn_statistics": [
+                    _fixture_turn_statistics(
+                        turn_index=turn_index,
+                        elapsed_ns=(
+                            measured_elapsed if measured else warmup_elapsed
+                        ),
+                        bounded_wait_timeout_count=(
+                            behavior.candidate_bounded_wait_timeout_count
+                            if measured and role == "candidate"
+                            else 0
+                        ),
+                        generated_tokens=(
+                            generated_tokens if measured else 8
+                        ),
+                        speculative_proposed=(
+                            (
+                                behavior.reference_speculative_proposed
+                                if role == "reference"
+                                else behavior.candidate_speculative_proposed
+                            )
+                            if measured
+                            else 0
+                        ),
+                        speculative_accepted=(
+                            (
+                                behavior.reference_speculative_accepted
+                                if role == "reference"
+                                else behavior.candidate_speculative_accepted
+                            )
+                            if measured
+                            else 0
+                        ),
+                    )
+                    for turn_index in range(2)
+                ],
+            }
+        )
+    return conversation_sets
+
+
+def test_product_measurement_fails_closed_when_a_loading_second_conversation_is_measured() -> None:
+    conversation_sets = _fixture_conversation_sets(
+        role="candidate",
+        behavior=ValidationBehavior(
+            candidate_second_conversation_load_bytes=4_194_304,
+        ),
+    )[:2]
+    conversation_sets[-1]["disposition"] = "measured"
+
+    with pytest.raises(
+        ModelCompileError,
+        match="still loading residency",
+    ):
+        _role_measurement(
+            {"conversation_sets": conversation_sets},
+            role="candidate",
+        )
 
 
 def _staged_fixture(tmp_path: Path, *, approximate: bool = False):
@@ -1003,7 +1079,7 @@ def test_locally_faster_candidate_is_rejected_when_warmed_product_run_regresses(
     )
     assert stage["status"] == "failed"
     assert reason in stage["reason"]
-    assert stage["metrics"]["warmup_turns_discarded"] >= 1
+    assert stage["metrics"]["warmup_conversation_pairs_discarded"] >= 1
     assert record["status"] == "failed"
     lifecycle = next(
         candidate
@@ -1100,9 +1176,52 @@ def test_product_performance_discards_the_first_conversation_as_warmup(
         if stage["name"] == "whole_model_product_performance"
     )
     assert stage["status"] == "passed"
-    assert stage["metrics"]["reference_measured_elapsed_ns"] == 200
-    assert stage["metrics"]["candidate_measured_elapsed_ns"] == 180
-    assert stage["metrics"]["warmup_turns_discarded"] == 2
+    assert stage["metrics"]["reference_measured_elapsed_ns"] == 400
+    assert stage["metrics"]["candidate_measured_elapsed_ns"] == 360
+    assert stage["metrics"]["warmup_conversation_pairs_discarded"] == 2
+
+
+def test_product_performance_discards_a_loading_second_conversation_and_measures_the_third(
+    tmp_path: Path,
+) -> None:
+    fixture = _staged_fixture(tmp_path)
+    adapter = FixtureValidationAdapter(
+        ValidationBehavior(
+            candidate_second_conversation_load_bytes=4_194_304,
+            candidate_measured_elapsed_ns=90,
+        )
+    )
+    pre, adapter, _ = _prevalidate(
+        tmp_path,
+        fixture,
+        adapter=adapter,
+    )
+    benchmark = benchmark_candidate(
+        plan=fixture[4],
+        construction_record=fixture[3].record,
+        session=pre.session,
+        adapter=FixtureExecutionAdapter(),
+        workspace_root=tmp_path / "benchmark-workspace",
+    )
+
+    final = validate_benchmarked_candidate(
+        plan=fixture[5],
+        prebenchmark_record=pre.record,
+        benchmark_record=benchmark.record,
+        session=benchmark.session,
+        adapter=adapter,
+        workspace_root=tmp_path / "validation-workspace",
+    )
+
+    assert final.status == "passed"
+    stage = next(
+        stage
+        for stage in final.record.to_json()["stages"]
+        if stage["name"] == "whole_model_product_performance"
+    )
+    assert stage["status"] == "passed"
+    assert stage["metrics"]["candidate_warmup_conversations_discarded"] == 4
+    assert stage["metrics"]["candidate_measured_elapsed_ns"] == 360
 
 
 def test_product_performance_normalizes_different_generated_work(
@@ -1144,8 +1263,8 @@ def test_product_performance_normalizes_different_generated_work(
         if stage["name"] == "whole_model_product_performance"
     )
     assert stage["status"] == "passed"
-    assert stage["metrics"]["reference_generated_tokens"] == 16
-    assert stage["metrics"]["candidate_generated_tokens"] == 14
+    assert stage["metrics"]["reference_generated_tokens"] == 32
+    assert stage["metrics"]["candidate_generated_tokens"] == 28
     assert stage["metrics"]["host_speedup_ppm"] > 0
 
 

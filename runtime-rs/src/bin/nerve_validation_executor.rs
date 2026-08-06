@@ -9,8 +9,9 @@ use std::time::Instant;
 use nerve_runtime::{
     ResourceResidencyPolicy, RuntimeAssistantStreamProtocolAction,
     RuntimeChatGeneratedOutputControl, RuntimeChatSession, RuntimeStagedCandidate,
-    VulkanComputeDevice, VulkanComputeDeviceCatalog, VulkanPlacedPromptEngineShutdownReport,
-    VulkanResidentBufferPool, VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
+    VulkanCompiledResourceResidencyTotalsReport, VulkanComputeDevice, VulkanComputeDeviceCatalog,
+    VulkanPlacedPromptEngineShutdownReport, VulkanResidentBufferPool,
+    VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
     VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageManifest,
     VulkanResidentOutputControl, VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig,
@@ -18,12 +19,12 @@ use nerve_runtime::{
     chat_transcript_codec, execute_vulkan_resident_chat_transaction,
     reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v7";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v6";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v8";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v7";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
@@ -44,6 +45,7 @@ enum ExecutorCommand {
         validation_turns: Vec<String>,
         teacher_forced_assistant_turns: Vec<String>,
         execution_mode: String,
+        conversation_set_policy: ConversationSetPolicy,
         speculative_draft_tokens: usize,
         random_seed: u32,
         sampler_config: VulkanResidentSamplerRuntimeConfig,
@@ -58,6 +60,7 @@ enum ExecutorCommand {
         turns: Vec<String>,
         teacher_forced_assistant_turns: Vec<String>,
         execution_mode: String,
+        conversation_set_policy: ConversationSetPolicy,
         step_unit: String,
         max_output_tokens: Option<usize>,
     },
@@ -78,6 +81,98 @@ enum ValidationContextCapacity {
     FixtureExact,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ConversationSetPolicy {
+    minimum_sets: usize,
+    maximum_sets: usize,
+    repeat_second_set_if_residency_loaded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+struct ConversationResidencyActivity {
+    load_required_count: u64,
+    physical_bytes_read: u64,
+    reload_count: u64,
+    uploaded_bytes: u64,
+}
+
+impl ConversationResidencyActivity {
+    fn between(
+        before: &VulkanCompiledResourceResidencyTotalsReport,
+        after: &VulkanCompiledResourceResidencyTotalsReport,
+    ) -> Result<Self, io::Error> {
+        fn delta(after: u64, before: u64, label: &str) -> Result<u64, io::Error> {
+            after.checked_sub(before).ok_or_else(|| {
+                invalid_input(format!("conversation residency counter {label} decreased"))
+            })
+        }
+        Ok(Self {
+            load_required_count: delta(
+                after.residency_load_required_count,
+                before.residency_load_required_count,
+                "load_required_count",
+            )?,
+            physical_bytes_read: delta(
+                after.physical_bytes_read,
+                before.physical_bytes_read,
+                "physical_bytes_read",
+            )?,
+            reload_count: delta(after.reload_count, before.reload_count, "reload_count")?,
+            uploaded_bytes: delta(
+                after.uploaded_bytes,
+                before.uploaded_bytes,
+                "uploaded_bytes",
+            )?,
+        })
+    }
+
+    fn loaded_residency(self) -> bool {
+        self.load_required_count > 0
+            || self.physical_bytes_read > 0
+            || self.reload_count > 0
+            || self.uploaded_bytes > 0
+    }
+}
+
+fn should_run_another_conversation_set(
+    policy: &ConversationSetPolicy,
+    completed_sets: usize,
+    activity: ConversationResidencyActivity,
+) -> bool {
+    completed_sets < policy.maximum_sets
+        && (completed_sets < policy.minimum_sets
+            || (policy.repeat_second_set_if_residency_loaded
+                && completed_sets == 2
+                && activity.loaded_residency()))
+}
+
+fn validate_conversation_set_policy(
+    policy: &ConversationSetPolicy,
+    execution_mode: &str,
+) -> Result<(), io::Error> {
+    let valid = match execution_mode {
+        "conversation" => {
+            policy.minimum_sets > 0
+                && policy.minimum_sets <= policy.maximum_sets
+                && policy.maximum_sets <= 3
+                && (!policy.repeat_second_set_if_residency_loaded
+                    || (policy.minimum_sets == 2 && policy.maximum_sets == 3))
+        }
+        _ => {
+            policy.minimum_sets == 0
+                && policy.maximum_sets == 0
+                && !policy.repeat_second_set_if_residency_loaded
+        }
+    };
+    if !valid {
+        return Err(invalid_input(format!(
+            "invalid conversation set policy for execution mode {execution_mode:?}"
+        )));
+    }
+    Ok(())
+}
+
 struct MountedValidation {
     package_key: ValidationPackageKey,
     package_id: String,
@@ -92,6 +187,7 @@ struct MountedValidation {
     random_seed: u32,
     validation_fixture_digest: String,
     execution_mode: String,
+    conversation_set_policy: ConversationSetPolicy,
     executed: bool,
 }
 
@@ -183,6 +279,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 turns,
                 teacher_forced_assistant_turns,
                 execution_mode,
+                conversation_set_policy,
                 step_unit,
                 max_output_tokens,
             } => {
@@ -195,6 +292,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     turns,
                     teacher_forced_assistant_turns,
                     &execution_mode,
+                    &conversation_set_policy,
                     &step_unit,
                     max_output_tokens,
                     &mut |payload| {
@@ -404,6 +502,7 @@ fn mount(
         validation_turns,
         teacher_forced_assistant_turns,
         execution_mode,
+        conversation_set_policy,
         speculative_draft_tokens,
         random_seed,
         sampler_config,
@@ -448,10 +547,12 @@ fn mount(
         &teacher_forced_assistant_turns,
         &execution_mode,
     )?;
+    validate_conversation_set_policy(&conversation_set_policy, &execution_mode)?;
     let validation_fixture_digest = execution_fixture_digest(
         &validation_turns,
         &teacher_forced_assistant_turns,
         &execution_mode,
+        &conversation_set_policy,
     );
     let (bound_devices, physical_to_logical) = bound_amd_devices(devices, &physical_device_ids)?;
     let default_logical_device = physical_to_logical
@@ -524,6 +625,7 @@ fn mount(
         role.random_seed = random_seed;
         role.validation_fixture_digest = validation_fixture_digest;
         role.execution_mode = execution_mode;
+        role.conversation_set_policy = conversation_set_policy;
         role.executed = false;
         return Ok((request_id, role, true));
     }
@@ -585,6 +687,7 @@ fn mount(
             random_seed,
             validation_fixture_digest,
             execution_mode,
+            conversation_set_policy,
             executed: false,
         },
         false,
@@ -777,12 +880,14 @@ fn execution_fixture_digest(
     turns: &[String],
     assistant_turns: &[String],
     execution_mode: &str,
+    conversation_set_policy: &ConversationSetPolicy,
 ) -> String {
     artifact_digest(
         &serde_json::to_vec(&json!({
             "turns": turns,
             "teacher_forced_assistant_turns": assistant_turns,
             "execution_mode": execution_mode,
+            "conversation_set_policy": conversation_set_policy,
         }))
         .expect("validation fixture is serializable"),
     )
@@ -800,6 +905,7 @@ impl MountedValidation {
         turns: Vec<String>,
         teacher_forced_assistant_turns: Vec<String>,
         execution_mode: &str,
+        conversation_set_policy: &ConversationSetPolicy,
         step_unit: &str,
         max_output_tokens: Option<usize>,
         on_progress: &mut F,
@@ -819,18 +925,24 @@ impl MountedValidation {
             );
         }
         if execution_mode != self.execution_mode
-            || execution_fixture_digest(&turns, &teacher_forced_assistant_turns, execution_mode)
-                != self.validation_fixture_digest
+            || conversation_set_policy != &self.conversation_set_policy
+            || execution_fixture_digest(
+                &turns,
+                &teacher_forced_assistant_turns,
+                execution_mode,
+                conversation_set_policy,
+            ) != self.validation_fixture_digest
         {
             return Err(invalid_input(
                 "validation execute request differs from the fixture bound at mount",
             )
             .into());
         }
-        match execution_mode {
-            "conversation" => self.execute_conversation(
+        let mut report = match execution_mode {
+            "conversation" => self.execute_conversation_sets(
                 turns,
                 positive_output_allowance(max_output_tokens)?,
+                conversation_set_policy,
                 on_progress,
             ),
             "teacher_forced" => {
@@ -845,10 +957,92 @@ impl MountedValidation {
                 "unsupported validation execution_mode {execution_mode:?}"
             ))
             .into()),
+        }?;
+        if execution_mode != "conversation" {
+            report["conversation_sets"] = json!([]);
         }
+        Ok(report)
     }
 
-    fn execute_conversation<F>(
+    fn conversation_residency_totals(
+        &self,
+    ) -> Result<VulkanCompiledResourceResidencyTotalsReport, Box<dyn Error>> {
+        let stream = self
+            .engine
+            .stream(STREAM_ID)
+            .ok_or_else(|| invalid_input("validation engine lost its mounted stream"))?;
+        let coverage = stream.selection_telemetry_snapshot()?.report();
+        Ok(stream
+            .package()
+            .compiled_resource_residency_report(&coverage)?
+            .totals)
+    }
+
+    fn execute_conversation_sets<F>(
+        &mut self,
+        turns: Vec<String>,
+        max_output_tokens: usize,
+        policy: &ConversationSetPolicy,
+        on_progress: &mut F,
+    ) -> Result<Value, Box<dyn Error>>
+    where
+        F: FnMut(Value) -> Result<(), Box<dyn Error>>,
+    {
+        validate_conversation_set_policy(policy, "conversation")?;
+        let initial_chat = self.chat.clone();
+        let mut conversation_sets = Vec::with_capacity(policy.maximum_sets);
+        let mut measured_report = None;
+        for set_index in 0..policy.maximum_sets {
+            let before = self.conversation_residency_totals()?;
+            let mut set_progress = |mut payload: Value| {
+                let object = payload
+                    .as_object_mut()
+                    .ok_or_else(|| invalid_input("validation progress payload is not an object"))?;
+                object.insert("conversation_set_index".to_string(), json!(set_index));
+                on_progress(payload)
+            };
+            let report =
+                self.execute_one_conversation(turns.clone(), max_output_tokens, &mut set_progress)?;
+            let after = self.conversation_residency_totals()?;
+            let activity = ConversationResidencyActivity::between(&before, &after)?;
+            conversation_sets.push(json!({
+                "set_index": set_index,
+                "disposition": "pending",
+                "residency_activity": activity,
+                "turns": report["turns"].clone(),
+            }));
+            let completed_sets = set_index + 1;
+            if !should_run_another_conversation_set(policy, completed_sets, activity) {
+                measured_report = Some(report);
+                break;
+            }
+            self.engine
+                .reset_stream_for_new_session(STREAM_ID, self.random_seed)?;
+            self.chat = initial_chat.clone();
+            let reset_state_digest = self.engine.stream_resident_state_digest(STREAM_ID)?;
+            if reset_state_digest != self.mounted_state_digest {
+                return Err(invalid_input(
+                    "warmup conversation reset did not restore the exact initial stream state",
+                )
+                .into());
+            }
+        }
+        let mut measured_report = measured_report.ok_or_else(|| {
+            invalid_input("conversation set policy produced no measured conversation")
+        })?;
+        let measured_index = conversation_sets.len().saturating_sub(1);
+        for (set_index, conversation_set) in conversation_sets.iter_mut().enumerate() {
+            conversation_set["disposition"] = json!(if set_index == measured_index {
+                "measured"
+            } else {
+                "discarded_warmup"
+            });
+        }
+        measured_report["conversation_sets"] = Value::Array(conversation_sets);
+        Ok(measured_report)
+    }
+
+    fn execute_one_conversation<F>(
         &mut self,
         turns: Vec<String>,
         max_output_tokens: usize,
@@ -1878,6 +2072,58 @@ mod tests {
         );
         let error = read_command(&mut input.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn product_conversation_sets_discard_loading_residency_before_measurement() {
+        let policy = ConversationSetPolicy {
+            minimum_sets: 2,
+            maximum_sets: 3,
+            repeat_second_set_if_residency_loaded: true,
+        };
+        let quiet = ConversationResidencyActivity {
+            load_required_count: 0,
+            physical_bytes_read: 0,
+            reload_count: 0,
+            uploaded_bytes: 0,
+        };
+        let loading = ConversationResidencyActivity {
+            load_required_count: 1,
+            physical_bytes_read: 4_194_304,
+            reload_count: 0,
+            uploaded_bytes: 4_194_304,
+        };
+
+        assert!(should_run_another_conversation_set(&policy, 1, quiet));
+        assert!(!should_run_another_conversation_set(&policy, 2, quiet));
+        assert!(should_run_another_conversation_set(&policy, 2, loading));
+        assert!(!should_run_another_conversation_set(&policy, 3, loading));
+    }
+
+    #[test]
+    fn conversation_set_policy_rejects_unbounded_or_nonconversation_warmups() {
+        assert!(
+            validate_conversation_set_policy(
+                &ConversationSetPolicy {
+                    minimum_sets: 2,
+                    maximum_sets: 4,
+                    repeat_second_set_if_residency_loaded: true,
+                },
+                "conversation",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_conversation_set_policy(
+                &ConversationSetPolicy {
+                    minimum_sets: 1,
+                    maximum_sets: 1,
+                    repeat_second_set_if_residency_loaded: false,
+                },
+                "teacher_forced",
+            )
+            .is_err()
+        );
     }
 
     #[test]

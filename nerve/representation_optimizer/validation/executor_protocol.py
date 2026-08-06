@@ -15,15 +15,16 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
 
 
 VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v7"
+    "nerve.optimizer.validation_executor_command.v8"
 )
 VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v6"
+    "nerve.optimizer.validation_executor_response.v7"
 )
 
 _PROGRESS_FIELDS = {
     "generation": {
         "phase",
+        "conversation_set_index",
         "turn_index",
         "generated_tokens",
         "token_id",
@@ -32,6 +33,7 @@ _PROGRESS_FIELDS = {
     },
     "turn_completed": {
         "phase",
+        "conversation_set_index",
         "turn_index",
         "generated_tokens",
         "elapsed_ns",
@@ -118,6 +120,16 @@ def validate_validation_progress(
         raise ModelCompileError(
             "validation progress turn index is invalid"
         )
+    conversation_set_index = payload.get("conversation_set_index")
+    if conversation_set_index is not None and (
+        isinstance(conversation_set_index, bool)
+        or not isinstance(conversation_set_index, int)
+        or conversation_set_index < 0
+        or conversation_set_index > 2
+    ):
+        raise ModelCompileError(
+            "validation progress conversation set index is invalid"
+        )
 
 
 def validated_validation_response(
@@ -178,6 +190,7 @@ def validate_validation_execution_payload(
     *,
     expected_step_unit: str,
     expected_turns: tuple[str, ...],
+    expected_conversation_set_policy: Json,
 ) -> None:
     expected = {
         "output_digest",
@@ -188,6 +201,7 @@ def validate_validation_execution_payload(
         "elapsed_ns",
         "turns",
         "execution_counters",
+        "conversation_sets",
     }
     if set(payload) != expected:
         raise ModelCompileError(
@@ -211,16 +225,25 @@ def validate_validation_execution_payload(
         payload.get("elapsed_ns"),
         "validation executor elapsed time",
     )
-    turns = payload.get("turns")
-    if (
-        not isinstance(turns, list)
-        or len(turns) != len(expected_turns)
-    ):
+    _validate_execution_turns(payload.get("turns"), expected_turns)
+    required_object(payload, "execution_counters")
+    _validate_conversation_sets(
+        payload.get("conversation_sets"),
+        expected_turns=expected_turns,
+        expected_policy=expected_conversation_set_policy,
+    )
+
+
+def _validate_execution_turns(
+    value: object,
+    expected_turns: tuple[str, ...],
+) -> None:
+    if not isinstance(value, list) or len(value) != len(expected_turns):
         raise ModelCompileError(
             "validation executor did not complete every requested turn"
         )
     for index, (turn, expected_user) in enumerate(
-        zip(turns, expected_turns, strict=True)
+        zip(value, expected_turns, strict=True)
     ):
         if (
             not isinstance(turn, dict)
@@ -306,11 +329,11 @@ def validate_validation_execution_payload(
                     f"validation executor turn {path} fields are invalid"
                 )
             for field in fields:
-                value = document[field]
+                field_value = document[field]
                 if (
-                    isinstance(value, bool)
-                    or not isinstance(value, int)
-                    or value < 0
+                    isinstance(field_value, bool)
+                    or not isinstance(field_value, int)
+                    or field_value < 0
                 ):
                     raise ModelCompileError(
                         f"validation executor turn {path}.{field} is invalid"
@@ -322,7 +345,89 @@ def validate_validation_execution_payload(
             raise ModelCompileError(
                 "validation executor accepted more draft tokens than proposed"
             )
-    required_object(payload, "execution_counters")
+
+
+def _validate_conversation_sets(
+    value: object,
+    *,
+    expected_turns: tuple[str, ...],
+    expected_policy: Json,
+) -> None:
+    if not isinstance(value, list):
+        raise ModelCompileError(
+            "validation executor conversation sets are invalid"
+        )
+    minimum = nonnegative_integer(
+        expected_policy.get("minimum_sets"),
+        "validation conversation minimum sets",
+    )
+    maximum = nonnegative_integer(
+        expected_policy.get("maximum_sets"),
+        "validation conversation maximum sets",
+    )
+    repeat_loading = expected_policy.get(
+        "repeat_second_set_if_residency_loaded"
+    )
+    if (
+        maximum < minimum
+        or maximum > 3
+        or not isinstance(repeat_loading, bool)
+        or ((minimum == 0) != (maximum == 0))
+        or (minimum == 0 and repeat_loading)
+        or (repeat_loading and (minimum != 2 or maximum != 3))
+    ):
+        raise ModelCompileError(
+            "validation conversation set policy is invalid"
+        )
+    if not (minimum <= len(value) <= maximum):
+        raise ModelCompileError(
+            "validation executor completed an invalid conversation set count"
+        )
+    for set_index, item in enumerate(value):
+        if not isinstance(item, dict) or set(item) != {
+            "set_index",
+            "disposition",
+            "residency_activity",
+            "turns",
+        }:
+            raise ModelCompileError(
+                "validation executor conversation set fields are invalid"
+            )
+        expected_disposition = (
+            "measured"
+            if set_index == len(value) - 1
+            else "discarded_warmup"
+        )
+        if (
+            item["set_index"] != set_index
+            or item["disposition"] != expected_disposition
+        ):
+            raise ModelCompileError(
+                "validation executor conversation set ordering is invalid"
+            )
+        activity = required_object(item, "residency_activity")
+        if set(activity) != {
+            "load_required_count",
+            "physical_bytes_read",
+            "reload_count",
+            "uploaded_bytes",
+        }:
+            raise ModelCompileError(
+                "validation executor conversation residency activity is invalid"
+            )
+        for field, field_value in activity.items():
+            nonnegative_integer(
+                field_value,
+                f"validation conversation residency activity {field}",
+            )
+        _validate_execution_turns(item["turns"], expected_turns)
+    if repeat_loading and len(value) == 2:
+        second_activity = value[1]["residency_activity"]
+        if any(second_activity[field] > 0 for field in second_activity):
+            raise ModelCompileError(
+                "validation executor measured a loading second conversation "
+                "instead of running the required third set"
+            )
 
 
 def validate_validation_release_payload(

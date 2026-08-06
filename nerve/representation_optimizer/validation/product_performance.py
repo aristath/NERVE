@@ -26,6 +26,12 @@ _TRANSFER_COUNTERS = (
     "received_byte_count",
     "received_packet_count",
 )
+_RESIDENCY_ACTIVITY_FIELDS = (
+    "load_required_count",
+    "physical_bytes_read",
+    "reload_count",
+    "uploaded_bytes",
+)
 
 
 def qualify_whole_model_product_performance(
@@ -136,7 +142,21 @@ def qualify_whole_model_product_performance(
         "reason": "; ".join(reasons) or None,
         "metrics": {
             "observation_count": len(comparisons),
-            "warmup_turns_discarded": len(comparisons),
+            "warmup_conversation_pairs_discarded": sum(
+                max(
+                    comparison["reference_warmup_conversations_discarded"],
+                    comparison["candidate_warmup_conversations_discarded"],
+                )
+                for comparison in comparisons
+            ),
+            "reference_warmup_conversations_discarded": sum(
+                comparison["reference_warmup_conversations_discarded"]
+                for comparison in comparisons
+            ),
+            "candidate_warmup_conversations_discarded": sum(
+                comparison["candidate_warmup_conversations_discarded"]
+                for comparison in comparisons
+            ),
             "candidate_faster_observation_count": sum(
                 comparison["candidate_normalized_faster"]
                 for comparison in comparisons
@@ -283,6 +303,18 @@ def _observation_comparison(observation: Json) -> Json:
         ],
         "reference_speculative_acceptance_ppm": reference_acceptance,
         "candidate_speculative_acceptance_ppm": candidate_acceptance,
+        "reference_warmup_conversations_discarded": roles["reference"][
+            "warmup_conversations_discarded"
+        ],
+        "candidate_warmup_conversations_discarded": roles["candidate"][
+            "warmup_conversations_discarded"
+        ],
+        "reference_measured_residency_activity": roles["reference"][
+            "residency_activity"
+        ],
+        "candidate_measured_residency_activity": roles["candidate"][
+            "residency_activity"
+        ],
         "reference_slow_paths": roles["reference"]["slow_paths"],
         "candidate_slow_paths": roles["candidate"]["slow_paths"],
         "slow_path_count_deltas": slow_path_count_deltas,
@@ -298,32 +330,71 @@ def _role_measurement(value: object, *, role: str) -> Json:
         raise ModelCompileError(
             f"whole-model {role} execution statistics are missing"
         )
-    turns = value.get("turn_statistics")
+    conversation_sets = value.get("conversation_sets")
+    if (
+        not isinstance(conversation_sets, list)
+        or len(conversation_sets) not in {2, 3}
+        or any(not isinstance(item, dict) for item in conversation_sets)
+    ):
+        raise ModelCompileError(
+            "whole-model product timing requires one complete discarded "
+            "conversation followed by a complete measured conversation, "
+            "with an optional second discarded conversation when residency "
+            "is still loading"
+        )
+    set_indices = [
+        _integer(item.get("set_index"), "conversation set_index")
+        for item in conversation_sets
+    ]
+    if set_indices != list(range(len(conversation_sets))):
+        raise ModelCompileError(
+            "whole-model product conversation sets are not contiguous"
+        )
+    dispositions = [item.get("disposition") for item in conversation_sets]
+    expected_dispositions = [
+        *("discarded_warmup" for _ in conversation_sets[:-1]),
+        "measured",
+    ]
+    if dispositions != expected_dispositions:
+        raise ModelCompileError(
+            "whole-model product conversation set dispositions are invalid"
+        )
+    activities = [
+        _residency_activity(item.get("residency_activity"))
+        for item in conversation_sets
+    ]
+    if len(conversation_sets) == 2 and _residency_loaded(activities[1]):
+        raise ModelCompileError(
+            "whole-model product timing measured a second conversation that "
+            "was still loading residency instead of discarding it and running "
+            "a third complete conversation"
+        )
+    measured_set = conversation_sets[-1]
+    turns = measured_set.get("turn_statistics")
     if (
         not isinstance(turns, list)
-        or len(turns) < 2
+        or not turns
         or any(not isinstance(turn, dict) for turn in turns)
     ):
         raise ModelCompileError(
-            "whole-model product timing requires one discarded warmup "
-            "followed by one or more measured turns"
+            "whole-model product measured conversation has no complete turn "
+            "statistics"
         )
     indices = [_integer(turn.get("turn_index"), "turn_index") for turn in turns]
     if indices != list(range(len(turns))):
         raise ModelCompileError(
             "whole-model product timing turns are not contiguous"
         )
-    measured = turns[1:]
     elapsed_ns = sum(
         _positive_integer(turn.get("elapsed_ns"), "turn elapsed_ns")
-        for turn in measured
+        for turn in turns
     )
     generated_tokens = sum(
         _positive_integer(
             turn.get("generated_tokens"),
             "turn generated_tokens",
         )
-        for turn in measured
+        for turn in turns
     )
     proposed = sum(
         _nonnegative_integer(
@@ -332,7 +403,7 @@ def _role_measurement(value: object, *, role: str) -> Json:
             ),
             "turn speculative.proposed_draft_tokens",
         )
-        for turn in measured
+        for turn in turns
     )
     accepted = sum(
         _nonnegative_integer(
@@ -341,14 +412,14 @@ def _role_measurement(value: object, *, role: str) -> Json:
             ),
             "turn speculative.accepted_draft_tokens",
         )
-        for turn in measured
+        for turn in turns
     )
     if accepted > proposed:
         raise ModelCompileError(
             "whole-model speculative acceptance exceeds proposals"
         )
     slow_paths: dict[str, int] = {}
-    for turn in measured:
+    for turn in turns:
         counters = _object(
             turn.get("execution_counters"),
             "turn execution_counters",
@@ -381,7 +452,29 @@ def _role_measurement(value: object, *, role: str) -> Json:
         "speculative_proposed": proposed,
         "speculative_accepted": accepted,
         "slow_paths": slow_paths,
+        "warmup_conversations_discarded": len(conversation_sets) - 1,
+        "residency_activity": activities[-1],
     }
+
+
+def _residency_activity(value: object) -> Json:
+    activity = _object(value, "conversation residency_activity")
+    if set(activity) != set(_RESIDENCY_ACTIVITY_FIELDS):
+        raise ModelCompileError(
+            "whole-model product conversation residency activity fields are "
+            "invalid"
+        )
+    return {
+        field: _nonnegative_integer(
+            activity[field],
+            f"conversation residency_activity.{field}",
+        )
+        for field in _RESIDENCY_ACTIVITY_FIELDS
+    }
+
+
+def _residency_loaded(activity: Json) -> bool:
+    return any(activity[field] > 0 for field in _RESIDENCY_ACTIVITY_FIELDS)
 
 
 def _aggregate_slow_paths(comparisons: tuple[Json, ...]) -> Json:

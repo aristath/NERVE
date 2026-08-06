@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,6 +170,30 @@ class FixtureWholeModelExecutor:
                 "execution_counters": {
                     "execution_quantum_dispatch_count": 64,
                 },
+                "conversation_sets": [
+                    {
+                        "set_index": set_index,
+                        "disposition": (
+                            "measured"
+                            if set_index
+                            == document["conversation_set_policy"][
+                                "minimum_sets"
+                            ]
+                            - 1
+                            else "discarded_warmup"
+                        ),
+                        "residency_activity": {
+                            "load_required_count": 0,
+                            "physical_bytes_read": 0,
+                            "reload_count": 0,
+                            "uploaded_bytes": 0,
+                        },
+                        "turns": deepcopy(turns),
+                    }
+                    for set_index in range(
+                        document["conversation_set_policy"]["minimum_sets"]
+                    )
+                ],
             }
             status = "completed"
         elif document["command"] == "close":
@@ -240,6 +265,7 @@ def test_generation_progress_identifies_the_observed_token() -> None:
         "sequence": 0,
         "payload": {
             "phase": "generation",
+            "conversation_set_index": 0,
             "turn_index": 0,
             "generated_tokens": 1,
             "token_id": 128_799,
@@ -291,6 +317,7 @@ def test_validation_execution_requires_every_requested_turn() -> None:
             }
         ],
         "execution_counters": {"dispatches": 1},
+        "conversation_sets": [],
     }
 
     with pytest.raises(
@@ -301,6 +328,44 @@ def test_validation_execution_requires_every_requested_turn() -> None:
             payload,
             expected_step_unit="component_activations",
             expected_turns=("first", "second"),
+            expected_conversation_set_policy={
+                "minimum_sets": 0,
+                "maximum_sets": 0,
+                "repeat_second_set_if_residency_loaded": False,
+            },
+        )
+
+
+def test_validation_execution_rejects_malformed_discarded_warmup_turns() -> None:
+    policy = {
+        "minimum_sets": 2,
+        "maximum_sets": 3,
+        "repeat_second_set_if_residency_loaded": True,
+    }
+    executor = FixtureWholeModelExecutor()
+    response = executor.request(
+        {
+            "command": "execute",
+            "request_id": "warmup-shape",
+            "turns": ["first"],
+            "step_unit": "component_activations",
+            "conversation_set_policy": policy,
+        },
+        progress_received=lambda _event: None,
+    )
+    response["payload"]["conversation_sets"][0]["turns"][0][
+        "speculative"
+    ].pop("cycle_count")
+
+    with pytest.raises(
+        ModelCompileError,
+        match="turn speculative fields are invalid",
+    ):
+        validate_validation_execution_payload(
+            response["payload"],
+            expected_step_unit="component_activations",
+            expected_turns=("first",),
+            expected_conversation_set_policy=policy,
         )
 
 
