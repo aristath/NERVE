@@ -100,6 +100,7 @@ def discover_parallel_markov_drafts(
         default_draft_tokens = discover_recommended_draft_token_count(
             model_dir, minimum=block_size
         )
+        execution_block_size = max(block_size, default_draft_tokens)
         if noise_token_id < 0 or noise_token_id >= vocabulary_size:
             raise ModelTranspileError(
                 "parallel Markov noise token must belong to the model vocabulary"
@@ -166,7 +167,8 @@ def discover_parallel_markov_drafts(
                     "proposal_contract": {
                         "schedule": "parallel_backbone_then_sequential_markov",
                         "configured_block_size": block_size,
-                        "minimum_draft_tokens": block_size,
+                        "execution_block_size": execution_block_size,
+                        "minimum_draft_tokens": 1,
                         "default_draft_tokens": default_draft_tokens,
                         "noise_token_id": noise_token_id,
                         "sampling": "greedy",

@@ -377,7 +377,7 @@ def make_parallel_markov_draft_descriptor(
             "type": "anchor_then_noise_embeddings",
             "token_embedding": tensor_ref(structure.tensors["token_embedding"]),
             "block_size": draft.attributes["proposal_contract"][
-                "configured_block_size"
+                "execution_block_size"
             ],
             "noise_token_id": draft.attributes["proposal_contract"]["noise_token_id"],
         },
@@ -425,6 +425,9 @@ def make_parallel_markov_draft_descriptor(
                 "markov_rank": draft.attributes["markov_rank"],
                 "configured_block_size": draft.attributes["proposal_contract"][
                     "configured_block_size"
+                ],
+                "execution_block_size": draft.attributes["proposal_contract"][
+                    "execution_block_size"
                 ],
                 "default_draft_tokens": draft.attributes["proposal_contract"][
                     "default_draft_tokens"

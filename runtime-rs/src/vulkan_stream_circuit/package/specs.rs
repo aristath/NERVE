@@ -353,15 +353,30 @@ impl VulkanResidentSpeculativeDecoderPackageSpec {
                     )
                 })?;
             let block_width = u64::try_from(*block_width).ok();
-            if proposal
+            let configured = proposal
                 .get("configured_block_size")
+                .and_then(Value::as_u64);
+            let minimum = proposal
+                .get("minimum_draft_tokens")
+                .and_then(Value::as_u64);
+            let recommended = proposal
+                .get("default_draft_tokens")
+                .and_then(Value::as_u64);
+            if proposal
+                .get("execution_block_size")
                 .and_then(Value::as_u64)
                 != block_width
-                || proposal
-                    .get("default_draft_tokens")
-                    .and_then(Value::as_u64)
+                || configured
                     .zip(block_width)
-                    .is_none_or(|(recommended, physical)| recommended < physical)
+                    .is_none_or(|(configured, capacity)| {
+                        configured == 0 || configured > capacity
+                    })
+                || minimum
+                    .zip(recommended)
+                    .zip(block_width)
+                    .is_none_or(|((minimum, recommended), capacity)| {
+                        minimum == 0 || minimum > recommended || recommended > capacity
+                    })
                 || proposal.get("confidence_prefix").and_then(Value::as_str)
                     != Some("first_sigmoid_below_runtime_threshold")
             {

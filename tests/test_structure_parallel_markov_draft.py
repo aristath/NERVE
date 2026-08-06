@@ -125,7 +125,8 @@ def test_discovers_parallel_backbone_markov_draft_from_tensor_contract(
     assert graph["proposal_contract"] == {
         "schedule": "parallel_backbone_then_sequential_markov",
         "configured_block_size": 5,
-        "minimum_draft_tokens": 5,
+        "execution_block_size": 5,
+        "minimum_draft_tokens": 1,
         "default_draft_tokens": 5,
         "noise_token_id": 31,
         "sampling": "greedy",
@@ -206,7 +207,8 @@ def test_parallel_markov_discovery_reuses_contract_for_unseen_config_and_tensor_
     assert graph["proposal_contract"] == {
         "schedule": "parallel_backbone_then_sequential_markov",
         "configured_block_size": 5,
-        "minimum_draft_tokens": 5,
+        "execution_block_size": 5,
+        "minimum_draft_tokens": 1,
         "default_draft_tokens": 5,
         "noise_token_id": 31,
         "sampling": "greedy",
@@ -276,7 +278,7 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
     assert query_block["op"] == "anchor_noise_embedding_block"
     assert query_block["params"] == ["token_embedding"]
     assert query_block["attrs"] == {
-        "minimum_block_size": 5,
+        "minimum_block_size": 1,
         "block_size": 5,
         "noise_token_id": 31,
         "anchor_position": 0,
@@ -472,13 +474,38 @@ def test_compiles_source_owned_recommended_parallel_draft_width(
     model = make_model_graph(structure, Path("transpiled"), {"source": {}})
     graph = model["graph"]["draft_execution_graphs"][0]
 
-    assert draft.attributes["proposal_contract"]["minimum_draft_tokens"] == 5
+    assert draft.attributes["proposal_contract"]["minimum_draft_tokens"] == 1
+    assert draft.attributes["proposal_contract"]["configured_block_size"] == 5
+    assert draft.attributes["proposal_contract"]["execution_block_size"] == 7
     assert draft.attributes["proposal_contract"]["default_draft_tokens"] == 7
-    assert graph["query_block"]["block_size"] == 5
+    assert graph["query_block"]["block_size"] == 7
 
     input_circuit, output_circuit = build_draft_system_circuits(model, graph)
-    assert input_circuit["boundary"]["outputs"][0]["shape"] == [5, 4, 8]
-    assert output_circuit["boundary"]["outputs"][0]["shape"] == [5]
+    assert input_circuit["boundary"]["outputs"][0]["shape"] == [7, 4, 8]
+    assert output_circuit["boundary"]["outputs"][0]["shape"] == [7]
+    tensor_index = {
+        "tensors": {
+            name: {**tensor, "layout": ROW_MAJOR_LAYOUT}
+            for name, tensor in tensors.items()
+        }
+    }
+    shader_files = {
+        shader_file_for_node(circuit, node, tensor_index, model["dimensions"])
+        for circuit in (input_circuit, output_circuit)
+        for node in circuit["nodes"]
+    }
+    assert "anchor_noise_embedding_block_b7_m4_h8_noise31.comp" in shader_files
+    assert "hyper_head_block_b7_m4_h8_eps1e-06.comp" in shader_files
+    assert "markov_argmax_partials_b7_p6_v32_r2_t256.comp" in shader_files
+    assert "confidence_projection_block_b7_bf16_h8_r2.comp" in shader_files
+    assert "pack_token_block_b7.comp" in shader_files
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+    compile_shader_artifacts(tmp_path)
+    assert all(
+        (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+        for shader_file in shader_files
+    )
 
     lowered = lower_parallel_markov_draft_graph(
         graph,
@@ -498,7 +525,9 @@ def test_compiles_source_owned_recommended_parallel_draft_width(
             "runtime_role": "draft_output_transducer",
         },
     )
-    assert lowered["execution_contract"]["block_width"] == 5
+    assert lowered["execution_contract"]["block_width"] == 7
+    assert lowered["proposal_contract"]["configured_block_size"] == 5
+    assert lowered["proposal_contract"]["execution_block_size"] == 7
     assert lowered["proposal_contract"]["default_draft_tokens"] == 7
 
 
