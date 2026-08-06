@@ -98,6 +98,17 @@ toward 50 tok/s without regressing supported Qwen models.
      draft generation, target projection, comparison, state selection, commit,
      and draft catch-up without a host wait until a true external residency miss
      or completed emitted block.
+     DeepSeek-V4-Flash-0731 ships its DSpark module inside the target checkpoint;
+     this is the intended fast path, not an optional external draft model. The
+     compiler already discovers its structure without a model-name branch as a
+     three-stage `parallel_backbone_markov` decoder: target taps from layers
+     40-42, a five-lane semi-autoregressive backbone, a rank-256 Markov head,
+     and confidence-prefix verification. Complete the shared runtime path and
+     make DSpark part of the DeepSeek product gate. Reconcile the source's
+     physical `dspark_block_size = 5` with the official runtime recommendation
+     of seven speculative tokens instead of silently clamping or inventing
+     lanes; prove the resulting proposal, confidence, verification, commit, and
+     rollback behavior against the checkpoint's reference implementation.
      A fresh complete-conversation warmup followed by the canonical truth
      conversation measured **8.1878 decode tok/s** and **8.4208 prefill tok/s**,
      statistically flat against the accepted 8.0350/8.2372 run. The measured
@@ -182,7 +193,15 @@ toward 50 tok/s without regressing supported Qwen models.
    temperature 1.0, top-k 20, top-p 0.95, min-p 0, presence-penalty 1.5,
    repetition-penalty 1.0 thinking profile. Keep repetition,
    structured-protocol, conversation, and teardown checks active so throughput
-   alone cannot pass.
+   alone cannot pass. The demand-aware resident-feedback runtime now passes the
+   complete Qwen3.6-35B-A3B gate with its attached speculative decoder enabled
+   on one discrete AMD GPU at **62.7030 decode tok/s** and **50.4392 prefill
+   tok/s**. It also passes Qwen3.5-9B on one discrete AMD GPU at **48.4574
+   decode tok/s** and **131.4108 prefill tok/s**. Both runs used 128K context,
+   the 65,536-token output allowance, official thinking/sampling behavior, one
+   discarded complete in-process conversation, a measured five-turn truth
+   conversation, correct Greece recall, and exact teardown. Retain these gates
+   for every subsequent runtime-performance commit.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
