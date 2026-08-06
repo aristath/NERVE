@@ -1,6 +1,5 @@
 const VULKAN_CAPACITY_PARTS_PER_MILLION: u64 = 1_000_000;
 const VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM: u64 = 200_000;
-const VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP: u64 = 4 * 1024 * 1024 * 1024;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_BYTE_CAP: u64 = 16 * 1024 * 1024;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_HEADROOM_DIVISOR: u64 = 4;
 const VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL: Duration = Duration::from_millis(25);
@@ -276,11 +275,47 @@ fn start_device_local_memory_observer(
                 memory_budget_supported,
                 device_local_memory_bytes,
             );
-            let _ = VulkanDeviceLocalMemoryBudgetTracker::record_execution_observation(
+            let recorded = VulkanDeviceLocalMemoryBudgetTracker::record_execution_observation(
                 &tracker,
                 allocation_generation,
                 available_bytes,
-            );
+            )
+            .unwrap_or(false);
+            if recorded {
+                let budget = tracker.lock().ok().map(|state| state.budget);
+                if let Some(budget) = budget
+                    && budget.protected_headroom_deficit_at(available_bytes) > 0
+                    && let Ok(reclaimers) =
+                        VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker)
+                    && !reclaimers.is_empty()
+                {
+                    let _ = restore_protected_device_local_headroom(
+                        budget,
+                        reclaimers,
+                        Duration::from_millis(250),
+                        || {
+                            let currently_available_bytes =
+                                query_available_device_local_memory_bytes(
+                                    &context.instance,
+                                    physical_device,
+                                    memory_budget_supported,
+                                    device_local_memory_bytes,
+                                );
+                            tracker
+                                .lock()
+                                .map(|state| {
+                                    state.accounting_at(currently_available_bytes)
+                                })
+                                .map_err(|_| {
+                                    VulkanError(
+                                        "device-local memory budget tracker was poisoned"
+                                            .to_string(),
+                                    )
+                                })
+                        },
+                    );
+                }
+            }
             drop(tracker);
             std::thread::sleep(VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL);
         })
@@ -537,16 +572,16 @@ impl Drop for VulkanDeviceLocalMemoryReclaimerRegistration {
 impl VulkanDeviceLocalMemoryBudget {
     fn capture(baseline_available_bytes: u64) -> Self {
         // A model may remain resident while unrelated workloads grow. Keep a
-        // meaningful amount of the opening availability outside NERVE's stable
-        // allocation budget so an ordinary dispatch cannot drive the heap to
-        // exhaustion. The cap avoids stranding an ever-growing absolute amount
-        // on large heaps, while the fraction scales safely on constrained
-        // devices.
+        // meaningful fraction of the opening availability outside NERVE's
+        // stable allocation budget so unrelated display and compute clients do
+        // not need TTM eviction merely to allocate. This is intentionally not
+        // capped: an absolute cap diluted the safety invariant on larger heaps
+        // and allowed every 32 GiB device to sit at the same unsafe 4 GiB
+        // watermark.
         let protected_headroom_bytes = baseline_available_bytes
             .saturating_mul(VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM)
             .checked_div(VULKAN_CAPACITY_PARTS_PER_MILLION)
-            .unwrap_or(0)
-            .min(VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP);
+            .unwrap_or(0);
         let reservable_bytes = baseline_available_bytes.saturating_sub(protected_headroom_bytes);
         Self {
             baseline_available_bytes,

@@ -2472,18 +2472,16 @@ fn device_local_memory_budget_preserves_headroom_from_the_opening_snapshot() {
 }
 
 #[test]
-fn device_local_memory_budget_caps_absolute_protected_headroom() {
+fn device_local_memory_budget_preserves_the_fraction_on_large_heaps() {
     let baseline = 64 * 1024 * 1024 * 1024;
     let budget = VulkanDeviceLocalMemoryBudget::capture(baseline);
+    let protected = baseline
+        * VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM
+        / VULKAN_CAPACITY_PARTS_PER_MILLION;
 
-    assert_eq!(
-        budget.protected_headroom_bytes,
-        VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP
-    );
-    assert_eq!(
-        budget.reservable_bytes,
-        baseline - VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP
-    );
+    assert_eq!(budget.protected_headroom_bytes, protected);
+    assert_eq!(budget.reservable_bytes, baseline - protected);
+    assert!(protected > 4 * 1024 * 1024 * 1024);
 }
 
 #[test]
@@ -2521,10 +2519,9 @@ fn selected_device_memory_budget_never_exceeds_physical_device_local_memory() {
         budget.baseline_available_bytes,
         device.device_local_memory_bytes(),
     );
-    let protected_headroom = (budget.baseline_available_bytes
+    let protected_headroom = budget.baseline_available_bytes
         * VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM
-        / VULKAN_CAPACITY_PARTS_PER_MILLION)
-        .min(VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_BYTE_CAP);
+        / VULKAN_CAPACITY_PARTS_PER_MILLION;
     assert_eq!(budget.protected_headroom_bytes, protected_headroom);
     assert_eq!(
         budget.reservable_bytes,
