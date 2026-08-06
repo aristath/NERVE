@@ -59,8 +59,20 @@ toward 50 tok/s without regressing supported Qwen models.
    gate at 128K context and a 65,536-token output allowance. The gate discards
    one complete conversation, measures a second conversation without unloading
    the model, preserves Greece/Athens turn recall, and releases every acquired
-   allocation. Its current official-profile truth baseline is **8.0818 decode
-   tok/s** and **8.4564 prefill tok/s** before the compact-MXFP4 remap. The
+   allocation. The optimizer's product gate must discard a complete first
+   conversation, measure every turn of the complete second conversation, and
+   run a third complete conversation when the second still performs residency
+   loads. Finish the executor/protocol integration and prove malformed or
+   incomplete warmup evidence fails closed; never compare a cold reference
+   with a warm candidate. The 2026-08-06 workstation crash was an amdgpu TTM
+   LRU corruption during global BO eviction after NERVE filled every discrete
+   AMD heap to the old capped 4 GiB watermark. Finish uncapped proportional
+   headroom and proactive live-budget reclamation, then prove demand-paged
+   execution stays below the physical pressure watermark while preserving
+   unrelated allocations before any further full-model benchmark.
+
+   Its current official-profile truth baseline is **8.0818 decode tok/s** and
+   **8.4564 prefill tok/s** before the compact-MXFP4 remap. The
    exact integer remap keeps the source's packed 4-bit residency and replaces
    per-value floating reconstruction with direct E2M1-to-E4M3 bit mapping. It
    reduced the real-geometry scalar expert pair from 1.03344 ms to 0.72736 ms
