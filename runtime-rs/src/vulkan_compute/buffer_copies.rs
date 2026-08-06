@@ -1,6 +1,6 @@
 pub struct VulkanResidentBufferCopy {
     device: ash::Device,
-    activity_lease_health: VulkanDeviceActivityLeaseHealth,
+    device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
@@ -16,7 +16,7 @@ pub struct VulkanResidentBufferCopy {
 
 pub struct VulkanResidentBufferCopyBatch {
     device: ash::Device,
-    activity_lease_health: VulkanDeviceActivityLeaseHealth,
+    device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
@@ -193,7 +193,7 @@ impl VulkanResidentBufferCopy {
     }
 
     fn run_internal(&self, len: usize) -> Result<Option<u64>, VulkanError> {
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         if len == 0 {
             return Err(VulkanError(
                 "resident byte copy length must not be zero".to_string(),
@@ -220,26 +220,32 @@ impl VulkanResidentBufferCopy {
             self.device
                 .queue_submit(self.queue, &submit_info, self.completion_fence)
                 .map_err(|error| {
-                    vulkan_operation_error_with_device_fault(
+                    let mapped = vulkan_operation_error_with_device_fault(
                         "failed to submit resident byte copy",
                         error,
                         self.device_fault.as_ref(),
                         &self.device_address_registry,
-                    )
+                    );
+                    vulkan_error_with_device_quarantine(&self.device_health, error, mapped)
                 })?;
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            self.device
-                .wait_for_fences(&[self.completion_fence], true, u64::MAX)
-                .map_err(|error| {
+            wait_for_vulkan_fences_with_progress_watchdog(
+                &self.device,
+                &[self.completion_fence],
+                true,
+                &self.device_health,
+                "resident byte copy",
+                |error| {
                     vulkan_operation_error_with_device_fault(
                         "failed waiting for resident byte copy",
                         error,
                         self.device_fault.as_ref(),
                         &self.device_address_registry,
                     )
-                })?;
+                },
+            )?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-            self.activity_lease_health.require_healthy()?;
+            self.device_health.require_healthy()?;
             let device_duration_ns = if let Some(query_pool) = self.timestamp_query_pool {
                 let mut timestamps = [0_u64; 2];
                 self.device
@@ -279,7 +285,7 @@ impl VulkanResidentBufferCopyBatch {
     }
 
     pub fn run(&self) -> Result<(), VulkanError> {
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         unsafe {
             self.device
                 .reset_fences(&[self.completion_fence])
@@ -293,27 +299,33 @@ impl VulkanResidentBufferCopyBatch {
             self.device
                 .queue_submit(self.queue, &submit_info, self.completion_fence)
                 .map_err(|error| {
-                    vulkan_operation_error_with_device_fault(
+                    let mapped = vulkan_operation_error_with_device_fault(
                         "failed to submit resident buffer copy batch",
                         error,
                         self.device_fault.as_ref(),
                         &self.device_address_registry,
-                    )
+                    );
+                    vulkan_error_with_device_quarantine(&self.device_health, error, mapped)
                 })?;
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            self.device
-                .wait_for_fences(&[self.completion_fence], true, u64::MAX)
-                .map_err(|error| {
+            wait_for_vulkan_fences_with_progress_watchdog(
+                &self.device,
+                &[self.completion_fence],
+                true,
+                &self.device_health,
+                "resident buffer copy batch",
+                |error| {
                     vulkan_operation_error_with_device_fault(
                         "failed waiting for resident buffer copy batch",
                         error,
                         self.device_fault.as_ref(),
                         &self.device_address_registry,
                     )
-                })?;
+                },
+            )?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         }
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         Ok(())
     }
 }

@@ -7,7 +7,7 @@ pub struct VulkanComputeDevice {
     transfer_queue: vk::Queue,
     transfer_queue_is_distinct: bool,
     activity_lease: RefCell<Option<VulkanDeviceActivityLease>>,
-    activity_lease_health: VulkanDeviceActivityLeaseHealth,
+    device_health: VulkanDeviceHealth,
     buffer_device_address_supported: bool,
     api_version: u32,
     physical_device_id: String,
@@ -527,7 +527,7 @@ struct VulkanResidentQueueSubmitter {
     device: ash::Device,
     device_handle: vk::Device,
     queue: vk::Queue,
-    activity_lease_health: VulkanDeviceActivityLeaseHealth,
+    device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
 }
@@ -861,7 +861,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                     device: group.device.device.clone(),
                     device_handle: group.device.device.handle(),
                     queue: group.device.queue,
-                    activity_lease_health: group.device.activity_lease_health.clone(),
+                    device_health: group.device.device_health.clone(),
                     device_fault: group.device.device_fault.clone(),
                     device_address_registry: Arc::clone(
                         &group.device.device_address_registry,
@@ -1018,7 +1018,7 @@ fn offset_timeline_value(value: u64, offset: u64) -> Result<u64, VulkanError> {
 struct VulkanResidentMemoryAccess {
     queue: vk::Queue,
     queue_family_index: u32,
-    activity_lease_health: VulkanDeviceActivityLeaseHealth,
+    device_health: VulkanDeviceHealth,
     property_flags: vk::MemoryPropertyFlags,
     staging_memory_type_index: Option<u32>,
 }

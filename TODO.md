@@ -174,7 +174,26 @@ toward 50 tok/s without regressing supported Qwen models.
      and otherwise wait only at the emitted-window boundary. It must retain
      bounded watchdog quanta and exact stop-token, sampler, state, and routed-
      expert semantics. Do not disguise the synchronous scalar path behind a
-     larger host loop or revive the rejected suffix-retry batch.
+     larger host loop or revive the rejected suffix-retry batch. A rejected
+     whole-window replay experiment resolved one miss and then restarted the
+     complete five-device graph for every subsequent checkpoint. Its first
+     warmup turn performed 5,001 expert loads, 4,880 sequence submissions, and
+     7,709 copy submissions at 1.931 decode tok/s; a later turn left the host in
+     an unbounded DRM sync wait while PCI `0000:21:00.0` reported an MES
+     `WAIT_REG_MEM` failure. True checkpoint resume must continue the causal
+     suffix exactly once; graph replay is both slower and unsafe.
+   - Isolate product Vulkan execution behind supervised per-device worker
+     processes. Normal inference fence, timeline, transfer, and quiescence waits
+     now poll at the existing 250 ms execution-quantum target, quarantine a
+     device after four quanta with no observable progress, retain the first
+     failure, and never revive it through the DRM activity lease. This bounds
+     the coordinator's wait, but an in-process driver fault can still leave
+     Vulkan objects in flight. The coordinator must be able to terminate only
+     the poisoned worker context without unwinding live GPU objects, keep other
+     component workers and the UI responsive, and report the exact device and
+     last completed checkpoint. Validation/optimizer executors already provide
+     process boundaries; generalize that mechanism instead of inventing a
+     second model-specific recovery path.
    - Optimize the independently material MXFP4 expert path. Retain the source's
      packed 4-bit payload, amortize or fuse unpacking and activation conversion,
      and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8

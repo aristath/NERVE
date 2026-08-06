@@ -44,7 +44,7 @@ impl VulkanComputeDevice {
         sequence: &VulkanResidentKernelSequence,
         timeout: Duration,
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
+        self.require_device_healthy()?;
         let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
         unsafe {
             match self
@@ -53,7 +53,7 @@ impl VulkanComputeDevice {
             {
                 Ok(()) => {
                     RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
-                    self.require_activity_lease_healthy()
+                    self.require_device_healthy()
                 }
                 Err(vk::Result::TIMEOUT) => Err(VulkanError(format!(
                     "resident kernel sequence exceeded bounded wait of {} ns",
@@ -198,7 +198,7 @@ impl VulkanComputeDevice {
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
+        self.require_device_healthy()?;
         if wait_points.is_empty() && signal_points.is_empty() {
             return Err(VulkanError(
                 "timeline semaphore bridge has no wait or signal points".to_string(),
@@ -232,9 +232,14 @@ impl VulkanComputeDevice {
             self.device
                 .queue_submit2(self.queue, &submit_info, vk::Fence::null())
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to submit timeline semaphore bridge: {error:?}"
-                    ))
+                    vulkan_error_with_device_quarantine(
+                        &self.device_health,
+                        error,
+                        self.vulkan_operation_error(
+                            "failed to submit timeline semaphore bridge",
+                            error,
+                        ),
+                    )
                 })?;
         }
         RESIDENT_SEQUENCE_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
@@ -272,7 +277,7 @@ impl VulkanComputeDevice {
         label: &str,
         record_sequence_submission: bool,
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
+        self.require_device_healthy()?;
         for point in wait_points.iter().chain(signal_points) {
             self.validate_local_timeline_semaphore(point.semaphore)?;
         }
@@ -316,7 +321,13 @@ impl VulkanComputeDevice {
                     &submit_info,
                     completion_fence.unwrap_or(vk::Fence::null()),
                 )
-                .map_err(|error| VulkanError(format!("failed to submit {label}: {error:?}")))?;
+                .map_err(|error| {
+                    vulkan_error_with_device_quarantine(
+                        &self.device_health,
+                        error,
+                        self.vulkan_operation_error(&format!("failed to submit {label}"), error),
+                    )
+                })?;
             if record_sequence_submission {
                 RESIDENT_SEQUENCE_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -335,7 +346,7 @@ impl VulkanResidentQueueSubmitter {
         timeline_value_transform: VulkanTimelineValueTransform<'_>,
         completion_fence_override: Option<vk::Fence>,
     ) -> Result<(), VulkanError> {
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         if submissions.is_empty() {
             return Ok(());
         }
@@ -427,10 +438,17 @@ impl VulkanResidentQueueSubmitter {
             self.device
                 .queue_submit2(self.queue, &submit_infos, batch_fence)
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to submit resident queue batch containing {} commands: {error:?}",
-                        submissions.len()
-                    ))
+                    vulkan_error_with_device_quarantine(
+                        &self.device_health,
+                        error,
+                        self.vulkan_operation_error(
+                            &format!(
+                                "failed to submit resident queue batch containing {} commands",
+                                submissions.len()
+                            ),
+                            error,
+                        ),
+                    )
                 })?;
             RESIDENT_QUEUE_BATCH_SUBMITS.fetch_add(1, Ordering::Relaxed);
             RESIDENT_QUEUE_BATCH_COMMANDS.fetch_add(
@@ -443,9 +461,14 @@ impl VulkanResidentQueueSubmitter {
                     self.device
                         .queue_submit2(self.queue, &completion_submit, fence)
                         .map_err(|error| {
-                            VulkanError(format!(
-                                "failed to submit resident queue batch completion fence: {error:?}"
-                            ))
+                            vulkan_error_with_device_quarantine(
+                                &self.device_health,
+                                error,
+                                self.vulkan_operation_error(
+                                    "failed to submit resident queue batch completion fence",
+                                    error,
+                                ),
+                            )
                         })?;
                     RESIDENT_QUEUE_BATCH_SUBMITS.fetch_add(1, Ordering::Relaxed);
                 }
@@ -455,19 +478,21 @@ impl VulkanResidentQueueSubmitter {
     }
 
     fn wait_for_completion_fence(&self, fence: vk::Fence) -> Result<(), VulkanError> {
-        self.activity_lease_health.require_healthy()?;
-        unsafe {
-            self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .map_err(|error| {
-                    self.vulkan_operation_error(
-                        "failed to wait for resident execution quantum",
-                        error,
-                    )
-                })?;
-        }
+        wait_for_vulkan_fences_with_progress_watchdog(
+            &self.device,
+            &[fence],
+            true,
+            &self.device_health,
+            "resident execution quantum",
+            |error| {
+                self.vulkan_operation_error(
+                    "failed to wait for resident execution quantum",
+                    error,
+                )
+            },
+        )?;
         RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
-        self.activity_lease_health.require_healthy()
+        Ok(())
     }
 }
 
@@ -476,19 +501,16 @@ impl VulkanComputeDevice {
         &self,
         sequence: &VulkanResidentKernelSequence,
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
-        unsafe {
-            self.device
-                .wait_for_fences(&[sequence.completion_fence], true, u64::MAX)
-                .map_err(|error| {
-                    self.vulkan_operation_error(
-                        "failed waiting for resident kernel sequence",
-                        error,
-                    )
-                })?;
-            RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
-        }
-        self.require_activity_lease_healthy()
+        wait_for_vulkan_fences_with_progress_watchdog(
+            &self.device,
+            &[sequence.completion_fence],
+            true,
+            &self.device_health,
+            "resident kernel sequence",
+            |error| self.vulkan_operation_error("failed waiting for resident kernel sequence", error),
+        )?;
+        RESIDENT_SEQUENCE_FENCE_WAITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn run_resident_kernel_sequence_with_snapshot_copies(

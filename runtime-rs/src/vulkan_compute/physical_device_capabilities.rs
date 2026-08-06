@@ -1,6 +1,6 @@
 impl VulkanComputeDevice {
-    fn require_activity_lease_healthy(&self) -> Result<(), VulkanError> {
-        self.activity_lease_health.require_healthy()
+    fn require_device_healthy(&self) -> Result<(), VulkanError> {
+        self.device_health.require_healthy()
     }
 
     /// Establish that every queue operation submitted through this logical
@@ -10,23 +10,45 @@ impl VulkanComputeDevice {
     /// the corresponding resources one device at a time.  Process-exit field
     /// drop order is not an accelerator residency protocol.
     pub fn quiesce(&self) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
-        unsafe {
-            self.device.device_wait_idle().map_err(|error| {
-                VulkanError(format!(
-                    "failed to quiesce Vulkan device {:?}: {error:?}",
-                    self.device_name
-                ))
-            })?;
+        quiesce_vulkan_queue_with_progress_watchdog(
+            &self.device,
+            self.queue,
+            &self.device_health,
+            "compute queue quiescence",
+            |error| self.vulkan_operation_error("failed to quiesce compute queue", error),
+        )?;
+        if self.transfer_queue_is_distinct {
+            quiesce_vulkan_queue_with_progress_watchdog(
+                &self.device,
+                self.transfer_queue,
+                &self.device_health,
+                "transfer queue quiescence",
+                |error| self.vulkan_operation_error("failed to quiesce transfer queue", error),
+            )?;
         }
-        self.require_activity_lease_healthy()
+        Ok(())
     }
 }
 
 impl Drop for VulkanComputeDevice {
     fn drop(&mut self) {
+        if !self.device_health.is_quarantined() {
+            let _ = self.quiesce();
+        }
+        if self.device_health.is_quarantined() {
+            if let Some(sequence) = self.immediate_kernel_sequence.get_mut().take() {
+                std::mem::forget(sequence);
+            }
+            if let Some(mut activity_lease) = self.activity_lease.get_mut().take() {
+                let _ = activity_lease.stop();
+            }
+            // A quarantined queue may still own in-flight objects. Leave the
+            // logical device and instance alive for the process lifetime; the
+            // OS/driver tears the context down atomically at process exit.
+            std::mem::forget(Arc::clone(&self.context));
+            return;
+        }
         unsafe {
-            let _ = self.device.device_wait_idle();
             self.immediate_kernel_sequence.get_mut().take();
             for (_, pipeline) in self.generic_storage_pipelines.get_mut().drain() {
                 self.device.destroy_pipeline(pipeline.pipeline, None);
@@ -1033,7 +1055,7 @@ unsafe fn write_device_local_bytes(
     byte_len: vk::DeviceSize,
     input: &[u8],
 ) -> Result<(), VulkanError> {
-    access.activity_lease_health.require_healthy()?;
+    access.device_health.require_healthy()?;
     let memory_type_index = access
         .staging_memory_type_index
         .ok_or_else(|| VulkanError("device-local buffer has no staging memory type".to_string()))?;
@@ -1052,6 +1074,7 @@ unsafe fn write_device_local_bytes(
                 device,
                 access.queue,
                 access.queue_family_index,
+                &access.device_health,
                 staging_buffer,
                 destination,
                 0,
@@ -1060,12 +1083,14 @@ unsafe fn write_device_local_bytes(
             )
         }
     })();
-    unsafe {
-        device.destroy_buffer(staging_buffer, None);
-        device.free_memory(staging_memory, None);
+    if !access.device_health.is_quarantined() {
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_memory, None);
+        }
     }
     result?;
-    access.activity_lease_health.require_healthy()
+    access.device_health.require_healthy()
 }
 
 unsafe fn read_device_local_bytes(
@@ -1075,7 +1100,7 @@ unsafe fn read_device_local_bytes(
     source_offset: vk::DeviceSize,
     byte_len: vk::DeviceSize,
 ) -> Result<Vec<u8>, VulkanError> {
-    access.activity_lease_health.require_healthy()?;
+    access.device_health.require_healthy()?;
     let memory_type_index = access
         .staging_memory_type_index
         .ok_or_else(|| VulkanError("device-local buffer has no staging memory type".to_string()))?;
@@ -1092,6 +1117,7 @@ unsafe fn read_device_local_bytes(
             device,
             access.queue,
             access.queue_family_index,
+            &access.device_health,
             source,
             staging_buffer,
             source_offset,
@@ -1100,12 +1126,14 @@ unsafe fn read_device_local_bytes(
         )?;
         read_byte_memory(device, staging_memory, byte_len, byte_len as usize)
     })();
-    unsafe {
-        device.destroy_buffer(staging_buffer, None);
-        device.free_memory(staging_memory, None);
+    if !access.device_health.is_quarantined() {
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_memory, None);
+        }
     }
     let bytes = result?;
-    access.activity_lease_health.require_healthy()?;
+    access.device_health.require_healthy()?;
     Ok(bytes)
 }
 
@@ -1156,6 +1184,7 @@ unsafe fn copy_buffer_immediately(
     device: &ash::Device,
     queue: vk::Queue,
     queue_family_index: u32,
+    device_health: &VulkanDeviceHealth,
     source: vk::Buffer,
     destination: vk::Buffer,
     source_offset: vk::DeviceSize,
@@ -1197,12 +1226,34 @@ unsafe fn copy_buffer_immediately(
         })?;
         let command_buffers = [command_buffer];
         let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-        unsafe { device.queue_submit(queue, &submit_info, vk::Fence::null()) }
-            .map_err(|error| VulkanError(format!("failed to submit staging copy: {error:?}")))?;
-        unsafe { device.queue_wait_idle(queue) }
-            .map_err(|error| VulkanError(format!("failed waiting for staging copy: {error:?}")))
+        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
+            .map_err(|error| VulkanError(format!("failed to create staging-copy fence: {error:?}")))?;
+        let submit_result = unsafe { device.queue_submit(queue, &submit_info, fence) };
+        if let Err(error) = submit_result {
+            unsafe { device.destroy_fence(fence, None) };
+            let mapped = VulkanError(format!("failed to submit staging copy: {error:?}"));
+            return Err(vulkan_error_with_device_quarantine(
+                device_health,
+                error,
+                mapped,
+            ));
+        }
+        let wait_result = wait_for_vulkan_fences_with_progress_watchdog(
+            device,
+            &[fence],
+            true,
+            device_health,
+            "immediate staging copy",
+            |error| VulkanError(format!("failed waiting for staging copy: {error:?}")),
+        );
+        if wait_result.is_ok() {
+            unsafe { device.destroy_fence(fence, None) };
+        }
+        wait_result
     })();
-    unsafe { device.destroy_command_pool(command_pool, None) };
+    if !device_health.is_quarantined() {
+        unsafe { device.destroy_command_pool(command_pool, None) };
+    }
     result
 }
 

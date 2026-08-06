@@ -1,10 +1,12 @@
 use crate::execution_schedule::{
-    RuntimeExecutionQuantum, RuntimeExecutionQuantumBudget, RuntimeExecutionQuantumCalibrator,
-    RuntimeExecutionRegion, RuntimeExecutionSchedule,
+    RUNTIME_EXECUTION_TARGET_QUANTUM_DURATION_NS, RuntimeExecutionQuantum,
+    RuntimeExecutionQuantumBudget, RuntimeExecutionQuantumCalibrator, RuntimeExecutionRegion,
+    RuntimeExecutionSchedule,
 };
 
 include!("vulkan_compute/features.rs");
 include!("vulkan_compute/device_activity_lease.rs");
+include!("vulkan_compute/queue_progress_watchdog.rs");
 include!("vulkan_compute/spirv_interface.rs");
 include!("vulkan_compute/device_fault.rs");
 include!("vulkan_compute/device_types.rs");

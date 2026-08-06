@@ -16,7 +16,10 @@ impl VulkanComputeDevice {
     }
 
     pub fn new_for_device_uuid(device_uuid: [u8; vk::UUID_SIZE]) -> Result<Self, VulkanError> {
-        Self::new_with_physical_device_selector(None, Some(device_uuid))
+        let physical_device_id = format!("vulkan-uuid:{}", format_device_uuid(&device_uuid));
+        let allowlist = BTreeSet::from([physical_device_id]);
+        VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowlist)?
+            .open_device_uuid(device_uuid)
     }
 
     fn new_with_physical_device_selector(

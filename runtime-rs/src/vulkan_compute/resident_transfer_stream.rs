@@ -1,6 +1,8 @@
 pub struct VulkanResidentTransferStream {
     device: ash::Device,
-    activity_lease_health: VulkanDeviceActivityLeaseHealth,
+    device_health: VulkanDeviceHealth,
+    device_fault: Option<ash::ext::device_fault::Device>,
+    device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
     queue: vk::Queue,
     consumer_queue: vk::Queue,
     queue_is_distinct_from_consumer: bool,
@@ -121,7 +123,9 @@ impl VulkanComputeDevice {
             }
             Ok(VulkanResidentTransferStream {
                 device: self.device.clone(),
-                activity_lease_health: self.activity_lease_health.clone(),
+                device_health: self.device_health.clone(),
+                device_fault: self.device_fault.clone(),
+                device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.transfer_queue,
                 consumer_queue: self.queue,
                 queue_is_distinct_from_consumer:
@@ -159,7 +163,7 @@ impl VulkanResidentTransferStream {
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],
     ) -> Result<VulkanResidentTransferTicket, VulkanError> {
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         if writes.is_empty() {
             return Err(VulkanError(
                 "resident transfer submission must contain at least one write".to_string(),
@@ -267,9 +271,13 @@ impl VulkanResidentTransferStream {
                     vk::Fence::null(),
                 )
                 .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to submit resident transfer: {error:?}"
-                    ))
+                    let mapped = vulkan_operation_error_with_device_fault(
+                        "failed to submit resident transfer",
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    );
+                    vulkan_error_with_device_quarantine(&self.device_health, error, mapped)
                 })?;
         }
         RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
@@ -301,7 +309,7 @@ impl VulkanResidentTransferStream {
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],
     ) -> Result<(), (VulkanError, bool)> {
-        self.activity_lease_health
+        self.device_health
             .require_healthy()
             .map_err(|error| (error, false))?;
         if writes.is_empty() {
@@ -442,35 +450,45 @@ impl VulkanResidentTransferStream {
                 fence,
             ) {
                 self.device.destroy_fence(fence, None);
+                let mapped = vulkan_operation_error_with_device_fault(
+                    "failed to submit consumer-serialized resident transfer",
+                    error,
+                    self.device_fault.as_ref(),
+                    &self.device_address_registry,
+                );
                 return Err((
-                    VulkanError(format!(
-                        "failed to submit consumer-serialized transfer: {error:?}"
-                    )),
+                    vulkan_error_with_device_quarantine(&self.device_health, error, mapped),
                     false,
                 ));
             }
-            let mut wait_result =
-                self.device.wait_for_fences(&[fence], true, u64::MAX);
-            if wait_result.is_err()
-                && self.device.queue_wait_idle(self.consumer_queue).is_ok()
-            {
-                wait_result = Ok(());
-            }
-            self.device.destroy_fence(fence, None);
+            let wait_result = wait_for_vulkan_fences_with_progress_watchdog(
+                &self.device,
+                &[fence],
+                true,
+                &self.device_health,
+                "consumer-serialized resident transfer",
+                |error| {
+                    vulkan_operation_error_with_device_fault(
+                        "failed waiting for consumer-serialized resident transfer",
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    )
+                },
+            );
             if let Err(error) = wait_result {
                 return Err((
-                    VulkanError(format!(
-                        "failed waiting for consumer-serialized transfer: {error:?}"
-                    )),
+                    error,
                     true,
                 ));
             }
+            self.device.destroy_fence(fence, None);
         }
         RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         slot.pending_timeline_value = 0;
         self.next_slot_index = (slot_index + 1) % self.slots.len();
-        self.activity_lease_health
+        self.device_health
             .require_healthy()
             .map_err(|error| (error, true))
     }
@@ -522,41 +540,43 @@ impl VulkanResidentTransferStream {
     }
 
     fn timeline_value(&self) -> Result<u64, VulkanError> {
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         let value = unsafe { self.device.get_semaphore_counter_value(self.timeline.semaphore) }
             .map_err(|error| {
                 VulkanError(format!(
                     "failed to read resident transfer timeline: {error:?}"
                 ))
             })?;
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         Ok(value)
     }
 
     fn wait_timeline_value(&self, value: u64) -> Result<(), VulkanError> {
-        self.activity_lease_health.require_healthy()?;
-        unsafe {
-            self.device.wait_semaphores(
-                &vk::SemaphoreWaitInfo::default()
-                    .semaphores(&[self.timeline.semaphore])
-                    .values(&[value]),
-                u64::MAX,
-            )
-        }
-        .map_err(|error| {
-            VulkanError(format!(
-                "failed waiting for resident transfer timeline value {value}: {error:?}"
-            ))
-        })?;
+        wait_for_vulkan_timeline_points_with_progress_watchdog(
+            &self.device,
+            &[self.timeline.semaphore],
+            &[value],
+            false,
+            &self.device_health,
+            "resident transfer timeline",
+            |error| {
+                vulkan_operation_error_with_device_fault(
+                    &format!("failed waiting for resident transfer timeline value {value}"),
+                    error,
+                    self.device_fault.as_ref(),
+                    &self.device_address_registry,
+                )
+            },
+        )?;
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        self.activity_lease_health.require_healthy()
+        Ok(())
     }
 
     fn wait_timeline_value_on_consumer_queue(
         &self,
         value: u64,
     ) -> Result<(), VulkanError> {
-        self.activity_lease_health.require_healthy()?;
+        self.device_health.require_healthy()?;
         unsafe {
             let fence = self
                 .device
@@ -578,24 +598,40 @@ impl VulkanResidentTransferStream {
             );
             if let Err(error) = submit_result {
                 self.device.destroy_fence(fence, None);
-                return Err(VulkanError(format!(
-                    "failed to bridge resident transfer timeline value {value} to the compute queue: {error:?}"
-                )));
+                let mapped = vulkan_operation_error_with_device_fault(
+                    &format!("failed to bridge resident transfer timeline value {value} to the compute queue"),
+                    error,
+                    self.device_fault.as_ref(),
+                    &self.device_address_registry,
+                );
+                return Err(vulkan_error_with_device_quarantine(
+                    &self.device_health,
+                    error,
+                    mapped,
+                ));
             }
-            let wait_result =
-                self.device.wait_for_fences(&[fence], true, u64::MAX);
-            if wait_result.is_err() {
-                let _ = self.device.queue_wait_idle(self.consumer_queue);
+            let wait_result = wait_for_vulkan_fences_with_progress_watchdog(
+                &self.device,
+                &[fence],
+                true,
+                &self.device_health,
+                "resident transfer compute-queue bridge",
+                |error| {
+                    vulkan_operation_error_with_device_fault(
+                        &format!("failed waiting for resident transfer timeline value {value} on the compute queue"),
+                        error,
+                        self.device_fault.as_ref(),
+                        &self.device_address_registry,
+                    )
+                },
+            );
+            if let Err(error) = wait_result {
+                return Err(error);
             }
             self.device.destroy_fence(fence, None);
-            wait_result.map_err(|error| {
-                VulkanError(format!(
-                    "failed waiting for resident transfer timeline value {value} on the compute queue: {error:?}"
-                ))
-            })?;
         }
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        self.activity_lease_health.require_healthy()
+        self.device_health.require_healthy()
     }
 }
 

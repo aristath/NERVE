@@ -739,7 +739,7 @@ impl VulkanComputeDeviceCatalog {
             let subgroup_size = subgroup_support.subgroup_size;
             let pci_address =
                 physical_device_pci_address(instance, physical_device);
-            let (activity_lease, activity_lease_health) =
+            let (activity_lease, device_health) =
                 if permitted_device.vendor_id == AMD_PCI_VENDOR_ID {
                     let (render_major, render_minor) =
                         match physical_device_drm_render_node(instance, physical_device) {
@@ -765,7 +765,7 @@ impl VulkanComputeDeviceCatalog {
                 } else {
                     (
                         None,
-                        VulkanDeviceActivityLeaseHealth::inactive(Arc::<str>::from(
+                        VulkanDeviceHealth::inactive(Arc::<str>::from(
                             permitted_device.physical_device_id.clone(),
                         )),
                     )
@@ -780,7 +780,7 @@ impl VulkanComputeDeviceCatalog {
                 transfer_queue,
                 transfer_queue_is_distinct,
                 activity_lease: RefCell::new(activity_lease),
-                activity_lease_health,
+                device_health,
                 buffer_device_address_supported,
                 api_version: physical_device_properties.api_version,
                 physical_device_id: permitted_device.physical_device_id.clone(),

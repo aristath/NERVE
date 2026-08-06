@@ -31,44 +31,44 @@ const DRM_IOCTL_GET_CAP: libc::c_ulong =
     linux_iowr_request::<DrmGetCap>(DRM_IOCTL_BASE, DRM_IOCTL_GET_CAP_NUMBER);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VulkanDeviceActivityLeasePhase {
+enum VulkanDeviceHealthPhase {
     Starting,
     Active,
     Stopping,
     Stopped,
-    Failed,
+    Quarantined,
 }
 
-struct VulkanDeviceActivityLeaseState {
-    phase: VulkanDeviceActivityLeasePhase,
+struct VulkanDeviceHealthState {
+    phase: VulkanDeviceHealthPhase,
     stop_requested: bool,
     pulse_count: u64,
     failure: Option<String>,
 }
 
-struct VulkanDeviceActivityLeaseShared {
-    state: Mutex<VulkanDeviceActivityLeaseState>,
+struct VulkanDeviceHealthShared {
+    state: Mutex<VulkanDeviceHealthState>,
     changed: std::sync::Condvar,
 }
 
 #[derive(Clone)]
-struct VulkanDeviceActivityLeaseHealth {
+struct VulkanDeviceHealth {
     device_id: Arc<str>,
-    shared: Arc<VulkanDeviceActivityLeaseShared>,
+    shared: Arc<VulkanDeviceHealthShared>,
 }
 
 struct VulkanDeviceActivityLease {
-    health: VulkanDeviceActivityLeaseHealth,
+    health: VulkanDeviceHealth,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
-impl VulkanDeviceActivityLeaseHealth {
+impl VulkanDeviceHealth {
     fn inactive(device_id: impl Into<Arc<str>>) -> Self {
         Self {
             device_id: device_id.into(),
-            shared: Arc::new(VulkanDeviceActivityLeaseShared {
-                state: Mutex::new(VulkanDeviceActivityLeaseState {
-                    phase: VulkanDeviceActivityLeasePhase::Stopped,
+            shared: Arc::new(VulkanDeviceHealthShared {
+                state: Mutex::new(VulkanDeviceHealthState {
+                    phase: VulkanDeviceHealthPhase::Stopped,
                     stop_requested: true,
                     pulse_count: 0,
                     failure: None,
@@ -86,10 +86,10 @@ impl VulkanDeviceActivityLeaseHealth {
             ))
         })?;
         match state.phase {
-            VulkanDeviceActivityLeasePhase::Active => Ok(()),
-            VulkanDeviceActivityLeasePhase::Stopped if state.pulse_count == 0 => Ok(()),
-            VulkanDeviceActivityLeasePhase::Failed => Err(VulkanError(format!(
-                "Vulkan device {:?} activity lease failed after {} pulses: {}",
+            VulkanDeviceHealthPhase::Active => Ok(()),
+            VulkanDeviceHealthPhase::Stopped if state.pulse_count == 0 => Ok(()),
+            VulkanDeviceHealthPhase::Quarantined => Err(VulkanError(format!(
+                "Vulkan device {:?} is quarantined after {} activity pulses: {}",
                 self.device_id,
                 state.pulse_count,
                 state.failure.as_deref().unwrap_or("unknown failure")
@@ -101,8 +101,39 @@ impl VulkanDeviceActivityLeaseHealth {
         }
     }
 
+    /// Permanently rejects new work on this logical device after the runtime
+    /// observes a queue or driver failure. The first failure is retained so a
+    /// later activity-lease pulse cannot hide the initiating fault.
+    fn quarantine(&self, failure: impl Into<String>) -> VulkanError {
+        let Ok(mut state) = self.shared.state.lock() else {
+            return VulkanError(format!(
+                "Vulkan device {:?} health state was poisoned while quarantining it",
+                self.device_id
+            ));
+        };
+        if state.phase != VulkanDeviceHealthPhase::Quarantined {
+            state.phase = VulkanDeviceHealthPhase::Quarantined;
+            state.failure = Some(failure.into());
+            state.stop_requested = true;
+            self.shared.changed.notify_all();
+        }
+        let failure = state.failure.as_deref().unwrap_or("unknown failure");
+        VulkanError(format!(
+            "Vulkan device {:?} is quarantined after {} activity pulses: {failure}",
+            self.device_id, state.pulse_count
+        ))
+    }
+
+    fn is_quarantined(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .map(|state| state.phase == VulkanDeviceHealthPhase::Quarantined)
+            .unwrap_or(true)
+    }
+
     #[cfg(test)]
-    fn snapshot(&self) -> (VulkanDeviceActivityLeasePhase, u64, Option<String>) {
+    fn snapshot(&self) -> (VulkanDeviceHealthPhase, u64, Option<String>) {
         let state = self.shared.state.lock().unwrap();
         (state.phase, state.pulse_count, state.failure.clone())
     }
@@ -164,16 +195,16 @@ impl VulkanDeviceActivityLease {
                 "Vulkan device activity-lease interval must not be zero".to_string(),
             ));
         }
-        let shared = Arc::new(VulkanDeviceActivityLeaseShared {
-            state: Mutex::new(VulkanDeviceActivityLeaseState {
-                phase: VulkanDeviceActivityLeasePhase::Starting,
+        let shared = Arc::new(VulkanDeviceHealthShared {
+            state: Mutex::new(VulkanDeviceHealthState {
+                phase: VulkanDeviceHealthPhase::Starting,
                 stop_requested: false,
                 pulse_count: 0,
                 failure: None,
             }),
             changed: std::sync::Condvar::new(),
         });
-        let health = VulkanDeviceActivityLeaseHealth {
+        let health = VulkanDeviceHealth {
             device_id: Arc::clone(&device_id),
             shared: Arc::clone(&shared),
         };
@@ -194,8 +225,11 @@ impl VulkanDeviceActivityLease {
                             let Ok(mut state) = shared.state.lock() else {
                                 return;
                             };
+                            if state.phase == VulkanDeviceHealthPhase::Quarantined {
+                                return;
+                            }
                             state.pulse_count = state.pulse_count.saturating_add(1);
-                            state.phase = VulkanDeviceActivityLeasePhase::Active;
+                            state.phase = VulkanDeviceHealthPhase::Active;
                             shared.changed.notify_all();
                             let Ok((mut state, _)) = shared
                                 .changed
@@ -206,15 +240,20 @@ impl VulkanDeviceActivityLease {
                                 return;
                             };
                             if state.stop_requested {
-                                state.phase = VulkanDeviceActivityLeasePhase::Stopped;
+                                if state.phase != VulkanDeviceHealthPhase::Quarantined {
+                                    state.phase = VulkanDeviceHealthPhase::Stopped;
+                                }
                                 shared.changed.notify_all();
                                 return;
                             }
                         }
                         Err(error) => {
                             if let Ok(mut state) = shared.state.lock() {
-                                state.phase = VulkanDeviceActivityLeasePhase::Failed;
-                                state.failure = Some(error.to_string());
+                                if state.phase != VulkanDeviceHealthPhase::Quarantined {
+                                    state.phase = VulkanDeviceHealthPhase::Quarantined;
+                                    state.failure = Some(error.to_string());
+                                }
+                                state.stop_requested = true;
                                 shared.changed.notify_all();
                             }
                             return;
@@ -248,7 +287,7 @@ impl VulkanDeviceActivityLease {
             .shared
             .changed
             .wait_timeout_while(state, DRM_ACTIVITY_LEASE_START_TIMEOUT, |state| {
-                state.phase == VulkanDeviceActivityLeasePhase::Starting
+                state.phase == VulkanDeviceHealthPhase::Starting
             })
             .map_err(|_| {
                 VulkanError(format!(
@@ -256,7 +295,7 @@ impl VulkanDeviceActivityLease {
                     self.health.device_id
                 ))
             })?;
-        if timeout.timed_out() && state.phase == VulkanDeviceActivityLeasePhase::Starting {
+        if timeout.timed_out() && state.phase == VulkanDeviceHealthPhase::Starting {
             return Err(VulkanError(format!(
                 "Vulkan device {:?} activity lease did not start within {} ms",
                 self.health.device_id,
@@ -267,15 +306,15 @@ impl VulkanDeviceActivityLease {
         self.health.require_healthy()
     }
 
-    fn health(&self) -> VulkanDeviceActivityLeaseHealth {
+    fn health(&self) -> VulkanDeviceHealth {
         self.health.clone()
     }
 
     fn stop(&mut self) -> Result<(), VulkanError> {
         if let Ok(mut state) = self.health.shared.state.lock() {
             state.stop_requested = true;
-            if state.phase == VulkanDeviceActivityLeasePhase::Active {
-                state.phase = VulkanDeviceActivityLeasePhase::Stopping;
+            if state.phase == VulkanDeviceHealthPhase::Active {
+                state.phase = VulkanDeviceHealthPhase::Stopping;
             }
             self.health.shared.changed.notify_all();
         }
@@ -293,15 +332,15 @@ impl VulkanDeviceActivityLease {
                 self.health.device_id
             ))
         })?;
-        if state.phase == VulkanDeviceActivityLeasePhase::Failed {
+        if state.phase == VulkanDeviceHealthPhase::Quarantined {
             return Err(VulkanError(format!(
-                "Vulkan device {:?} activity lease failed after {} pulses: {}",
+                "Vulkan device {:?} is quarantined after {} activity pulses: {}",
                 self.health.device_id,
                 state.pulse_count,
                 state.failure.as_deref().unwrap_or("unknown failure")
             )));
         }
-        if state.phase != VulkanDeviceActivityLeasePhase::Stopped {
+        if state.phase != VulkanDeviceHealthPhase::Stopped {
             return Err(VulkanError(format!(
                 "Vulkan device {:?} activity lease stopped in invalid phase {:?}",
                 self.health.device_id, state.phase
@@ -378,7 +417,7 @@ mod device_activity_lease_tests {
         lease.stop().unwrap();
 
         let (phase, pulse_count, failure) = lease.health().snapshot();
-        assert_eq!(phase, VulkanDeviceActivityLeasePhase::Stopped);
+        assert_eq!(phase, VulkanDeviceHealthPhase::Stopped);
         assert!(pulse_count >= 2);
         assert_eq!(failure, None);
     }
@@ -417,6 +456,35 @@ mod device_activity_lease_tests {
     }
 
     #[test]
+    fn queue_quarantine_is_terminal_and_retains_the_first_failure() {
+        let mut lease = VulkanDeviceActivityLease::start_with_pulse(
+            Arc::<str>::from("fixture-device"),
+            Duration::from_millis(1),
+            || Ok(()),
+        )
+        .unwrap();
+        let health = lease.health();
+
+        let first = health.quarantine("resident queue made no progress");
+        let second = health.quarantine("later lease observation");
+        assert!(first.to_string().contains("resident queue made no progress"));
+        assert!(second.to_string().contains("resident queue made no progress"));
+        assert!(!second.to_string().contains("later lease observation"));
+        assert!(health.is_quarantined());
+
+        assert!(
+            lease
+                .stop()
+                .unwrap_err()
+                .to_string()
+                .contains("resident queue made no progress")
+        );
+        let (phase, _, failure) = health.snapshot();
+        assert_eq!(phase, VulkanDeviceHealthPhase::Quarantined);
+        assert_eq!(failure.as_deref(), Some("resident queue made no progress"));
+    }
+
+    #[test]
     fn selected_amd_device_remains_submit_ready_across_runtime_pm_window() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!("skipping AMD activity-lease integration test: explicit Vulkan device index unset");
@@ -429,9 +497,9 @@ mod device_activity_lease_tests {
             .expect("selected AMD Vulkan device must open with an activity lease");
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
-            let (phase, pulse_count, failure) = device.activity_lease_health.snapshot();
+            let (phase, pulse_count, failure) = device.device_health.snapshot();
             assert_eq!(failure, None);
-            assert_eq!(phase, VulkanDeviceActivityLeasePhase::Active);
+            assert_eq!(phase, VulkanDeviceHealthPhase::Active);
             if pulse_count >= 7 {
                 break;
             }

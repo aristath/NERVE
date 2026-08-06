@@ -656,12 +656,16 @@ impl VulkanComputeDevice {
         semaphore: &VulkanTimelineSemaphore,
         value: u64,
     ) -> Result<(), VulkanError> {
-        if self.wait_timeline_semaphore_value_for(semaphore, value, u64::MAX)? {
-            return Ok(());
-        }
-        Err(VulkanError(format!(
-            "timeline semaphore value {value} did not complete during an unbounded wait"
-        )))
+        self.validate_local_timeline_semaphore(semaphore)?;
+        wait_for_vulkan_timeline_points_with_progress_watchdog(
+            &self.device,
+            &[semaphore.semaphore],
+            &[value],
+            false,
+            &self.device_health,
+            "timeline semaphore wait",
+            |error| self.vulkan_operation_error("failed to wait for timeline semaphore", error),
+        )
     }
 
     pub fn wait_timeline_semaphore_value_for(
@@ -671,6 +675,10 @@ impl VulkanComputeDevice {
         timeout_ns: u64,
     ) -> Result<bool, VulkanError> {
         self.validate_local_timeline_semaphore(semaphore)?;
+        if timeout_ns == u64::MAX {
+            self.wait_timeline_semaphore_value(semaphore, value)?;
+            return Ok(true);
+        }
         let semaphores = [semaphore.semaphore];
         let values = [value];
         let wait_info = vk::SemaphoreWaitInfo::default()
@@ -703,6 +711,23 @@ impl VulkanComputeDevice {
             .map(|point| point.semaphore.semaphore)
             .collect::<Vec<_>>();
         let values = points.iter().map(|point| point.value).collect::<Vec<_>>();
+        if timeout_ns == u64::MAX {
+            wait_for_vulkan_timeline_points_with_progress_watchdog(
+                &self.device,
+                &semaphores,
+                &values,
+                true,
+                &self.device_health,
+                "timeline semaphore set wait",
+                |error| {
+                    self.vulkan_operation_error(
+                        "failed to wait for timeline semaphore set",
+                        error,
+                    )
+                },
+            )?;
+            return Ok(true);
+        }
         let wait_info = vk::SemaphoreWaitInfo::default()
             .flags(vk::SemaphoreWaitFlags::ANY)
             .semaphores(&semaphores)
@@ -874,7 +899,7 @@ impl VulkanComputeDevice {
         Ok(VulkanResidentMemoryAccess {
             queue: self.queue,
             queue_family_index: self.queue_family_index,
-            activity_lease_health: self.activity_lease_health.clone(),
+            device_health: self.device_health.clone(),
             property_flags,
             staging_memory_type_index,
         })
@@ -1362,7 +1387,7 @@ impl VulkanComputeDevice {
                 VulkanResidentMemoryAccess {
                     queue: self.queue,
                     queue_family_index: self.queue_family_index,
-                    activity_lease_health: self.activity_lease_health.clone(),
+                    device_health: self.device_health.clone(),
                     property_flags,
                     staging_memory_type_index,
                 },
@@ -1526,7 +1551,7 @@ impl VulkanComputeDevice {
 
             Ok(VulkanResidentBufferCopy {
                 device: self.device.clone(),
-                activity_lease_health: self.activity_lease_health.clone(),
+                device_health: self.device_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.queue,
@@ -1568,53 +1593,59 @@ impl VulkanComputeDevice {
         &self,
         binding: &VulkanResidentBufferCopy,
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy belongs to another logical device".to_string(),
             ));
         }
-        unsafe {
-            self.device
-                .wait_for_fences(&[binding.completion_fence], true, u64::MAX)
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed waiting for resident buffer copy completion: {error:?}"
-                    ))
-                })?;
-        }
+        wait_for_vulkan_fences_with_progress_watchdog(
+            &self.device,
+            &[binding.completion_fence],
+            true,
+            &self.device_health,
+            "resident buffer copy",
+            |error| {
+                self.vulkan_operation_error(
+                    "failed waiting for resident buffer copy completion",
+                    error,
+                )
+            },
+        )?;
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        self.require_activity_lease_healthy()
+        Ok(())
     }
 
     pub fn wait_resident_buffer_copy_batch(
         &self,
         binding: &VulkanResidentBufferCopyBatch,
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy batch belongs to another logical device".to_string(),
             ));
         }
-        unsafe {
-            self.device
-                .wait_for_fences(&[binding.completion_fence], true, u64::MAX)
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed waiting for resident buffer copy batch completion: {error:?}"
-                    ))
-                })?;
-        }
+        wait_for_vulkan_fences_with_progress_watchdog(
+            &self.device,
+            &[binding.completion_fence],
+            true,
+            &self.device_health,
+            "resident buffer copy batch",
+            |error| {
+                self.vulkan_operation_error(
+                    "failed waiting for resident buffer copy batch completion",
+                    error,
+                )
+            },
+        )?;
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        self.require_activity_lease_healthy()
+        Ok(())
     }
 
     pub fn submit_resident_buffer_copy_batch(
         &self,
         binding: &VulkanResidentBufferCopyBatch,
     ) -> Result<(), VulkanError> {
-        self.require_activity_lease_healthy()?;
+        self.require_device_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy batch belongs to another logical device".to_string(),
@@ -1633,9 +1664,13 @@ impl VulkanComputeDevice {
             self.device
                 .queue_submit(self.queue, &submit_info, binding.completion_fence)
                 .map_err(|error| {
-                    self.vulkan_operation_error(
-                        "failed to submit resident buffer copy batch",
+                    vulkan_error_with_device_quarantine(
+                        &self.device_health,
                         error,
+                        self.vulkan_operation_error(
+                            "failed to submit resident buffer copy batch",
+                            error,
+                        ),
                     )
                 })?;
         }
@@ -1718,7 +1753,7 @@ impl VulkanComputeDevice {
                 })?;
             Ok(VulkanResidentBufferCopyBatch {
                 device: self.device.clone(),
-                activity_lease_health: self.activity_lease_health.clone(),
+                device_health: self.device_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
                 queue: self.queue,
