@@ -108,8 +108,10 @@ toward 50 tok/s without regressing supported Qwen models.
      width on the same resident model, then select speculation only when useful
      committed tokens per complete cycle win. The runtime now calibrates scalar,
      resident-loop (when available), and useful speculative widths using complete
-     cycle elapsed time; mode-specific residency loads are charged instead of
-     discarded. On this sparse package it selects scalar and improves decode by
+     cycle elapsed time. One-time candidate materialization is now excluded as a
+     residency warmup, while a mode that keeps loading on consecutive cycles has
+     its second and third load cycles charged and cannot stall or game
+     calibration. On this sparse package it selects scalar and improves decode by
      20.7% over the previous 6.6966 baseline, but remains far below the 30 tok/s
      floor. Before treating modes as interchangeable, certify committed-token,
      routed-expert, sampler, and state-digest equivalence from identical
@@ -285,7 +287,14 @@ toward 50 tok/s without regressing supported Qwen models.
    gates with explicit widths: Qwen3.6-35B-A3B passed at **62.6418 decode
    tok/s** and **50.4346 prefill tok/s**, while Qwen3.5-9B passed with explicit
    speculative disable at **48.7560 decode tok/s** and **140.2734 prefill
-   tok/s**. Retain these gates for every subsequent runtime-performance commit.
+   tok/s**. The residency-aware execution-selector milestone was then rebuilt
+   after the workstation reboot and re-ran both complete gates on individually
+   allowlisted, unaffected AMD devices. Qwen3.6-35B-A3B passed at **62.1522
+   decode tok/s** and **58.1906 prefill tok/s**; Qwen3.5-9B passed at **48.8166
+   decode tok/s** and **142.8648 prefill tok/s**. Both retained correct Greece
+   recall, emitted full thinking traces, returned exactly to their recorded
+   59,985,920-byte VRAM baselines, and produced no new kernel GPU fault. Retain
+   these gates for every subsequent runtime-performance commit.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime

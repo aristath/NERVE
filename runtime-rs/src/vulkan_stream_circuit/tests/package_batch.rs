@@ -1000,7 +1000,7 @@ fn adaptive_feedback_execution_ignores_truncated_or_failed_measurements() {
 }
 
 #[test]
-fn adaptive_feedback_execution_charges_mode_specific_residency_cost() {
+fn adaptive_feedback_execution_excludes_one_time_residency_materialization() {
     let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, false);
     for _ in 0..3 {
         selector.record_scalar_tick(100);
@@ -1008,9 +1008,41 @@ fn adaptive_feedback_execution_charges_mode_specific_residency_cost() {
     assert_eq!(selector.next_candidate(), speculative_candidate(1));
 
     selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 1_000), true);
-    selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 100), false);
+    assert!(!selector.is_calibrated());
+    for _ in 0..3 {
+        selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 100), false);
+    }
 
     assert!(selector.is_calibrated());
+    let observation = &selector.observations[&speculative_candidate(1)];
+    assert_eq!(observation.measured_cycle_count, 2);
+    assert_eq!(observation.emitted_token_count, 4);
+    assert_eq!(observation.total_time_ns, 200);
+    assert_eq!(
+        selector.next_candidate(),
+        speculative_candidate(1)
+    );
+}
+
+#[test]
+fn adaptive_feedback_execution_charges_repeated_residency_churn() {
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, false);
+    for _ in 0..3 {
+        selector.record_scalar_tick(100);
+    }
+    assert_eq!(selector.next_candidate(), speculative_candidate(1));
+
+    selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 1_000), true);
+    assert!(!selector.is_calibrated());
+    selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 1_000), true);
+    assert!(!selector.is_calibrated());
+    selector.record_speculative_cycle(1, &adaptive_window_cycle(1, 2, 1_000), true);
+
+    assert!(selector.is_calibrated());
+    let observation = &selector.observations[&speculative_candidate(1)];
+    assert_eq!(observation.measured_cycle_count, 2);
+    assert_eq!(observation.emitted_token_count, 4);
+    assert_eq!(observation.total_time_ns, 2_000);
     assert_eq!(
         selector.next_candidate(),
         VulkanFeedbackExecutionCandidate::Scalar

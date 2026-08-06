@@ -58,6 +58,7 @@ const ADAPTIVE_SPECULATIVE_WINDOW_MEASURED_CYCLES: usize = 2;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VulkanFeedbackExecutionObservation {
     valid_cycle_count: usize,
+    measurement_started: bool,
     measured_cycle_count: usize,
     emitted_token_count: usize,
     total_time_ns: u64,
@@ -204,21 +205,26 @@ impl VulkanAdaptiveFeedbackExecutionSelector {
         candidate: VulkanFeedbackExecutionCandidate,
         emitted_token_count: usize,
         total_time_ns: u64,
-        force_measurement: bool,
+        residency_changed: bool,
     ) {
         let observation = self.observations.entry(candidate).or_default();
         observation.valid_cycle_count = observation.valid_cycle_count.saturating_add(1);
-        if force_measurement
-            || observation.valid_cycle_count > ADAPTIVE_SPECULATIVE_WINDOW_WARMUP_CYCLES
-        {
-            observation.measured_cycle_count = observation.measured_cycle_count.saturating_add(1);
-            observation.emitted_token_count = observation
-                .emitted_token_count
-                .saturating_add(emitted_token_count);
-            observation.total_time_ns = observation
-                .total_time_ns
-                .saturating_add(total_time_ns);
+        if !observation.measurement_started {
+            if !residency_changed {
+                observation.measurement_started = true;
+                return;
+            }
+            if observation.valid_cycle_count <= ADAPTIVE_SPECULATIVE_WINDOW_WARMUP_CYCLES {
+                return;
+            }
         }
+        observation.measured_cycle_count = observation.measured_cycle_count.saturating_add(1);
+        observation.emitted_token_count = observation
+            .emitted_token_count
+            .saturating_add(emitted_token_count);
+        observation.total_time_ns = observation
+            .total_time_ns
+            .saturating_add(total_time_ns);
         if observation.measured_cycle_count < ADAPTIVE_SPECULATIVE_WINDOW_MEASURED_CYCLES {
             return;
         }
