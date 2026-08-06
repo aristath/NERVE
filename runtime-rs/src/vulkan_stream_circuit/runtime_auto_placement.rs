@@ -11,6 +11,138 @@ pub struct VulkanRuntimeAutoPlacement {
     pub selected_device_ids: Vec<String>,
 }
 
+fn runtime_model_placement_signature(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Vec<(String, String)> {
+    let mut signature = runtime_model
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| (instance.instance_id.clone(), instance.device_id.clone()))
+        .collect::<Vec<_>>();
+    signature.sort();
+    signature
+}
+
+fn hardware_profiles_for_runtime_placement(
+    runtime_model: &VulkanResidentRuntimeModel,
+    profiles_by_physical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+) -> Result<BTreeMap<String, crate::HardwareProcessProfile>, VulkanRuntimeResidencyPlanError> {
+    runtime_model
+        .placement_device_ids()
+        .into_iter()
+        .map(|logical_device_id| {
+            profiles_by_physical_device
+                .get(&logical_device_id)
+                .cloned()
+                .map(|profile| (logical_device_id.clone(), profile))
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "runtime placement device {logical_device_id:?} has no hardware profile",
+                    ))
+                })
+        })
+        .collect()
+}
+
+/// Solves placement and implementation selection together. Exact compiled
+/// implementations establish the first capacity-safe placement. Alternatives
+/// are then selected against the physical profile that will execute each
+/// component, followed by an exact residency re-plan. If representation sizes
+/// move a placement boundary, selection is repeated from the untouched exact
+/// model at the new boundary until both decisions are stable.
+#[allow(clippy::too_many_arguments)]
+pub fn capacity_pack_and_select_vulkan_runtime_model(
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    candidates: &[VulkanRuntimePlacementCandidate],
+    profiles_by_physical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+    context_capacity_activations: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+    execution: crate::RuntimeExecutionEnvelope,
+) -> Result<VulkanRuntimeAutoPlacement, VulkanRuntimeResidencyPlanError> {
+    let manifest_dir = manifest_dir.as_ref();
+    let tensor_index = runtime_model
+        .load_runtime_tensor_index(manifest_dir)
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    let initial = capacity_pack_vulkan_runtime_model(
+        manifest_dir,
+        runtime_model,
+        &tensor_index,
+        candidates,
+        context_capacity_activations,
+        speculative_draft_tokens,
+        residency_policy,
+    )?;
+    let exact_model = runtime_model.clone();
+    let mut exact_placed_model = initial.runtime_model;
+    let maximum_iterations = exact_model
+        .runtime_graph
+        .instances
+        .len()
+        .saturating_add(candidates.len())
+        .max(1);
+    let mut observed_placements = BTreeSet::new();
+
+    for _ in 0..maximum_iterations {
+        let placement_signature = runtime_model_placement_signature(&exact_placed_model);
+        if !observed_placements.insert(placement_signature.clone()) {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "runtime representation and placement selection entered a placement cycle"
+                    .to_string(),
+            ));
+        }
+        let profiles = hardware_profiles_for_runtime_placement(
+            &exact_placed_model,
+            profiles_by_physical_device,
+        )?;
+        let (selected_model, _) = exact_placed_model
+            .clone()
+            .select_and_apply_runtime_implementations(
+                manifest_dir,
+                &profiles,
+                execution.clone(),
+            )
+            .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+        let selected_tensor_index = selected_model
+            .load_runtime_tensor_index(manifest_dir)
+            .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+        let selected = capacity_pack_vulkan_runtime_model(
+            manifest_dir,
+            &selected_model,
+            &selected_tensor_index,
+            candidates,
+            context_capacity_activations,
+            speculative_draft_tokens,
+            residency_policy,
+        )?;
+        let selected_signature = runtime_model_placement_signature(&selected.runtime_model);
+        if selected_signature == placement_signature {
+            return Ok(selected);
+        }
+
+        let selected_placement = selected_signature.into_iter().collect::<BTreeMap<_, _>>();
+        let default_device_id = selected
+            .selected_device_ids
+            .first()
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "selected runtime placement has no physical devices".to_string(),
+                )
+            })?;
+        exact_placed_model = vulkan_runtime_model_with_component_placement(
+            &exact_model,
+            default_device_id,
+            &selected_placement,
+        )?;
+    }
+
+    Err(VulkanRuntimeResidencyPlanError(
+        "runtime representation and placement selection did not converge".to_string(),
+    ))
+}
+
 pub fn vulkan_runtime_maximum_device_resident_bytes(
     plan: &VulkanRuntimeDeviceResidencyPlan,
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
@@ -270,7 +402,7 @@ fn admit_fixed_vulkan_runtime_placement(
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeAutoPlacement, VulkanRuntimeResidencyPlanError> {
-    let placed_model = runtime_model_with_capacity_packed_placement(
+    let placed_model = vulkan_runtime_model_with_component_placement(
         runtime_model,
         &candidates[0].device_id,
         placement,
@@ -355,7 +487,7 @@ fn capacity_pack_vulkan_runtime_model_on_devices(
                 "exact residency correction converged to an over-capacity placement".to_string(),
             ));
         }
-        let placed_model = runtime_model_with_capacity_packed_placement(
+        let placed_model = vulkan_runtime_model_with_component_placement(
             runtime_model,
             &candidates[0].device_id,
             &placement,
@@ -533,7 +665,7 @@ fn capacity_packed_runtime_components(
         .collect()
 }
 
-fn runtime_model_with_capacity_packed_placement(
+fn vulkan_runtime_model_with_component_placement(
     runtime_model: &VulkanResidentRuntimeModel,
     default_device_id: &str,
     placement: &BTreeMap<String, String>,

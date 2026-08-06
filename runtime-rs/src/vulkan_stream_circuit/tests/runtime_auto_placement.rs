@@ -8,6 +8,55 @@ fn maximum_resident_bytes(plan: &VulkanRuntimeResidencyPlan, device_id: &str) ->
     .unwrap()
 }
 
+fn auto_placement_hardware_profile(
+    stable_device_id: &str,
+    architecture: &str,
+) -> crate::HardwareProcessProfile {
+    crate::HardwareProcessProfile::create(crate::HardwareProcessProfileDefinition {
+        hardware_identity: crate::HardwareIdentity {
+            device_kind: crate::HardwareDeviceKind::Gpu,
+            stable_device_id: stable_device_id.to_string(),
+            name: format!("{architecture} fixture"),
+            vendor_id: "fixture".to_string(),
+            device_id: architecture.to_string(),
+            architecture: architecture.to_string(),
+            physical_location: stable_device_id.to_string(),
+        },
+        processes: vec![crate::HardwareProcessCapability::new(
+            "compute",
+            crate::HardwareProcessCategory::Arithmetic,
+            crate::HardwareProcessAvailability::Available,
+            crate::HardwareProcessProgrammability::Direct,
+            "vulkan",
+        )],
+        memory_domains: vec![crate::HardwareMemoryDomain {
+            name: "device_local".to_string(),
+            kind: "device_local".to_string(),
+            capacity_bytes: 64 * 1024 * 1024 * 1024,
+            host_visible: false,
+            device_local: true,
+            coherent: false,
+            cached: false,
+            minimum_alignment_bytes: 4,
+            properties: BTreeMap::new(),
+        }],
+        interconnects: Vec::new(),
+        provenance: crate::HardwareProfileProvenance {
+            api: "vulkan".to_string(),
+            api_version: "1.4".to_string(),
+            driver: "fixture".to_string(),
+            driver_version: "1".to_string(),
+            compiler: "fixture".to_string(),
+            operating_system: "linux".to_string(),
+            discovery_backend: "fixture".to_string(),
+        },
+        capability_extensions: BTreeMap::new(),
+        identity_extensions: BTreeMap::new(),
+        runtime_bindings: BTreeMap::new(),
+    })
+    .unwrap()
+}
+
 #[test]
 fn runtime_component_weights_include_target_endpoint_parameters() {
     let runtime_model = fixture_model_runtime_model();
@@ -97,7 +146,7 @@ fn runtime_auto_placement_uses_one_device_when_the_complete_retained_set_fits() 
         ResourceResidencyPolicy::DemandRetained,
     )
     .unwrap();
-    let required = maximum_resident_bytes(&baseline, "gpu0");
+    let required = vulkan_runtime_maximum_device_resident_bytes(&baseline.device_plans[0]).unwrap();
 
     let placed = capacity_pack_vulkan_runtime_model(
         tiny_model_dir(),
@@ -178,6 +227,118 @@ fn runtime_auto_placement_spills_once_instead_of_balancing_across_extra_devices(
         })
         .collect::<Vec<_>>();
     assert_eq!(signal_devices, ["first", "first", "second"]);
+}
+
+#[test]
+fn representation_selection_converges_across_heterogeneous_placement() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let tensor_index = runtime_model.load_runtime_tensor_index(tiny_model_dir()).unwrap();
+    let baseline = plan_vulkan_runtime_residency(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        8,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    let one_device_required = maximum_resident_bytes(&baseline, "gpu0");
+    let primary = auto_placement_hardware_profile("primary", "primary-architecture");
+    let spill = auto_placement_hardware_profile("spill", "spill-architecture");
+    assert_ne!(primary.capability_class, spill.capability_class);
+
+    let placed = capacity_pack_and_select_vulkan_runtime_model(
+        tiny_model_dir(),
+        &runtime_model,
+        &[
+            VulkanRuntimePlacementCandidate {
+                device_id: "primary".to_string(),
+                safe_capacity_bytes: one_device_required - 1,
+            },
+            VulkanRuntimePlacementCandidate {
+                device_id: "spill".to_string(),
+                safe_capacity_bytes: one_device_required,
+            },
+        ],
+        &BTreeMap::from([("primary".to_string(), primary), ("spill".to_string(), spill)]),
+        8,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+        crate::RuntimeExecutionEnvelope {
+            phases: vec!["decode".to_string(), "prefill".to_string()],
+            activation_batch: crate::RuntimeInclusiveRange {
+                minimum: 1,
+                maximum: 8,
+            },
+            context_activations: crate::RuntimeInclusiveRange {
+                minimum: 0,
+                maximum: 8,
+            },
+            state_activations: crate::RuntimeInclusiveRange {
+                minimum: 0,
+                maximum: 8,
+            },
+            speculative_draft_tokens: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(placed.selected_device_ids, ["primary", "spill"]);
+    assert_eq!(placed.runtime_model.placement_device_ids(), ["primary", "spill"]);
+    let selection = placed.runtime_model.implementation_selection.unwrap();
+    assert!(selection.selected.is_empty());
+    assert!(!selection.exact_instance_ids.is_empty());
+}
+
+#[test]
+fn heterogeneous_selection_rejects_a_selected_device_without_a_profile() {
+    let runtime_model = fixture_model_runtime_model();
+    let tensor_index = runtime_model.load_runtime_tensor_index(tiny_model_dir()).unwrap();
+    let baseline = plan_vulkan_runtime_residency(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        8,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    let required = vulkan_runtime_maximum_device_resident_bytes(&baseline.device_plans[0]).unwrap();
+
+    let error = capacity_pack_and_select_vulkan_runtime_model(
+        tiny_model_dir(),
+        &runtime_model,
+        &[VulkanRuntimePlacementCandidate {
+            device_id: "unprofiled".to_string(),
+            safe_capacity_bytes: required,
+        }],
+        &BTreeMap::new(),
+        8,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+        crate::RuntimeExecutionEnvelope {
+            phases: vec!["decode".to_string()],
+            activation_batch: crate::RuntimeInclusiveRange {
+                minimum: 1,
+                maximum: 1,
+            },
+            context_activations: crate::RuntimeInclusiveRange {
+                minimum: 0,
+                maximum: 8,
+            },
+            state_activations: crate::RuntimeInclusiveRange {
+                minimum: 0,
+                maximum: 8,
+            },
+            speculative_draft_tokens: 0,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "runtime placement device \"unprofiled\" has no hardware profile",
+    );
 }
 
 #[test]
@@ -341,7 +502,7 @@ fn runtime_auto_placement_rewires_without_discarding_selected_artifacts() {
     });
     let execution_before = selected.component_executions.clone();
 
-    let rewired = runtime_model_with_capacity_packed_placement(
+    let rewired = vulkan_runtime_model_with_component_placement(
         &selected,
         "physical-a",
         &BTreeMap::from([("layer_00".to_string(), "physical-a".to_string())]),

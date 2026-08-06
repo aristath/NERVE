@@ -185,6 +185,16 @@ impl DeviceCapabilityView {
 }
 
 impl RuntimeModelEditor {
+    pub fn validate_all_instance_device_compatibility(
+        &self,
+        device_id: &str,
+    ) -> Result<(), RuntimeEditorError> {
+        for instance in self.draft.instances.iter().filter(|instance| instance.enabled) {
+            self.validate_instance_device_compatibility(&instance.instance_id, device_id)?;
+        }
+        Ok(())
+    }
+
     pub fn validate_instance_device_compatibility(
         &self,
         instance_id: &str,

@@ -1106,6 +1106,13 @@ fn e2e_unavailable_device_and_invalid_property_cannot_mutate_the_draft() {
 #[test]
 fn e2e_component_incompatible_device_is_explained_and_cannot_be_selected() {
     let mut editor = deterministic_editor_with_incompatible_second_device();
+    let graph_error = editor
+        .validate_all_instance_device_compatibility("limited-gpu")
+        .unwrap_err();
+    assert!(
+        graph_error.to_string().contains("unsupported")
+            || graph_error.to_string().contains("no compatible prefill")
+    );
     let error = editor
         .validate_instance_device_compatibility("layer_00", "limited-gpu")
         .unwrap_err();

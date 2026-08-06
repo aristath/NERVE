@@ -30,7 +30,7 @@ mod tests {
         runtime_chat_repl_control, runtime_physical_device_bindings_in, submit_chat_turn, usage,
         validate_explicit_logical_device_bindings, runtime_uses_explicit_placement,
         runtime_auto_placement_device_is_eligible,
-        rank_runtime_auto_placement_candidates,
+        rank_runtime_auto_placement_candidates_across_capability_classes,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -149,32 +149,38 @@ mod tests {
 
     #[test]
     fn automatic_capacity_packing_prefers_one_unreserved_gpu_over_spilling_from_default() {
-        let ranked = rank_runtime_auto_placement_candidates(vec![
-            (
-                true,
-                0,
-                nerve_runtime::VulkanRuntimePlacementCandidate {
-                    device_id: "reserved-default".to_string(),
-                    safe_capacity_bytes: 4,
-                },
-            ),
-            (
-                false,
-                1,
-                nerve_runtime::VulkanRuntimePlacementCandidate {
-                    device_id: "roomy".to_string(),
-                    safe_capacity_bytes: 32,
-                },
-            ),
-            (
-                false,
-                2,
-                nerve_runtime::VulkanRuntimePlacementCandidate {
-                    device_id: "also-roomy".to_string(),
-                    safe_capacity_bytes: 32,
-                },
-            ),
-        ]);
+        let ranked = rank_runtime_auto_placement_candidates_across_capability_classes(
+            vec![
+                (
+                    true,
+                    0,
+                    "same".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "reserved-default".to_string(),
+                        safe_capacity_bytes: 4,
+                    },
+                ),
+                (
+                    false,
+                    1,
+                    "same".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "roomy".to_string(),
+                        safe_capacity_bytes: 32,
+                    },
+                ),
+                (
+                    false,
+                    2,
+                    "same".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "also-roomy".to_string(),
+                        safe_capacity_bytes: 32,
+                    },
+                ),
+            ],
+            Some("same"),
+        );
 
         assert_eq!(
             ranked
@@ -182,6 +188,50 @@ mod tests {
                 .map(|candidate| candidate.device_id.as_str())
                 .collect::<Vec<_>>(),
             ["roomy", "also-roomy", "reserved-default"],
+        );
+    }
+
+    #[test]
+    fn automatic_capacity_packing_retains_heterogeneous_spill_targets() {
+        let ranked = rank_runtime_auto_placement_candidates_across_capability_classes(
+            vec![
+                (
+                    true,
+                    0,
+                    "primary-class".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "primary-reserved".to_string(),
+                        safe_capacity_bytes: 24,
+                    },
+                ),
+                (
+                    false,
+                    1,
+                    "primary-class".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "primary-roomy".to_string(),
+                        safe_capacity_bytes: 32,
+                    },
+                ),
+                (
+                    false,
+                    2,
+                    "spill-class".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "heterogeneous-spill".to_string(),
+                        safe_capacity_bytes: 28,
+                    },
+                ),
+            ],
+            Some("primary-class"),
+        );
+
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|candidate| candidate.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["primary-roomy", "primary-reserved", "heterogeneous-spill"],
         );
     }
 
