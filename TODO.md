@@ -100,15 +100,30 @@ toward 50 tok/s without regressing supported Qwen models.
      or completed emitted block.
      DeepSeek-V4-Flash-0731 ships its DSpark module inside the target checkpoint;
      this is the intended fast path, not an optional external draft model. The
-     compiler already discovers its structure without a model-name branch as a
+     compiler discovers its structure without a model-name branch as a
      three-stage `parallel_backbone_markov` decoder: target taps from layers
-     40-42, a five-lane semi-autoregressive backbone, a rank-256 Markov head,
-     and confidence-prefix verification. Complete the shared runtime path and
-     make DSpark part of the DeepSeek product gate. Reconcile the source's
-     physical `dspark_block_size = 5` with the official runtime recommendation
-     of seven speculative tokens instead of silently clamping or inventing
-     lanes; prove the resulting proposal, confidence, verification, commit, and
-     rollback behavior against the checkpoint's reference implementation.
+     40-42, a semi-autoregressive backbone, a rank-256 Markov head, and
+     confidence-prefix verification. The source `dspark_block_size = 5` is now
+     retained as training/checkpoint provenance while the compiled execution
+     capacity follows the official seven-token runtime recommendation. Fresh
+     b7 input, backbone, sequential Markov, confidence, and output shaders are
+     compiled; widths 1-7 remain legal runtime views of that capacity. Make the
+     package-owned seven-token recommendation activate automatically when an
+     attached decoder is present, while preserving an explicit runtime disable.
+     Finish reference-equivalence evidence for proposal, confidence,
+     verification, commit, and rollback behavior.
+
+     The first five-device demand-paged run proves the b7 decoder executes, but
+     not yet profitably: calibration measured 10 DSpark cycles, proposed 34
+     draft tokens, accepted 14 (41.18%), and selected scalar afterward. Width 4
+     was best at 3.734 useful tok/s; width 7 reached only 1.514 useful tok/s.
+     Fuse the complete DSpark proposal, target verification, prefix comparison,
+     state selection, canonical commit, and draft catch-up transaction on the
+     GPU so seven-token execution no longer expands into thousands of host
+     submissions and waits. Re-run one complete warmup conversation followed
+     by the untouched truth conversation; DSpark is complete only when it is
+     behaviorally correct and wins the selector on measured useful committed
+     tokens per second.
      A fresh complete-conversation warmup followed by the canonical truth
      conversation measured **8.1878 decode tok/s** and **8.4208 prefill tok/s**,
      statistically flat against the accepted 8.0350/8.2372 run. The measured
@@ -164,11 +179,18 @@ toward 50 tok/s without regressing supported Qwen models.
    fits, and proportionally assigns a larger virtual model across every
    compatible cache when it does not. It respects partial VRAM reservations,
    keeps contiguous component segments, excludes integrated display GPUs, and
-   leaves explicit wiring untouched. Complete candidate ranking and spill
-   across capability classes using measured execution and transfer costs rather
-   than model or vendor names. Select each component representation for its
-   target device, reject incompatible boundaries before allocation, and permit
-   a model that exhausts the AMD group to continue contiguously onto a
+   leaves explicit wiring untouched. Placement and representation selection now
+   run as one fixed-point solve: exact artifacts establish a capacity-safe
+   graph, alternatives are selected against each component's actual target
+   profile, and exact residency is replanned until both decisions converge.
+   Whole-graph SPIR-V compatibility is checked before opening candidate
+   devices. A fresh DeepSeek mount selected the smallest contiguous five-AMD
+   prefix, excluded the discrete Intel target before allocation because the
+   current package's FP8 shaders require unsupported `shader_float8`, and
+   released every byte it acquired. Finish compiler emission and measurement
+   of compatible BF16/INT8 alternatives, and rank cross-class spill using
+   measured execution and transfer costs rather than model or vendor names, so
+   a model that exhausts the AMD group can continue contiguously onto a
    compatible discrete Intel GPU or CPU without recompilation.
 
    Make temporal and speculative batch execution device-segment aware. A valid
@@ -200,8 +222,15 @@ toward 50 tok/s without regressing supported Qwen models.
    decode tok/s** and **131.4108 prefill tok/s**. Both runs used 128K context,
    the 65,536-token output allowance, official thinking/sampling behavior, one
    discarded complete in-process conversation, a measured five-turn truth
-   conversation, correct Greece recall, and exact teardown. Retain these gates
-   for every subsequent runtime-performance commit.
+   conversation, correct Greece recall, and exact teardown. After moving lazy
+   temporal runners and deferred demand-chain materialization ahead of shared
+   execution epochs, the same gates pass at **61.9432 decode tok/s** and
+   **48.6530 prefill tok/s** for Qwen3.6-35B-A3B, and **48.7122 decode tok/s**
+   and **137.1206 prefill tok/s** for Qwen3.5-9B. This regression exercised a
+   near-capacity expert cache through both warmup and truth conversations; no
+   allocator failure recurred and both GPUs returned exactly to their recorded
+   pre-workload reservations. Retain these gates for every subsequent
+   runtime-performance commit.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
