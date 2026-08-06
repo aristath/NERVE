@@ -68,8 +68,9 @@ use crate::vulkan_compute::{
     VulkanStableResourceAllocation, VulkanStableResourceArena, VulkanStableResourceArenaConfig,
     VulkanStableResourceGroupLayout, VulkanSubgroupOperation, VulkanTimelineSemaphore,
     VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
-    record_vulkan_execution_quantum_measurement, vulkan_gpu_residency_gate_spirv_words,
-    vulkan_spirv_requirements,
+    record_vulkan_demand_sequence_device_duration, record_vulkan_execution_quantum_measurement,
+    record_vulkan_resident_component_sequence_device_duration,
+    vulkan_gpu_residency_gate_spirv_words, vulkan_spirv_requirements,
 };
 #[cfg(test)]
 use crate::vulkan_compute::{

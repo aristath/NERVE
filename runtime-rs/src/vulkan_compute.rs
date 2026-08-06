@@ -39,3 +39,5 @@ include!("vulkan_compute/radix_topk_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/spirv_interface_tests.rs");
 include!("vulkan_compute/tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/execution_counter_tests.rs");

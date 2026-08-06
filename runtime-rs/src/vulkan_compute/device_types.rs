@@ -60,6 +60,15 @@ pub struct VulkanResidentExecutionCounters {
     pub resident_queue_batch_commands: u64,
     pub resident_copy_queue_submits: u64,
     pub resident_copy_waits: u64,
+    pub demand_initial_sequence_count: u64,
+    pub demand_initial_device_duration_ns: u64,
+    pub demand_initial_max_device_duration_ns: u64,
+    pub demand_resume_sequence_count: u64,
+    pub demand_resume_device_duration_ns: u64,
+    pub demand_resume_max_device_duration_ns: u64,
+    pub resident_component_sequence_count: u64,
+    pub resident_component_device_duration_ns: u64,
+    pub resident_component_max_device_duration_ns: u64,
     pub execution_quantum_count: u64,
     pub execution_quantum_region_count: u64,
     pub execution_quantum_forced_yield_count: u64,
@@ -81,6 +90,15 @@ static RESIDENT_QUEUE_BATCH_SUBMITS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_QUEUE_BATCH_COMMANDS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_COPY_QUEUE_SUBMITS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_COPY_WAITS: AtomicU64 = AtomicU64::new(0);
+static DEMAND_INITIAL_SEQUENCE_COUNT: AtomicU64 = AtomicU64::new(0);
+static DEMAND_INITIAL_DEVICE_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static DEMAND_INITIAL_MAX_DEVICE_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static DEMAND_RESUME_SEQUENCE_COUNT: AtomicU64 = AtomicU64::new(0);
+static DEMAND_RESUME_DEVICE_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static DEMAND_RESUME_MAX_DEVICE_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static RESIDENT_COMPONENT_SEQUENCE_COUNT: AtomicU64 = AtomicU64::new(0);
+static RESIDENT_COMPONENT_DEVICE_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static RESIDENT_COMPONENT_MAX_DEVICE_DURATION_NS: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_COUNT: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_REGION_COUNT: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_FORCED_YIELD_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -102,6 +120,15 @@ pub fn reset_vulkan_resident_execution_counters() {
     RESIDENT_QUEUE_BATCH_COMMANDS.store(0, Ordering::Relaxed);
     RESIDENT_COPY_QUEUE_SUBMITS.store(0, Ordering::Relaxed);
     RESIDENT_COPY_WAITS.store(0, Ordering::Relaxed);
+    DEMAND_INITIAL_SEQUENCE_COUNT.store(0, Ordering::Relaxed);
+    DEMAND_INITIAL_DEVICE_DURATION_NS.store(0, Ordering::Relaxed);
+    DEMAND_INITIAL_MAX_DEVICE_DURATION_NS.store(0, Ordering::Relaxed);
+    DEMAND_RESUME_SEQUENCE_COUNT.store(0, Ordering::Relaxed);
+    DEMAND_RESUME_DEVICE_DURATION_NS.store(0, Ordering::Relaxed);
+    DEMAND_RESUME_MAX_DEVICE_DURATION_NS.store(0, Ordering::Relaxed);
+    RESIDENT_COMPONENT_SEQUENCE_COUNT.store(0, Ordering::Relaxed);
+    RESIDENT_COMPONENT_DEVICE_DURATION_NS.store(0, Ordering::Relaxed);
+    RESIDENT_COMPONENT_MAX_DEVICE_DURATION_NS.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_COUNT.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_REGION_COUNT.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_FORCED_YIELD_COUNT.store(0, Ordering::Relaxed);
@@ -127,6 +154,22 @@ pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
         resident_queue_batch_commands: RESIDENT_QUEUE_BATCH_COMMANDS.load(Ordering::Relaxed),
         resident_copy_queue_submits: RESIDENT_COPY_QUEUE_SUBMITS.load(Ordering::Relaxed),
         resident_copy_waits: RESIDENT_COPY_WAITS.load(Ordering::Relaxed),
+        demand_initial_sequence_count: DEMAND_INITIAL_SEQUENCE_COUNT.load(Ordering::Relaxed),
+        demand_initial_device_duration_ns: DEMAND_INITIAL_DEVICE_DURATION_NS
+            .load(Ordering::Relaxed),
+        demand_initial_max_device_duration_ns: DEMAND_INITIAL_MAX_DEVICE_DURATION_NS
+            .load(Ordering::Relaxed),
+        demand_resume_sequence_count: DEMAND_RESUME_SEQUENCE_COUNT.load(Ordering::Relaxed),
+        demand_resume_device_duration_ns: DEMAND_RESUME_DEVICE_DURATION_NS
+            .load(Ordering::Relaxed),
+        demand_resume_max_device_duration_ns: DEMAND_RESUME_MAX_DEVICE_DURATION_NS
+            .load(Ordering::Relaxed),
+        resident_component_sequence_count: RESIDENT_COMPONENT_SEQUENCE_COUNT
+            .load(Ordering::Relaxed),
+        resident_component_device_duration_ns: RESIDENT_COMPONENT_DEVICE_DURATION_NS
+            .load(Ordering::Relaxed),
+        resident_component_max_device_duration_ns: RESIDENT_COMPONENT_MAX_DEVICE_DURATION_NS
+            .load(Ordering::Relaxed),
         execution_quantum_count: EXECUTION_QUANTUM_COUNT.load(Ordering::Relaxed),
         execution_quantum_region_count: EXECUTION_QUANTUM_REGION_COUNT.load(Ordering::Relaxed),
         execution_quantum_forced_yield_count: EXECUTION_QUANTUM_FORCED_YIELD_COUNT
@@ -145,6 +188,34 @@ pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
         execution_quantum_max_actual_duration_ns: EXECUTION_QUANTUM_MAX_ACTUAL_DURATION_NS
             .load(Ordering::Relaxed),
     }
+}
+
+pub(crate) fn record_vulkan_resident_component_sequence_device_duration(duration_ns: u64) {
+    RESIDENT_COMPONENT_SEQUENCE_COUNT.fetch_add(1, Ordering::Relaxed);
+    RESIDENT_COMPONENT_DEVICE_DURATION_NS.fetch_add(duration_ns, Ordering::Relaxed);
+    RESIDENT_COMPONENT_MAX_DEVICE_DURATION_NS.fetch_max(duration_ns, Ordering::Relaxed);
+}
+
+pub(crate) fn record_vulkan_demand_sequence_device_duration(
+    resumed: bool,
+    duration_ns: u64,
+) {
+    let (count, total, maximum) = if resumed {
+        (
+            &DEMAND_RESUME_SEQUENCE_COUNT,
+            &DEMAND_RESUME_DEVICE_DURATION_NS,
+            &DEMAND_RESUME_MAX_DEVICE_DURATION_NS,
+        )
+    } else {
+        (
+            &DEMAND_INITIAL_SEQUENCE_COUNT,
+            &DEMAND_INITIAL_DEVICE_DURATION_NS,
+            &DEMAND_INITIAL_MAX_DEVICE_DURATION_NS,
+        )
+    };
+    count.fetch_add(1, Ordering::Relaxed);
+    total.fetch_add(duration_ns, Ordering::Relaxed);
+    maximum.fetch_max(duration_ns, Ordering::Relaxed);
 }
 
 pub(crate) fn record_vulkan_execution_quantum_measurement(

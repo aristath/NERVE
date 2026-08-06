@@ -663,8 +663,18 @@ impl VulkanResidentPlacedComponentBatchRunner {
         })?;
         last_slice.wait_pipeline_demand_submission(last_device, batch_width)?;
         for device_index in preceding {
+            let device_id = self.device_ids.get(*device_index).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch has no device identity for slice {device_index}"
+                )))
+            })?;
+            let device = devices.get(device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.clone(),
+                }
+            })?;
             self.slice(*device_index)?
-                .mark_pipeline_demand_submission_completed(batch_width)?;
+                .mark_pipeline_demand_submission_completed(device, batch_width)?;
         }
         Ok(())
     }

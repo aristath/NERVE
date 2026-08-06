@@ -192,6 +192,42 @@ fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) 
     );
     println!("  resident_copy_waits={}", counters.resident_copy_waits);
     println!(
+        "  demand_initial_sequences={}",
+        counters.demand_initial_sequence_count
+    );
+    println!(
+        "  demand_initial_device_ms={:.3}",
+        nanos_to_millis(counters.demand_initial_device_duration_ns)
+    );
+    println!(
+        "  demand_initial_max_device_ms={:.3}",
+        nanos_to_millis(counters.demand_initial_max_device_duration_ns)
+    );
+    println!(
+        "  demand_resume_sequences={}",
+        counters.demand_resume_sequence_count
+    );
+    println!(
+        "  demand_resume_device_ms={:.3}",
+        nanos_to_millis(counters.demand_resume_device_duration_ns)
+    );
+    println!(
+        "  demand_resume_max_device_ms={:.3}",
+        nanos_to_millis(counters.demand_resume_max_device_duration_ns)
+    );
+    println!(
+        "  resident_component_sequences={}",
+        counters.resident_component_sequence_count
+    );
+    println!(
+        "  resident_component_device_ms={:.3}",
+        nanos_to_millis(counters.resident_component_device_duration_ns)
+    );
+    println!(
+        "  resident_component_max_device_ms={:.3}",
+        nanos_to_millis(counters.resident_component_max_device_duration_ns)
+    );
+    println!(
         "  execution_quanta={}",
         counters.execution_quantum_count
     );
