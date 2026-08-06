@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 import time
@@ -115,6 +116,33 @@ class FixtureExecutionAdapter:
         payload = self.trace_artifacts[relative_path]
         for offset in range(0, len(payload), chunk_bytes):
             yield payload[offset : offset + chunk_bytes]
+
+
+class ScopedFixtureExecutionAdapter(FixtureExecutionAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scope_entries = 0
+        self.scope_exits = 0
+        self.scope_active = False
+
+    @contextmanager
+    def benchmark_scope(self):
+        assert self.scope_active is False
+        self.scope_entries += 1
+        self.scope_active = True
+        try:
+            yield
+        finally:
+            self.scope_active = False
+            self.scope_exits += 1
+
+    def iter_fixture_artifact(self, *args, **kwargs):
+        assert self.scope_active is True
+        yield from super().iter_fixture_artifact(*args, **kwargs)
+
+    def open_session(self, request):
+        assert self.scope_active is True
+        return super().open_session(request)
 
 
 class DeadlineAwareExecutionAdapter(FixtureExecutionAdapter):
@@ -592,6 +620,43 @@ def test_matched_benchmark_promotes_only_measured_material_speedup(
         event["default_statistics"]["execution_path"] == "normal_fixture_runtime"
         for event in outcome.run.to_json()["residency_events"]
     )
+
+
+def test_benchmark_runner_owns_one_adapter_scope_for_the_complete_plan(
+    tmp_path: Path,
+) -> None:
+    _, _, _, plan, _ = _fixture(tmp_path)
+    adapter = ScopedFixtureExecutionAdapter()
+
+    run = execute_benchmark_plan(plan, adapter)
+
+    assert run.to_json()["status"] == "completed"
+    assert adapter.scope_entries == 1
+    assert adapter.scope_exits == 1
+    assert adapter.scope_active is False
+
+
+def test_benchmark_runner_releases_adapter_scope_after_invalid_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, _, plan, _ = _fixture(tmp_path)
+    adapter = ScopedFixtureExecutionAdapter()
+    original = FixtureExecutionSession.execute
+
+    def mismatched_execute(self, request):
+        document = original(self, request)
+        document["input_digest"] = staged_artifact_digest(b"different")
+        document["observation_id"] = benchmark_observation_id(document)
+        return document
+
+    monkeypatch.setattr(FixtureExecutionSession, "execute", mismatched_execute)
+    with pytest.raises(ModelCompileError, match="matched trial conditions"):
+        execute_benchmark_plan(plan, adapter)
+
+    assert adapter.scope_entries == 1
+    assert adapter.scope_exits == 1
+    assert adapter.scope_active is False
 
 
 def test_slower_candidate_is_not_materially_faster(tmp_path: Path) -> None:

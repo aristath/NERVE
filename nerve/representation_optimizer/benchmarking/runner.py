@@ -33,6 +33,27 @@ def execute_benchmark_plan(
     *,
     cancel_requested: Callable[[], bool] | None = None,
 ) -> BenchmarkRun:
+    scope_factory = getattr(adapter, "benchmark_scope", None)
+    if scope_factory is None:
+        return _execute_benchmark_plan(
+            plan,
+            adapter,
+            cancel_requested=cancel_requested,
+        )
+    with scope_factory():
+        return _execute_benchmark_plan(
+            plan,
+            adapter,
+            cancel_requested=cancel_requested,
+        )
+
+
+def _execute_benchmark_plan(
+    plan: BenchmarkPlan,
+    adapter: NormalExecutionAdapter,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> BenchmarkRun:
     document = plan.to_json()
     policy = document["policy"]
     observations: list[Json] = []

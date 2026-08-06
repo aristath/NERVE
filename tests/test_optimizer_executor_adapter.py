@@ -297,6 +297,71 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert executor.aborted is False
 
 
+def test_resident_component_adapter_reuses_executor_and_candidate_seal_per_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, loader_calls, _ = _adapter_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    mount_request, execution_request, candidate_id = _requests(tmp_path)
+    candidate_root = tmp_path / "candidate"
+    (candidate_root / "fixtures").mkdir(parents=True)
+    (candidate_root / "fixtures" / "input.bin").write_bytes(
+        b"candidate-specific input"
+    )
+
+    with adapter.benchmark_scope():
+        assert b"".join(
+            adapter.iter_fixture_artifact(
+                "fixtures/input.bin",
+                candidate_id=candidate_id,
+            )
+        ) == b"candidate-specific input"
+        first = adapter.open_session(mount_request)
+        first.execute(execution_request)
+        first.close()
+
+        second_mount = replace(mount_request, block_index=1)
+        second_execution = replace(execution_request, block_index=1)
+        second = adapter.open_session(second_mount)
+        second.execute(second_execution)
+        second.close()
+
+    assert loader_calls == [candidate_id]
+    assert executor.factory_calls == 1
+    assert [command["command"] for command in executor.commands] == [
+        "mount",
+        "execute",
+        "close",
+        "mount",
+        "execute",
+        "close",
+        "shutdown",
+    ]
+    assert executor.closed is True
+    assert executor.aborted is False
+
+
+def test_resident_component_benchmark_scope_aborts_executor_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, _, _ = _requests(tmp_path)
+
+    with pytest.raises(RuntimeError, match="benchmark failed"):
+        with adapter.benchmark_scope():
+            session = adapter.open_session(mount_request)
+            session.close()
+            raise RuntimeError("benchmark failed")
+
+    assert executor.factory_calls == 1
+    assert executor.aborted is True
+    assert executor.closed is False
+
+
 def test_resident_component_adapter_rejects_too_few_sustained_windows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

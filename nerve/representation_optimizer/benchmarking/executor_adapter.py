@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -38,11 +39,15 @@ from nerve.representation_optimizer.benchmarking.executor_protocol import (
 )
 from nerve.representation_optimizer.benchmarking.executor_transport import (
     ExecutorFactory,
+    ExecutorTransport,
     subprocess_executor,
 )
 from nerve.representation_optimizer.contracts import (
     canonical_json_bytes,
     contract_digest,
+)
+from nerve.representation_optimizer.staging.loading import (
+    LoadedStagedCandidate,
 )
 
 
@@ -91,18 +96,46 @@ class ResidentComponentExecutionAdapter:
         self.executor_command = tuple(executor_command)
         self.vulkan_driver_files = drivers
         self.executor_factory = executor_factory or subprocess_executor
-        self.staged_candidate_loader = (
+        self._staged_candidate_loader = (
             staged_candidate_loader or default_staged_candidate_loader
         )
+        self._benchmark_active = False
+        self._benchmark_transport: ExecutorTransport | None = None
+        self._benchmark_physical_device_ids: set[str] = set()
+        self._benchmark_candidates: dict[str, LoadedStagedCandidate] = {}
         self.executor_client = ResidentExecutorClient(
             package_manifest=self.package_manifest,
             candidate_workspace=self.candidate_workspace,
             executor_command=self.executor_command,
             vulkan_driver_files=self.vulkan_driver_files,
             executor_factory=self.executor_factory,
-            staged_candidate_loader=self.staged_candidate_loader,
+            staged_candidate_loader=self._load_staged_candidate,
         )
         self.run_nonce = uuid4().hex
+
+    @contextmanager
+    def benchmark_scope(self) -> Iterator[None]:
+        """Keep immutable assets resident for one complete matched run."""
+        if self._benchmark_active:
+            raise ModelCompileError("resident benchmark scope cannot be nested")
+        self._benchmark_active = True
+        try:
+            yield
+        except BaseException:
+            if self._benchmark_transport is not None:
+                self._benchmark_transport.abort()
+            raise
+        else:
+            if self._benchmark_transport is not None:
+                self.executor_client.shutdown_transport(
+                    self._benchmark_transport,
+                    tuple(sorted(self._benchmark_physical_device_ids)),
+                )
+        finally:
+            self._benchmark_transport = None
+            self._benchmark_physical_device_ids.clear()
+            self._benchmark_candidates.clear()
+            self._benchmark_active = False
 
     def iter_fixture_artifact(
         self,
@@ -111,7 +144,7 @@ class ResidentComponentExecutionAdapter:
         candidate_id: str,
         chunk_bytes: int = 8 * 1024 * 1024,
     ) -> Iterable[bytes]:
-        candidate = self.staged_candidate_loader(
+        candidate = self._load_staged_candidate(
             self.candidate_workspace,
             candidate_id,
             self.package_dir,
@@ -145,6 +178,45 @@ class ResidentComponentExecutionAdapter:
 
     def executor_environment(self) -> dict[str, str]:
         return self.executor_client.environment()
+
+    def _load_staged_candidate(
+        self,
+        workspace_root: Path,
+        candidate_id: str,
+        package_dir: Path,
+    ) -> LoadedStagedCandidate:
+        if (
+            workspace_root != self.candidate_workspace
+            or package_dir != self.package_dir
+        ):
+            raise ModelCompileError(
+                "resident benchmark changed staged candidate custody"
+            )
+        if self._benchmark_active and candidate_id in self._benchmark_candidates:
+            return self._benchmark_candidates[candidate_id]
+        candidate = self._staged_candidate_loader(
+            workspace_root,
+            candidate_id,
+            package_dir,
+        )
+        if self._benchmark_active:
+            self._benchmark_candidates[candidate_id] = candidate
+        return candidate
+
+    def _open_executor_session(
+        self,
+        spec: ResidentExecutorMountSpec,
+    ) -> ResidentExecutorSession:
+        if not self._benchmark_active:
+            return self.executor_client.open(spec)
+        if self._benchmark_transport is None:
+            self._benchmark_transport = self.executor_client.start_transport()
+        session = self.executor_client.open_on_transport(
+            spec,
+            self._benchmark_transport,
+        )
+        self._benchmark_physical_device_ids.add(spec.physical_device_id)
+        return session
 
 
 class ResidentComponentExecutionSession:
@@ -226,7 +298,7 @@ class ResidentComponentExecutionSession:
             ),
             "matched_conditions.controls.maximum_quantum_wait_ns",
         )
-        executor_session = adapter.executor_client.open(
+        executor_session = adapter._open_executor_session(
             ResidentExecutorMountSpec(
                 implementation_id=request.implementation["implementation_id"],
                 component_id=component_id,
