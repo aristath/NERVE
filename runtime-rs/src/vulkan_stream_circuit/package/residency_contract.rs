@@ -743,7 +743,7 @@ pub(crate) fn compiled_resource_identity(
     resource_content_id("resource", payload)
 }
 
-fn compiled_atomic_group_identity(
+pub(super) fn compiled_atomic_group_identity(
     group: &CompiledAtomicResidencyGroup,
 ) -> io::Result<String> {
     resource_content_id(
@@ -756,7 +756,7 @@ fn compiled_atomic_group_identity(
     )
 }
 
-fn compiled_partition_template_identity(
+pub(super) fn compiled_partition_template_identity(
     template: &CompiledPartitionTemplate,
 ) -> io::Result<String> {
     let member_payloads = template
@@ -862,7 +862,7 @@ pub(super) fn compiled_checkpoint_identity(
     )
 }
 
-fn validate_compiled_resource_residency(
+pub(super) fn validate_compiled_resource_residency(
     package_root: &Path,
     manifest: &VulkanResidentModelPackageManifest,
 ) -> io::Result<()> {

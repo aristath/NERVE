@@ -675,7 +675,7 @@ def _build_plan(
             "mount",
             "ordinary_lowering",
             0,
-            json_contract("nerve.optimizer.vulkan_component_overlay.v1"),
+            json_contract("nerve.optimizer.vulkan_component_overlay.v2"),
         ),
         _output(
             prefix(PREFILL_SHADER_PATH),

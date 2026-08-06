@@ -38,7 +38,7 @@ def build_plan() -> CandidateBuildPlan:
                     "validation_contract": {
                         "schema": (
                             "nerve.optimizer."
-                            "vulkan_component_overlay.v1"
+                            "vulkan_component_overlay.v2"
                         ),
                         "object_required": True,
                     },
@@ -159,11 +159,12 @@ def test_mount_artifacts_reject_source_identity_drift(
         json.dumps(
             {
                 "schema": (
-                    "nerve.optimizer.vulkan_component_overlay.v1"
+                    "nerve.optimizer.vulkan_component_overlay.v2"
                 ),
                 "source_component_id": "other_component",
                 "component": {},
                 "execution": {},
+                "resident_derivations": [],
             }
         )
     )
@@ -184,6 +185,153 @@ def test_mount_artifacts_reject_source_identity_drift(
     with pytest.raises(
         ContractValidationError,
         match="source component disagrees",
+    ):
+        validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+def test_component_resident_derivations_must_be_sorted_and_unique(
+    tmp_path: Path,
+):
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    derivation = {
+        "schema": "nerve.resident_derivation.v1",
+        "kind": "mxfp4_e2m1_to_fp8_e4m3",
+        "source_byte_count": 8,
+        "resident_byte_count": 16,
+        "required_features": [
+            "shader_float8",
+            "shader_int8",
+            "shader_mixed_float_dot_product_float8_acc_float32",
+        ],
+    }
+    overlay.write_text(
+        json.dumps(
+            {
+                "schema": "nerve.optimizer.vulkan_component_overlay.v2",
+                "source_component_id": "component",
+                "component": {},
+                "execution": {},
+                "resident_derivations": [
+                    {
+                        "node_id": "node_b",
+                        "parameter_id": "weight",
+                        "derivation": derivation,
+                    },
+                    {
+                        "node_id": "node_a",
+                        "parameter_id": "weight",
+                        "derivation": derivation,
+                    },
+                ],
+            }
+        )
+    )
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        mount_document(),
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    with pytest.raises(ContractValidationError, match="sorted and unique"):
+        validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+def test_component_resident_derivation_contract_is_accepted(tmp_path: Path):
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(
+        json.dumps(
+            {
+                "schema": "nerve.optimizer.vulkan_component_overlay.v2",
+                "source_component_id": "component",
+                "component": {},
+                "execution": {},
+                "resident_derivations": [
+                    {
+                        "node_id": "node",
+                        "parameter_id": "weight",
+                        "derivation": {
+                            "schema": "nerve.resident_derivation.v1",
+                            "kind": "mxfp4_e2m1_to_fp8_e4m3",
+                            "source_byte_count": 8,
+                            "resident_byte_count": 16,
+                            "required_features": [
+                                "shader_float8",
+                                "shader_int8",
+                                (
+                                    "shader_mixed_float_dot_product_"
+                                    "float8_acc_float32"
+                                ),
+                            ],
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        mount_document(),
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+def test_component_resident_derivation_rejects_invalid_nested_contract(
+    tmp_path: Path,
+):
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(
+        json.dumps(
+            {
+                "schema": "nerve.optimizer.vulkan_component_overlay.v2",
+                "source_component_id": "component",
+                "component": {},
+                "execution": {},
+                "resident_derivations": [
+                    {
+                        "node_id": "node",
+                        "parameter_id": "weight",
+                        "derivation": {
+                            "schema": "nerve.resident_derivation.v1",
+                            "kind": "mxfp4_e2m1_to_fp8_e4m3",
+                            "source_byte_count": 8,
+                            "resident_byte_count": 8,
+                            "required_features": [
+                                "shader_float8",
+                                "shader_int8",
+                                (
+                                    "shader_mixed_float_dot_product_"
+                                    "float8_acc_float32"
+                                ),
+                            ],
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        mount_document(),
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    with pytest.raises(
+        ContractValidationError,
+        match="output size is inconsistent",
     ):
         validate_runtime_mount_artifacts(tmp_path, mount)
 

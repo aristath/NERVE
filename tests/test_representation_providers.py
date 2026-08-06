@@ -303,7 +303,7 @@ class FixtureProvider:
                     "validator_id": "json_contract",
                     "validation_contract": {
                         "schema": (
-                            "nerve.optimizer.vulkan_component_overlay.v1"
+                            "nerve.optimizer.vulkan_component_overlay.v2"
                         ),
                         "object_required": True,
                     },

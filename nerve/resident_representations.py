@@ -76,6 +76,21 @@ def validate_resident_derivation(
         raise ModelCompileError(f"{label} has an unsupported resident derivation schema")
     if value["kind"] != MXFP4_TO_FP8_RESIDENT_DERIVATION:
         raise ModelCompileError(f"{label} has an unsupported resident derivation kind")
+    if (
+        not isinstance(source_byte_count, int)
+        or isinstance(source_byte_count, bool)
+        or source_byte_count <= 0
+    ):
+        raise ModelCompileError(f"{label} has an invalid source byte count")
+    if (
+        not isinstance(value["source_byte_count"], int)
+        or isinstance(value["source_byte_count"], bool)
+        or value["source_byte_count"] <= 0
+        or not isinstance(value["resident_byte_count"], int)
+        or isinstance(value["resident_byte_count"], bool)
+        or value["resident_byte_count"] <= 0
+    ):
+        raise ModelCompileError(f"{label} has invalid resident derivation sizes")
     if value["source_byte_count"] != source_byte_count:
         raise ModelCompileError(f"{label} resident derivation source size is inconsistent")
     if value["resident_byte_count"] != source_byte_count * 2:

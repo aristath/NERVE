@@ -248,6 +248,7 @@ fn staged_runtime_candidate_fixture() -> (
             "source_component_id": "layer_00",
             "component": component,
             "execution": execution,
+            "resident_derivations": [],
         }))
         .unwrap(),
     )
@@ -440,6 +441,7 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
             "source_component_id": "layer_00",
             "component": component,
             "execution": execution,
+            "resident_derivations": [],
         }))
         .unwrap(),
     )
@@ -910,6 +912,77 @@ fn sealed_staged_candidate_uses_the_normal_runtime_mount_path() {
     );
     assert!(mounted.implementation_selection.is_none());
     mounted.load_runtime_tensor_index(&package_root).unwrap();
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn staged_resident_derivation_rejects_a_non_mxfp4_target_at_mount() {
+    let (root, package_root, candidate_root, runtime_model) =
+        staged_runtime_candidate_fixture();
+    let binding = runtime_model
+        .package
+        .resource_residency
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.component_id == "layer_00"
+                && binding.node_id == "operator_norm"
+                && binding.parameter_id == "operator_norm"
+        })
+        .unwrap();
+    let resource_id = match &binding.mapping {
+        CompiledResourceBindingMapping::AtomicGroup { resource_id, .. } => resource_id,
+        mapping => panic!("unexpected fixture mapping {mapping:?}"),
+    };
+    let source_byte_count = runtime_model
+        .package
+        .resource_residency
+        .resources
+        .iter()
+        .find(|resource| resource.id == *resource_id)
+        .unwrap()
+        .ranges
+        .iter()
+        .map(|range| range.byte_count)
+        .sum::<usize>();
+    let overlay_path = candidate_root.join("overlays/layer_00.json");
+    let mut overlay: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&overlay_path).unwrap()).unwrap();
+    overlay["resident_derivations"] = serde_json::json!([{
+        "node_id": "operator_norm",
+        "parameter_id": "operator_norm",
+        "derivation": {
+            "schema": RESIDENT_DERIVATION_SCHEMA,
+            "kind": "mxfp4_e2m1_to_fp8_e4m3",
+            "source_byte_count": source_byte_count,
+            "resident_byte_count": source_byte_count * 2,
+            "required_features": [
+                "shader_float8",
+                "shader_int8",
+                "shader_mixed_float_dot_product_float8_acc_float32",
+            ],
+        },
+    }]);
+    std::fs::write(&overlay_path, serde_json::to_vec(&overlay).unwrap()).unwrap();
+    seal_staged_runtime_candidate(
+        &candidate_root,
+        "candidate_0123456789abcdef0123456789abcdef",
+    );
+    let candidate = crate::RuntimeStagedCandidate::load(
+        &package_root,
+        &candidate_root,
+    )
+    .unwrap();
+
+    let error = runtime_model
+        .apply_staged_runtime_candidate(&package_root, &candidate)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not an independently addressable MXFP4 expert projection")
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -5,6 +5,7 @@ struct VulkanRuntimeComponentOverlay {
     source_component_id: String,
     component: VulkanResidentPackageComponentCircuit,
     execution: VulkanResidentComponentExecutionSpec,
+    resident_derivations: Vec<VulkanRuntimeParameterResidentDerivation>,
 }
 
 #[derive(Deserialize)]
@@ -284,6 +285,7 @@ impl VulkanResidentRuntimeModel {
             .collect::<BTreeMap<_, _>>();
         let mut mounted_instances = BTreeSet::new();
         let mut loaded_tensor_fragments = BTreeSet::new();
+        let mut mounted_resident_derivation_sources = BTreeMap::new();
 
         for selected in &selection.selected {
             let loaded = implementations
@@ -307,6 +309,8 @@ impl VulkanResidentRuntimeModel {
                 RuntimeCandidateMountLedger {
                     mounted_instances: &mut mounted_instances,
                     loaded_tensor_fragments: &mut loaded_tensor_fragments,
+                    mounted_resident_derivation_sources:
+                        &mut mounted_resident_derivation_sources,
                 },
             )?;
         }
@@ -445,6 +449,7 @@ impl VulkanResidentRuntimeModel {
         ];
         let mut mounted_instances = BTreeSet::new();
         let mut loaded_tensor_fragments = BTreeSet::new();
+        let mut mounted_resident_derivation_sources = BTreeMap::new();
         for instance_ids in &applications {
             mount_runtime_candidate_application(
                 &mut self,
@@ -458,6 +463,8 @@ impl VulkanResidentRuntimeModel {
                 RuntimeCandidateMountLedger {
                     mounted_instances: &mut mounted_instances,
                     loaded_tensor_fragments: &mut loaded_tensor_fragments,
+                    mounted_resident_derivation_sources:
+                        &mut mounted_resident_derivation_sources,
                 },
             )?;
         }
@@ -529,6 +536,8 @@ struct RuntimeCandidateApplication<'a> {
 struct RuntimeCandidateMountLedger<'a> {
     mounted_instances: &'a mut BTreeSet<String>,
     loaded_tensor_fragments: &'a mut BTreeSet<PathBuf>,
+    mounted_resident_derivation_sources:
+        &'a mut BTreeMap<String, Vec<VulkanRuntimeParameterResidentDerivation>>,
 }
 
 fn mount_runtime_candidate_application(
@@ -758,6 +767,32 @@ fn mount_runtime_candidate_region_application(
                     package_root,
                     candidate_root,
                 )?;
+                if !overlay.resident_derivations.is_empty() {
+                    match ledger
+                        .mounted_resident_derivation_sources
+                        .get(source_component_id)
+                    {
+                        Some(mounted) if mounted == &overlay.resident_derivations => {}
+                        Some(_) => {
+                            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                                "runtime instances of source component {source_component_id:?} selected conflicting resident representations",
+                            )));
+                        }
+                        None => {
+                            apply_runtime_component_resident_derivations(
+                                runtime_model,
+                                package_root,
+                                source_component_id,
+                                &overlay.execution,
+                                &overlay.resident_derivations,
+                            )?;
+                            ledger.mounted_resident_derivation_sources.insert(
+                                source_component_id.to_string(),
+                                overlay.resident_derivations.clone(),
+                            );
+                        }
+                    }
+                }
                 mount_runtime_component_overlay(
                     runtime_model,
                     matching_instances[0].instance_id.as_str(),

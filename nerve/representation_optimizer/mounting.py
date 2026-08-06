@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nerve.compilation import Json
+from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.contracts import (
     ContractValidationError,
     canonical_json_bytes,
 )
 from nerve.representation_optimizer.staging.contracts import CandidateBuildPlan
+from nerve.resident_representations import validate_resident_derivation
 
 
 RUNTIME_MOUNT_PLAN_SCHEMA = "nerve.optimizer.runtime_mount_plan.v3"
@@ -19,7 +20,7 @@ VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER = (
     "vulkan_stream_circuit_overlay.v2"
 )
 VULKAN_COMPONENT_OVERLAY_SCHEMA = (
-    "nerve.optimizer.vulkan_component_overlay.v1"
+    "nerve.optimizer.vulkan_component_overlay.v2"
 )
 VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA = (
     "nerve.optimizer.vulkan_output_transducer_overlay.v1"
@@ -206,6 +207,7 @@ def validate_runtime_mount_artifacts(
                     "source_component_id",
                     "component",
                     "execution",
+                    "resident_derivations",
                 }
                 expected_schema = VULKAN_COMPONENT_OVERLAY_SCHEMA
             else:
@@ -240,6 +242,46 @@ def validate_runtime_mount_artifacts(
                     overlay["execution"],
                     "Vulkan component overlay execution",
                 )
+                derivations = _list(
+                    overlay["resident_derivations"],
+                    "Vulkan component overlay resident derivations",
+                )
+                derivation_keys = []
+                for index, derivation in enumerate(derivations):
+                    derivation = _object(
+                        derivation,
+                        f"Vulkan component overlay resident derivations[{index}]",
+                    )
+                    _fields(
+                        derivation,
+                        {"node_id", "parameter_id", "derivation"},
+                        f"Vulkan component overlay resident derivations[{index}]",
+                    )
+                    derivation_keys.append(
+                        (
+                            _text(derivation["node_id"], "resident derivation node_id"),
+                            _text(
+                                derivation["parameter_id"],
+                                "resident derivation parameter_id",
+                            ),
+                        )
+                    )
+                    contract = _object(
+                        derivation["derivation"],
+                        "resident derivation contract",
+                    )
+                    try:
+                        validate_resident_derivation(
+                            contract,
+                            source_byte_count=contract.get("source_byte_count"),
+                            label="resident derivation contract",
+                        )
+                    except ModelCompileError as error:
+                        raise ContractValidationError(str(error)) from error
+                if derivation_keys != sorted(set(derivation_keys)):
+                    raise ContractValidationError(
+                        "Vulkan component overlay resident derivations must be sorted and unique"
+                    )
             else:
                 _object(
                     overlay["output_transducer"],

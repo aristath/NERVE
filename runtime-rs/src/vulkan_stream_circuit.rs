@@ -148,6 +148,7 @@ include!("vulkan_stream_circuit/targeted_component_execution.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
+include!("vulkan_stream_circuit/runtime_resident_derivations.rs");
 include!("vulkan_stream_circuit/runtime_resource_contract.rs");
 include!("vulkan_stream_circuit/compiled_resource_store_residency.rs");
 include!("vulkan_stream_circuit/sparse_moe_execution.rs");

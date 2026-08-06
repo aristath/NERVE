@@ -13,7 +13,7 @@ pub const PROMOTION_DECISION_SCHEMA: &str = "nerve.optimizer.promotion_decision.
 pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v2";
 pub const VALIDATION_RECORD_SCHEMA: &str = "nerve.optimizer.validation_record.v2";
 pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v3";
-pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v1";
+pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v2";
 pub const VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA: &str =
     "nerve.optimizer.vulkan_output_transducer_overlay.v1";
 pub const VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER: &str = "vulkan_stream_circuit_overlay.v2";

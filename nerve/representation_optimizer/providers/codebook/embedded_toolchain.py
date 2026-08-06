@@ -231,10 +231,11 @@ class EmbeddedParameterProgramOrdinaryRelowerer:
         context.write_json_artifact(
             OVERLAY_PATH,
             {
-                "schema": "nerve.optimizer.vulkan_component_overlay.v1",
+                "schema": "nerve.optimizer.vulkan_component_overlay.v2",
                 "source_component_id": source["component_id"],
                 "component": overlay_component,
                 "execution": overlay_execution,
+                "resident_derivations": [],
             },
         )
         context.account_transient_bytes(0)

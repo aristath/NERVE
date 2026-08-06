@@ -349,7 +349,7 @@ def _verify_overlay(
     )
     overlay = _json_file(_regular_file(candidate_root, OVERLAY_PATH))
     if (
-        overlay.get("schema") != "nerve.optimizer.vulkan_component_overlay.v1"
+        overlay.get("schema") != "nerve.optimizer.vulkan_component_overlay.v2"
         or overlay.get("source_component_id") != component_id
     ):
         raise ModelCompileError(

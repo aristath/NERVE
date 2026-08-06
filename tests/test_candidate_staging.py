@@ -114,10 +114,11 @@ class CompleteSemanticConstructor:
         context.write_json_artifact(
             "state/compact_layout.json",
             {
-                "schema": ("nerve.optimizer.vulkan_component_overlay.v1"),
+                "schema": ("nerve.optimizer.vulkan_component_overlay.v2"),
                 "source_component_id": "component",
                 "component": {"fixture": True},
                 "execution": {"fixture": True},
+                "resident_derivations": [],
             },
         )
         context.account_transient_bytes(0)

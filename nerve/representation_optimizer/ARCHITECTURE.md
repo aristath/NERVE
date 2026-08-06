@@ -56,7 +56,7 @@ non-finite number, or internally inconsistent contract.
 | `representation_graph.v1` | Logical contracts, physical forms, resources, transducers, islands, corrections, and provenance |
 | `candidate_build_plan.v1` | Ordered construction phases, sealed source inputs, declared outputs, validators, and resource limits |
 | `candidate_construction.v1` | Isolated construction result, artifacts, resources, and diagnostics |
-| `source_package_seal.v1` | Immutable baseline, stage, package-integrity, and source-input evidence |
+| `source_package_seal.v2` | Immutable baseline, stage, package-integrity, and source-input evidence |
 | `staged_candidate_integrity.v1` | Complete byte coverage for one atomically ready candidate |
 | `benchmark_workload.v1` | Immutable input, state, randomness, useful work, and validity regime |
 | `benchmark_plan.v1` | Counterbalanced matched reference/candidate experiment |
@@ -76,7 +76,8 @@ non-finite number, or internally inconsistent contract.
 | `validation_record.v2` | Complete funnel, benchmark link, full runs, warmed product-performance gate, and counterexamples |
 | `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
 | `runtime_implementation_predicate.v5` | Exact measured hardware-profile identities plus capability multiplicities, explicit alternative/source-retained phase ownership, execution-regime and placement guards, and qualified speculative-decoding modes for one verified implementation |
-| `runtime_mount_plan.v1` | Runtime-adapter identity and candidate-local component-overlay and tensor-index artifacts |
+| `runtime_mount_plan.v3` | Runtime-adapter identity, connected replacement regions, and candidate-local component-overlay and tensor-index artifacts |
+| `vulkan_component_overlay.v2` | One component's candidate circuit, execution kernels, and sorted parameter-level resident derivations |
 | `promotion_decision.v2` | Candidate, proof, benchmark, validation, target, artifact, and provenance decision |
 | `implementation_registry.v1` | Exact baseline plus all published physical implementations |
 | `relowering_request.v1` | Representation-aware request to repeat ordinary lowering passes |
@@ -460,13 +461,15 @@ cited analysis runs, and measured hardware profiles from their integrity
 checked publications before it creates a promotion decision.
 
 The runtime predicate is derived from evidence rather than supplied as an
-unverified label. It records allowed hardware capability classes, device kinds,
-APIs, required processes and features; prefill, decode, component, mixed, or
-state-transition phases; measured activation-batch, context, and state ranges;
-and local, distributed, or either placement with an exact device-count range
-and any required interconnects. Physical profile documents remain in the
-published bundle, while the guard uses capability identities so a runtime is
-not hardcoded to the physical device used for benchmarking.
+unverified label. It records exact measured hardware-profile identities,
+allowed capability classes, device kinds, APIs, required processes and
+features; prefill, decode, component, mixed, or state-transition phases;
+measured activation-batch, context, and state ranges; and local, distributed,
+or either placement with an exact device-count range and any required
+interconnects. Physical profile documents remain in the published bundle. An
+implementation may run only on a physical profile represented in its measured
+evidence; matching a capability class alone does not prove equal realized
+performance.
 
 Each registry entry retains:
 
@@ -521,7 +524,7 @@ non-overlapping set with the greatest measured savings after conversion costs.
 Uncovered instances retain the immutable exact implementation only when that
 implementation is compatible; otherwise execution fails closed.
 
-Each selected package entry names a `runtime_mount_plan.v1` explicitly. The
+Each selected package entry names a `runtime_mount_plan.v3` explicitly. The
 current Vulkan adapter replaces the physical component circuit and execution
 specification while preserving semantic identity and all externally visible
 ports. A multi-component island may retain a native representation across
@@ -531,6 +534,17 @@ mounted atomically. Tensor fragments may add candidate-owned parameters but
 may never shadow an exact tensor. The fully mounted graph, execution specs,
 generation contract, and merged tensor index are revalidated before model
 residency begins.
+
+A `vulkan_component_overlay.v2` may also attach an explicitly benchmarked
+resident derivation to selector-addressed parameter resources. Source tensor
+bytes remain immutable: derivation occurs only when the resource becomes
+resident. Runtime mounting validates that the request covers every weight
+consumed by the selected physical kernel, rejects shared-resource or
+duplicate-instance representation conflicts, and recomputes every dependent
+resource, atomic-group, partition-template, selector, and checkpoint identity
+before residency planning. Lazy expert loading is therefore preserved while
+native packed weights and measured resident alternatives remain runtime
+choices rather than compiler-wide model conversions.
 
 Normal package and placement inspection expose every verified option and the
 selection report. The TUI shows the option, provider provenance, predicate,

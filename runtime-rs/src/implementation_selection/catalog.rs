@@ -388,28 +388,32 @@ pub(super) fn validate_mount_plan(
             &confined_path(candidate_root, replacement.overlay_ref(), "runtime overlay")?,
             "runtime overlay",
         )?;
-        let (schema, required_payloads) = match replacement {
+        let (schema, payloads_are_valid) = match replacement {
             RuntimeReplacement::Component { .. } => (
                 VULKAN_COMPONENT_OVERLAY_SCHEMA,
-                &["component", "execution"][..],
+                required(&overlay, "component", "runtime overlay").is_ok_and(Value::is_object)
+                    && required(&overlay, "execution", "runtime overlay")
+                        .is_ok_and(Value::is_object)
+                    && required(&overlay, "resident_derivations", "runtime overlay")
+                        .is_ok_and(Value::is_array),
             ),
             RuntimeReplacement::OutputTransducer { .. } => (
                 VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA,
-                &[
-                    "component",
-                    "output_transducer",
-                    "speculative_output_transducers",
-                ][..],
+                required(&overlay, "component", "runtime overlay").is_ok_and(Value::is_object)
+                    && required(&overlay, "output_transducer", "runtime overlay")
+                        .is_ok_and(Value::is_object)
+                    && required(
+                        &overlay,
+                        "speculative_output_transducers",
+                        "runtime overlay",
+                    )
+                    .is_ok_and(Value::is_array),
             ),
         };
         require_schema(&overlay, schema, "runtime overlay")?;
         if text(&overlay, "source_component_id", "runtime overlay")?
             != replacement.source_component_id()
-            || required_payloads.iter().any(|field| {
-                !required(&overlay, field, "runtime overlay").is_ok_and(Value::is_object)
-                    && !(*field == "speculative_output_transducers"
-                        && required(&overlay, field, "runtime overlay").is_ok_and(Value::is_array))
-            })
+            || !payloads_are_valid
         {
             return invalid("runtime overlay does not match its mount-plan replacement");
         }
