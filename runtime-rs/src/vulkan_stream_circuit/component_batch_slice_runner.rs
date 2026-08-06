@@ -303,6 +303,22 @@ impl VulkanResidentComponentBatchSliceRunner {
             .begin_execution_after_headroom_check()
     }
 
+    fn prepare_pipeline_demand_submission(
+        &self,
+        device: &VulkanComputeDevice,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.pipeline_demand_segment()?
+            .prepare(device, &self.steps, batch_width)
+    }
+
+    fn require_prepared_pipeline_demand_submission(
+        &self,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.pipeline_demand_segment()?.require_prepared(batch_width)
+    }
+
     fn wait_pipeline_demand_submission(
         &self,
         device: &VulkanComputeDevice,
@@ -354,6 +370,8 @@ impl VulkanResidentComponentBatchSliceRunner {
             start_stream_tick,
             input_token_ids.len(),
         )?;
+        self.pipeline_demand_segment()?
+            .require_prepared(input_token_ids.len())?;
         self.run(
             device,
             input_token_ids,

@@ -429,6 +429,34 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .remove(&capture_causal_state_snapshots);
         }
         let pipeline = self.linear_pipeline_device_indices()?;
+        let mut prepared_physical_devices = BTreeSet::new();
+        for device_index in &pipeline {
+            let slice = self.device_slices.get(*device_index).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    format!(
+                        "temporal pipeline references missing device slice {device_index}",
+                    ),
+                ))
+            })?;
+            let device = devices.get(&slice.device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: slice.device_id.clone(),
+                }
+            })?;
+            if prepared_physical_devices.insert(device.physical_device_id()) {
+                // Temporal runners are mounted lazily because their state
+                // snapshot geometry depends on the effective verification
+                // width. Mounting allocates activation banks, sampler views,
+                // pipelines, and command resources. Restore the device's
+                // protected construction headroom before any execution epoch
+                // takes a shared residency guard; once that guard exists an
+                // allocator-triggered eviction would correctly refuse to
+                // self-deadlock.
+                device
+                    .ensure_device_local_memory_headroom()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
+        }
         let first_device_index = *pipeline.first().ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "temporal pipeline is empty".to_string(),
@@ -693,9 +721,24 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             runner
                 .execution_graph
                 .reset_deferred_demand_pipeline_predicate()?;
+            // A demand-chain shape owns conditional predicates, miss queues,
+            // and command resources. Materialize every participating slice
+            // before acquiring any shared execution guard: allocator-driven
+            // reclamation correctly refuses to evict through a live epoch.
             runner
                 .execution_graph
-                .begin_deferred_demand_pipeline_executions(devices, &runner.pipeline)?
+                .prepare_deferred_demand_pipeline_executions(
+                    devices,
+                    &runner.pipeline,
+                    input_token_ids.len(),
+                )?;
+            runner
+                .execution_graph
+                .begin_deferred_demand_pipeline_executions(
+                    devices,
+                    &runner.pipeline,
+                    input_token_ids.len(),
+                )?
         } else {
             Vec::new()
         };
@@ -816,7 +859,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 let retry_pipeline = &runner.pipeline[retry_start..];
                 let retry_execution_guards = runner
                     .execution_graph
-                    .begin_deferred_demand_pipeline_executions(devices, retry_pipeline)?;
+                    .begin_deferred_demand_pipeline_executions(
+                        devices,
+                        retry_pipeline,
+                        input_token_ids.len(),
+                    )?;
                 let retry_submission_batch = VulkanResidentQueueSubmissionBatch::new();
                 self.transfer_causal_component_block_edge(
                     runner,

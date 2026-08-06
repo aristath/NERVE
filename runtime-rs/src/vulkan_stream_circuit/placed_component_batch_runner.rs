@@ -595,6 +595,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
         &'a self,
         devices: &'a BTreeMap<String, Rc<VulkanComputeDevice>>,
         pipeline: &[usize],
+        batch_width: usize,
     ) -> Result<
         Vec<VulkanCompiledResourceExecutionGuard<'a>>,
         VulkanResidentInProcessPlacedRuntimeError,
@@ -603,6 +604,13 @@ impl VulkanResidentPlacedComponentBatchRunner {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError("component batch has no deferred demand pipeline".to_string()),
             ));
+        }
+        // Refuse to acquire even the first read guard unless every chain shape
+        // is already materialized. This turns the allocation-order invariant
+        // into an enforced runtime boundary rather than a caller convention.
+        for device_index in pipeline.iter().copied() {
+            self.slice(device_index)?
+                .require_prepared_pipeline_demand_submission(batch_width)?;
         }
         // Pressure must be resolved on every participating device before any
         // execution read guard is held. A reclaimer needs the corresponding
@@ -631,6 +639,34 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     .begin_pipeline_demand_execution_after_headroom_check()
             })
             .collect()
+    }
+
+    fn prepare_deferred_demand_pipeline_executions(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        pipeline: &[usize],
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if !self.has_deferred_demand_pipeline() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError("component batch has no deferred demand pipeline".to_string()),
+            ));
+        }
+        for device_index in pipeline.iter().copied() {
+            let device_id = self.device_ids.get(device_index).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component batch has no device identity for slice {device_index}"
+                )))
+            })?;
+            let device = devices.get(device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.clone(),
+                }
+            })?;
+            self.slice(device_index)?
+                .prepare_pipeline_demand_submission(device, batch_width)?;
+        }
+        Ok(())
     }
 
     fn complete_deferred_demand_pipeline_submissions(

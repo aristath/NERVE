@@ -70,6 +70,47 @@ struct VulkanDemandResidencyBatchSegment {
 }
 
 impl VulkanDemandResidencyBatchSegment {
+    fn prepare(
+        &self,
+        device: &VulkanComputeDevice,
+        steps: &[VulkanComponentBatchDispatchStep],
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if batch_width == 0 || batch_width > self.lane_capacity {
+            return Err(demand_batch_error(format!(
+                "demand batch width {batch_width} is outside 1..={}",
+                self.lane_capacity
+            )));
+        }
+        if !self.chains.borrow().contains_key(&batch_width) {
+            let chain = VulkanDemandResidencyBatchChain::new(
+                device,
+                steps,
+                self.step_start,
+                self.step_end,
+                batch_width,
+                &self.gate_specs,
+                Arc::clone(&self.address_table),
+                self.address_table_slot_count,
+                self.pipeline_continuation_predicate.clone(),
+            )?;
+            self.chains.borrow_mut().insert(batch_width, chain);
+        }
+        Ok(())
+    }
+
+    fn require_prepared(
+        &self,
+        batch_width: usize,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        if self.chains.borrow().contains_key(&batch_width) {
+            return Ok(());
+        }
+        Err(demand_batch_error(format!(
+            "deferred demand batch width {batch_width} was not prepared before entering its execution epoch"
+        )))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_slice_steps(
         mounted: &VulkanMountedPlacedStreamCircuit,
@@ -299,26 +340,7 @@ impl VulkanDemandResidencyBatchSegment {
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        if batch_width == 0 || batch_width > self.lane_capacity {
-            return Err(demand_batch_error(format!(
-                "demand batch width {batch_width} is outside 1..={}",
-                self.lane_capacity
-            )));
-        }
-        if !self.chains.borrow().contains_key(&batch_width) {
-            let chain = VulkanDemandResidencyBatchChain::new(
-                device,
-                steps,
-                self.step_start,
-                self.step_end,
-                batch_width,
-                &self.gate_specs,
-                Arc::clone(&self.address_table),
-                self.address_table_slot_count,
-                self.pipeline_continuation_predicate.clone(),
-            )?;
-            self.chains.borrow_mut().insert(batch_width, chain);
-        }
+        self.prepare(device, steps, batch_width)?;
         self.chains
             .borrow()
             .get(&batch_width)
@@ -347,26 +369,7 @@ impl VulkanDemandResidencyBatchSegment {
         stream_ticks: &[u64],
         dynamic_state_capacity_activations: u32,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        if batch_width == 0 || batch_width > self.lane_capacity {
-            return Err(demand_batch_error(format!(
-                "deferred demand batch width {batch_width} is outside 1..={}",
-                self.lane_capacity
-            )));
-        }
-        if !self.chains.borrow().contains_key(&batch_width) {
-            let chain = VulkanDemandResidencyBatchChain::new(
-                device,
-                steps,
-                self.step_start,
-                self.step_end,
-                batch_width,
-                &self.gate_specs,
-                Arc::clone(&self.address_table),
-                self.address_table_slot_count,
-                self.pipeline_continuation_predicate.clone(),
-            )?;
-            self.chains.borrow_mut().insert(batch_width, chain);
-        }
+        self.prepare(device, steps, batch_width)?;
         self.chains
             .borrow()
             .get(&batch_width)
@@ -396,26 +399,7 @@ impl VulkanDemandResidencyBatchSegment {
         submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
         signal_completion: bool,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        if batch_width == 0 || batch_width > self.lane_capacity {
-            return Err(demand_batch_error(format!(
-                "deferred demand batch width {batch_width} is outside 1..={}",
-                self.lane_capacity
-            )));
-        }
-        if !self.chains.borrow().contains_key(&batch_width) {
-            let chain = VulkanDemandResidencyBatchChain::new(
-                device,
-                steps,
-                self.step_start,
-                self.step_end,
-                batch_width,
-                &self.gate_specs,
-                Arc::clone(&self.address_table),
-                self.address_table_slot_count,
-                self.pipeline_continuation_predicate.clone(),
-            )?;
-            self.chains.borrow_mut().insert(batch_width, chain);
-        }
+        self.prepare(device, steps, batch_width)?;
         self.chains
             .borrow()
             .get(&batch_width)
