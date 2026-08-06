@@ -13,6 +13,8 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Sequence
 
+from nerve.text_quality import repeated_segment
+
 
 WARMUP_PROMPT = "hi"
 MEASURED_PROMPTS = (
@@ -36,7 +38,6 @@ _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
 _RESIDENCY_COUNTER_LINE = re.compile(
     r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE
 )
-_WORD = re.compile(r"\S+")
 
 _CUMULATIVE_RESIDENCY_COUNTER_GROUPS = {
     "gpu_accesses",
@@ -220,39 +221,6 @@ def parse_conversation_transcript(
     ]
 
 
-def repeated_suffix(text: str, minimum_repeats: int = 4) -> str | None:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    for width in (8, 12, 16, 24, 32, 48, 64, 96, 128, 192):
-        if len(normalized) < width * minimum_repeats:
-            continue
-        suffix = normalized[-width:]
-        if suffix.strip() and normalized.endswith(suffix * minimum_repeats):
-            return suffix
-
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
-    maximum_line_width = min(len(lines) // minimum_repeats, 512)
-    for width in range(1, maximum_line_width + 1):
-        suffix = lines[-width:]
-        if all(
-            lines[-width * repeat : -width * (repeat - 1)] == suffix
-            for repeat in range(2, minimum_repeats + 1)
-        ):
-            return "\n".join(suffix)
-
-    words = _WORD.findall(normalized)
-    for width in (*range(4, 17), 24, 32, 48, 64):
-        if len(words) < width * minimum_repeats:
-            continue
-        suffix = words[-width:]
-        if all(
-            words[-width * repeat : -width * (repeat - 1)] == suffix
-            for repeat in range(2, minimum_repeats + 1)
-        ):
-            return " ".join(suffix)
-    return None
-
-
 def _final_answer(response: str, require_thinking: bool) -> str:
     closing_count = response.count("</think>")
     opening_count = response.count("<think>")
@@ -305,7 +273,7 @@ def validate_conversation_turns(
                 f"expected prompt {expected_prompt!r}; found {turn.prompt!r}"
             )
         answer = _final_answer(turn.response, require_thinking)
-        repeated = repeated_suffix(turn.response)
+        repeated = repeated_segment(turn.response)
         if repeated is not None:
             raise ConversationGateError(
                 f"turn {turn.prompt!r} ends in a repeated segment: {repeated!r}"
@@ -494,11 +462,11 @@ def run_resident_conversation(
                 response = transcript[
                     response_start + len(_RESPONSE_PREFIX) :
                 ].decode(errors="replace")
-                repeated = repeated_suffix(response)
+                repeated = repeated_segment(response)
                 checked_response_bytes = len(transcript)
                 if repeated is not None:
                     live_error = (
-                        "runtime response entered a repeated suffix before termination: "
+                        "runtime response entered a repeated segment before termination: "
                         f"{repeated!r}"
                     )
                     break
@@ -612,7 +580,7 @@ def run_conversation_gate(
         for set_index, conversation_set in enumerate(conversation_sets):
             warmup, turns = conversation_set[0], conversation_set[1:]
             _final_answer(warmup.response, require_thinking)
-            if repeated_suffix(warmup.response) is not None:
+            if repeated_segment(warmup.response) is not None:
                 raise ConversationGateError(
                     f"seed {seed} conversation set {set_index + 1} "
                     "warmup ended in repetition"

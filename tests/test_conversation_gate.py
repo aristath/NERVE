@@ -13,11 +13,11 @@ from nerve.conversation_gate import (
     ConversationTurn,
     canonical_runtime_command,
     parse_conversation_transcript,
-    repeated_suffix,
     run_conversation_gate,
     run_resident_conversation,
     validate_conversation_turns,
 )
+from nerve.text_quality import repeated_segment
 
 
 def _response(answer: str) -> str:
@@ -204,25 +204,39 @@ def test_transcript_parser_rejects_a_missing_turn_even_if_prior_text_is_valid() 
         ("Corinth Greece city list continues " * 6).strip(),
     ),
 )
-def test_repeated_suffix_catches_text_token_and_unicode_loops(text: str) -> None:
-    assert repeated_suffix(text) is not None
+def test_repeated_segment_catches_text_token_and_unicode_loops(text: str) -> None:
+    assert repeated_segment(text) is not None
 
 
-def test_repeated_suffix_catches_long_multiline_cycles() -> None:
+def test_repeated_segment_catches_long_multiline_cycles() -> None:
     cycle = "\n".join(
         f"* There is a Corinth in region {index} with qualifier {index * 17}."
         for index in range(24)
     )
 
-    repeated = repeated_suffix("Reasoning begins.\n" + "\n".join([cycle] * 5))
+    repeated = repeated_segment("Reasoning begins.\n" + "\n".join([cycle] * 5))
 
     assert repeated is not None
     assert "Corinth" in repeated
 
 
-def test_repeated_suffix_allows_long_nonrepeating_reasoning() -> None:
+def test_repeated_segment_catches_a_long_cycle_before_a_partial_next_cycle() -> None:
+    cycle = " ".join(
+        f"Corinth candidate {index} has distinct qualifier {index * 17}."
+        for index in range(32)
+    )
+    response = "Reasoning begins. " + cycle * 4 + cycle[:311]
+
+    repeated = repeated_segment(response)
+
+    assert repeated is not None
+    assert "Corinth" in repeated
+    assert len(repeated) <= 256
+
+
+def test_repeated_segment_allows_long_nonrepeating_reasoning() -> None:
     text = " ".join(f"distinct-step-{index}" for index in range(1_000))
-    assert repeated_suffix(text) is None
+    assert repeated_segment(text) is None
 
 
 def test_gate_rejects_malformed_thinking_boundary() -> None:
@@ -403,6 +417,31 @@ for turn in range(7):
 
     assert return_code == 0
     assert len(parse_conversation_transcript(transcript)) == 6
+
+
+def test_resident_runner_stops_a_long_cycle_before_the_runtime_finishes(tmp_path) -> None:
+    fake_runtime = tmp_path / "repeating_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+cycle = " ".join(
+    f"Corinth candidate {index} has distinct qualifier {index * 17}."
+    for index in range(96)
+)
+print("ready")
+print("you> ", end="", flush=True)
+sys.stdin.readline()
+print("llm> ", end="", flush=True)
+print(cycle * 4 + cycle[:311], flush=True)
+""".lstrip()
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="entered a repeated segment before termination",
+    ):
+        run_resident_conversation([sys.executable, "-u", str(fake_runtime)])
 
 
 def test_resident_runner_reports_bounded_runtime_failure_tail(tmp_path) -> None:
@@ -642,5 +681,5 @@ time.sleep(0.2)
 """.lstrip()
     )
 
-    with pytest.raises(ConversationGateError, match="repeated suffix"):
+    with pytest.raises(ConversationGateError, match="repeated segment"):
         run_resident_conversation([sys.executable, "-u", str(fake_runtime)])

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.contracts import canonical_json_bytes
+from nerve.text_quality import repeated_segment
 
 
-_WORD = re.compile(r"\S+")
 _CONCEPT_NAME = re.compile(r"[a-z][a-z0-9_]*")
 VALIDATION_CONVERSATION_SCHEMA = "nerve.optimizer.validation_conversation.v2"
 
@@ -183,7 +183,7 @@ def assess_semantic_conversation(
             continue
         if (
             expectations["forbid_repeated_suffix"]
-            and repeated_suffix(assistant) is not None
+            and repeated_segment(assistant) is not None
         ):
             semantic_consistency = False
             if expectation["conversation_memory"]:
@@ -262,28 +262,6 @@ def compare_semantic_conversations(
         "metrics": metrics,
         "diagnostics": diagnostics,
     }
-
-
-def repeated_suffix(text: str, minimum_repeats: int = 4) -> str | None:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    for width in (8, 12, 16, 24, 32, 48, 64, 96, 128, 192):
-        if len(normalized) < width * minimum_repeats:
-            continue
-        suffix = normalized[-width:]
-        if suffix.strip() and normalized.endswith(suffix * minimum_repeats):
-            return suffix
-
-    words = _WORD.findall(normalized)
-    for width in (*range(4, 17), 24, 32, 48, 64):
-        if len(words) < width * minimum_repeats:
-            continue
-        suffix = words[-width:]
-        if all(
-            words[-width * repeat : -width * (repeat - 1)] == suffix
-            for repeat in range(2, minimum_repeats + 1)
-        ):
-            return " ".join(suffix)
-    return None
 
 
 def _visible_answer(
