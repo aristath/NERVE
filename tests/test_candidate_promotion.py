@@ -605,6 +605,7 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
     predicate = prepared.runtime_predicate.to_json()
 
     assert predicate["hardware"] == {
+        "measured_profile_ids": [qualified.profile["profile_id"]],
         "capability_classes": [
             qualified.profile["capability_class"]
         ],
@@ -830,6 +831,9 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
         "same semantic scope, decode-specialized representation",
     )
     second_predicate = create_runtime_implementation_predicate(
+        measured_profile_ids=first["runtime_predicate"]["hardware"][
+            "measured_profile_ids"
+        ],
         capability_classes=(
             first["runtime_predicate"]["hardware"][
                 "capability_classes"

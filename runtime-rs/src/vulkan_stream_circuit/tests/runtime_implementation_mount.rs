@@ -334,6 +334,9 @@ fn runtime_implementation_test_predicate(
             crate::RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA.to_string(),
         predicate_id: "runtime_predicate_fixture".to_string(),
         hardware: crate::RuntimeHardwarePredicate {
+            measured_profile_ids: vec![
+                format!("hardware_profile_{}", "1".repeat(32)),
+            ],
             capability_classes: vec![
                 "hardware_capability_fixture".to_string(),
             ],

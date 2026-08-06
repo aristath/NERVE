@@ -250,6 +250,7 @@ def validate_published_implementation_registry(
                 for profile in hardware_profile_provenance
             ]
             == [profile["profile_id"] for profile in loaded_profiles]
+            == hardware_predicate["measured_profile_ids"]
             and [
                 contract_digest(profile) for profile in loaded_profiles
             ]

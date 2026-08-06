@@ -269,6 +269,42 @@ fn load_implementation(
     }
     let workload_metrics = load_workload_metrics(&benchmark_path, &benchmark, &implementation)?;
 
+    let measured_profile_ids = implementation
+        .evidence
+        .hardware_profile_refs
+        .iter()
+        .map(|reference| reference.profile_id.as_str())
+        .collect::<Vec<_>>();
+    if !strictly_sorted_unique(&measured_profile_ids)
+        || measured_profile_ids
+            != implementation
+                .runtime_predicate
+                .hardware
+                .measured_profile_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+    {
+        return invalid(
+            "runtime implementation hardware evidence does not match its measured profiles",
+        );
+    }
+    for reference in &implementation.evidence.hardware_profile_refs {
+        let profile_path = confined_path(
+            package_root,
+            &reference.artifact_ref,
+            "implementation hardware profile",
+        )?;
+        let profile: crate::HardwareProcessProfile =
+            read_json(&profile_path, "implementation hardware profile")?;
+        profile.validate().map_err(invalid_error)?;
+        if profile.profile_id != reference.profile_id {
+            return invalid(
+                "runtime implementation hardware-profile evidence changed after promotion",
+            );
+        }
+    }
+
     for reference in [
         implementation
             .artifact_bundle

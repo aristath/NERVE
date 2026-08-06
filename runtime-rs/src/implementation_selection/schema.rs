@@ -8,7 +8,7 @@ pub const IMPLEMENTATION_REGISTRY_SCHEMA: &str = "nerve.optimizer.implementation
 pub const OPTIMIZER_STAGE_SCHEMA: &str = "nerve.optimizer.stage.v3";
 pub const OPTIMIZATION_SCOPE_CATALOG_SCHEMA: &str = "nerve.optimizer.optimization_scope_catalog.v1";
 pub const RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA: &str =
-    "nerve.optimizer.runtime_implementation_predicate.v4";
+    "nerve.optimizer.runtime_implementation_predicate.v5";
 pub const PROMOTION_DECISION_SCHEMA: &str = "nerve.optimizer.promotion_decision.v2";
 pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v2";
 pub const VALIDATION_RECORD_SCHEMA: &str = "nerve.optimizer.validation_record.v2";
@@ -34,6 +34,7 @@ pub struct RuntimeImplementationPredicate {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeHardwarePredicate {
+    pub measured_profile_ids: Vec<String>,
     pub capability_classes: Vec<String>,
     pub device_kinds: Vec<String>,
     pub apis: Vec<String>,

@@ -449,6 +449,9 @@ def contract_fixtures() -> list[dict[str, object]]:
     )
     promotion_hardware_profile = hardware_profile_contract()
     runtime_predicate = create_runtime_implementation_predicate(
+        measured_profile_ids=(
+            promotion_hardware_profile["profile_id"],
+        ),
         capability_classes=(
             promotion_hardware_profile["capability_class"],
         ),
@@ -780,6 +783,17 @@ def test_contract_validation_rejects_unknown_fields_and_nonfinite_numbers() -> N
 
     with pytest.raises(ContractValidationError, match="non-finite"):
         canonical_json_bytes({"invalid": float("nan")})
+
+
+def test_promoted_runtime_predicate_requires_exact_measured_profile_identities() -> None:
+    promotion = contract_fixtures()[8]
+    del promotion["runtime_predicate"]["hardware"]["measured_profile_ids"]
+
+    with pytest.raises(
+        ContractValidationError,
+        match="missing=\\['measured_profile_ids'\\]",
+    ):
+        validate_contract(promotion)
 
 
 def test_unknown_schema_fails_closed() -> None:

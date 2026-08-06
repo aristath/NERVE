@@ -637,6 +637,9 @@ def _derive_runtime_predicate(
         required_interconnects=required_interconnects,
     )
     return create_runtime_implementation_predicate(
+        measured_profile_ids=(
+            profile["profile_id"] for profile in compatible_profiles
+        ),
         capability_classes=(
             profile["capability_class"] for profile in compatible_profiles
         ),

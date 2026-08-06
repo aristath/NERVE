@@ -11,6 +11,7 @@ impl RuntimeImplementationPredicate {
             ));
         }
         if self.predicate_id.is_empty()
+            || self.hardware.measured_profile_ids.is_empty()
             || self.hardware.capability_classes.is_empty()
             || self.hardware.device_kinds.is_empty()
             || self.hardware.apis.is_empty()
@@ -19,6 +20,7 @@ impl RuntimeImplementationPredicate {
             return Err("runtime implementation predicate is incomplete".to_string());
         }
         for values in [
+            &self.hardware.measured_profile_ids,
             &self.hardware.device_kinds,
             &self.hardware.apis,
             &self.hardware.capability_classes,
@@ -217,6 +219,22 @@ impl RuntimeImplementationPredicate {
         if !actual_capabilities.is_subset(&allowed_capabilities) {
             reasons.push(format!(
                 "capability classes {actual_capabilities:?} are outside {allowed_capabilities:?}"
+            ));
+        }
+
+        let actual_profiles = unique_devices
+            .values()
+            .map(|profile| profile.profile_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let measured_profiles = self
+            .hardware
+            .measured_profile_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !actual_profiles.is_subset(&measured_profiles) {
+            reasons.push(format!(
+                "hardware profiles {actual_profiles:?} were not measured; evidence covers {measured_profiles:?}"
             ));
         }
 

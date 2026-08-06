@@ -78,6 +78,12 @@ fn predicate(profiles: &[&HardwareProcessProfile], mode: &str) -> RuntimeImpleme
         schema: RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA.to_string(),
         predicate_id: "runtime_predicate_fixture".to_string(),
         hardware: RuntimeHardwarePredicate {
+            measured_profile_ids: profiles
+                .iter()
+                .map(|profile| profile.profile_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
             capability_classes: profiles
                 .iter()
                 .map(|profile| profile.capability_class.clone())
@@ -128,6 +134,60 @@ fn predicate(profiles: &[&HardwareProcessProfile], mode: &str) -> RuntimeImpleme
             },
         },
     }
+}
+
+#[test]
+fn selector_rejects_an_unmeasured_physical_profile_with_the_same_capability_class() {
+    let measured = profile(
+        HardwareDeviceKind::Gpu,
+        "gpu-measured",
+        "gfx-fixture",
+        "vulkan",
+    );
+    let unmeasured = profile(
+        HardwareDeviceKind::Gpu,
+        "gpu-unmeasured",
+        "gfx-fixture",
+        "vulkan",
+    );
+    assert_eq!(measured.capability_class, unmeasured.capability_class);
+    assert_ne!(measured.profile_id, unmeasured.profile_id);
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        scopes: BTreeMap::new(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        implementations: vec![loaded_implementation(
+            "implementation_measured_elsewhere",
+            &["layer"],
+            &["scope_layer"],
+            predicate(&[&measured], "local"),
+            1_000,
+            800,
+            0,
+        )],
+    };
+    let request = request(
+        vec![selection_device("gpu0", unmeasured)],
+        &[("layer0", "layer", &["gpu0"])],
+        &[],
+    );
+
+    let report = catalog.select(&request).unwrap();
+
+    assert!(report.selected.is_empty());
+    assert_eq!(report.exact_instance_ids, vec!["layer0"]);
+    assert!(
+        report.rejected[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("were not measured"))
+    );
 }
 
 fn loaded_implementation(

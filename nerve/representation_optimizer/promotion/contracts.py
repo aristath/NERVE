@@ -13,7 +13,7 @@ from nerve.representation_optimizer.contracts import (
 
 
 RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA = (
-    "nerve.optimizer.runtime_implementation_predicate.v4"
+    "nerve.optimizer.runtime_implementation_predicate.v5"
 )
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
 IMPLEMENTATION_REGISTRY_SCHEMA = (
@@ -138,6 +138,7 @@ def implementation_id(
 
 def create_runtime_implementation_predicate(
     *,
+    measured_profile_ids: Iterable[str],
     capability_classes: Iterable[str],
     device_kinds: Iterable[str],
     apis: Iterable[str],
@@ -163,6 +164,7 @@ def create_runtime_implementation_predicate(
         "schema": RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA,
         "predicate_id": "",
         "hardware": {
+            "measured_profile_ids": sorted(set(measured_profile_ids)),
             "capability_classes": capability_classes,
             "device_kinds": sorted(set(device_kinds)),
             "apis": sorted(set(apis)),
@@ -265,6 +267,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
     _fields(
         hardware,
         {
+            "measured_profile_ids",
             "capability_classes",
             "device_kinds",
             "apis",
@@ -273,6 +276,17 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         },
         "hardware",
     )
+    measured_profile_ids = _sorted_unique_strings(
+        hardware["measured_profile_ids"],
+        "hardware.measured_profile_ids",
+        nonempty=True,
+    )
+    for index, profile_id in enumerate(measured_profile_ids):
+        _stable_id(
+            profile_id,
+            "hardware_profile",
+            f"hardware.measured_profile_ids[{index}]",
+        )
     capability_classes = _sorted_unique_strings(
         hardware["capability_classes"],
         "hardware.capability_classes",

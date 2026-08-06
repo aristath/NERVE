@@ -75,7 +75,7 @@ non-finite number, or internally inconsistent contract.
 | `prebenchmark_record.v1` | Static integrity, proof, and cheap-sanity gate result |
 | `validation_record.v2` | Complete funnel, benchmark link, full runs, warmed product-performance gate, and counterexamples |
 | `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
-| `runtime_implementation_predicate.v4` | Exact hardware-capability multiplicities, explicit alternative/source-retained phase ownership, execution-regime and placement guards, and qualified speculative-decoding modes for one verified implementation |
+| `runtime_implementation_predicate.v5` | Exact measured hardware-profile identities plus capability multiplicities, explicit alternative/source-retained phase ownership, execution-regime and placement guards, and qualified speculative-decoding modes for one verified implementation |
 | `runtime_mount_plan.v1` | Runtime-adapter identity and candidate-local component-overlay and tensor-index artifacts |
 | `promotion_decision.v2` | Candidate, proof, benchmark, validation, target, artifact, and provenance decision |
 | `implementation_registry.v1` | Exact baseline plus all published physical implementations |
