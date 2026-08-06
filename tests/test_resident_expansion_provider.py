@@ -714,6 +714,15 @@ def test_provider_plan_is_component_local_exact_and_product_qualified(
     assert set(build_plan.output_paths) == set(
         candidate_path["path"] for candidate_path in candidate["artifact_declarations"]
     )
+    declared_artifacts = {
+        item["path"] for item in candidate["artifact_declarations"]
+    }
+    referenced_artifacts = {
+        item["artifact"]["path"] for item in representation["resources"]
+    } | {
+        item["artifact"]["path"] for item in representation["physical_kernels"]
+    }
+    assert referenced_artifacts <= declared_artifacts
 
     estimate = provider.estimate_static_cost(
         context,

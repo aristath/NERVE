@@ -3,6 +3,7 @@ from __future__ import annotations
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
     PROOF_PATH,
+    component_overlay_path,
 )
 from nerve.representation_optimizer.providers.resident_expansion.discovery import (
     ResidentExpansionOpportunity,
@@ -100,8 +101,8 @@ def resident_expansion_representation_graph(
                 "logical_contract_id": logical_parameters,
                 "physical_representation_id": "repr.parameter.resident_fp8",
                 "artifact": {
-                    "path": opportunity.manifest_ref,
-                    "format": "runtime_derived_resident_resources.v1",
+                    "path": component_overlay_path(opportunity.component_id),
+                    "format": "nerve.optimizer.vulkan_component_overlay.v2",
                 },
                 "provenance": provenance(),
             }
