@@ -362,9 +362,40 @@ impl VulkanResidentRuntimeModel {
     }
 
     pub fn apply_staged_runtime_candidate(
+        self,
+        package_root: impl AsRef<Path>,
+        candidate: &crate::RuntimeStagedCandidate,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        self.apply_staged_runtime_candidate_application(
+            package_root,
+            candidate,
+            None,
+        )
+    }
+
+    pub fn apply_staged_runtime_candidate_for_target(
+        self,
+        package_root: impl AsRef<Path>,
+        candidate: &crate::RuntimeStagedCandidate,
+        target_instance_id: &str,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        if target_instance_id.is_empty() {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                "targeted staged candidate application requires a runtime instance",
+            ));
+        }
+        self.apply_staged_runtime_candidate_application(
+            package_root,
+            candidate,
+            Some(target_instance_id),
+        )
+    }
+
+    fn apply_staged_runtime_candidate_application(
         mut self,
         package_root: impl AsRef<Path>,
         candidate: &crate::RuntimeStagedCandidate,
+        target_instance_id: Option<&str>,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let package_root = package_root
             .as_ref()
@@ -427,16 +458,25 @@ impl VulkanResidentRuntimeModel {
                     right.destination_instance_id.as_str(),
                 ))
         });
-        let applications = crate::implementation_selection::independent_region_applications(
+        let mut applications = crate::implementation_selection::independent_region_applications(
             &candidate.mount_plan.regions,
             &instances,
             &edges,
         );
+        if let Some(target) = target_instance_id {
+            applications.retain(|instance_ids| {
+                instance_ids.iter().any(|instance_id| instance_id == target)
+            });
+        }
         if applications.is_empty() {
             return Err(VulkanResidentTokenModelPackageError::new(
                 format!(
-                    "staged candidate {:?} has no complete matching runtime region for source components {:?}",
+                    "staged candidate {:?} has no complete matching runtime region{} for source components {:?}",
                     candidate.candidate_id,
+                    target_instance_id.map_or_else(
+                        String::new,
+                        |target| format!(" containing target instance {target:?}"),
+                    ),
                     candidate.source_component_ids,
                 ),
             ));

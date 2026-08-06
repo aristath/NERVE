@@ -172,7 +172,11 @@ fn execute_session(
             )
             .into());
         }
-        runtime_model = runtime_model.apply_staged_runtime_candidate(&package_root, &candidate)?;
+        runtime_model = runtime_model.apply_staged_runtime_candidate_for_target(
+            &package_root,
+            &candidate,
+            &mount.component_id,
+        )?;
     } else if mount.candidate_id.is_some() {
         return Err(invalid_input("candidate_id requires a sealed candidate_root").into());
     }

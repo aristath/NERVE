@@ -1063,6 +1063,65 @@ fn sealed_staged_candidate_mounts_every_duplicated_source_instance() {
 }
 
 #[test]
+fn targeted_staged_candidate_mounts_only_the_selected_independent_application() {
+    let (root, package_root, candidate_root, _) =
+        staged_runtime_candidate_fixture();
+    let manifest =
+        VulkanResidentModelPackageManifest::from_json_file(
+            package_root.join("vulkan_resident_package.json"),
+        )
+        .unwrap();
+    let source = manifest.resolved_source_graph(&package_root).unwrap();
+    let runtime_graph = manifest
+        .runtime_graph_from_controls(
+            Some("gpu0"),
+            &BTreeMap::new(),
+            &[],
+            None,
+        )
+        .unwrap()
+        .duplicate_after_instance(
+            &source,
+            "layer_00",
+            "layer_00__duplicate",
+        )
+        .unwrap();
+    let runtime_model = manifest.mount_runtime_graph(&runtime_graph).unwrap();
+    let candidate = crate::RuntimeStagedCandidate::load(
+        &package_root,
+        &candidate_root,
+    )
+    .unwrap();
+
+    let mounted = runtime_model
+        .apply_staged_runtime_candidate_for_target(
+            &package_root,
+            &candidate,
+            "layer_00__duplicate",
+        )
+        .unwrap();
+
+    let implementations = mounted
+        .circuit_graph
+        .components
+        .iter()
+        .map(|component| {
+            (
+                component.component_id.as_str(),
+                component.implementation.as_str(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_ne!(implementations["layer_00"], "staged_alternative");
+    assert_eq!(
+        implementations["layer_00__duplicate"],
+        "staged_alternative"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn staged_candidate_loader_rejects_artifact_and_source_drift() {
     let (root, package_root, candidate_root, runtime_model) =
         staged_runtime_candidate_fixture();
