@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nerve_runtime::{
     RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanResidentBufferPool, VulkanResidentModelPackageManifest,
+    VulkanResidentBufferPool, VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
     VulkanResidentTargetedExecutionSession, VulkanResidentTargetedModelPackageDeviceSlice,
     VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
 };
@@ -72,9 +73,19 @@ struct MountCommand {
     capture_output_values: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PreparedRuntimeModelKey {
+    package_manifest: PathBuf,
+    candidate_root: Option<PathBuf>,
+    candidate_id: Option<String>,
+    component_id: String,
+    logical_device_id: String,
+}
+
 #[derive(Default)]
 struct ExecutorHost {
     manifests: BTreeMap<PathBuf, VulkanResidentModelPackageManifest>,
+    prepared_runtime_models: BTreeMap<PreparedRuntimeModelKey, VulkanResidentRuntimeModel>,
     devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
     logical_by_physical: BTreeMap<String, String>,
     parameter_pool: VulkanResidentBufferPool,
@@ -156,30 +167,8 @@ fn execute_session(
         .to_path_buf();
 
     let manifest = host.manifest(&package_manifest)?;
-    let node_devices =
-        BTreeMap::from([(mount.component_id.clone(), mount.logical_device_id.clone())]);
-    let mut runtime_model = manifest.mount_runtime_graph_controls(
-        Some(UNMOUNTED_LOGICAL_DEVICE_ID),
-        &node_devices,
-        &[],
-        None,
-    )?;
-    if let Some(candidate_root) = &mount.candidate_root {
-        let candidate = RuntimeStagedCandidate::load(&package_root, candidate_root)?;
-        if mount.candidate_id.as_deref() != Some(candidate.candidate_id.as_str()) {
-            return Err(invalid_input(
-                "mounted staged candidate does not match requested candidate_id",
-            )
-            .into());
-        }
-        runtime_model = runtime_model.apply_staged_runtime_candidate_for_target(
-            &package_root,
-            &candidate,
-            &mount.component_id,
-        )?;
-    } else if mount.candidate_id.is_some() {
-        return Err(invalid_input("candidate_id requires a sealed candidate_root").into());
-    }
+    let (runtime_model, prepared_runtime_model_cache_hit) =
+        host.prepared_runtime_model(&package_manifest, &package_root, manifest, &mount)?;
     let device = host.device(&mount.physical_device_id, &mount.logical_device_id)?;
     let placed_device = runtime_model
         .placement
@@ -243,6 +232,8 @@ fn execute_session(
             "resident_asset_pool_buffers": pool_stats.resident_buffer_count,
             "resident_asset_pool_hits": pool_stats.hit_count,
             "resident_asset_pool_misses": pool_stats.miss_count,
+            "prepared_runtime_model_cache_hit": prepared_runtime_model_cache_hit,
+            "prepared_runtime_model_cache_entries": host.prepared_runtime_models.len(),
             "mounted_state_digest": mounted_digest,
         }),
     )?;
@@ -316,6 +307,8 @@ impl ExecutorHost {
             return Err(invalid_input("executor cannot shut down before mounting a device").into());
         }
         let shutdown_started = Instant::now();
+        let released_prepared_runtime_model_count = self.prepared_runtime_models.len();
+        self.prepared_runtime_models.clear();
         let physical_device_ids = self.devices.keys().cloned().collect::<Vec<_>>();
         let pre_release_quiesce_started = Instant::now();
         for physical_device_id in &physical_device_ids {
@@ -364,6 +357,7 @@ impl ExecutorHost {
         let residual_pool = self.parameter_pool.stats();
         if !self.devices.is_empty()
             || !self.logical_by_physical.is_empty()
+            || !self.prepared_runtime_models.is_empty()
             || self.parameter_pool.registered_device_count() != 0
             || residual_pool.resident_buffer_count != 0
             || residual_pool.resident_bytes != 0
@@ -380,8 +374,56 @@ impl ExecutorHost {
                 pre_release_quiesce_duration_ns
             ),
             "device_releases": device_releases,
+            "released_prepared_runtime_model_count": released_prepared_runtime_model_count,
             "shutdown_duration_ns": nonzero_elapsed_ns(shutdown_started),
         }))
+    }
+
+    fn prepared_runtime_model(
+        &mut self,
+        package_manifest: &Path,
+        package_root: &Path,
+        manifest: VulkanResidentModelPackageManifest,
+        mount: &MountCommand,
+    ) -> Result<(VulkanResidentRuntimeModel, bool), Box<dyn Error>> {
+        let key = PreparedRuntimeModelKey::new(
+            package_manifest,
+            mount.candidate_root.as_deref(),
+            mount.candidate_id.as_deref(),
+            &mount.component_id,
+            &mount.logical_device_id,
+        )?;
+        if let Some(runtime_model) = self.prepared_runtime_models.get(&key) {
+            return Ok((runtime_model.clone(), true));
+        }
+
+        let node_devices =
+            BTreeMap::from([(mount.component_id.clone(), mount.logical_device_id.clone())]);
+        let mut runtime_model = manifest.mount_runtime_graph_controls(
+            Some(UNMOUNTED_LOGICAL_DEVICE_ID),
+            &node_devices,
+            &[],
+            None,
+        )?;
+        if let Some(candidate_root) = &mount.candidate_root {
+            let candidate = RuntimeStagedCandidate::load(package_root, candidate_root)?;
+            if mount.candidate_id.as_deref() != Some(candidate.candidate_id.as_str()) {
+                return Err(invalid_input(
+                    "mounted staged candidate does not match requested candidate_id",
+                )
+                .into());
+            }
+            runtime_model = runtime_model.apply_staged_runtime_candidate_for_target(
+                package_root,
+                &candidate,
+                &mount.component_id,
+            )?;
+        }
+        let previous = self
+            .prepared_runtime_models
+            .insert(key, runtime_model.clone());
+        debug_assert!(previous.is_none());
+        Ok((runtime_model, false))
     }
 
     fn manifest(
@@ -451,6 +493,51 @@ impl ExecutorHost {
         self.parameter_pool
             .register_device(logical_device_id, device.clone())?;
         Ok(device)
+    }
+}
+
+impl PreparedRuntimeModelKey {
+    fn new(
+        package_manifest: &Path,
+        candidate_root: Option<&Path>,
+        candidate_id: Option<&str>,
+        component_id: &str,
+        logical_device_id: &str,
+    ) -> io::Result<Self> {
+        let (candidate_root, candidate_id) = match (candidate_root, candidate_id) {
+            (Some(candidate_root), Some(candidate_id)) => {
+                if fs::symlink_metadata(candidate_root)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    return Err(invalid_input(
+                        "staged candidate root must not be a symbolic link",
+                    ));
+                }
+                (
+                    Some(candidate_root.canonicalize()?),
+                    Some(candidate_id.to_string()),
+                )
+            }
+            (None, None) => (None, None),
+            (Some(_), None) => {
+                return Err(invalid_input(
+                    "sealed candidate_root requires a candidate_id",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(invalid_input(
+                    "candidate_id requires a sealed candidate_root",
+                ));
+            }
+        };
+        Ok(Self {
+            package_manifest: package_manifest.to_path_buf(),
+            candidate_root,
+            candidate_id,
+            component_id: component_id.to_string(),
+            logical_device_id: logical_device_id.to_string(),
+        })
     }
 }
 
@@ -758,5 +845,93 @@ mod tests {
         assert_eq!(exact, repeated);
         assert_ne!(exact, candidate);
         assert!(exact.starts_with("nerve.optimizer.device_state_sha256.v1:"));
+    }
+
+    #[test]
+    fn optimizer_executor_reuses_only_semantically_identical_prepared_models() {
+        let package_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json")
+            .canonicalize()
+            .unwrap();
+        let package_root = package_manifest.parent().unwrap().to_path_buf();
+        let mut mount = MountCommand::from_command(mount_command("decode", 1)).unwrap();
+        mount.component_id = "layer_00".to_string();
+        let mut host = ExecutorHost::default();
+
+        let manifest = host.manifest(&package_manifest).unwrap();
+        let (first, first_hit) = host
+            .prepared_runtime_model(&package_manifest, &package_root, manifest, &mount)
+            .unwrap();
+        assert!(!first_hit);
+        assert_eq!(host.prepared_runtime_models.len(), 1);
+
+        let manifest = host.manifest(&package_manifest).unwrap();
+        let (second, second_hit) = host
+            .prepared_runtime_model(&package_manifest, &package_root, manifest, &mount)
+            .unwrap();
+        assert!(second_hit);
+        assert_eq!(first, second);
+        assert_eq!(host.prepared_runtime_models.len(), 1);
+
+        let mut different_placement = mount;
+        different_placement.logical_device_id = "optimizer:amd1".to_string();
+        let manifest = host.manifest(&package_manifest).unwrap();
+        let (_, different_placement_hit) = host
+            .prepared_runtime_model(
+                &package_manifest,
+                &package_root,
+                manifest,
+                &different_placement,
+            )
+            .unwrap();
+        assert!(!different_placement_hit);
+        assert_eq!(host.prepared_runtime_models.len(), 2);
+    }
+
+    #[test]
+    fn optimizer_executor_prepared_model_key_is_candidate_custody_bound() {
+        let package_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json")
+            .canonicalize()
+            .unwrap();
+        let candidate_root = package_manifest.parent().unwrap();
+        let exact = PreparedRuntimeModelKey::new(
+            &package_manifest,
+            None,
+            None,
+            "layer_00",
+            "optimizer:amd0",
+        )
+        .unwrap();
+        let candidate_a = PreparedRuntimeModelKey::new(
+            &package_manifest,
+            Some(candidate_root),
+            Some("candidate_a"),
+            "layer_00",
+            "optimizer:amd0",
+        )
+        .unwrap();
+        let candidate_b = PreparedRuntimeModelKey::new(
+            &package_manifest,
+            Some(candidate_root),
+            Some("candidate_b"),
+            "layer_00",
+            "optimizer:amd0",
+        )
+        .unwrap();
+        assert_ne!(exact, candidate_a);
+        assert_ne!(candidate_a, candidate_b);
+        assert!(
+            PreparedRuntimeModelKey::new(
+                &package_manifest,
+                Some(candidate_root),
+                None,
+                "layer_00",
+                "optimizer:amd0",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires a candidate_id")
+        );
     }
 }
