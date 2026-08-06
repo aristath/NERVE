@@ -307,7 +307,6 @@ impl ExecutorHost {
             return Err(invalid_input("executor cannot shut down before mounting a device").into());
         }
         let shutdown_started = Instant::now();
-        let released_prepared_runtime_model_count = self.prepared_runtime_models.len();
         self.prepared_runtime_models.clear();
         let physical_device_ids = self.devices.keys().cloned().collect::<Vec<_>>();
         let pre_release_quiesce_started = Instant::now();
@@ -367,16 +366,12 @@ impl ExecutorHost {
             )
             .into());
         }
-        Ok(json!({
-            "released": true,
-            "physical_device_ids": physical_device_ids,
-            "pre_release_quiesce_duration_ns": (
-                pre_release_quiesce_duration_ns
-            ),
-            "device_releases": device_releases,
-            "released_prepared_runtime_model_count": released_prepared_runtime_model_count,
-            "shutdown_duration_ns": nonzero_elapsed_ns(shutdown_started),
-        }))
+        Ok(executor_shutdown_payload(
+            physical_device_ids,
+            pre_release_quiesce_duration_ns,
+            device_releases,
+            nonzero_elapsed_ns(shutdown_started),
+        ))
     }
 
     fn prepared_runtime_model(
@@ -494,6 +489,21 @@ impl ExecutorHost {
             .register_device(logical_device_id, device.clone())?;
         Ok(device)
     }
+}
+
+fn executor_shutdown_payload(
+    physical_device_ids: Vec<String>,
+    pre_release_quiesce_duration_ns: u64,
+    device_releases: Vec<Value>,
+    shutdown_duration_ns: u64,
+) -> Value {
+    json!({
+        "released": true,
+        "physical_device_ids": physical_device_ids,
+        "pre_release_quiesce_duration_ns": pre_release_quiesce_duration_ns,
+        "device_releases": device_releases,
+        "shutdown_duration_ns": shutdown_duration_ns,
+    })
 }
 
 impl PreparedRuntimeModelKey {
@@ -932,6 +942,31 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("requires a candidate_id")
+        );
+    }
+
+    #[test]
+    fn optimizer_executor_shutdown_proof_keeps_its_strict_protocol_shape() {
+        let payload = executor_shutdown_payload(
+            vec!["vulkan-uuid:amd0".to_string()],
+            1,
+            vec![json!({"device": "proof"})],
+            2,
+        );
+        assert_eq!(
+            payload
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "device_releases".to_string(),
+                "physical_device_ids".to_string(),
+                "pre_release_quiesce_duration_ns".to_string(),
+                "released".to_string(),
+                "shutdown_duration_ns".to_string(),
+            ]),
         );
     }
 }
