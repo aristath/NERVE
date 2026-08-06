@@ -260,9 +260,11 @@ At runtime, NERVE first resolves duplication, bypass, rewiring, sharding,
 placement, and physical device bindings. It then matches promoted predicates
 against the resulting graph, hardware processes, device-count multiplicity,
 interconnects, execution phase, activation/context/state envelope, and
-qualified speculative-draft-token count. A measured-cost planner selects the
-best compatible non-overlapping alternatives, including conversion costs.
-Uncovered compatible regions retain the immutable exact implementation.
+qualified speculative-draft-token count and residency policy. Evidence gathered
+with an eager, demand-retained, or bounded demand-paged working set is valid only
+for that measured memory regime. A measured-cost planner selects the best
+compatible non-overlapping alternatives, including conversion costs. Uncovered
+compatible regions retain the immutable exact implementation.
 
 ### Running the optimizer
 
@@ -277,6 +279,7 @@ python -m nerve \
   --allow-physical-device vulkan-uuid:FIRST_AMD_UUID \
   --allow-physical-device vulkan-uuid:SECOND_AMD_UUID \
   --vulkan-driver-manifest /path/to/radeon_icd.json \
+  --residency-policy demand-paged \
   --speculative-draft-tokens 2
 ```
 
@@ -288,12 +291,16 @@ recorded reservations, not device-level exclusions: NERVE may use the measured
 unreserved VRAM while preserving those workloads.
 
 Automatic optimizer placement measures each compatible AMD device's current
-VRAM usage, reserves a conservative share of what remains, selects the smallest
-admissible device set, and partitions the ordered component stream
-proportionally to those per-device capacities. Components stay contiguous to
-minimize cross-device edges, while devices are ordered by physical PCI topology.
-The lease lock serializes NERVE optimizers only; it never claims exclusive
-ownership of a physical GPU or evicts another process.
+VRAM usage and asks every linked runtime executable for the authoritative
+device-local memory policy. All executables must agree or optimization fails
+before device work begins. The current policy reserves at most 80% of the
+opening free capacity and leaves the remaining 20% outside NERVE's stable
+budget. Placement then selects the smallest admissible device set and partitions
+the ordered component stream proportionally to those per-device capacities.
+Components stay contiguous to minimize cross-device edges, while devices are
+ordered by physical PCI topology. The lease lock serializes NERVE optimizers
+only; it never claims exclusive ownership of a physical GPU or evicts another
+process.
 
 ### Adding a representation provider
 
@@ -379,14 +386,17 @@ captured in the report. Physical bindings are also printed in the normal chat
 readiness line, so a benchmark transcript identifies the devices it actually
 mounted.
 
-## Demand-retained compiled resources
+## Demand-resident compiled resources
 
-`--residency-policy demand-retained` changes parameter residency, not model
-semantics. The compiled package declares resources that may be selected
-independently and an always-resident execution spine. The runtime resolves
-placement against the physical devices selected for that run. Mounting reserves
-a stable sparse virtual address range but commits no device-local payload pages
-for unselected dynamic resources.
+`--residency-policy demand-retained` and `--residency-policy demand-paged`
+change parameter residency, not model semantics. The compiled package declares
+resources that may be selected independently and an always-resident execution
+spine. The runtime resolves placement against the physical devices selected for
+that run. Mounting reserves a stable sparse virtual address range but commits no
+device-local payload pages for unselected dynamic resources. Demand-retained
+keeps every loaded cohort until teardown. Demand-paged admits the model against
+the fixed spine plus one complete selector load wave and its allocation
+padding, then may evict whole cohorts from the bounded shared cache.
 
 Execution then follows one contract:
 
@@ -401,13 +411,14 @@ GPU selection -> resident gate
 ```
 
 No token or completed component is replayed. A resident hit has no host round
-trip. The resource remains resident until explicit unload, and teardown
-acknowledges every physical-device store before the package is released.
-Regular partitioned resources use affine address metadata; genuinely irregular
-groups use compact tables. The mechanism is semantic and model-family neutral:
-the same path has been exercised with routed expert partitions and with an
-irregular, optional output-head package whose resource order differs from its
-compiled member order.
+trip. Under demand-retained the resource remains resident until explicit
+unload; under demand-paged, pressure reclaims complete allocation cohorts rather
+than partial expert state. Teardown acknowledges every physical-device store
+before the package is released. Regular partitioned resources use affine
+address metadata; genuinely irregular groups use compact tables. The mechanism
+is semantic and model-family neutral: the same path has been exercised with
+routed expert partitions and with an irregular, optional output-head package
+whose resource order differs from its compiled member order.
 
 The qualification run on 2026-07-29 used the compiled FP8
 Qwen3.6-35B-A3B package across two AMD Vulkan devices, 131,072-token context,

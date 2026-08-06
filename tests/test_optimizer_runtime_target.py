@@ -32,6 +32,28 @@ from nerve.representation_optimizer.providers.resident_expansion.contracts impor
 RUNTIME_IMPLEMENTATION_FINGERPRINT = runtime_implementation_fingerprint(
     Path(__file__).resolve().parents[1] / "runtime-rs"
 )
+RUNTIME_DEVICE_LOCAL_MEMORY_POLICY = {
+    "schema": "nerve.runtime.device_local_memory_policy.v1",
+    "capacity_parts_per_million": 1_000_000,
+    "protected_headroom_fraction_ppm": 200_000,
+    "reservable_free_vram_fraction_ppm": 800_000,
+}
+RUNTIME_DEVICE_CAPACITY_POLICY = DeviceCapacityPolicy.from_runtime_policy(
+    RUNTIME_DEVICE_LOCAL_MEMORY_POLICY
+)
+
+
+def test_device_capacity_policy_accepts_only_a_complete_runtime_partition() -> None:
+    assert (
+        DeviceCapacityPolicy.from_runtime_policy(
+            RUNTIME_DEVICE_LOCAL_MEMORY_POLICY
+        ).reservable_free_vram_fraction_ppm
+        == 800_000
+    )
+    invalid = dict(RUNTIME_DEVICE_LOCAL_MEMORY_POLICY)
+    invalid["reservable_free_vram_fraction_ppm"] = 900_000
+    with pytest.raises(ModelCompileError, match="fractions are invalid"):
+        DeviceCapacityPolicy.from_runtime_policy(invalid)
 
 
 def test_runtime_executor_command_asks_cargo_to_verify_source_freshness(
@@ -191,6 +213,7 @@ def test_linux_amd_probe_tolerates_inaccessible_unrelated_proc_metadata(
     probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
 
     observation = probe.require_capacity((profile,))
@@ -211,6 +234,7 @@ def test_capacity_probe_rejects_reservation_for_another_device(
     probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
     other_device = _device_id("0000:07:00.0")
     with pytest.raises(ModelCompileError, match="does not match the probed"):
@@ -282,6 +306,7 @@ def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
     probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
     driver = _driver(tmp_path)
     component = _executable(tmp_path / "component-executor")
@@ -336,12 +361,107 @@ def test_runtime_target_preparation_selects_minimum_capacity_amd_group(
         _device_id("0000:0a:00.0"),
     }
     assert admission["reserved_device_capacity_bytes"] == {
-        _device_id("0000:07:00.0"): 949,
-        _device_id("0000:0a:00.0"): 949,
+        _device_id("0000:07:00.0"): 799,
+        _device_id("0000:0a:00.0"): 799,
     }
     assert optimization_target.matched_conditions["residency_scope"] == (
         "capacity_partition"
     )
+
+
+def test_runtime_target_uses_compatible_devices_not_compile_time_identities(
+    tmp_path: Path,
+) -> None:
+    package_target = _target(
+        ("0000:0a:00.0",),
+        capacity_bytes=1_000,
+    )
+    live_addresses = ("0000:03:00.0", "0000:07:00.0")
+    live_target = _target(live_addresses, capacity_bytes=1_000)
+    package = _package(
+        tmp_path / "package",
+        package_target,
+        tensor_sizes=(600, 600),
+    )
+    sysfs = tmp_path / "sys" / "class" / "drm"
+    proc = tmp_path / "proc"
+    for index, pci_address in enumerate(live_addresses):
+        _device_filesystem(
+            tmp_path,
+            pci_address=pci_address,
+            used_vram=1,
+            busy_percent=0,
+            card_index=index,
+            roots=(sysfs, proc),
+            total_vram=1_000,
+        )
+
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        selected_device_ids=tuple(map(_device_id, live_addresses)),
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(tmp_path / "residency"),
+        vulkan_driver_files=(_driver(tmp_path),),
+        capacity_probe=LinuxAmdDeviceCapacityProbe(
+            sysfs_drm_root=sysfs,
+            proc_root=proc,
+            policy=RUNTIME_DEVICE_CAPACITY_POLICY,
+        ),
+        live_target=live_target,
+    )
+
+    assert [item["device_id"] for item in prepared.selected_devices] == sorted(
+        map(_device_id, live_addresses)
+    )
+    assert {
+        profile["hardware_identity"]["stable_device_id"]
+        for profile in prepared.targets[0].hardware_profiles
+    } == set(map(_device_id, live_addresses))
+
+
+def test_runtime_target_rejects_live_device_with_uncompiled_capabilities(
+    tmp_path: Path,
+) -> None:
+    package_target = _target(
+        ("0000:0a:00.0",),
+        capacity_bytes=1_000,
+    )
+    live_address = "0000:03:00.0"
+    live_target = _target((live_address,), capacity_bytes=2_000)
+    package = _package(
+        tmp_path / "package",
+        package_target,
+        tensor_sizes=(100,),
+    )
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=live_address,
+        used_vram=1,
+        busy_percent=0,
+        total_vram=2_000,
+    )
+
+    with pytest.raises(
+        ModelCompileError,
+        match="not live AMD targets compatible with the compiled execution",
+    ):
+        prepare_runtime_optimization_targets(
+            package_manifest=package,
+            run_root=tmp_path / "run",
+            selected_device_ids=(_device_id(live_address),),
+            component_executor_bin=_executable(tmp_path / "component"),
+            validation_executor_bin=_executable(tmp_path / "validation"),
+            residency_planner_bin=_residency_planner(tmp_path / "residency"),
+            vulkan_driver_files=(_driver(tmp_path),),
+            capacity_probe=LinuxAmdDeviceCapacityProbe(
+                sysfs_drm_root=sysfs,
+                proc_root=proc,
+                policy=RUNTIME_DEVICE_CAPACITY_POLICY,
+            ),
+            live_target=live_target,
+        )
 
 
 def test_runtime_target_counts_transient_working_set_before_selecting_topology(
@@ -379,6 +499,7 @@ def test_runtime_target_counts_transient_working_set_before_selecting_topology(
         capacity_probe=LinuxAmdDeviceCapacityProbe(
             sysfs_drm_root=sysfs,
             proc_root=proc,
+            policy=RUNTIME_DEVICE_CAPACITY_POLICY,
         ),
         live_target=target,
     )
@@ -411,7 +532,7 @@ def test_runtime_target_repacks_boundaries_after_exact_fixed_residency(
             busy_percent=0,
             card_index=index,
             roots=(sysfs, proc),
-            total_vram=1_000,
+            total_vram=1_001,
         )
 
     prepared = prepare_runtime_optimization_targets(
@@ -427,6 +548,7 @@ def test_runtime_target_repacks_boundaries_after_exact_fixed_residency(
         capacity_probe=LinuxAmdDeviceCapacityProbe(
             sysfs_drm_root=sysfs,
             proc_root=proc,
+            policy=RUNTIME_DEVICE_CAPACITY_POLICY,
         ),
         live_target=target,
     )
@@ -477,12 +599,56 @@ def test_demand_retained_rejects_a_device_that_only_fits_the_cold_mount(
             capacity_probe=LinuxAmdDeviceCapacityProbe(
                 sysfs_drm_root=sysfs,
                 proc_root=proc,
+                policy=RUNTIME_DEVICE_CAPACITY_POLICY,
             ),
             live_target=target,
         )
 
     assert "planned': 10100" in str(caught.value)
-    assert "available_capacity': 949" in str(caught.value)
+    assert "available_capacity': 799" in str(caught.value)
+
+
+def test_demand_paged_admits_fixed_state_and_one_load_wave(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:07:00.0"
+    target = _target((pci_address,), capacity_bytes=1_000)
+    package = _package(
+        tmp_path / "package",
+        target,
+        tensor_sizes=(100,),
+    )
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=1,
+        busy_percent=0,
+        total_vram=1_000,
+    )
+
+    prepared = prepare_runtime_optimization_targets(
+        package_manifest=package,
+        run_root=tmp_path / "run",
+        component_executor_bin=_executable(tmp_path / "component"),
+        validation_executor_bin=_executable(tmp_path / "validation"),
+        residency_planner_bin=_residency_planner(
+            tmp_path / "residency",
+            maximum_dynamic_bytes_per_device_by_count={1: 10_000},
+        ),
+        vulkan_driver_files=(_driver(tmp_path),),
+        capacity_probe=LinuxAmdDeviceCapacityProbe(
+            sysfs_drm_root=sysfs,
+            proc_root=proc,
+            policy=RUNTIME_DEVICE_CAPACITY_POLICY,
+        ),
+        live_target=target,
+        residency_policy="demand_paged",
+    )
+
+    plan = prepared.residency_plans[0]
+    assert plan["residency_policy"] == "demand_paged"
+    assert plan["total_maximum_addressable_parameter_bytes"] == 10_100
+    assert plan["total_initial_device_resident_bytes"] == 100
 
 
 def test_runtime_target_records_post_context_capacity(
@@ -507,6 +673,7 @@ def test_runtime_target_records_post_context_capacity(
     probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
 
     discovery_count = 0
@@ -523,6 +690,19 @@ def test_runtime_target_records_post_context_capacity(
         "discover_compiler_target",
         discover_after_context_initialization,
     )
+    observed_policy: list[DeviceCapacityPolicy] = []
+
+    def capacity_probe_from_runtime_policy(
+        *, policy: DeviceCapacityPolicy
+    ) -> LinuxAmdDeviceCapacityProbe:
+        observed_policy.append(policy)
+        return probe
+
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.automation.runtime_target."
+        "LinuxAmdDeviceCapacityProbe",
+        capacity_probe_from_runtime_policy,
+    )
 
     prepared = prepare_runtime_optimization_targets(
         package_manifest=package,
@@ -533,11 +713,11 @@ def test_runtime_target_records_post_context_capacity(
         validation_executor_bin=_executable(tmp_path / "validation"),
         residency_planner_bin=_residency_planner(tmp_path / "residency"),
         vulkan_driver_files=(_driver(tmp_path),),
-        capacity_probe=probe,
     )
 
     expected_vram = initial_vram + 12_288
     assert discovery_count == 1
+    assert observed_policy == [RUNTIME_DEVICE_CAPACITY_POLICY]
     assert prepared.selected_devices[0]["vram_used_bytes"] == expected_vram
     assert (
         prepared.targets[0].matched_conditions["environment"]["capacity_observations"][
@@ -566,6 +746,7 @@ def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
     probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
     stale = "nerve.runtime_implementation_sha256.v1:" + "b" * 64
 
@@ -590,6 +771,33 @@ def test_runtime_target_rejects_stale_runtime_executor_before_device_work(
     assert not (tmp_path / "run").exists()
 
 
+def test_runtime_target_rejects_inconsistent_executor_memory_policies(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:03:00.0"
+    target = _target((pci_address,))
+    package = _package(tmp_path / "package", target, tensor_sizes=(100,))
+    inconsistent = dict(RUNTIME_DEVICE_LOCAL_MEMORY_POLICY)
+    inconsistent["protected_headroom_fraction_ppm"] = 300_000
+    inconsistent["reservable_free_vram_fraction_ppm"] = 700_000
+
+    with pytest.raises(ModelCompileError, match="inconsistent runtime device-local"):
+        prepare_runtime_optimization_targets(
+            package_manifest=package,
+            run_root=tmp_path / "run",
+            component_executor_bin=_executable(tmp_path / "component"),
+            validation_executor_bin=_executable(
+                tmp_path / "validation",
+                runtime_memory_policy=inconsistent,
+            ),
+            residency_planner_bin=_residency_planner(tmp_path / "residency"),
+            vulkan_driver_files=(_driver(tmp_path),),
+            live_target=target,
+        )
+
+    assert not (tmp_path / "run").exists()
+
+
 def test_explicit_busy_optimizer_device_uses_its_remaining_capacity(
     tmp_path: Path,
 ) -> None:
@@ -605,6 +813,7 @@ def test_explicit_busy_optimizer_device_uses_its_remaining_capacity(
     probe = LinuxAmdDeviceCapacityProbe(
         sysfs_drm_root=sysfs,
         proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
 
     prepared = prepare_runtime_optimization_targets(
@@ -914,11 +1123,17 @@ def _executable(
     path: Path,
     *,
     runtime_fingerprint: str = RUNTIME_IMPLEMENTATION_FINGERPRINT,
+    runtime_memory_policy: dict[str, object] = RUNTIME_DEVICE_LOCAL_MEMORY_POLICY,
 ) -> Path:
+    policy_json = json.dumps(runtime_memory_policy, separators=(",", ":"))
     path.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "--runtime-implementation-fingerprint" ]; then\n'
         f"  printf '%s\\n' '{runtime_fingerprint}'\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "--runtime-device-local-memory-policy" ]; then\n'
+        f"  printf '%s\\n' '{policy_json}'\n"
         "  exit 0\n"
         "fi\n"
         "exit 0\n"
@@ -933,6 +1148,7 @@ def _residency_planner(
     extra_bytes_per_device_by_count: dict[int, int] | None = None,
     maximum_dynamic_bytes_per_device_by_count: (dict[int, int] | None) = None,
     runtime_fingerprint: str = RUNTIME_IMPLEMENTATION_FINGERPRINT,
+    runtime_memory_policy: dict[str, object] = RUNTIME_DEVICE_LOCAL_MEMORY_POLICY,
 ) -> Path:
     extras = extra_bytes_per_device_by_count or {}
     maximum_dynamic = maximum_dynamic_bytes_per_device_by_count or {}
@@ -940,10 +1156,14 @@ def _residency_planner(
         "#!/usr/bin/env python3\n"
         "import json, pathlib, sys\n"
         f"fingerprint = {runtime_fingerprint!r}\n"
+        f"memory_policy = {runtime_memory_policy!r}\n"
         f"extras = {extras!r}\n"
         f"maximum_dynamic = {maximum_dynamic!r}\n"
         "if sys.argv[1:] == ['--runtime-implementation-fingerprint']:\n"
         "    print(fingerprint)\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['--runtime-device-local-memory-policy']:\n"
+        "    print(json.dumps(memory_policy, separators=(',', ':')))\n"
         "    raise SystemExit(0)\n"
         "request = json.load(sys.stdin)\n"
         "manifest_path = pathlib.Path(request['package_manifest'])\n"

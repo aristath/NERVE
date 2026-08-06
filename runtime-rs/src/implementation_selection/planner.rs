@@ -30,13 +30,11 @@ impl RuntimeImplementationCatalog {
         let mut rejected = Vec::new();
 
         for loaded in &self.implementations {
-            let applications = maximum_nonoverlapping_region_applications(
+            let applications = independent_region_applications(
                 &loaded.mount_plan.regions,
                 &request.instances,
                 &request.edges,
-            )
-            .map(|applications| vec![flatten_region_applications(&applications)])
-            .unwrap_or_default();
+            );
             if applications.is_empty() {
                 rejected.push(RuntimeRejectedImplementation {
                     implementation_id: loaded.implementation.implementation_id.clone(),
@@ -188,6 +186,31 @@ impl RuntimeImplementationCatalog {
     }
 }
 
+/// Enumerates independently selectable applications of every declared mount
+/// region. A region is the indivisible semantic replacement boundary; separate
+/// regions in one verified artifact bundle are alternatives that may be chosen
+/// independently according to each application's placement and measured cost.
+pub(crate) fn independent_region_applications(
+    regions: &[super::RuntimeMountRegion],
+    instances: &[RuntimeSelectionInstance],
+    edges: &[super::RuntimeSelectionEdge],
+) -> Vec<Vec<String>> {
+    let mut applications = regions
+        .iter()
+        .flat_map(|region| {
+            let required_sources = region
+                .replacements
+                .iter()
+                .map(|replacement| replacement.source_component_id().to_string())
+                .collect::<Vec<_>>();
+            matching_applications(&required_sources, instances, edges)
+        })
+        .collect::<Vec<_>>();
+    applications.sort();
+    applications.dedup();
+    applications
+}
+
 fn checked_metric_sum(mut values: impl Iterator<Item = u64>, label: &str) -> io::Result<u64> {
     values.try_fold(0u64, |total, value| {
         total.checked_add(value).ok_or_else(|| {
@@ -285,73 +308,6 @@ fn validate_request(request: &RuntimeSelectionRequest) -> io::Result<()> {
     Ok(())
 }
 
-fn maximum_nonoverlapping_matching_applications(
-    required_sources: &[String],
-    instances: &[RuntimeSelectionInstance],
-    edges: &[super::RuntimeSelectionEdge],
-) -> Vec<Vec<String>> {
-    let applications = matching_applications(required_sources, instances, edges);
-    let suffix_capacity = (0..applications.len())
-        .rev()
-        .scan(0usize, |total, index| {
-            *total = total.saturating_add(applications[index].len());
-            Some(*total)
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>();
-    let mut best = Vec::new();
-    search_matching_application_sets(
-        &applications,
-        &suffix_capacity,
-        0,
-        &mut BTreeSet::new(),
-        &mut Vec::new(),
-        &mut best,
-    );
-    best.into_iter()
-        .map(|index| applications[index].clone())
-        .collect()
-}
-
-pub(crate) fn maximum_nonoverlapping_region_applications(
-    regions: &[super::RuntimeMountRegion],
-    instances: &[RuntimeSelectionInstance],
-    edges: &[super::RuntimeSelectionEdge],
-) -> Option<Vec<Vec<Vec<String>>>> {
-    let applications = regions
-        .iter()
-        .map(|region| {
-            let required_sources = region
-                .replacements
-                .iter()
-                .map(|replacement| replacement.source_component_id().to_string())
-                .collect::<Vec<_>>();
-            maximum_nonoverlapping_matching_applications(&required_sources, instances, edges)
-        })
-        .collect::<Vec<_>>();
-    if applications.iter().any(Vec::is_empty) {
-        return None;
-    }
-    let flattened = flatten_region_applications(&applications);
-    if flattened.len() != flattened.iter().collect::<BTreeSet<_>>().len() {
-        return None;
-    }
-    Some(applications)
-}
-
-pub(crate) fn flatten_region_applications(applications: &[Vec<Vec<String>>]) -> Vec<String> {
-    let mut flattened = applications
-        .iter()
-        .flatten()
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>();
-    flattened.sort();
-    flattened
-}
-
 fn matching_applications(
     required_sources: &[String],
     instances: &[RuntimeSelectionInstance],
@@ -405,88 +361,6 @@ fn matching_applications(
     combinations.sort();
     combinations.dedup();
     combinations
-}
-
-fn search_matching_application_sets(
-    applications: &[Vec<String>],
-    suffix_capacity: &[usize],
-    index: usize,
-    occupied_instances: &mut BTreeSet<String>,
-    current: &mut Vec<usize>,
-    best: &mut Vec<usize>,
-) {
-    if index == applications.len() {
-        if matching_application_set_is_better(current, best, applications) {
-            *best = current.clone();
-        }
-        return;
-    }
-    let current_coverage = current
-        .iter()
-        .map(|index| applications[*index].len())
-        .sum::<usize>();
-    let best_coverage = best
-        .iter()
-        .map(|index| applications[*index].len())
-        .sum::<usize>();
-    if current_coverage.saturating_add(suffix_capacity[index]) < best_coverage {
-        return;
-    }
-    let application = &applications[index];
-    if application
-        .iter()
-        .all(|instance| !occupied_instances.contains(instance))
-    {
-        occupied_instances.extend(application.iter().cloned());
-        current.push(index);
-        search_matching_application_sets(
-            applications,
-            suffix_capacity,
-            index + 1,
-            occupied_instances,
-            current,
-            best,
-        );
-        current.pop();
-        for instance in application {
-            occupied_instances.remove(instance);
-        }
-    }
-    search_matching_application_sets(
-        applications,
-        suffix_capacity,
-        index + 1,
-        occupied_instances,
-        current,
-        best,
-    );
-}
-
-fn matching_application_set_is_better(
-    candidate: &[usize],
-    current: &[usize],
-    applications: &[Vec<String>],
-) -> bool {
-    let coverage = |indices: &[usize]| {
-        indices
-            .iter()
-            .map(|index| applications[*index].len())
-            .sum::<usize>()
-    };
-    let candidate_coverage = coverage(candidate);
-    let current_coverage = coverage(current);
-    if candidate_coverage != current_coverage {
-        return candidate_coverage > current_coverage;
-    }
-    let candidate_applications = candidate
-        .iter()
-        .map(|index| applications[*index].as_slice())
-        .collect::<Vec<_>>();
-    let current_applications = current
-        .iter()
-        .map(|index| applications[*index].as_slice())
-        .collect::<Vec<_>>();
-    candidate_applications < current_applications
 }
 
 fn enumerate_source_combinations(

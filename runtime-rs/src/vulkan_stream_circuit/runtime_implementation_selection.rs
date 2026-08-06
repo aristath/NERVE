@@ -427,13 +427,12 @@ impl VulkanResidentRuntimeModel {
                     right.destination_instance_id.as_str(),
                 ))
         });
-        let Some(region_applications) =
-            crate::implementation_selection::maximum_nonoverlapping_region_applications(
-                &candidate.mount_plan.regions,
-                &instances,
-                &edges,
-            )
-        else {
+        let applications = crate::implementation_selection::independent_region_applications(
+            &candidate.mount_plan.regions,
+            &instances,
+            &edges,
+        );
+        if applications.is_empty() {
             return Err(VulkanResidentTokenModelPackageError::new(
                 format!(
                     "staged candidate {:?} has no complete matching runtime region for source components {:?}",
@@ -441,12 +440,7 @@ impl VulkanResidentRuntimeModel {
                     candidate.source_component_ids,
                 ),
             ));
-        };
-        let applications = vec![
-            crate::implementation_selection::flatten_region_applications(
-                &region_applications,
-            ),
-        ];
+        }
         let mut mounted_instances = BTreeSet::new();
         let mut loaded_tensor_fragments = BTreeSet::new();
         let mut mounted_resident_derivation_sources = BTreeMap::new();
@@ -575,50 +569,41 @@ fn mount_runtime_candidate_application(
             destination_instance_id: edge.destination.component_id.clone(),
         })
         .collect::<Vec<_>>();
-    let region_applications =
-        crate::implementation_selection::maximum_nonoverlapping_region_applications(
-            &mount_plan.regions,
-            &selection_instances,
-            &selection_edges,
-        )
-        .ok_or_else(|| {
-            VulkanResidentTokenModelPackageError::new(format!(
-                "runtime candidate application {application_id:?} has no complete matching semantic regions",
-            ))
-        })?;
     let mut declared_instance_ids = instance_ids.to_vec();
     declared_instance_ids.sort();
-    if crate::implementation_selection::flatten_region_applications(
-        &region_applications,
-    ) != declared_instance_ids
-    {
-        return Err(VulkanResidentTokenModelPackageError::new(format!(
-            "runtime candidate application {application_id:?} instance coverage disagrees with its semantic regions",
-        )));
-    }
-    for (region_index, (region, applications)) in mount_plan
+    declared_instance_ids.dedup();
+    let matching_regions = mount_plan
         .regions
         .iter()
-        .zip(&region_applications)
         .enumerate()
-    {
-        for (region_application_index, region_instance_ids) in
-            applications.iter().enumerate()
-        {
-            mount_runtime_candidate_region_application(
-                runtime_model,
-                package_root,
-                candidate_root,
-                region,
-                &format!(
-                    "{application_id}:region_{region_index}:application_{region_application_index}"
-                ),
-                region_instance_ids,
-                &effective_edges,
-                &mut ledger,
-            )?;
-        }
+        .filter_map(|(region_index, region)| {
+            let applications = crate::implementation_selection::independent_region_applications(
+                std::slice::from_ref(region),
+                &selection_instances,
+                &selection_edges,
+            );
+            applications
+                .into_iter()
+                .any(|candidate| candidate == declared_instance_ids)
+                .then_some((region_index, region))
+        })
+        .collect::<Vec<_>>();
+    if matching_regions.len() != 1 || declared_instance_ids.len() != instance_ids.len() {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime candidate application {application_id:?} does not identify exactly one complete semantic region",
+        )));
     }
+    let (region_index, region) = matching_regions[0];
+    mount_runtime_candidate_region_application(
+        runtime_model,
+        package_root,
+        candidate_root,
+        region,
+        &format!("{application_id}:region_{region_index}"),
+        &declared_instance_ids,
+        &effective_edges,
+        &mut ledger,
+    )?;
     for reference in &mount_plan.tensor_index_refs {
         let index_path = contained_candidate_artifact(
             candidate_root,

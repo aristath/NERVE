@@ -241,9 +241,7 @@ def contract_fixtures() -> list[dict[str, object]]:
             "proof_obligations": ["bounded_interpolation_error"],
             "error_contract": error_contract,
         },
-        "artifact_declarations": [
-            {"path": "optimization/candidates/field/grid.bin"}
-        ],
+        "artifact_declarations": [{"path": "optimization/candidates/field/grid.bin"}],
     }
     evidence = {
         "schema": ALGEBRAIC_EVIDENCE_SCHEMA,
@@ -263,8 +261,7 @@ def contract_fixtures() -> list[dict[str, object]]:
     }
     evidence["evidence_id"] = algebraic_evidence_id(evidence)
     candidate["descriptor_id"] = (
-        "representation_descriptor_"
-        "11111111111111111111111111111111"
+        "representation_descriptor_11111111111111111111111111111111"
     )
     candidate["evidence_refs"] = [evidence["evidence_id"]]
     candidate["candidate_id"] = representation_candidate_id(candidate)
@@ -444,17 +441,11 @@ def contract_fixtures() -> list[dict[str, object]]:
         "counterexamples": [],
         "status": "passed",
     }
-    validation_record["validation_id"] = validation_record_id(
-        validation_record
-    )
+    validation_record["validation_id"] = validation_record_id(validation_record)
     promotion_hardware_profile = hardware_profile_contract()
     runtime_predicate = create_runtime_implementation_predicate(
-        measured_profile_ids=(
-            promotion_hardware_profile["profile_id"],
-        ),
-        capability_classes=(
-            promotion_hardware_profile["capability_class"],
-        ),
+        measured_profile_ids=(promotion_hardware_profile["profile_id"],),
+        capability_classes=(promotion_hardware_profile["capability_class"],),
         device_kinds=("gpu",),
         apis=("vulkan",),
         required_processes=("texture_sampling",),
@@ -469,6 +460,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         state_activations_minimum=4096,
         state_activations_maximum=4096,
         speculative_draft_token_counts=(0,),
+        residency_policies=("eager",),
         placement_mode="local",
         minimum_device_count=1,
         maximum_device_count=1,
@@ -505,16 +497,12 @@ def contract_fixtures() -> list[dict[str, object]]:
                 {
                     "workload_id": benchmark_workload_id,
                     "decision": "materially_faster",
-                    "paired": deepcopy(
-                        benchmark_record["workloads"][0]["paired"]
-                    ),
+                    "paired": deepcopy(benchmark_record["workloads"][0]["paired"]),
                 }
             ],
             "validation_id": validation_record["validation_id"],
             "validation_status": "passed",
-            "behavioral_contract": deepcopy(
-                candidate["behavioral_contract"]
-            ),
+            "behavioral_contract": deepcopy(candidate["behavioral_contract"]),
         },
         "provenance": {
             "provider": deepcopy(candidate["provider"]),
@@ -527,28 +515,18 @@ def contract_fixtures() -> list[dict[str, object]]:
                         "fixture promotion analysis",
                     ),
                     "run_digest": digest("analysis run"),
-                    "cited_evidence_ids": deepcopy(
-                        candidate["evidence_refs"]
-                    ),
+                    "cited_evidence_ids": deepcopy(candidate["evidence_refs"]),
                 }
             ],
             "hardware_profiles": [
                 {
-                    "profile_id": promotion_hardware_profile[
-                        "profile_id"
-                    ],
-                    "profile_digest": contract_digest(
-                        promotion_hardware_profile
-                    ),
+                    "profile_id": promotion_hardware_profile["profile_id"],
+                    "profile_digest": contract_digest(promotion_hardware_profile),
                 }
             ],
-            "representation_graph_digest": digest(
-                "representation graph"
-            ),
+            "representation_graph_digest": digest("representation graph"),
             "target_lowering_digest": digest("target lowering"),
-            "relowering_request_digest": digest(
-                "relowering request"
-            ),
+            "relowering_request_digest": digest("relowering request"),
         },
         "decision": "promote",
         "reason": "material speedup with validated error contract",
@@ -660,9 +638,7 @@ def contract_fixtures() -> list[dict[str, object]]:
         promotion,
         {
             "schema": RELOWERING_REQUEST_SCHEMA,
-            "request_id": stable_contract_id(
-                "relower", candidate_id, "representation"
-            ),
+            "request_id": stable_contract_id("relower", candidate_id, "representation"),
             "candidate_id": candidate_id,
             "scope_ids": [scope_id],
             "representation_digest": digest("representation"),
@@ -741,10 +717,10 @@ def test_algebraic_evidence_identity_rejects_claim_drift() -> None:
             "phase staging bytes",
         ),
         (
-                lambda document: document["integrity"].__setitem__(
-                    "file_count",
-                    9,
-                ),
+            lambda document: document["integrity"].__setitem__(
+                "file_count",
+                9,
+            ),
             "file_count",
         ),
         (
@@ -785,7 +761,9 @@ def test_contract_validation_rejects_unknown_fields_and_nonfinite_numbers() -> N
         canonical_json_bytes({"invalid": float("nan")})
 
 
-def test_promoted_runtime_predicate_requires_exact_measured_profile_identities() -> None:
+def test_promoted_runtime_predicate_requires_exact_measured_profile_identities() -> (
+    None
+):
     promotion = contract_fixtures()[8]
     del promotion["runtime_predicate"]["hardware"]["measured_profile_ids"]
 
@@ -820,7 +798,9 @@ def test_hardware_profile_rejects_unavailable_programmable_process() -> None:
         validate_contract(profile)
 
 
-def test_hardware_measurements_are_part_of_profile_identity_not_capability_class() -> None:
+def test_hardware_measurements_are_part_of_profile_identity_not_capability_class() -> (
+    None
+):
     profile = hardware_profile_contract()
     old_profile_id = profile["profile_id"]
     capability_class = profile["capability_class"]
@@ -856,9 +836,7 @@ def test_runtime_binding_changes_do_not_change_stable_hardware_identity() -> Non
 
     validate_contract(profile)
     profile_id = profile["profile_id"]
-    profile["runtime_bindings"]["vulkan_runtime_binding"][
-        "physical_device_index"
-    ] = 4
+    profile["runtime_bindings"]["vulkan_runtime_binding"]["physical_device_index"] = 4
     validate_contract(profile)
 
     assert profile["profile_id"] == profile_id

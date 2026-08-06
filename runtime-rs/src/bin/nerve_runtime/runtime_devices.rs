@@ -265,6 +265,10 @@ fn runtime_capacity_packed_model(
                 maximum: context_capacity_activations,
             },
             speculative_draft_tokens,
+            residency_policy: args
+                .resource_residency_policy
+                .as_runtime_name()
+                .replace('-', "_"),
         },
     )
     .map_err(|error| {

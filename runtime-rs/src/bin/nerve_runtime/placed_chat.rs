@@ -47,6 +47,10 @@ fn run_placed_chat(
                     maximum: capacity,
                 },
                 speculative_draft_tokens,
+                residency_policy: args
+                    .resource_residency_policy
+                    .as_runtime_name()
+                    .replace('-', "_"),
             },
         )?
     };

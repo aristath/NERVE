@@ -363,6 +363,7 @@ fn runtime_implementation_test_predicate(
                 maximum: 65_536,
             },
             speculative_draft_token_counts: vec![0],
+            residency_policies: vec!["eager".to_string()],
         },
         placement: crate::RuntimePlacementPredicate {
             mode: "local".to_string(),
@@ -374,7 +375,7 @@ fn runtime_implementation_test_predicate(
 }
 
 #[test]
-fn selected_runtime_component_overlay_replaces_physical_execution() {
+fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -504,7 +505,10 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
     };
     let loaded = crate::LoadedRuntimeImplementation {
         implementation: implementation.clone(),
-        source_component_ids: vec!["layer_00".to_string()],
+        source_component_ids: vec![
+            "layer_00".to_string(),
+            "unselected_component".to_string(),
+        ],
         workload_metrics: Vec::new(),
         candidate_root: candidate_root.clone(),
         mount_plan: crate::RuntimeMountPlan {
@@ -513,14 +517,20 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
             adapter_id:
                 crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER
                     .to_string(),
-            regions: vec![crate::RuntimeMountRegion {
-                replacements: vec![
-                    crate::RuntimeReplacement::Component {
+            regions: vec![
+                crate::RuntimeMountRegion {
+                    replacements: vec![crate::RuntimeReplacement::Component {
                         source_component_id: "layer_00".to_string(),
                         overlay_ref: overlay_ref.to_string(),
-                    },
-                ],
-            }],
+                    }],
+                },
+                crate::RuntimeMountRegion {
+                    replacements: vec![crate::RuntimeReplacement::Component {
+                        source_component_id: "unselected_component".to_string(),
+                        overlay_ref: "overlays/must_not_be_opened.json".to_string(),
+                    }],
+                },
+            ],
             tensor_index_refs: Vec::new(),
         },
     };
@@ -573,7 +583,8 @@ fn selected_runtime_component_overlay_replaces_physical_execution() {
                 minimum: 0,
                 maximum: 65_536,
             },
-            speculative_draft_tokens: 0,
+        speculative_draft_tokens: 0,
+        residency_policy: "eager".to_string(),
         },
         selected: vec![selected],
         exact_instance_ids: vec!["output_transducer".to_string()],

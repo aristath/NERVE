@@ -671,6 +671,7 @@
                                 maximum: 16,
                             },
                         speculative_draft_tokens: 0,
+                        residency_policy: "eager".to_string(),
                     },
                     selected: Vec::new(),
                     exact_instance_ids: Vec::new(),

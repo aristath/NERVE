@@ -1,5 +1,10 @@
-const VULKAN_CAPACITY_PARTS_PER_MILLION: u64 = 1_000_000;
-const VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM: u64 = 200_000;
+pub const VULKAN_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA: &str =
+    "nerve.runtime.device_local_memory_policy.v1";
+pub const VULKAN_CAPACITY_PARTS_PER_MILLION: u64 = 1_000_000;
+pub const VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM: u64 = 200_000;
+pub const VULKAN_DEVICE_LOCAL_RESERVABLE_FRACTION_PPM: u64 =
+    VULKAN_CAPACITY_PARTS_PER_MILLION
+        - VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_BYTE_CAP: u64 = 16 * 1024 * 1024;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_HEADROOM_DIVISOR: u64 = 4;
 const VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL: Duration = Duration::from_millis(25);
@@ -11,6 +16,25 @@ pub struct VulkanDeviceLocalMemoryBudget {
     pub reservable_bytes: u64,
     pub protected_headroom_bytes: u64,
     pub counter_tolerance_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanDeviceLocalMemoryPolicy {
+    pub schema: &'static str,
+    pub capacity_parts_per_million: u64,
+    pub protected_headroom_fraction_ppm: u64,
+    pub reservable_free_vram_fraction_ppm: u64,
+}
+
+pub fn vulkan_device_local_memory_policy() -> VulkanDeviceLocalMemoryPolicy {
+    VulkanDeviceLocalMemoryPolicy {
+        schema: VULKAN_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA,
+        capacity_parts_per_million: VULKAN_CAPACITY_PARTS_PER_MILLION,
+        protected_headroom_fraction_ppm:
+            VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM,
+        reservable_free_vram_fraction_ppm:
+            VULKAN_DEVICE_LOCAL_RESERVABLE_FRACTION_PPM,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

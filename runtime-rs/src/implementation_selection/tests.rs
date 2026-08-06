@@ -122,6 +122,7 @@ fn predicate(profiles: &[&HardwareProcessProfile], mode: &str) -> RuntimeImpleme
                 maximum: 65_536,
             },
             speculative_draft_token_counts: vec![3],
+            residency_policies: vec!["demand_paged".to_string()],
         },
         placement: RuntimePlacementPredicate {
             mode: mode.to_string(),
@@ -337,6 +338,7 @@ fn request(
                 maximum: 4096,
             },
             speculative_draft_tokens: 3,
+            residency_policy: "demand_paged".to_string(),
         },
         devices,
         instances,
@@ -564,6 +566,7 @@ fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
             maximum: 4096,
         },
         speculative_draft_tokens: 3,
+        residency_policy: "demand_paged".to_string(),
     };
 
     assert!(
@@ -589,7 +592,8 @@ fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
     assert!(
         predicate(&[&cpu, &gpu_a], "distributed")
             .mismatch_reasons(&execution, &[&gpu_a_device, &gpu_b_device],)
-            .is_empty()
+            .iter()
+            .any(|reason| reason.contains("were not measured"))
     );
     let mut unsupported_gpu = gpu_b.clone();
     unsupported_gpu.capability_class = "hardware_capability_unsupported".to_string();
@@ -610,6 +614,14 @@ fn predicates_distinguish_cpu_single_gpu_multi_gpu_and_mixed_targets() {
             .mismatch_reasons(&different_speculative_mode, &[&gpu_a_device],)
             .iter()
             .any(|reason| reason.contains("speculative draft-token count"))
+    );
+    let mut different_residency = execution.clone();
+    different_residency.residency_policy = "eager".to_string();
+    assert!(
+        predicate(&[&gpu_a], "local")
+            .mismatch_reasons(&different_residency, &[&gpu_a_device],)
+            .iter()
+            .any(|reason| reason.contains("residency policy"))
     );
 }
 
@@ -642,9 +654,16 @@ fn selector_refuses_uncovered_regions_when_exact_execution_is_incompatible() {
 }
 
 #[test]
-fn one_implementation_covers_every_duplicate_source_instance() {
+fn one_implementation_exposes_each_duplicate_source_instance_as_an_independent_application() {
     let gpu_a = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
     let gpu_b = profile(HardwareDeviceKind::Gpu, "gpu-b", "gfx-fixture", "vulkan");
+    let mut local_on_either_measured_gpu = predicate(&[&gpu_a, &gpu_b], "distributed");
+    local_on_either_measured_gpu.placement = RuntimePlacementPredicate {
+        mode: "local".to_string(),
+        minimum_device_count: 1,
+        maximum_device_count: 1,
+        required_interconnects: Vec::new(),
+    };
     let catalog = RuntimeImplementationCatalog {
         package_id: "package".to_string(),
         package_root: PathBuf::from("."),
@@ -659,7 +678,7 @@ fn one_implementation_covers_every_duplicate_source_instance() {
             "implementation_layer",
             &["layer"],
             &["scope_layer"],
-            predicate(&[&gpu_a, &gpu_b], "distributed"),
+            local_on_either_measured_gpu,
             1_000,
             800,
             0,
@@ -679,19 +698,22 @@ fn one_implementation_covers_every_duplicate_source_instance() {
 
     let report = catalog.select(&request).unwrap();
 
-    assert_eq!(report.selected.len(), 1);
+    assert_eq!(report.selected.len(), 2);
     assert_eq!(
-        report.selected[0]
-            .instance_ids
+        report
+            .selected
             .iter()
-            .map(String::as_str)
+            .map(|selection| selection.instance_ids.as_slice())
             .collect::<Vec<_>>(),
-        vec!["layer_duplicate", "layer_original"]
+        vec![
+            ["layer_duplicate".to_string()].as_slice(),
+            ["layer_original".to_string()].as_slice(),
+        ]
     );
 }
 
 #[test]
-fn one_implementation_can_cover_disconnected_semantic_regions() {
+fn one_implementation_exposes_disconnected_semantic_regions_independently() {
     let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
     let mut implementation = loaded_implementation(
         "implementation_regions",
@@ -743,10 +765,17 @@ fn one_implementation_can_cover_disconnected_semantic_regions() {
 
     let report = catalog.select(&request).unwrap();
 
-    assert_eq!(report.selected.len(), 1);
+    assert_eq!(report.selected.len(), 2);
     assert_eq!(
-        report.selected[0].instance_ids,
-        ["instance_a".to_string(), "instance_b".to_string()]
+        report
+            .selected
+            .iter()
+            .map(|selection| selection.instance_ids.as_slice())
+            .collect::<Vec<_>>(),
+        vec![
+            ["instance_a".to_string()].as_slice(),
+            ["instance_b".to_string()].as_slice(),
+        ]
     );
     assert_eq!(report.exact_instance_ids, ["exact_middle".to_string()]);
 }

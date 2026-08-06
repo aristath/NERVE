@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
+    DeviceCapacityPolicy,
     LinuxAmdDeviceCapacityProbe,
     declared_capacity_reservation_digest,
     normalize_pci_address,
@@ -111,6 +112,7 @@ def prepare_runtime_optimization_targets(
     selected_device_ids: Iterable[str] = (),
     vulkan_driver_files: Iterable[Path] = (),
     speculative_draft_tokens: int = 0,
+    residency_policy: str = "demand_retained",
     capacity_probe: LinuxAmdDeviceCapacityProbe | None = None,
     live_target: CompilerTarget | None = None,
     policy: RuntimeOptimizationPolicy = RuntimeOptimizationPolicy(),
@@ -121,6 +123,14 @@ def prepare_runtime_optimization_targets(
     qualification_regime = QualificationRegime(
         speculative_draft_tokens=speculative_draft_tokens,
     )
+    if residency_policy not in {
+        "demand_paged",
+        "demand_retained",
+        "eager",
+    }:
+        raise ModelCompileError(
+            f"unsupported optimizer residency policy {residency_policy!r}"
+        )
     package_manifest = package_manifest.resolve()
     source_artifacts = PackageSourceArtifactResolver(package_manifest.parent)
     manifest = _read_json(package_manifest, "compiled package manifest")
@@ -166,6 +176,10 @@ def prepare_runtime_optimization_targets(
         runtime_root=Path(__file__).resolve().parents[3] / "runtime-rs",
         cancel_requested=cancel_requested,
     )
+    runtime_capacity_policy = _require_consistent_runtime_device_local_memory_policy(
+        commands=executor_commands,
+        cancel_requested=cancel_requested,
+    )
     package_target = CompilerTarget.from_json(
         _required_object(manifest, "compiler_target")
     )
@@ -183,28 +197,67 @@ def prepare_runtime_optimization_targets(
         raise ModelCompileError(
             "optimizer device selection requires stable Vulkan identities"
         )
-    by_id = {
-        str(profile["hardware_identity"]["stable_device_id"]): profile
-        for profile in package_profiles
+    parameter_bytes = _package_parameter_bytes(
+        package_manifest.parent,
+        manifest,
+    )
+    drivers = discover_amd_vulkan_driver_files(vulkan_driver_files)
+    check_compile_cancelled(cancel_requested)
+    if live_target is None:
+        environment = amd_vulkan_environment(drivers)
+        live_target = discover_compiler_target(
+            runtime_bin=(
+                Path(runtime_command[0])
+                if runtime_command is not None and len(runtime_command) == 1
+                else runtime_bin
+            ),
+            allowed_physical_device_ids=requested,
+            environment=environment,
+            initialize_device_contexts=True,
+            cancel_requested=cancel_requested,
+        )
+    check_compile_cancelled(cancel_requested)
+    all_live_amd_profiles = {
+        str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
+            profile.to_json()
+        )
+        for profile in live_target.hardware_profiles
+        if _is_amd_vulkan_gpu(profile.to_json())
     }
-    missing = sorted(set(requested) - set(by_id))
+    package_capability_classes = {
+        str(profile["capability_class"]) for profile in package_profiles
+    }
+    live_profiles = {
+        device_id: profile
+        for device_id, profile in all_live_amd_profiles.items()
+        if profile["capability_class"] in package_capability_classes
+    }
+    missing = sorted(set(requested) - set(live_profiles))
     if missing:
         raise ModelCompileError(
-            f"optimizer devices are absent from the compiled package: {missing}"
+            "optimizer devices are not live AMD targets compatible with the "
+            f"compiled execution capabilities: {missing}"
         )
-
-    probe = capacity_probe or LinuxAmdDeviceCapacityProbe()
     eligible = (
-        tuple(by_id[device_id] for device_id in requested)
+        tuple(live_profiles[device_id] for device_id in requested)
         if requested
-        else (package_profiles)
+        else tuple(live_profiles.values())
+    )
+    probe = capacity_probe or LinuxAmdDeviceCapacityProbe(
+        policy=runtime_capacity_policy,
     )
     capacity_profiles: list[Json] = []
     selected_records: list[Json] = []
-    excluded_records: list[Json] = []
+    excluded_records: list[Json] = [
+        {
+            "device_id": device_id,
+            "reason": ("live AMD device does not match a compiled capability class"),
+        }
+        for device_id in sorted(set(all_live_amd_profiles) - set(live_profiles))
+    ]
     for profile in eligible:
         check_compile_cancelled(cancel_requested)
-        device_id = str(profile["hardware_identity"]["stable_device_id"])
+        device_id = _device_id(profile)
         try:
             observation = probe.require_capacity((profile,))[0]
         except ModelCompileError as error:
@@ -223,51 +276,7 @@ def prepare_runtime_optimization_targets(
         raise ModelCompileError(
             "no package-compatible AMD GPU has reservable VRAM capacity"
         )
-
-    parameter_bytes = _package_parameter_bytes(
-        package_manifest.parent,
-        manifest,
-    )
-    drivers = discover_amd_vulkan_driver_files(vulkan_driver_files)
-    check_compile_cancelled(cancel_requested)
-    if live_target is None:
-        environment = amd_vulkan_environment(drivers)
-        live_target = discover_compiler_target(
-            runtime_bin=(
-                Path(runtime_command[0])
-                if runtime_command is not None and len(runtime_command) == 1
-                else runtime_bin
-            ),
-            allowed_physical_device_ids=tuple(
-                _device_id(profile) for profile in capacity_profiles
-            ),
-            environment=environment,
-            initialize_device_contexts=True,
-            cancel_requested=cancel_requested,
-        )
-    check_compile_cancelled(cancel_requested)
-    live_profiles = {
-        str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
-            profile.to_json()
-        )
-        for profile in live_target.hardware_profiles
-        if _is_amd_vulkan_gpu(profile.to_json())
-    }
-    eligible_ids = {_device_id(profile) for profile in capacity_profiles}
-    if not eligible_ids.issubset(live_profiles):
-        missing_live = sorted(eligible_ids - set(live_profiles))
-        raise ModelCompileError(
-            f"live AMD discovery omitted package-compatible AMD devices: {missing_live}"
-        )
-    _require_live_identity_match(
-        by_id,
-        live_profiles,
-        tuple(sorted(eligible_ids)),
-    )
-    live_eligible_profiles = tuple(
-        live_profiles[device_id] for device_id in sorted(eligible_ids)
-    )
-    selected_records = list(probe.require_capacity(live_eligible_profiles))
+    live_eligible_profiles = tuple(sorted(capacity_profiles, key=_device_topology_key))
     available_capacity_by_device = {
         str(record["device_id"]): int(record["reservable_vram_bytes"])
         for record in selected_records
@@ -279,6 +288,7 @@ def prepare_runtime_optimization_targets(
         manifest=manifest,
         residency_planner_command=residency_planner_command,
         speculative_draft_tokens=(qualification_regime.speculative_draft_tokens),
+        residency_policy=residency_policy,
         explicit_selection=bool(requested),
         cancel_requested=cancel_requested,
     )
@@ -471,10 +481,73 @@ def _query_runtime_implementation_fingerprint(
     *,
     cancel_requested: Callable[[], bool] | None,
 ) -> str:
-    invocation = [
-        *command,
-        "--runtime-implementation-fingerprint",
-    ]
+    stdout = _query_runtime_introspection(
+        command,
+        argument="--runtime-implementation-fingerprint",
+        subject="runtime implementation fingerprint",
+        cancel_requested=cancel_requested,
+    )
+    fingerprint = stdout.strip()
+    if (
+        not fingerprint.startswith(f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:")
+        or "\n" in fingerprint
+    ):
+        raise ModelCompileError(
+            f"optimizer executable {command[0]!r} returned an invalid "
+            f"runtime implementation fingerprint {fingerprint!r}"
+        )
+    return fingerprint
+
+
+def _require_consistent_runtime_device_local_memory_policy(
+    *,
+    commands: tuple[tuple[str, tuple[str, ...]], ...],
+    cancel_requested: Callable[[], bool] | None,
+) -> DeviceCapacityPolicy:
+    observed: list[tuple[str, DeviceCapacityPolicy]] = []
+    for label, command in commands:
+        check_compile_cancelled(cancel_requested)
+        stdout = _query_runtime_introspection(
+            command,
+            argument="--runtime-device-local-memory-policy",
+            subject="runtime device-local memory policy",
+            cancel_requested=cancel_requested,
+        )
+        try:
+            document = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            raise ModelCompileError(
+                f"optimizer executable {command[0]!r} returned invalid JSON "
+                "for its runtime device-local memory policy"
+            ) from error
+        if not isinstance(document, dict):
+            raise ModelCompileError(
+                f"optimizer executable {command[0]!r} returned a non-object "
+                "runtime device-local memory policy"
+            )
+        observed.append((label, DeviceCapacityPolicy.from_runtime_policy(document)))
+    if not observed:
+        raise ModelCompileError(
+            "optimizer requires at least one runtime executable memory policy"
+        )
+    expected = observed[0][1]
+    mismatches = [label for label, policy in observed[1:] if policy != expected]
+    if mismatches:
+        raise ModelCompileError(
+            "optimizer executables report inconsistent runtime device-local "
+            f"memory policies: {mismatches}"
+        )
+    return expected
+
+
+def _query_runtime_introspection(
+    command: tuple[str, ...],
+    *,
+    argument: str,
+    subject: str,
+    cancel_requested: Callable[[], bool] | None,
+) -> str:
+    invocation = [*command, argument]
     try:
         process = subprocess.Popen(
             invocation,
@@ -502,20 +575,10 @@ def _query_runtime_implementation_fingerprint(
     if process.returncode != 0:
         diagnostic = stderr.strip() or stdout.strip()
         raise ModelCompileError(
-            f"optimizer executable {command[0]!r} could not report its "
-            "runtime implementation fingerprint"
+            f"optimizer executable {command[0]!r} could not report its {subject}"
             + (f": {diagnostic}" if diagnostic else "")
         )
-    fingerprint = stdout.strip()
-    if (
-        not fingerprint.startswith(f"{RUNTIME_IMPLEMENTATION_FINGERPRINT_SCHEMA}:")
-        or "\n" in fingerprint
-    ):
-        raise ModelCompileError(
-            f"optimizer executable {command[0]!r} returned an invalid "
-            f"runtime implementation fingerprint {fingerprint!r}"
-        )
-    return fingerprint
+    return stdout
 
 
 def runtime_executor_command(
@@ -839,6 +902,7 @@ def _select_capability_groups(
     manifest: Json,
     residency_planner_command: tuple[str, ...],
     speculative_draft_tokens: int,
+    residency_policy: str,
     explicit_selection: bool,
     cancel_requested: Callable[[], bool] | None,
 ) -> tuple[_SelectedCapabilityGroup, ...]:
@@ -925,7 +989,7 @@ def _select_capability_groups(
                     component_placement=placement,
                     context_capacity_activations=max_context,
                     speculative_draft_tokens=speculative_draft_tokens,
-                    residency_policy="demand_retained",
+                    residency_policy=residency_policy,
                 )
                 plan = plan_runtime_residency_cases(
                     command=residency_planner_command,
@@ -933,7 +997,7 @@ def _select_capability_groups(
                     cases=(case,),
                     cancel_requested=cancel_requested,
                 )[case_id]
-                planned_devices = _maximum_retained_bytes_by_device(plan)
+                planned_devices = _capacity_admission_bytes_by_device(plan)
                 if set(planned_devices) != set(capacities):
                     raise ModelCompileError(
                         "runtime residency plan devices do not match the "
@@ -1003,7 +1067,7 @@ def _select_capability_groups(
     return tuple(groups)
 
 
-def _maximum_retained_bytes_by_device(plan: Json) -> dict[str, int]:
+def _capacity_admission_bytes_by_device(plan: Json) -> dict[str, int]:
     device_plans = plan.get("device_plans")
     if not isinstance(device_plans, list) or not device_plans:
         raise ModelCompileError("runtime residency plan has no device plans")
@@ -1042,7 +1106,20 @@ def _maximum_retained_bytes_by_device(plan: Json) -> dict[str, int]:
             raise ModelCompileError(
                 f"runtime residency plan repeats device {device_id!r}"
             )
-        retained[device_id] = sum(fields)
+        if plan.get("residency_policy") == "demand_paged":
+            initial = device.get("initial_device_resident_bytes")
+            if isinstance(initial, bool) or not isinstance(initial, int) or initial < 0:
+                raise ModelCompileError(
+                    f"runtime residency device {device_id!r} has invalid "
+                    "initial-byte accounting"
+                )
+            retained[device_id] = (
+                initial
+                + resource_store["maximum_load_wave_payload_bytes"]
+                + resource_store["maximum_dynamic_allocation_padding_bytes"]
+            )
+        else:
+            retained[device_id] = sum(fields)
     return retained
 
 
@@ -1113,29 +1190,6 @@ def _contiguous_capacity_packed_partition(
     if set(placement) != {component_id for component_id, _ in components}:
         raise ModelCompileError("capacity-packed placement omitted compiled components")
     return placement
-
-
-def _require_live_identity_match(
-    package_profiles: dict[str, Json],
-    live_profiles: dict[str, Json],
-    selected_ids: tuple[str, ...],
-) -> None:
-    for device_id in selected_ids:
-        packaged = package_profiles[device_id]
-        live = live_profiles[device_id]
-        for field in (
-            "vendor_id",
-            "device_id",
-            "architecture",
-            "physical_location",
-        ):
-            if packaged["hardware_identity"].get(field) != live[
-                "hardware_identity"
-            ].get(field):
-                raise ModelCompileError(
-                    f"live device {device_id!r} no longer matches package "
-                    f"hardware identity field {field!r}"
-                )
 
 
 def _is_amd_vulkan_gpu(profile: Json) -> bool:

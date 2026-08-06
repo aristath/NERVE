@@ -361,6 +361,115 @@ def test_scope_routing_skips_irrelevant_scopes_before_analysis_and_budget(
     } == {analyzed[0]["scope_id"]}
 
 
+def test_scope_analysis_runs_only_the_matching_provider_requirements(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, _lease = _target()
+
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
+        output_package_dir=tmp_path / "optimized",
+        run_root=tmp_path / "run",
+        providers=_providers(
+            FixtureProvider(
+                "fixture.graph-evidence-only",
+                _descriptor_id(),
+                accepted_scope_kinds=("sampler",),
+                analyzer_ids=("semantic_graph_structure",),
+            )
+        ),
+        targets=(target,),
+        budget=_budget(),
+    )
+
+    analyzed = [
+        scope for scope in outcome.report["scopes"] if scope["status"] == "analyzed"
+    ]
+    assert len(analyzed) == 1
+    assert [
+        structure["analyzer"]["id"] for structure in analyzed[0]["structures"]
+    ] == ["semantic_graph_structure"]
+    event = next(
+        json.loads(line)
+        for line in (tmp_path / "run" / "events.jsonl").read_text().splitlines()
+        if json.loads(line)["phase"] == "analysis"
+        and json.loads(line)["status"] == "completed"
+    )
+    assert event["details"]["analyzer_ids"] == ["semantic_graph_structure"]
+
+
+def test_scope_analysis_rejects_an_unavailable_provider_analyzer(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, lease = _target()
+
+    outcome = run_automated_optimizer(
+        package_dir=package,
+        source_artifacts=PackageSourceArtifactResolver(package),
+        output_package_dir=tmp_path / "unused-output",
+        run_root=tmp_path / "run",
+        providers=_providers(
+            FixtureProvider(
+                "fixture.unknown-analyzer",
+                _descriptor_id(),
+                accepted_scope_kinds=("sampler",),
+                analyzer_ids=("nonexistent_structure",),
+            )
+        ),
+        targets=(target,),
+        budget=_budget(),
+    )
+
+    assert outcome.report["status"] == "completed_no_changes"
+    failed = [
+        scope for scope in outcome.report["scopes"] if scope["status"] == "failed"
+    ]
+    assert len(failed) == 1
+    assert "unavailable" in failed[0]["reason"]
+    assert outcome.report["summary"]["analysis_failure_count"] == 1
+    assert lease.acquisitions == 0
+    assert not (tmp_path / "unused-output").exists()
+
+
+def test_scope_routing_rejects_ambiguous_provider_analyzer_requirements(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    target, lease = _target()
+
+    with pytest.raises(
+        ModelCompileError,
+        match="automated optimizer failed safely",
+    ):
+        run_automated_optimizer(
+            package_dir=package,
+            source_artifacts=PackageSourceArtifactResolver(package),
+            output_package_dir=tmp_path / "unused-output",
+            run_root=tmp_path / "run",
+            providers=_providers(
+                FixtureProvider(
+                    "fixture.duplicate-analyzers",
+                    _descriptor_id(),
+                    accepted_scope_kinds=("sampler",),
+                    analyzer_ids=(
+                        "semantic_graph_structure",
+                        "semantic_graph_structure",
+                    ),
+                )
+            ),
+            targets=(target,),
+            budget=_budget(),
+        )
+
+    report = json.loads((tmp_path / "run" / "report.json").read_text())
+    assert report["status"] == "failed"
+    assert "sorted, unique" in report["publication"]["reason"]
+    assert lease.acquisitions == 0
+
+
 def test_optimizer_completes_without_changes_when_no_provider_accepts_a_scope(
     tmp_path: Path,
 ) -> None:

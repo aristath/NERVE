@@ -303,7 +303,8 @@ mod tests {
                                 "minimum": 0,
                                 "maximum": 65536
                             },
-                            "speculative_draft_token_counts": [0]
+                            "speculative_draft_token_counts": [0],
+                            "residency_policies": ["eager"]
                         },
                         "placement": {
                             "mode": "local",

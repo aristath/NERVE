@@ -199,6 +199,7 @@ impl RuntimeModelEditor {
                                 .max_context_activations,
                         },
                     speculative_draft_tokens: 0,
+                    residency_policy: "eager".to_string(),
                 },
                 true,
             )

@@ -48,6 +48,7 @@ from nerve.representation_optimizer.validation.contracts import (
 
 _REQUIRED_METHODS = (
     "may_optimize_scope",
+    "required_analyzer_ids",
     "match_semantics",
     "match_structure",
     "analyze_evidence",
@@ -146,6 +147,39 @@ class ProviderRegistry:
             if accepted:
                 return True
         return False
+
+    def required_analyzer_ids(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> tuple[str, ...]:
+        """Return the exact analyzer union requested by matching providers."""
+
+        selected: set[str] = set()
+        for provider in self.providers:
+            scope_copy = deepcopy(scope)
+            contract_copy = deepcopy(source_contract)
+            if not provider.may_optimize_scope(scope_copy, contract_copy):
+                continue
+            analyzer_ids = provider.required_analyzer_ids(
+                deepcopy(scope),
+                deepcopy(source_contract),
+            )
+            if (
+                not isinstance(analyzer_ids, tuple)
+                or not analyzer_ids
+                or any(
+                    not isinstance(analyzer_id, str) or not analyzer_id
+                    for analyzer_id in analyzer_ids
+                )
+                or analyzer_ids != tuple(sorted(set(analyzer_ids)))
+            ):
+                raise ContractValidationError(
+                    f"representation provider {provider.identity.provider_id!r} "
+                    "must request a sorted, unique, non-empty analyzer tuple"
+                )
+            selected.update(analyzer_ids)
+        return tuple(sorted(selected))
 
     def run(
         self,

@@ -15,6 +15,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if std::env::args()
         .skip(1)
+        .eq(["--runtime-device-local-memory-policy"])
+    {
+        println!(
+            "{}",
+            serde_json::to_string(&nerve_runtime::vulkan_device_local_memory_policy())?
+        );
+        return Ok(());
+    }
+    if std::env::args()
+        .skip(1)
         .any(|arg| arg == "--help" || arg == "-h")
     {
         print_usage();

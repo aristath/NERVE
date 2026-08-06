@@ -471,6 +471,10 @@ fn inspect_placement(
                     maximum: capacity,
                 },
                 speculative_draft_tokens,
+                residency_policy: args
+                    .resource_residency_policy
+                    .as_runtime_name()
+                    .replace('-', "_"),
             },
         )?;
     let placement = runtime_model_placement(

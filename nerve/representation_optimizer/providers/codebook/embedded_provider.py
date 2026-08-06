@@ -72,6 +72,17 @@ class ExactEmbeddedHeadNormParameterProgramProvider:
         del source_contract
         return _has_head_norm_static_shape(scope)
 
+    def required_analyzer_ids(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> tuple[str, ...]:
+        del scope, source_contract
+        return (
+            "elementwise_structure",
+            "semantic_graph_structure",
+        )
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         eligible = [
             scope

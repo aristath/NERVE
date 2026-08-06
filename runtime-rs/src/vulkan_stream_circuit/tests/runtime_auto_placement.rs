@@ -279,6 +279,7 @@ fn representation_selection_converges_across_heterogeneous_placement() {
                 maximum: 8,
             },
             speculative_draft_tokens: 0,
+            residency_policy: "demand_retained".to_string(),
         },
     )
     .unwrap();
@@ -331,6 +332,7 @@ fn heterogeneous_selection_rejects_a_selected_device_without_a_profile() {
                 maximum: 8,
             },
             speculative_draft_tokens: 0,
+            residency_policy: "demand_retained".to_string(),
         },
     )
     .unwrap_err();

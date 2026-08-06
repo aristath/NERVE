@@ -131,9 +131,7 @@ def prepare_candidate_promotion(
         benchmark_workspace_root,
         str(benchmark_record.to_json()["benchmark_id"]),
     )
-    benchmark_plan, _benchmark_run, loaded_benchmark_record = (
-        loaded_benchmark
-    )
+    benchmark_plan, _benchmark_run, loaded_benchmark_record = loaded_benchmark
     if loaded_benchmark_record != benchmark_record:
         raise ModelCompileError(
             "promotion benchmark record does not match published raw evidence"
@@ -193,15 +191,9 @@ def prepare_candidate_promotion(
             profile,
             expected_schema=HARDWARE_PROCESS_PROFILE_SCHEMA,
         )
-    profiles = tuple(
-        sorted(profiles, key=lambda profile: str(profile["profile_id"]))
-    )
-    if len({profile["profile_id"] for profile in profiles}) != len(
-        profiles
-    ):
-        raise ModelCompileError(
-            "promotion hardware profiles must be unique"
-        )
+    profiles = tuple(sorted(profiles, key=lambda profile: str(profile["profile_id"])))
+    if len({profile["profile_id"] for profile in profiles}) != len(profiles):
+        raise ModelCompileError("promotion hardware profiles must be unique")
     analysis_runs = _prepare_analysis_runs(
         analysis_run_directories,
         candidate=candidate_plan.candidate.to_json(),
@@ -218,23 +210,15 @@ def prepare_candidate_promotion(
         runtime_predicate,
     )
     candidate = candidate_plan.candidate.to_json()
-    graph = read_json(
-        staged.path / "contracts" / "representation_graph.json"
-    )
-    target_lowering = read_json(
-        staged.path / "contracts" / "target_lowering.json"
-    )
-    relowering = read_json(
-        staged.path / "contracts" / "relowering_request.json"
-    )
+    graph = read_json(staged.path / "contracts" / "representation_graph.json")
+    target_lowering = read_json(staged.path / "contracts" / "target_lowering.json")
+    relowering = read_json(staged.path / "contracts" / "relowering_request.json")
     artifact_integrity = integrity_evidence(integrity)
     comparison = {
-        "exact_implementation_id": benchmark[
-            "reference_implementation_id"
+        "exact_implementation_id": benchmark["reference_implementation_id"],
+        "exact_contract_digest": benchmark_plan.implementation("reference")[
+            "contract_digest"
         ],
-        "exact_contract_digest": benchmark_plan.implementation(
-            "reference"
-        )["contract_digest"],
         "benchmark_id": benchmark["benchmark_id"],
         "benchmark_decision": benchmark["decision"],
         "workloads": [
@@ -257,9 +241,7 @@ def prepare_candidate_promotion(
             {
                 "run_id": prepared.run.run_id,
                 "run_digest": prepared.run_digest,
-                "cited_evidence_ids": list(
-                    prepared.cited_evidence_ids
-                ),
+                "cited_evidence_ids": list(prepared.cited_evidence_ids),
             }
             for prepared in analysis_runs
         ],
@@ -280,9 +262,7 @@ def prepare_candidate_promotion(
         "candidate_id": candidate_plan.candidate_id,
         "implementation_id": promoted_implementation_id,
         "scope_ids": list(candidate["scope_ids"]),
-        "source_contract_digests": list(
-            candidate["source_contract_digests"]
-        ),
+        "source_contract_digests": list(candidate["source_contract_digests"]),
         "candidate_contract_digest": candidate_plan.candidate.digest,
         "construction_record_digest": construction_record.digest,
         "prebenchmark_record_digest": prebenchmark_record.digest,
@@ -295,36 +275,23 @@ def prepare_candidate_promotion(
         "decision": "promote",
         "reason": reason,
     }
-    decision_document["promotion_id"] = promotion_decision_id(
-        decision_document
-    )
+    decision_document["promotion_id"] = promotion_decision_id(decision_document)
     decision = PromotionDecision.from_json(decision_document)
-    root_ref = (
-        "optimization/implementations/"
-        f"{promoted_implementation_id}"
-    )
-    benchmark_ref = (
-        f"{root_ref}/evidence/benchmarks/{benchmark['benchmark_id']}"
-    )
-    validation_ref = (
-        f"{root_ref}/evidence/validations/{validation['validation_id']}"
-    )
+    root_ref = f"optimization/implementations/{promoted_implementation_id}"
+    benchmark_ref = f"{root_ref}/evidence/benchmarks/{benchmark['benchmark_id']}"
+    validation_ref = f"{root_ref}/evidence/validations/{validation['validation_id']}"
     registry_entry = {
         "implementation_id": promoted_implementation_id,
         "candidate_id": candidate_plan.candidate_id,
         "scope_ids": list(candidate["scope_ids"]),
-        "source_contract_digests": list(
-            candidate["source_contract_digests"]
-        ),
+        "source_contract_digests": list(candidate["source_contract_digests"]),
         "representation": dict(candidate["representation"]),
         "behavioral_contract": dict(candidate["behavioral_contract"]),
         "runtime_predicate": runtime_predicate.to_json(),
         "artifact_bundle": {
             "root_ref": root_ref,
             "candidate_integrity_ref": f"{root_ref}/candidate/integrity.json",
-            "mount_plan_ref": (
-                f"{root_ref}/candidate/contracts/mount_plan.json"
-            ),
+            "mount_plan_ref": (f"{root_ref}/candidate/contracts/mount_plan.json"),
             "candidate_integrity_digest": artifact_integrity["digest"],
             "artifact_count": artifact_integrity["file_count"],
         },
@@ -333,9 +300,7 @@ def prepare_candidate_promotion(
             "candidate_contract_ref": (
                 f"{root_ref}/candidate/contracts/candidate.json"
             ),
-            "construction_record_ref": (
-                f"{root_ref}/construction_record.json"
-            ),
+            "construction_record_ref": (f"{root_ref}/construction_record.json"),
             "prebenchmark_record_ref": (
                 f"{root_ref}/evidence/prebenchmark/"
                 f"{prebenchmark_record.to_json()['prebenchmark_id']}/"
@@ -347,8 +312,7 @@ def prepare_candidate_promotion(
                 {
                     "run_id": prepared.run.run_id,
                     "artifact_ref": (
-                        f"{root_ref}/evidence/analysis/"
-                        f"{prepared.run.run_id}"
+                        f"{root_ref}/evidence/analysis/{prepared.run.run_id}"
                     ),
                 }
                 for prepared in analysis_runs
@@ -357,8 +321,7 @@ def prepare_candidate_promotion(
                 {
                     "profile_id": profile["profile_id"],
                     "artifact_ref": (
-                        f"{root_ref}/evidence/hardware/"
-                        f"{profile['profile_id']}.json"
+                        f"{root_ref}/evidence/hardware/{profile['profile_id']}.json"
                     ),
                 }
                 for profile in profiles
@@ -376,9 +339,7 @@ def prepare_candidate_promotion(
     promoted_session = session.transition_candidate(
         candidate_plan.candidate_id,
         CandidateState.PROMOTABLE,
-        evidence_refs=(
-            f"promotions/{decision.promotion_id}.json",
-        ),
+        evidence_refs=(f"promotions/{decision.promotion_id}.json",),
         reason=reason,
     )
     return PreparedPromotion(
@@ -435,19 +396,15 @@ def _prepare_analysis_runs(
         scope_id = str(document["scope_id"])
         if (
             document["package_id"] != package_id
-            or scope_sources.get(scope_id)
-            != document["source_contract_digest"]
+            or scope_sources.get(scope_id) != document["source_contract_digest"]
         ):
             raise ModelCompileError(
                 "promotion analysis run does not belong to the candidate source"
             )
         evidence_by_id = {
-            str(evidence["evidence_id"]): evidence
-            for evidence in run.evidence
+            str(evidence["evidence_id"]): evidence for evidence in run.evidence
         }
-        cited = tuple(
-            sorted(candidate_evidence.intersection(evidence_by_id))
-        )
+        cited = tuple(sorted(candidate_evidence.intersection(evidence_by_id)))
         if not cited:
             raise ModelCompileError(
                 "promotion received an analysis run not cited by the candidate"
@@ -479,13 +436,9 @@ def _prepare_analysis_runs(
         raise ModelCompileError(
             "promotion does not include every analysis record cited by the candidate"
         )
-    result = tuple(
-        sorted(prepared, key=lambda item: item.run.run_id)
-    )
+    result = tuple(sorted(prepared, key=lambda item: item.run.run_id))
     if len({item.run.run_id for item in result}) != len(result):
-        raise ModelCompileError(
-            "promotion contains duplicate analysis runs"
-        )
+        raise ModelCompileError("promotion contains duplicate analysis runs")
     return result
 
 
@@ -497,9 +450,7 @@ def _derive_runtime_predicate(
     candidate: Json,
 ) -> RuntimeImplementationPredicate:
     if not hardware_profiles:
-        raise ModelCompileError(
-            "promotion requires the benchmarked hardware profiles"
-        )
+        raise ModelCompileError("promotion requires the benchmarked hardware profiles")
     for profile in hardware_profiles:
         validate_contract(
             profile,
@@ -508,9 +459,7 @@ def _derive_runtime_predicate(
     expected_devices = sorted(
         (
             {
-                "device_id": profile["hardware_identity"][
-                    "stable_device_id"
-                ],
+                "device_id": profile["hardware_identity"]["stable_device_id"],
                 "hardware_profile_digest": contract_digest(profile),
                 "capability_class": profile["capability_class"],
                 "api": profile["provenance"]["api"],
@@ -524,47 +473,36 @@ def _derive_runtime_predicate(
         raise ModelCompileError(
             "promotion hardware profiles do not match benchmark evidence"
         )
-    workloads = [
-        workload.to_json() for workload in benchmark_plan.workloads
-    ]
+    workloads = [workload.to_json() for workload in benchmark_plan.workloads]
     regimes = [workload["regime"] for workload in workloads]
     target = candidate["target_predicate"]
+    benchmarked_device_ids = _benchmarked_physical_device_ids(benchmark_plan)
     compatible_profiles = tuple(
         profile
         for profile in hardware_profiles
-        if (
+        if profile["hardware_identity"]["stable_device_id"] in benchmarked_device_ids
+        and (
             target.get("capability_class") is None
-            or profile["capability_class"]
-            == target["capability_class"]
+            or profile["capability_class"] == target["capability_class"]
         )
         and (
             target.get("device_kind") is None
-            or profile["hardware_identity"]["device_kind"]
-            == target["device_kind"]
+            or profile["hardware_identity"]["device_kind"] == target["device_kind"]
         )
-        and (
-            target.get("api") is None
-            or profile["provenance"]["api"] == target["api"]
-        )
+        and (target.get("api") is None or profile["provenance"]["api"] == target["api"])
     )
     if not compatible_profiles:
-        raise ModelCompileError(
-            "promotion target has no benchmarked compatible device"
-        )
+        raise ModelCompileError("promotion target has no benchmarked compatible device")
     envelope = target.get("execution_envelope")
     if envelope is None:
-        phases = sorted(
-            {str(regime["execution_phase"]) for regime in regimes}
-        )
+        phases = sorted({str(regime["execution_phase"]) for regime in regimes})
         alternative_phases = list(phases)
         source_retained_phases: list[str] = []
         activation_batch_minimum = min(
-            int(regime["activation_batch_width"])
-            for regime in regimes
+            int(regime["activation_batch_width"]) for regime in regimes
         )
         activation_batch_maximum = max(
-            int(regime["activation_batch_width"])
-            for regime in regimes
+            int(regime["activation_batch_width"]) for regime in regimes
         )
         context_activations_minimum = min(
             int(regime["context_size"]) for regime in regimes
@@ -572,12 +510,8 @@ def _derive_runtime_predicate(
         context_activations_maximum = max(
             int(regime["context_size"]) for regime in regimes
         )
-        state_activations_minimum = min(
-            int(regime["state_size"]) for regime in regimes
-        )
-        state_activations_maximum = max(
-            int(regime["state_size"]) for regime in regimes
-        )
+        state_activations_minimum = min(int(regime["state_size"]) for regime in regimes)
+        state_activations_maximum = max(int(regime["state_size"]) for regime in regimes)
     else:
         (
             phases,
@@ -637,9 +571,7 @@ def _derive_runtime_predicate(
         required_interconnects=required_interconnects,
     )
     return create_runtime_implementation_predicate(
-        measured_profile_ids=(
-            profile["profile_id"] for profile in compatible_profiles
-        ),
+        measured_profile_ids=(profile["profile_id"] for profile in compatible_profiles),
         capability_classes=(
             profile["capability_class"] for profile in compatible_profiles
         ),
@@ -647,10 +579,7 @@ def _derive_runtime_predicate(
             profile["hardware_identity"]["device_kind"]
             for profile in compatible_profiles
         ),
-        apis=(
-            profile["provenance"]["api"]
-            for profile in compatible_profiles
-        ),
+        apis=(profile["provenance"]["api"] for profile in compatible_profiles),
         required_processes=required_processes,
         required_features=required_features,
         execution_phases=phases,
@@ -665,6 +594,7 @@ def _derive_runtime_predicate(
         speculative_draft_token_counts=(
             _validated_speculative_draft_token_counts(validation_plan)
         ),
+        residency_policies=(_validated_residency_policy(benchmark_plan),),
         placement_mode=placement_mode,
         minimum_device_count=minimum_device_count,
         maximum_device_count=maximum_device_count,
@@ -672,28 +602,74 @@ def _derive_runtime_predicate(
     )
 
 
+def _benchmarked_physical_device_ids(benchmark_plan) -> set[str]:
+    matched = benchmark_plan.matched_conditions
+    placement = matched["placement"]
+    component_ids: list[str] = []
+    untargeted_workloads = 0
+    for workload in benchmark_plan.workloads:
+        controls = workload.to_json()["controls"]
+        component_id = controls.get("component_id")
+        if component_id is None:
+            untargeted_workloads += 1
+            continue
+        if not isinstance(component_id, str) or not component_id:
+            raise ModelCompileError(
+                "benchmark workload component_id must be a non-empty string"
+            )
+        component_ids.append(component_id)
+    if component_ids and untargeted_workloads:
+        raise ModelCompileError(
+            "promotion benchmark cannot mix component-targeted and untargeted "
+            "workloads because its physical qualification is ambiguous"
+        )
+    if not component_ids:
+        return {str(device_id) for device_id in placement.values()}
+    missing = sorted(set(component_ids) - set(placement))
+    if missing:
+        raise ModelCompileError(
+            f"component benchmark placement is missing targeted components {missing}"
+        )
+    return {str(placement[component_id]) for component_id in component_ids}
+
+
 def _validated_speculative_draft_token_counts(
     validation_plan,
 ) -> tuple[int, ...]:
     whole_model_checks = validation_plan.checks_for_stage("whole_model")
     if not whole_model_checks:
-        raise ModelCompileError(
-            "promotion requires whole-model product qualification"
-        )
+        raise ModelCompileError("promotion requires whole-model product qualification")
     counts: set[int] = set()
     for check in whole_model_checks:
         value = check["controls"].get("speculative_draft_tokens", 0)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value < 0
-        ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ModelCompileError(
                 "whole-model validation speculative draft tokens must be "
                 "a non-negative integer"
             )
         counts.add(value)
     return tuple(sorted(counts))
+
+
+def _validated_residency_policy(benchmark_plan) -> str:
+    environment = benchmark_plan.matched_conditions.get("environment")
+    if not isinstance(environment, dict):
+        raise ModelCompileError("promotion benchmark residency environment is missing")
+    admission = environment.get("residency_admission")
+    if not isinstance(admission, dict):
+        # Generic providers without compiled-resource residency execute eagerly.
+        return "eager"
+    plan = admission.get("plan")
+    if not isinstance(plan, dict):
+        raise ModelCompileError(
+            "promotion benchmark residency admission has no runtime plan"
+        )
+    policy = plan.get("residency_policy")
+    if policy not in {"demand_paged", "demand_retained", "eager"}:
+        raise ModelCompileError(
+            "promotion benchmark residency admission has an unsupported policy"
+        )
+    return str(policy)
 
 
 def _require_runtime_hardware_capabilities(
@@ -722,21 +698,13 @@ def _require_runtime_hardware_capabilities(
                 "required_extensions",
                 "required_features",
             ):
-                available_features.update(
-                    str(value) for value in process[field]
-                )
+                available_features.update(str(value) for value in process[field])
         available_features.update(
             str(value) for value in profile["capability_extensions"]
         )
-        device_id = str(
-            profile["hardware_identity"]["stable_device_id"]
-        )
-        missing_processes = sorted(
-            set(required_processes) - available_processes
-        )
-        missing_features = sorted(
-            set(required_features) - available_features
-        )
+        device_id = str(profile["hardware_identity"]["stable_device_id"])
+        missing_processes = sorted(set(required_processes) - available_processes)
+        missing_features = sorted(set(required_features) - available_features)
         if missing_processes:
             missing_processes_by_device[device_id] = missing_processes
         if missing_features:
@@ -783,9 +751,7 @@ def _validated_execution_envelope(
         "context_activations",
         "state_activations",
     }:
-        raise ModelCompileError(
-            "candidate execution envelope has an invalid structure"
-        )
+        raise ModelCompileError("candidate execution envelope has an invalid structure")
     phases = _strict_phase_list(envelope, "phases")
     alternative_phases = _strict_phase_list(
         envelope,
@@ -798,16 +764,13 @@ def _validated_execution_envelope(
     if (
         not alternative_phases
         or set(alternative_phases) & set(source_retained_phases)
-        or set(alternative_phases) | set(source_retained_phases)
-        != set(phases)
+        or set(alternative_phases) | set(source_retained_phases) != set(phases)
     ):
         raise ModelCompileError(
             "candidate execution envelope must partition every phase into "
             "alternative or source-retained execution"
         )
-    observed_phases = {
-        str(regime["execution_phase"]) for regime in benchmark_regimes
-    }
+    observed_phases = {str(regime["execution_phase"]) for regime in benchmark_regimes}
     if observed_phases != set(alternative_phases):
         raise ModelCompileError(
             "promotion requires one or more benchmark workloads for every "
@@ -866,10 +829,7 @@ def _strict_phase_list(document: Json, name: str) -> list[str]:
     }
     if (
         not isinstance(phases, list)
-        or any(
-            not isinstance(phase, str) or phase not in supported
-            for phase in phases
-        )
+        or any(not isinstance(phase, str) or phase not in supported for phase in phases)
         or phases != sorted(set(phases))
     ):
         raise ModelCompileError(
@@ -912,9 +872,8 @@ def _require_in_execution_range(
 
 def _optional_string_list(document: Json, name: str) -> tuple[str, ...]:
     value = document.get(name, [])
-    if (
-        not isinstance(value, list)
-        or any(not isinstance(item, str) or not item for item in value)
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item for item in value
     ):
         raise ModelCompileError(
             f"candidate target predicate {name!r} must be a string list"
@@ -938,14 +897,11 @@ def _validate_record_headers(
         or construction["status"] != "completed"
         or benchmark_record.schema != BENCHMARK_RECORD_SCHEMA
         or benchmark["candidate_id"] != candidate_id
-        or benchmark["construction_record_digest"]
-        != construction_record.digest
+        or benchmark["construction_record_digest"] != construction_record.digest
         or validation_record.schema != VALIDATION_RECORD_SCHEMA
         or validation["candidate_id"] != candidate_id
-        or validation["construction_record_digest"]
-        != construction_record.digest
-        or validation["benchmark_record_digest"]
-        != benchmark_record.digest
+        or validation["construction_record_digest"] != construction_record.digest
+        or validation["benchmark_record_digest"] != benchmark_record.digest
     ):
         raise ModelCompileError(
             "candidate construction, benchmark, and validation records do not match"

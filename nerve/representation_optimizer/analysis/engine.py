@@ -161,6 +161,7 @@ class ScopeAnalysisEngine:
         scope_id: str,
         budget: AnalysisBudget | None = None,
         activation_trace: ActivationTrace | None = None,
+        analyzer_ids: Iterable[str] | None = None,
         output_dir: Path | None = None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> AnalysisRun:
@@ -183,9 +184,10 @@ class ScopeAnalysisEngine:
             activation_trace=activation_trace,
             computations=self.computations,
         )
+        selected_analyzers = self._selected_analyzers(analyzer_ids)
         evidence = []
         details = []
-        for analyzer in self.analyzers:
+        for analyzer in selected_analyzers:
             check_compile_cancelled(cancel_requested)
             result = analyzer.analyze(context)
             check_compile_cancelled(cancel_requested)
@@ -211,6 +213,29 @@ class ScopeAnalysisEngine:
             check_compile_cancelled(cancel_requested)
             write_analysis_run(run, output_dir)
         return run
+
+    def _selected_analyzers(
+        self,
+        analyzer_ids: Iterable[str] | None,
+    ) -> tuple[StructuralAnalyzer, ...]:
+        if analyzer_ids is None:
+            return self.analyzers
+        requested = tuple(analyzer_ids)
+        if (
+            not requested
+            or requested != tuple(sorted(set(requested)))
+            or any(not isinstance(item, str) or not item for item in requested)
+        ):
+            raise ModelCompileError(
+                "selected analyzer identities must be sorted, unique, and non-empty"
+            )
+        available = {analyzer.analyzer_id: analyzer for analyzer in self.analyzers}
+        unknown = sorted(set(requested) - set(available))
+        if unknown:
+            raise ModelCompileError(
+                f"selected analyzer identities are unavailable: {unknown}"
+            )
+        return tuple(available[analyzer_id] for analyzer_id in requested)
 def _load_semantic_graph(package_dir: Path) -> SemanticDependencyGraph:
     stage = read_json(package_dir / "optimization" / "stage.json")
     baseline = stage.get("exact_baseline")

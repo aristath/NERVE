@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 from nerve.compilation import Json, ModelCompileError
+from nerve.representation_optimizer.contracts import stable_contract_id
 from nerve.representation_optimizer.providers.codebook.artifacts import (
     conversation_fixture,
     model_limits_fixture,
@@ -10,7 +11,6 @@ from nerve.representation_optimizer.providers.codebook.artifacts import (
 )
 
 
-OVERLAY_PATH = "overlays/component.json"
 PROOF_PATH = "proofs/exact_expansion.json"
 COMPONENT_FIXTURE_PATH = "fixtures/component.json"
 CONVERSATION_FIXTURE_PATH = "fixtures/conversation.json"
@@ -38,17 +38,27 @@ def resident_shader_artifact_path(source_shader_path: str) -> str:
     return f"kernels/{target_name}"
 
 
-def artifact_paths(shader_paths: tuple[str, ...]) -> tuple[str, ...]:
+def component_overlay_path(component_id: str) -> str:
+    return f"overlays/{stable_contract_id('resident_region', component_id)}.json"
+
+
+def artifact_paths(
+    shader_paths: tuple[str, ...],
+    component_ids: tuple[str, ...],
+) -> tuple[str, ...]:
     return tuple(
         sorted(
             {
-                OVERLAY_PATH,
                 PROOF_PATH,
                 COMPONENT_FIXTURE_PATH,
                 CONVERSATION_FIXTURE_PATH,
                 PRODUCT_CONVERSATION_FIXTURE_PATH,
                 MODEL_LIMITS_PATH,
                 *shader_paths,
+                *(
+                    component_overlay_path(component_id)
+                    for component_id in component_ids
+                ),
             }
         )
     )
@@ -96,10 +106,10 @@ __all__ = [
     "COMPONENT_FIXTURE_PATH",
     "CONVERSATION_FIXTURE_PATH",
     "MODEL_LIMITS_PATH",
-    "OVERLAY_PATH",
     "PRODUCT_CONVERSATION_FIXTURE_PATH",
     "PROOF_PATH",
     "artifact_paths",
+    "component_overlay_path",
     "component_fixture",
     "conversation_fixture",
     "model_limits_fixture",

@@ -13,12 +13,10 @@ from nerve.representation_optimizer.contracts import (
 
 
 RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA = (
-    "nerve.optimizer.runtime_implementation_predicate.v5"
+    "nerve.optimizer.runtime_implementation_predicate.v6"
 )
 PROMOTION_DECISION_SCHEMA = "nerve.optimizer.promotion_decision.v2"
-IMPLEMENTATION_REGISTRY_SCHEMA = (
-    "nerve.optimizer.implementation_registry.v1"
-)
+IMPLEMENTATION_REGISTRY_SCHEMA = "nerve.optimizer.implementation_registry.v1"
 
 _CONTRACT_DIGEST_PREFIX = "nerve.optimizer.canonical_json_sha256.v1:"
 _ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
@@ -154,6 +152,7 @@ def create_runtime_implementation_predicate(
     state_activations_minimum: int,
     state_activations_maximum: int,
     speculative_draft_token_counts: Iterable[int],
+    residency_policies: Iterable[str],
     placement_mode: str,
     minimum_device_count: int,
     maximum_device_count: int,
@@ -173,12 +172,8 @@ def create_runtime_implementation_predicate(
         },
         "execution": {
             "phases": sorted(set(execution_phases)),
-            "alternative_phases": sorted(
-                set(alternative_execution_phases)
-            ),
-            "source_retained_phases": sorted(
-                set(source_retained_execution_phases)
-            ),
+            "alternative_phases": sorted(set(alternative_execution_phases)),
+            "source_retained_phases": sorted(set(source_retained_execution_phases)),
             "activation_batch": {
                 "minimum": activation_batch_minimum,
                 "maximum": activation_batch_maximum,
@@ -194,14 +189,13 @@ def create_runtime_implementation_predicate(
             "speculative_draft_token_counts": sorted(
                 set(speculative_draft_token_counts)
             ),
+            "residency_policies": sorted(set(residency_policies)),
         },
         "placement": {
             "mode": placement_mode,
             "minimum_device_count": minimum_device_count,
             "maximum_device_count": maximum_device_count,
-            "required_interconnects": sorted(
-                set(required_interconnects)
-            ),
+            "required_interconnects": sorted(set(required_interconnects)),
         },
     }
     document["predicate_id"] = runtime_predicate_id(document)
@@ -230,8 +224,7 @@ def append_implementation_registry_entries(
 ) -> ImplementationRegistry:
     document = registry.to_json()
     existing = {
-        entry["implementation_id"]: entry
-        for entry in document["implementations"]
+        entry["implementation_id"]: entry for entry in document["implementations"]
     }
     for raw_entry in entries:
         entry = deepcopy(raw_entry)
@@ -328,6 +321,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
             "context_activations",
             "state_activations",
             "speculative_draft_token_counts",
+            "residency_policies",
         },
         "execution",
     )
@@ -349,16 +343,16 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         execution["source_retained_phases"],
         "execution.source_retained_phases",
     )
-    if (
-        set(alternative_phases) & set(source_retained_phases)
-        or set(alternative_phases) | set(source_retained_phases)
-        != set(phases)
-    ):
+    if set(alternative_phases) & set(source_retained_phases) or set(
+        alternative_phases
+    ) | set(source_retained_phases) != set(phases):
         raise PromotionContractError(
             "runtime predicate must partition every execution phase into "
             "alternative or source-retained execution"
         )
-    _inclusive_range(execution["activation_batch"], "execution.activation_batch", positive=True)
+    _inclusive_range(
+        execution["activation_batch"], "execution.activation_batch", positive=True
+    )
     _inclusive_range(
         execution["context_activations"],
         "execution.context_activations",
@@ -376,17 +370,26 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
     if (
         not speculative_draft_token_counts
         or any(
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value < 0
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
             for value in speculative_draft_token_counts
         )
-        or speculative_draft_token_counts
-        != sorted(set(speculative_draft_token_counts))
+        or speculative_draft_token_counts != sorted(set(speculative_draft_token_counts))
     ):
         raise PromotionContractError(
             "execution.speculative_draft_token_counts must contain sorted, "
             "unique non-negative integers"
+        )
+    residency_policies = _sorted_unique_strings(
+        execution["residency_policies"],
+        "execution.residency_policies",
+        nonempty=True,
+    )
+    if any(
+        policy not in {"demand_paged", "demand_retained", "eager"}
+        for policy in residency_policies
+    ):
+        raise PromotionContractError(
+            "execution.residency_policies contains an unsupported policy"
         )
 
     placement = _object(document["placement"], "placement")
@@ -401,9 +404,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         "placement",
     )
     if placement["mode"] not in _PLACEMENT_MODES:
-        raise PromotionContractError(
-            "runtime predicate placement mode is unsupported"
-        )
+        raise PromotionContractError("runtime predicate placement mode is unsupported")
     minimum_devices = _positive_integer(
         placement["minimum_device_count"],
         "placement.minimum_device_count",
@@ -413,9 +414,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         "placement.maximum_device_count",
     )
     if minimum_devices > maximum_devices:
-        raise PromotionContractError(
-            "runtime predicate device-count range is inverted"
-        )
+        raise PromotionContractError("runtime predicate device-count range is inverted")
     _sorted_unique_strings(
         placement["required_interconnects"],
         "placement.required_interconnects",
@@ -430,9 +429,7 @@ def validate_runtime_implementation_predicate(document: Json) -> None:
         )
     expected = runtime_predicate_id(document)
     if document["predicate_id"] != expected:
-        raise PromotionContractError(
-            f"runtime predicate id must be {expected!r}"
-        )
+        raise PromotionContractError(f"runtime predicate id must be {expected!r}")
 
 
 def validate_promotion_decision(document: Json) -> None:
@@ -569,9 +566,7 @@ def validate_promotion_decision(document: Json) -> None:
             )
         _object(workload["paired"], f"{path}.paired")
     if len(workload_ids) != len(set(workload_ids)):
-        raise PromotionContractError(
-            "promotion benchmark workloads must be unique"
-        )
+        raise PromotionContractError("promotion benchmark workloads must be unique")
     _stable_id(
         comparison["validation_id"],
         "validation",
@@ -631,9 +626,7 @@ def validate_promotion_decision(document: Json) -> None:
             {"run_id", "run_digest", "cited_evidence_ids"},
             path,
         )
-        run_ids.append(
-            _stable_id(run["run_id"], "analysis_run", f"{path}.run_id")
-        )
+        run_ids.append(_stable_id(run["run_id"], "analysis_run", f"{path}.run_id"))
         _contract_digest(run["run_digest"], f"{path}.run_digest")
         cited = _sorted_unique_strings(
             run["cited_evidence_ids"],
@@ -687,15 +680,11 @@ def validate_promotion_decision(document: Json) -> None:
     ):
         _contract_digest(provenance[field], f"provenance.{field}")
     if document["decision"] != "promote":
-        raise PromotionContractError(
-            "published promotion decisions must be promote"
-        )
+        raise PromotionContractError("published promotion decisions must be promote")
     _text(document["reason"], "reason")
     expected = promotion_decision_id(document)
     if document["promotion_id"] != expected:
-        raise PromotionContractError(
-            f"promotion id must be {expected!r}"
-        )
+        raise PromotionContractError(f"promotion id must be {expected!r}")
 
 
 def validate_implementation_registry(document: Json) -> None:
@@ -755,9 +744,7 @@ def validate_implementation_registry(document: Json) -> None:
         )
     expected = implementation_registry_id(document)
     if document["registry_id"] != expected:
-        raise PromotionContractError(
-            f"implementation registry id must be {expected!r}"
-        )
+        raise PromotionContractError(f"implementation registry id must be {expected!r}")
 
 
 def validate_implementation_registry_entry(document: Json) -> None:
@@ -833,9 +820,8 @@ def validate_implementation_registry_entry(document: Json) -> None:
         bundle["mount_plan_ref"],
         "artifact_bundle.mount_plan_ref",
     )
-    if (
-        not integrity_ref.startswith(f"{root_ref}/")
-        or not mount_plan_ref.startswith(f"{root_ref}/")
+    if not integrity_ref.startswith(f"{root_ref}/") or not mount_plan_ref.startswith(
+        f"{root_ref}/"
     ):
         raise PromotionContractError(
             "candidate artifact references must stay inside their artifact bundle"
@@ -977,9 +963,7 @@ def _text(value: object, path: str) -> str:
 
 def _nonnegative_integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise PromotionContractError(
-            f"{path} must be a non-negative integer"
-        )
+        raise PromotionContractError(f"{path} must be a non-negative integer")
     return value
 
 
@@ -998,13 +982,9 @@ def _sorted_unique_strings(
 ) -> list[str]:
     values = _list(value, path)
     if any(not isinstance(item, str) or not item for item in values):
-        raise PromotionContractError(
-            f"{path} must contain non-empty strings"
-        )
+        raise PromotionContractError(f"{path} must contain non-empty strings")
     if values != sorted(set(values)):
-        raise PromotionContractError(
-            f"{path} must be sorted and unique"
-        )
+        raise PromotionContractError(f"{path} must be sorted and unique")
     if nonempty and not values:
         raise PromotionContractError(f"{path} must not be empty")
     return values
@@ -1018,9 +998,7 @@ def _unique_strings(
 ) -> list[str]:
     values = _list(value, path)
     if any(not isinstance(item, str) or not item for item in values):
-        raise PromotionContractError(
-            f"{path} must contain non-empty strings"
-        )
+        raise PromotionContractError(f"{path} must contain non-empty strings")
     if len(values) != len(set(values)):
         raise PromotionContractError(f"{path} must be unique")
     if nonempty and not values:
@@ -1037,9 +1015,7 @@ def _stable_id(value: object, prefix: str, path: str) -> str:
         or len(suffix) != 32
         or any(character not in "0123456789abcdef" for character in suffix)
     ):
-        raise PromotionContractError(
-            f"{path} must be a stable {prefix!r} identifier"
-        )
+        raise PromotionContractError(f"{path} must be a stable {prefix!r} identifier")
     return identifier
 
 

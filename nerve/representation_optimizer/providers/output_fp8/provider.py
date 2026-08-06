@@ -76,6 +76,14 @@ class BlockScaledOutputProjectionProvider:
         del source_contract
         return _is_standalone_output_scope(scope)
 
+    def required_analyzer_ids(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> tuple[str, ...]:
+        del scope, source_contract
+        return ("semantic_graph_structure",)
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         eligible = [
             scope for scope in context.scopes if _is_standalone_output_scope(scope)

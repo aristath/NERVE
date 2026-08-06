@@ -16,6 +16,7 @@ impl RuntimeImplementationPredicate {
             || self.hardware.device_kinds.is_empty()
             || self.hardware.apis.is_empty()
             || self.execution.phases.is_empty()
+            || self.execution.residency_policies.is_empty()
         {
             return Err("runtime implementation predicate is incomplete".to_string());
         }
@@ -29,6 +30,7 @@ impl RuntimeImplementationPredicate {
             &self.execution.phases,
             &self.execution.alternative_phases,
             &self.execution.source_retained_phases,
+            &self.execution.residency_policies,
             &self.placement.required_interconnects,
         ] {
             if !sorted_unique(values) {
@@ -98,6 +100,16 @@ impl RuntimeImplementationPredicate {
                     .to_string(),
             );
         }
+        if self.execution.residency_policies.iter().any(|policy| {
+            !matches!(
+                policy.as_str(),
+                "demand_paged" | "demand_retained" | "eager"
+            )
+        }) {
+            return Err(
+                "runtime residency-policy predicate contains an unsupported policy".to_string(),
+            );
+        }
         match self.placement.mode.as_str() {
             "local" if measured_device_count == 1 => {}
             "distributed" if measured_device_count >= 2 => {}
@@ -151,6 +163,16 @@ impl RuntimeImplementationPredicate {
             reasons.push(format!(
                 "speculative draft-token count {} is outside {:?}",
                 execution.speculative_draft_tokens, self.execution.speculative_draft_token_counts
+            ));
+        }
+        if !self
+            .execution
+            .residency_policies
+            .contains(&execution.residency_policy)
+        {
+            reasons.push(format!(
+                "residency policy {:?} is outside {:?}",
+                execution.residency_policy, self.execution.residency_policies
             ));
         }
         for (label, predicate_range, requested_range) in [

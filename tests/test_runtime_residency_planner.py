@@ -72,6 +72,13 @@ def test_accepts_maximum_address_space_larger_than_mount_requirement() -> None:
     _validate_runtime_residency_plan(_plan())
 
 
+def test_accepts_demand_paged_maximum_address_space_larger_than_cache() -> None:
+    plan = _plan()
+    plan["residency_policy"] = "demand_paged"
+
+    _validate_runtime_residency_plan(plan)
+
+
 def test_planning_case_preserves_exact_speculative_window() -> None:
     case = RuntimeResidencyPlanningCase(
         case_id="draft-two",

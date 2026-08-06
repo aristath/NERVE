@@ -10,6 +10,9 @@ from nerve.representation_optimizer.automation.target import CapacityLeaseState
 
 
 AMD_PCI_VENDOR_ID = "0x1002"
+RUNTIME_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA = (
+    "nerve.runtime.device_local_memory_policy.v1"
+)
 _PCI_ADDRESS = re.compile(
     r"^(?:(?P<domain>[0-9a-fA-F]{4}):)?"
     r"(?P<bus>[0-9a-fA-F]{2}):"
@@ -22,7 +25,7 @@ _PCI_ADDRESS = re.compile(
 class DeviceCapacityPolicy:
     """Conservative share of currently free VRAM that NERVE may reserve."""
 
-    reservable_free_vram_fraction_ppm: int = 950_000
+    reservable_free_vram_fraction_ppm: int
     minimum_reservable_vram_bytes: int = 1
     material_process_vram_bytes: int = 64 * 1024 * 1024
     material_process_gtt_bytes: int = 64 * 1024 * 1024
@@ -30,6 +33,34 @@ class DeviceCapacityPolicy:
     release_vram_tolerance_bytes: int = 16 * 1024 * 1024
     release_settle_timeout_ns: int = 5_000_000_000
     release_poll_interval_ns: int = 50_000_000
+
+    @classmethod
+    def from_runtime_policy(cls, document: Json) -> DeviceCapacityPolicy:
+        expected = {
+            "schema",
+            "capacity_parts_per_million",
+            "protected_headroom_fraction_ppm",
+            "reservable_free_vram_fraction_ppm",
+        }
+        if set(document) != expected:
+            raise ModelCompileError(
+                "runtime device-local memory policy fields are invalid"
+            )
+        if document.get("schema") != RUNTIME_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA:
+            raise ModelCompileError(
+                "runtime device-local memory policy schema is unsupported"
+            )
+        parts = document.get("capacity_parts_per_million")
+        protected = document.get("protected_headroom_fraction_ppm")
+        reservable = document.get("reservable_free_vram_fraction_ppm")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (parts, protected, reservable)
+        ) or parts != 1_000_000 or protected + reservable != parts:
+            raise ModelCompileError(
+                "runtime device-local memory policy fractions are invalid"
+            )
+        return cls(reservable_free_vram_fraction_ppm=reservable)
 
     def __post_init__(self) -> None:
         if not 0 < self.reservable_free_vram_fraction_ppm <= 1_000_000:
@@ -126,9 +157,9 @@ class LinuxAmdDeviceCapacityProbe:
     def __init__(
         self,
         *,
+        policy: DeviceCapacityPolicy,
         sysfs_drm_root: Path = Path("/sys/class/drm"),
         proc_root: Path = Path("/proc"),
-        policy: DeviceCapacityPolicy = DeviceCapacityPolicy(),
     ) -> None:
         self.sysfs_drm_root = sysfs_drm_root.resolve()
         self.proc_root = proc_root.resolve()

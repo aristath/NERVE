@@ -146,7 +146,11 @@ def run_automated_optimizer(
         for scope in scopes:
             check_compile_cancelled(cancel_requested)
             scope_id = str(scope["scope_id"])
-            if not providers.accepts_scope(scope, contracts[scope_id]):
+            analyzer_ids = providers.required_analyzer_ids(
+                scope,
+                contracts[scope_id],
+            )
+            if not analyzer_ids:
                 reason = (
                     "scope skipped before analysis: no registered "
                     "representation provider accepts its static contract"
@@ -191,6 +195,7 @@ def run_automated_optimizer(
                 analysis = analysis_engine.analyze_scope(
                     scope_id=scope_id,
                     budget=analysis_budget,
+                    analyzer_ids=analyzer_ids,
                     output_dir=analysis_directory,
                     cancel_requested=cancel_requested,
                 )
@@ -245,7 +250,7 @@ def run_automated_optimizer(
                     "scope_id": scope_id,
                     "kind": scope["kind"],
                     "status": "analyzed",
-                    "reason": "all selected analyzers completed",
+                    "reason": "all provider-required analyzers completed",
                     "analysis_ref": analysis_ref,
                     "structures": structures,
                 }
@@ -255,7 +260,10 @@ def run_automated_optimizer(
                 status="completed",
                 scope_id=scope_id,
                 evidence_refs=(analysis_ref,),
-                details={"structure_record_count": len(structures)},
+                details={
+                    "analyzer_ids": list(analyzer_ids),
+                    "structure_record_count": len(structures),
+                },
             )
             analyzed_scopes.append(scope)
             analyzed_evidence.extend(analysis.evidence)

@@ -59,6 +59,7 @@ def optimize_compiled_package(
     selected_device_ids: Iterable[str] = (),
     vulkan_driver_files: Iterable[Path] = (),
     speculative_draft_tokens: int = 0,
+    residency_policy: str = "demand_retained",
     budget: OptimizationBudget | None = None,
     analysis_budget: AnalysisBudget | None = None,
     cancel_requested: Callable[[], bool] | None = None,
@@ -85,6 +86,7 @@ def optimize_compiled_package(
         selected_device_ids=selected_device_ids,
         vulkan_driver_files=vulkan_driver_files,
         speculative_draft_tokens=speculative_draft_tokens,
+        residency_policy=residency_policy,
         cancel_requested=cancel_requested,
     )
     check_compile_cancelled(cancel_requested)

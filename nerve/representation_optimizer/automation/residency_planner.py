@@ -13,7 +13,7 @@ RUNTIME_RESIDENCY_PLANNER_RESPONSE_SCHEMA = (
     "nerve.runtime_residency_planner_response.v3"
 )
 RUNTIME_RESIDENCY_PLAN_SCHEMA = "nerve.vulkan_runtime_residency_plan.v3"
-RESIDENCY_POLICIES = frozenset(("demand_retained", "eager"))
+RESIDENCY_POLICIES = frozenset(("demand_paged", "demand_retained", "eager"))
 PARAMETER_RESIDENCY_FIELDS = frozenset(
     (
         "always_resident_bytes",
@@ -293,7 +293,7 @@ def _validate_runtime_residency_plan(plan: Json) -> None:
             or parameters["maximum_addressable_bytes"]
             < parameters["current_resident_bytes"]
             or (
-                plan["residency_policy"] == "demand_retained"
+                plan["residency_policy"] in {"demand_paged", "demand_retained"}
                 and parameters["initial_dynamic_bytes"] != 0
             )
             or (

@@ -2472,6 +2472,29 @@ fn device_local_memory_budget_preserves_headroom_from_the_opening_snapshot() {
 }
 
 #[test]
+fn device_local_memory_policy_is_the_authoritative_budget_partition() {
+    let policy = vulkan_device_local_memory_policy();
+    let budget = VulkanDeviceLocalMemoryBudget::capture(
+        policy.capacity_parts_per_million,
+    );
+
+    assert_eq!(policy.schema, VULKAN_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA);
+    assert_eq!(
+        policy.protected_headroom_fraction_ppm,
+        budget.protected_headroom_bytes
+    );
+    assert_eq!(
+        policy.reservable_free_vram_fraction_ppm,
+        budget.reservable_bytes
+    );
+    assert_eq!(
+        policy.protected_headroom_fraction_ppm
+            + policy.reservable_free_vram_fraction_ppm,
+        policy.capacity_parts_per_million
+    );
+}
+
+#[test]
 fn device_local_memory_budget_preserves_the_fraction_on_large_heaps() {
     let baseline = 64 * 1024 * 1024 * 1024;
     let budget = VulkanDeviceLocalMemoryBudget::capture(baseline);

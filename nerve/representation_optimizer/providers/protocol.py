@@ -31,6 +31,20 @@ class RepresentationProvider(Protocol):
         insufficient to decide.
         """
 
+    def required_analyzer_ids(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> tuple[str, ...]:
+        """Declare the generic structural evidence required for this scope.
+
+        The result must be sorted, unique, and non-empty whenever
+        ``may_optimize_scope`` returns true. Representation-specific exact
+        proofs and behavioral validation remain separate obligations; this
+        declaration prevents unrelated generic analyzers from becoming an
+        accidental prerequisite.
+        """
+
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         """Decide whether the scope's responsibility can use this representation."""
 

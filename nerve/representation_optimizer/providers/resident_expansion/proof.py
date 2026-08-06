@@ -13,12 +13,12 @@ from nerve.quantized_transforms import (
     resident_mxfp4_value,
 )
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
+    component_overlay_path,
     resident_shader_artifact_path,
 )
 from nerve.representation_optimizer.contracts import contract_digest
 from nerve.representation_optimizer.providers.codebook.shaders import compile_spirv
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
-    OVERLAY_PATH,
     PROOF_PATH,
 )
 from nerve.representation_optimizer.providers.resident_expansion.contracts import (
@@ -79,20 +79,29 @@ class ExactResidentExpansionProofVerifier:
             )
             proof = _json_file(proof_path)
             code_domain = _verify_code_domain(lowering, proof)
-            source_coverage = _verify_source_coverage(
-                self.source_artifacts,
-                lowering,
-            )
-            resource_boundary = _verify_overlay(
-                self.source_artifacts,
-                root,
-                lowering,
-            )
+            source_documents: dict[str, Json] = {}
+            source_coverage = [
+                _verify_source_coverage(
+                    self.source_artifacts,
+                    region,
+                    source_documents=source_documents,
+                )
+                for region in _regions(lowering)
+            ]
+            resource_boundaries = [
+                _verify_overlay(
+                    self.source_artifacts,
+                    root,
+                    region,
+                    source_documents=source_documents,
+                )
+                for region in _regions(lowering)
+            ]
             deterministic_shaders = _verify_shaders(root, lowering)
             facts = {
                 "code_domain": code_domain,
                 "source_coverage": source_coverage,
-                "resource_boundary": resource_boundary,
+                "resource_boundaries": resource_boundaries,
                 "deterministic_shaders": deterministic_shaders,
             }
             artifacts.append(
@@ -180,16 +189,31 @@ def _verify_code_domain(lowering: Json, proof: Json) -> Json:
         {"source_nibble": nibble, "resident_e4m3_bits": bits}
         for nibble, bits in enumerate(MXFP4_E2M1_FP8_E4M3_BITS)
     ]
-    derivations = lowering["resident_derivations"]
+    regions = _regions(lowering)
+    expected_regions = [
+        {
+            "component_id": region["source"]["component_id"],
+            "derivation_count": len(region["resident_derivations"]),
+            "derivations_digest": contract_digest(
+                {"resident_derivations": region["resident_derivations"]}
+            ),
+            "source_weight_bytes": sum(
+                int(item["source_byte_count"])
+                for item in region["resident_derivations"]
+            ),
+            "resident_weight_bytes": sum(
+                int(item["derivation"]["resident_byte_count"])
+                for item in region["resident_derivations"]
+            ),
+        }
+        for region in regions
+    ]
     if (
         proof.get("schema") != PROOF_SCHEMA
         or proof.get("candidate_id") != lowering["candidate_id"]
         or proof.get("scope_ids") != lowering["scope_ids"]
-        or proof.get("component_id") != lowering["source"]["component_id"]
         or proof.get("mapping") != expected_mapping
-        or proof.get("derivation_count") != len(derivations)
-        or proof.get("derivations_digest")
-        != contract_digest({"resident_derivations": derivations})
+        or proof.get("regions") != expected_regions
     ):
         raise ModelCompileError("resident expansion proof certificate is inconsistent")
     for nibble in range(16):
@@ -201,20 +225,18 @@ def _verify_code_domain(lowering: Json, proof: Json) -> Json:
                 raise ModelCompileError(
                     f"resident expansion changes source code {nibble:#x}"
                 )
-    source_bytes = sum(int(item["source_byte_count"]) for item in derivations)
-    resident_bytes = sum(
-        int(item["derivation"]["resident_byte_count"]) for item in derivations
-    )
-    if (
-        proof.get("source_weight_bytes") != source_bytes
-        or proof.get("resident_weight_bytes") != resident_bytes
-        or resident_bytes != source_bytes * 2
+    if any(
+        region["resident_weight_bytes"] != region["source_weight_bytes"] * 2
+        for region in expected_regions
     ):
         raise ModelCompileError("resident expansion proof sizes are inconsistent")
     return {
         "source_code_count": 16,
         "finite_scale_code_count": 255,
-        "derivation_count": len(derivations),
+        "region_count": len(regions),
+        "derivation_count": sum(
+            len(region["resident_derivations"]) for region in regions
+        ),
     }
 
 
@@ -222,12 +244,13 @@ def _verify_overlay(
     resolver: PackageSourceArtifactResolver,
     root: Path,
     lowering: Json,
+    *,
+    source_documents: dict[str, Json] | None = None,
 ) -> Json:
-    manifest = _json_file(
-        _regular_file(
-            resolver.package_root,
-            lowering["source"]["manifest_ref"],
-        )
+    manifest = _source_json(
+        resolver,
+        lowering["source"]["manifest_ref"],
+        source_documents,
     )
     component_id = lowering["source"]["component_id"]
     source_component = _unique(
@@ -240,7 +263,12 @@ def _verify_overlay(
         "component_id",
         component_id,
     )
-    overlay = _json_file(_regular_file(root, OVERLAY_PATH))
+    overlay_path = lowering["artifacts"]["overlay_path"]
+    if overlay_path != component_overlay_path(component_id):
+        raise ModelCompileError(
+            "resident expansion overlay path is not component-derived"
+        )
+    overlay = _json_file(_regular_file(root, overlay_path))
     expected_derivations = [
         {
             "node_id": item["node_id"],
@@ -302,19 +330,24 @@ def _verify_overlay(
 def _verify_source_coverage(
     resolver: PackageSourceArtifactResolver,
     lowering: Json,
+    *,
+    source_documents: dict[str, Json] | None = None,
 ) -> Json:
-    manifest = _json_file(
-        _regular_file(
-            resolver.package_root,
-            lowering["source"]["manifest_ref"],
-        )
+    manifest = _source_json(
+        resolver,
+        lowering["source"]["manifest_ref"],
+        source_documents,
     )
     tensor_index_path = manifest.get("tensor_index_path")
     if tensor_index_path != "tensors.json":
         raise ModelCompileError(
             "resident expansion source tensor index is not canonical"
         )
-    tensor_index = _json_file(_regular_file(resolver.package_root, tensor_index_path))
+    tensor_index = _source_json(
+        resolver,
+        tensor_index_path,
+        source_documents,
+    )
     tensors = tensor_index.get("tensors")
     if not isinstance(tensors, dict):
         raise ModelCompileError("resident expansion source tensor map is missing")
@@ -517,8 +550,9 @@ def _verify_source_coverage(
 def _verify_shaders(root: Path, lowering: Json) -> Json:
     verified = []
     by_artifact = {}
-    for replacement in lowering["shader_replacements"]:
-        by_artifact.setdefault(replacement["artifact_path"], replacement)
+    for region in _regions(lowering):
+        for replacement in region["shader_replacements"]:
+            by_artifact.setdefault(replacement["artifact_path"], replacement)
     for path, replacement in sorted(by_artifact.items()):
         expected = compile_spirv(
             render_shader_source(_SHADER_ROOT, replacement["template_name"]),
@@ -530,6 +564,26 @@ def _verify_shaders(root: Path, lowering: Json) -> Json:
             )
         verified.append(path)
     return {"shader_count": len(verified), "paths": verified}
+
+
+def _regions(lowering: Json) -> list[Json]:
+    regions = lowering.get("regions")
+    if not isinstance(regions, list) or not regions:
+        raise ModelCompileError("resident expansion proof has no component regions")
+    component_ids = [
+        region.get("source", {}).get("component_id")
+        if isinstance(region, dict)
+        else None
+        for region in regions
+    ]
+    if any(
+        not isinstance(component_id, str) or not component_id
+        for component_id in component_ids
+    ) or component_ids != sorted(set(component_ids)):
+        raise ModelCompileError(
+            "resident expansion proof regions must have sorted unique components"
+        )
+    return regions
 
 
 def _resource_byte_count(resource: Json) -> int:
@@ -596,6 +650,21 @@ def _json_file(path: Path) -> Json:
     document = json.loads(path.read_bytes())
     if not isinstance(document, dict):
         raise ModelCompileError(f"proof input must be a JSON object: {path}")
+    return document
+
+
+def _source_json(
+    resolver: PackageSourceArtifactResolver,
+    relative_path: str,
+    documents: dict[str, Json] | None,
+) -> Json:
+    if documents is not None and relative_path in documents:
+        return documents[relative_path]
+    document = _json_file(
+        _regular_file(resolver.package_root, relative_path)
+    )
+    if documents is not None:
+        documents[relative_path] = document
     return document
 
 

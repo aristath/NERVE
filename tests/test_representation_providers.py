@@ -56,6 +56,14 @@ class FixtureProvider:
     omit_structural_evidence: bool = False
     mutate_scope_copy: bool = False
     accepted_scope_kinds: tuple[str, ...] | None = None
+    analyzer_ids: tuple[str, ...] = (
+        "elementwise_structure",
+        "joint_parameter_structure",
+        "matrix_and_tensor_structure",
+        "procedural_structure",
+        "reachable_activation_evidence",
+        "semantic_graph_structure",
+    )
     calls: list[str] = field(default_factory=list)
 
     @property
@@ -74,6 +82,11 @@ class FixtureProvider:
             self.accepted_scope_kinds is None
             or scope["kind"] in self.accepted_scope_kinds
         )
+
+    def required_analyzer_ids(self, scope, source_contract):
+        self._called("required_analyzer_ids")
+        del scope, source_contract
+        return self.analyzer_ids
 
     def match_semantics(self, context):
         self._called("match_semantics")

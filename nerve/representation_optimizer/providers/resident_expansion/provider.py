@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from nerve.compilation import Json
-from nerve.representation_optimizer.contracts import representation_candidate_id
+from nerve.compilation import Json, ModelCompileError
+from nerve.representation_optimizer.contracts import (
+    representation_candidate_id,
+    stable_contract_id,
+)
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
     COMPONENT_FIXTURE_PATH,
     CONVERSATION_FIXTURE_PATH,
     MODEL_LIMITS_PATH,
-    OVERLAY_PATH,
     PRODUCT_CONVERSATION_FIXTURE_PATH,
     PROOF_PATH,
     artifact_paths,
+    component_overlay_path,
 )
 from nerve.representation_optimizer.providers.resident_expansion.contracts import (
     COMPONENT_FIXTURE_SCHEMA,
@@ -25,7 +28,6 @@ from nerve.representation_optimizer.providers.resident_expansion.discovery impor
     discover_resident_expansions,
     discovery_result,
     is_resident_expansion_scope,
-    require_resident_expansion,
     source_inputs,
 )
 from nerve.representation_optimizer.providers.resident_expansion.representation import (
@@ -56,6 +58,14 @@ class ExactResidentExpertExpansionProvider:
 
     def may_optimize_scope(self, scope: Json, source_contract: Json) -> bool:
         return is_resident_expansion_scope(scope, source_contract)
+
+    def required_analyzer_ids(
+        self,
+        scope: Json,
+        source_contract: Json,
+    ) -> tuple[str, ...]:
+        del scope, source_contract
+        return ("semantic_graph_structure",)
 
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         matched = any(
@@ -118,17 +128,50 @@ class ExactResidentExpertExpansionProvider:
     ) -> tuple[Json, ...]:
         accepted = set(evidence.evidence_ids)
         candidates = []
-        for opportunity in discover_resident_expansions(context):
+        for opportunities in _opportunity_groups(context):
+            representative = opportunities[0]
+            scope_contracts = sorted(
+                (
+                    (scope_id, digest)
+                    for opportunity in opportunities
+                    for scope_id, digest in zip(
+                        opportunity.scope_ids,
+                        opportunity.source_contract_digests,
+                        strict=True,
+                    )
+                ),
+                key=lambda item: item[0],
+            )
+            component_ids = tuple(
+                opportunity.component_id for opportunity in opportunities
+            )
+            shader_paths = tuple(
+                sorted(
+                    {
+                        path
+                        for opportunity in opportunities
+                        for path in opportunity.shader_artifact_paths
+                    }
+                )
+            )
             candidate = {
                 "schema": "nerve.optimizer.representation_candidate.v1",
                 "candidate_id": "",
-                "scope_ids": list(opportunity.scope_ids),
-                "source_contract_digests": list(opportunity.source_contract_digests),
+                "scope_ids": [scope_id for scope_id, _digest in scope_contracts],
+                "source_contract_digests": [
+                    digest for _scope_id, digest in scope_contracts
+                ],
                 "provider": self.identity.to_json(),
                 "descriptor_id": self.descriptor_id,
                 "evidence_refs": [
                     evidence_id
-                    for evidence_id in opportunity.evidence_ids
+                    for evidence_id in sorted(
+                        {
+                            item
+                            for opportunity in opportunities
+                            for item in opportunity.evidence_ids
+                        }
+                    )
                     if evidence_id in accepted
                 ],
                 "representation": {
@@ -143,9 +186,18 @@ class ExactResidentExpertExpansionProvider:
                     },
                     "state_format": {"kind": "source_state_unchanged"},
                     "topology": {
-                        "kind": "component_local_sparse_expert_bank",
-                        "component_ids": [opportunity.component_id],
-                        "node_ids": list(opportunity.node_ids),
+                        "kind": "independently_selectable_component_regions",
+                        "component_ids": list(component_ids),
+                        "node_ids": sorted(
+                            {
+                                node_id
+                                for opportunity in opportunities
+                                for node_id in opportunity.node_ids
+                            }
+                        ),
+                        "performance_equivalence_class": _opportunity_performance_key(
+                            representative
+                        ),
                     },
                 },
                 "target_predicate": {
@@ -162,15 +214,15 @@ class ExactResidentExpertExpansionProvider:
                         "source_retained_phases": [],
                         "activation_batch": {
                             "minimum": 1,
-                            "maximum": opportunity.max_context_activations,
+                            "maximum": representative.max_context_activations,
                         },
                         "context_activations": {
                             "minimum": 0,
-                            "maximum": opportunity.max_context_activations,
+                            "maximum": representative.max_context_activations,
                         },
                         "state_activations": {
                             "minimum": 0,
-                            "maximum": opportunity.max_context_activations,
+                            "maximum": representative.max_context_activations,
                         },
                     },
                 },
@@ -181,7 +233,7 @@ class ExactResidentExpertExpansionProvider:
                 },
                 "artifact_declarations": [
                     {"path": path}
-                    for path in artifact_paths(opportunity.shader_artifact_paths)
+                    for path in artifact_paths(shader_paths, component_ids)
                 ],
             }
             candidate["candidate_id"] = representation_candidate_id(candidate)
@@ -193,10 +245,10 @@ class ExactResidentExpertExpansionProvider:
         context: ProviderContext,
         candidate: Json,
     ) -> Json:
-        opportunity = _candidate_opportunity(context, candidate)
+        opportunities = _candidate_opportunities(context, candidate)
         return resident_expansion_representation_graph(
             candidate=candidate,
-            opportunity=opportunity,
+            opportunities=opportunities,
             capability_class=str(context.hardware_profile["capability_class"]),
         )
 
@@ -206,33 +258,17 @@ class ExactResidentExpertExpansionProvider:
         candidate: Json,
         representation_ir: Json,
     ) -> Json:
-        opportunity = _candidate_opportunity(context, candidate)
+        opportunities = _candidate_opportunities(context, candidate)
         return {
             "schema": TARGET_LOWERING_SCHEMA,
             "candidate_id": candidate["candidate_id"],
             "representation_graph_id": representation_ir["graph_id"],
-            "scope_ids": list(opportunity.scope_ids),
+            "scope_ids": list(candidate["scope_ids"]),
             "capability_class": context.hardware_profile["capability_class"],
-            "source": {
-                "component_id": opportunity.component_id,
-                "node_ids": list(opportunity.node_ids),
-                "manifest_ref": opportunity.manifest_ref,
-                "source_inputs": source_inputs(context, opportunity),
-            },
-            "geometry": {
-                "hidden_size": opportunity.hidden_size,
-                "intermediate_size": opportunity.intermediate_size,
-                "expert_count": opportunity.expert_count,
-                "experts_per_token": opportunity.experts_per_token,
-            },
-            "resident_derivations": [
-                item.to_json() for item in opportunity.weight_derivations
-            ],
-            "shader_replacements": [
-                item.to_json() for item in opportunity.shader_replacements
+            "regions": [
+                _lowered_region(context, opportunity) for opportunity in opportunities
             ],
             "artifacts": {
-                "overlay_path": OVERLAY_PATH,
                 "proof_path": PROOF_PATH,
                 "component_fixture_path": COMPONENT_FIXTURE_PATH,
                 "conversation_fixture_path": CONVERSATION_FIXTURE_PATH,
@@ -242,7 +278,7 @@ class ExactResidentExpertExpansionProvider:
                 "model_limits_path": MODEL_LIMITS_PATH,
             },
             "runtime": {
-                "max_context_activations": (opportunity.max_context_activations),
+                "max_context_activations": (opportunities[0].max_context_activations),
                 "required_vulkan_version": "1.4",
                 "residency_lifetime": "demand_retained",
             },
@@ -256,23 +292,34 @@ class ExactResidentExpertExpansionProvider:
         target_lowering: Json,
     ) -> StaticEstimate:
         del representation_ir, target_lowering
-        opportunity = _candidate_opportunity(context, candidate)
+        opportunities = _candidate_opportunities(context, candidate)
+        representative = opportunities[0]
+        total_source_bytes = sum(
+            opportunity.source_weight_bytes for opportunity in opportunities
+        )
+        total_resident_bytes = sum(
+            opportunity.resident_weight_bytes for opportunity in opportunities
+        )
         return StaticEstimate(
             feasible=True,
             permanent_bytes=0,
-            transient_bytes=(
-                opportunity.resident_weight_bytes - opportunity.source_weight_bytes
-            ),
+            transient_bytes=total_resident_bytes - total_source_bytes,
             construction_nanoseconds=None,
             steady_state_work={
                 "kind": "native_fp8_dot4_acc32",
-                "source_parameter_bytes": opportunity.source_weight_bytes,
-                "fully_resident_parameter_bytes": (opportunity.resident_weight_bytes),
-                "parameter_byte_ratio": (
-                    opportunity.resident_weight_bytes / opportunity.source_weight_bytes
+                "source_parameter_bytes": representative.source_weight_bytes,
+                "fully_resident_parameter_bytes": (
+                    representative.resident_weight_bytes
                 ),
-                "expert_count": opportunity.expert_count,
-                "experts_per_activation": opportunity.experts_per_token,
+                "maximum_selected_source_parameter_bytes": total_source_bytes,
+                "maximum_selected_resident_parameter_bytes": total_resident_bytes,
+                "parameter_byte_ratio": (
+                    representative.resident_weight_bytes
+                    / representative.source_weight_bytes
+                ),
+                "expert_count": representative.expert_count,
+                "experts_per_activation": representative.experts_per_token,
+                "independent_region_count": len(opportunities),
                 "materialization": "only_selected_resources_on_demand",
             },
             reasons=(
@@ -287,15 +334,17 @@ class ExactResidentExpertExpansionProvider:
         context: ProviderContext,
         candidate: Json,
     ) -> Json:
-        opportunity = _candidate_opportunity(context, candidate)
-        return _build_plan(context, opportunity)
+        return _build_plan(
+            context,
+            _candidate_opportunities(context, candidate),
+        )
 
     def mount_requirements(
         self,
         context: ProviderContext,
         candidate: Json,
     ) -> Json:
-        opportunity = _candidate_opportunity(context, candidate)
+        opportunities = _candidate_opportunities(context, candidate)
         return {
             "schema": "nerve.optimizer.runtime_mount_plan.v3",
             "candidate_id": candidate["candidate_id"],
@@ -306,10 +355,13 @@ class ExactResidentExpertExpansionProvider:
                         {
                             "kind": "component",
                             "source_component_id": opportunity.component_id,
-                            "overlay_ref": OVERLAY_PATH,
+                            "overlay_ref": component_overlay_path(
+                                opportunity.component_id
+                            ),
                         }
                     ]
                 }
+                for opportunity in opportunities
             ],
             "tensor_index_refs": [],
         }
@@ -328,7 +380,7 @@ class ExactResidentExpertExpansionProvider:
         candidate: Json,
     ) -> tuple[Json, ...]:
         return resident_expansion_benchmark_workloads(
-            _candidate_opportunity(context, candidate)
+            _candidate_opportunities(context, candidate)[0]
         )
 
     def validation_requirements(
@@ -338,29 +390,185 @@ class ExactResidentExpertExpansionProvider:
     ) -> Json:
         return resident_expansion_validation_requirements(
             candidate=candidate,
-            opportunity=_candidate_opportunity(context, candidate),
+            opportunity=_candidate_opportunities(context, candidate)[0],
             speculative_draft_tokens=(
                 context.qualification_regime.speculative_draft_tokens
             ),
         )
 
 
-def _candidate_opportunity(
+def _opportunity_performance_key(
+    opportunity: ResidentExpansionOpportunity,
+) -> str:
+    return stable_contract_id(
+        "resident_performance_class",
+        {
+            "geometry": {
+                "hidden_size": opportunity.hidden_size,
+                "intermediate_size": opportunity.intermediate_size,
+                "expert_count": opportunity.expert_count,
+                "experts_per_token": opportunity.experts_per_token,
+                "max_context_activations": opportunity.max_context_activations,
+            },
+            "derivations": [
+                {
+                    "node_id": item.node_id,
+                    "parameter_id": item.parameter_id,
+                    "source_byte_count": item.source_byte_count,
+                    "resident_byte_count": item.derivation["resident_byte_count"],
+                    "schema": item.derivation["schema"],
+                    "kind": item.derivation["kind"],
+                    "required_features": item.derivation["required_features"],
+                }
+                for item in opportunity.weight_derivations
+            ],
+            "shaders": [
+                {
+                    "node_id": item.node_id,
+                    "template_name": item.template_name,
+                    "execution_kind": item.execution_kind,
+                }
+                for item in opportunity.shader_replacements
+            ],
+        },
+    )
+
+
+def _opportunity_groups(
+    context: ProviderContext,
+) -> tuple[tuple[ResidentExpansionOpportunity, ...], ...]:
+    grouped: dict[str, list[ResidentExpansionOpportunity]] = {}
+    for opportunity in discover_resident_expansions(context):
+        grouped.setdefault(_opportunity_performance_key(opportunity), []).append(
+            opportunity
+        )
+    return tuple(
+        tuple(sorted(group, key=lambda item: item.component_id))
+        for _key, group in sorted(grouped.items())
+    )
+
+
+def _lowered_region(
+    context: ProviderContext,
+    opportunity: ResidentExpansionOpportunity,
+) -> Json:
+    return {
+        "scope_ids": list(opportunity.scope_ids),
+        "source": {
+            "component_id": opportunity.component_id,
+            "node_ids": list(opportunity.node_ids),
+            "manifest_ref": opportunity.manifest_ref,
+            "source_inputs": source_inputs(context, opportunity),
+        },
+        "geometry": {
+            "hidden_size": opportunity.hidden_size,
+            "intermediate_size": opportunity.intermediate_size,
+            "expert_count": opportunity.expert_count,
+            "experts_per_token": opportunity.experts_per_token,
+        },
+        "resident_derivations": [
+            item.to_json() for item in opportunity.weight_derivations
+        ],
+        "shader_replacements": [
+            item.to_json() for item in opportunity.shader_replacements
+        ],
+        "artifacts": {
+            "overlay_path": component_overlay_path(opportunity.component_id),
+        },
+    }
+
+
+def _group_source_inputs(
+    context: ProviderContext,
+    opportunities: tuple[ResidentExpansionOpportunity, ...],
+) -> list[Json]:
+    inputs = {
+        item["path"]: item
+        for opportunity in opportunities
+        for item in source_inputs(context, opportunity)
+    }
+    return [inputs[path] for path in sorted(inputs)]
+
+
+def _candidate_opportunities(
     context: ProviderContext,
     candidate: Json,
-) -> ResidentExpansionOpportunity:
-    return require_resident_expansion(
-        context,
-        tuple(candidate["scope_ids"]),
+) -> tuple[ResidentExpansionOpportunity, ...]:
+    requested = set(candidate["scope_ids"])
+    matches = tuple(
+        opportunity
+        for opportunity in discover_resident_expansions(context)
+        if set(opportunity.scope_ids).issubset(requested)
     )
+    covered = {
+        scope_id for opportunity in matches for scope_id in opportunity.scope_ids
+    }
+    if not matches or covered != requested:
+        raise ModelCompileError(
+            "resident parameter expansion candidate does not map to one exact "
+            "set of component regions"
+        )
+    matches = tuple(sorted(matches, key=lambda item: item.component_id))
+    expected_scope_contracts = sorted(
+        (
+            (scope_id, digest)
+            for opportunity in matches
+            for scope_id, digest in zip(
+                opportunity.scope_ids,
+                opportunity.source_contract_digests,
+                strict=True,
+            )
+        ),
+        key=lambda item: item[0],
+    )
+    candidate_scope_contracts = list(
+        zip(
+            candidate["scope_ids"],
+            candidate["source_contract_digests"],
+            strict=True,
+        )
+    )
+    if candidate_scope_contracts != expected_scope_contracts:
+        raise ModelCompileError(
+            "resident parameter expansion candidate source contracts do not "
+            "match discovered component regions"
+        )
+    performance_keys = {
+        _opportunity_performance_key(opportunity) for opportunity in matches
+    }
+    if len(performance_keys) != 1:
+        raise ModelCompileError(
+            "resident parameter expansion candidate crosses physical performance classes"
+        )
+    topology = candidate["representation"]["topology"]
+    expected_topology = {
+        "kind": "independently_selectable_component_regions",
+        "component_ids": [opportunity.component_id for opportunity in matches],
+        "node_ids": sorted(
+            {node_id for opportunity in matches for node_id in opportunity.node_ids}
+        ),
+        "performance_equivalence_class": next(iter(performance_keys)),
+    }
+    if topology != expected_topology:
+        raise ModelCompileError(
+            "resident parameter expansion candidate topology does not match "
+            "discovered component regions and performance class"
+        )
+    return matches
 
 
 def _build_plan(
     context: ProviderContext,
-    opportunity: ResidentExpansionOpportunity,
+    opportunities: tuple[ResidentExpansionOpportunity, ...],
 ) -> Json:
     outputs = []
-    for path in opportunity.shader_artifact_paths:
+    for path in sorted(
+        {
+            path
+            for opportunity in opportunities
+            for path in opportunity.shader_artifact_paths
+        }
+    ):
         outputs.append(
             _output(
                 path,
@@ -370,6 +578,22 @@ def _build_plan(
                 {
                     "validator_id": "spirv_module",
                     "validation_contract": {"minimum_version": 0x00010600},
+                },
+            )
+        )
+    for opportunity in opportunities:
+        outputs.append(
+            _output(
+                component_overlay_path(opportunity.component_id),
+                "runtime_overlay",
+                "mount",
+                "ordinary_lowering",
+                {
+                    "validator_id": "json_contract",
+                    "validation_contract": {
+                        "schema": "nerve.optimizer.vulkan_component_overlay.v2",
+                        "object_required": True,
+                    },
                 },
             )
         )
@@ -391,12 +615,6 @@ def _build_plan(
             "validation_fixture",
             "nerve.optimizer.model_limits_fixture.v1",
             "semantic_construction",
-        ),
-        (
-            OVERLAY_PATH,
-            "runtime_overlay",
-            "nerve.optimizer.vulkan_component_overlay.v2",
-            "ordinary_lowering",
         ),
         (
             PRODUCT_CONVERSATION_FIXTURE_PATH,
@@ -434,7 +652,7 @@ def _build_plan(
             "ordinary_lowering",
             "physical_optimization",
         ],
-        "source_inputs": source_inputs(context, opportunity),
+        "source_inputs": _group_source_inputs(context, opportunities),
         "outputs": outputs,
         "resource_limits": {
             "maximum_construction_time_ns": None,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from nerve.representation_optimizer.contracts import (
     OPTIMIZATION_SCOPE_SCHEMA,
     SOURCE_BEHAVIOR_CONTRACT_SCHEMA,
     contract_digest,
+    representation_candidate_id,
     source_behavior_contract_digest,
     stable_contract_id,
     validate_contract,
@@ -33,8 +35,8 @@ from nerve.representation_optimizer.providers.resident_expansion import (
     ResidentExpansionToolchainResolver,
 )
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
-    OVERLAY_PATH,
     PROOF_PATH,
+    component_overlay_path,
     resident_shader_artifact_path,
 )
 from nerve.representation_optimizer.providers.resident_expansion.contracts import (
@@ -353,11 +355,6 @@ def _provider_products(tmp_path: Path, monkeypatch):
     opportunity = _opportunity(package)
     monkeypatch.setattr(
         "nerve.representation_optimizer.providers.resident_expansion.provider."
-        "require_resident_expansion",
-        lambda context, scope_ids: opportunity,
-    )
-    monkeypatch.setattr(
-        "nerve.representation_optimizer.providers.resident_expansion.provider."
         "discover_resident_expansions",
         lambda context: (opportunity,),
     )
@@ -619,9 +616,9 @@ def test_registry_discovers_a_generic_sparse_component_without_model_identity(
     assert report.evaluations[0].error is None
     assert len(report.candidates) == 1
     plan = report.candidates[0]
-    assert plan.target_lowering["source"]["component_id"] == _COMPONENT_ID
-    assert len(plan.target_lowering["resident_derivations"]) == 3
-    assert len(plan.target_lowering["shader_replacements"]) == 4
+    assert plan.target_lowering["regions"][0]["source"]["component_id"] == _COMPONENT_ID
+    assert len(plan.target_lowering["regions"][0]["resident_derivations"]) == 3
+    assert len(plan.target_lowering["regions"][0]["shader_replacements"]) == 4
     builtin_ids = {
         provider.identity.provider_id
         for provider in load_builtin_provider_registry().providers
@@ -631,6 +628,14 @@ def test_registry_discovers_a_generic_sparse_component_without_model_identity(
     assert toolchain.semantic_constructor is not None
     assert toolchain.ordinary_relowerer is not None
     assert toolchain.physical_optimizer is not None
+
+
+def test_resident_expansion_requests_only_exact_graph_structure_analysis() -> None:
+    provider = ExactResidentExpertExpansionProvider()
+
+    assert provider.required_analyzer_ids({}, {}) == (
+        "semantic_graph_structure",
+    )
 
 
 def test_registry_declines_resident_fp8_when_the_target_lacks_exact_capability(
@@ -693,11 +698,13 @@ def test_provider_plan_is_component_local_exact_and_product_qualified(
     )
     validate_contract(candidate)
     assert candidate["scope_ids"] == list(opportunity.scope_ids)
-    assert candidate["representation"]["topology"] == {
-        "kind": "component_local_sparse_expert_bank",
-        "component_ids": [_COMPONENT_ID],
-        "node_ids": ["projection_down", "projection_gate_up"],
-    }
+    topology = candidate["representation"]["topology"]
+    assert topology["kind"] == "independently_selectable_component_regions"
+    assert topology["component_ids"] == [_COMPONENT_ID]
+    assert topology["node_ids"] == ["projection_down", "projection_gate_up"]
+    assert topology["performance_equivalence_class"].startswith(
+        "resident_performance_class_"
+    )
     assert representation["confidence"]["mode"] == "exact"
     assert lowering["runtime"] == {
         "max_context_activations": 131_072,
@@ -733,6 +740,146 @@ def test_provider_plan_is_component_local_exact_and_product_qualified(
     assert all(item["controls"]["max_output_tokens"] == 65_536 for item in whole_model)
 
 
+def test_provider_groups_equivalent_components_into_independently_mountable_regions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    package = tmp_path / "package"
+    first = _opportunity(package)
+    second_scope_ids = tuple(
+        sorted(
+            (
+                stable_contract_id("scope", "second_down"),
+                stable_contract_id("scope", "second_gate"),
+            )
+        )
+    )
+    second = replace(
+        first,
+        component_id="sparse_block_beta",
+        scope_ids=second_scope_ids,
+        source_contract_digests=tuple(
+            contract_digest({"scope_id": scope_id}) for scope_id in second_scope_ids
+        ),
+        evidence_ids=(stable_contract_id("evidence", "resident_second"),),
+    )
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.providers.resident_expansion.provider."
+        "discover_resident_expansions",
+        lambda context: (first, second),
+    )
+    provider = ExactResidentExpertExpansionProvider()
+    context = SimpleNamespace(
+        hardware_profile={"capability_class": "hardware_capability_fixture"},
+        qualification_regime=QualificationRegime(),
+        source_artifacts=PackageSourceArtifactResolver(package),
+    )
+    evidence = EvidenceAssessment(
+        accepted=True,
+        evidence_ids=tuple(sorted((*first.evidence_ids, *second.evidence_ids))),
+        facts={"exact": True},
+        reasons=("fixture evidence",),
+    )
+
+    candidates = provider.synthesize_candidates(context, evidence)
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["representation"]["topology"]["component_ids"] == [
+        "sparse_block_alpha",
+        "sparse_block_beta",
+    ]
+    representation = provider.emit_representation_ir(context, candidate)
+    lowering = provider.lower_for_target(context, candidate, representation)
+    assert [region["source"]["component_id"] for region in lowering["regions"]] == [
+        "sparse_block_alpha",
+        "sparse_block_beta",
+    ]
+    mount = provider.mount_requirements(context, candidate)
+    assert [
+        region["replacements"][0]["source_component_id"] for region in mount["regions"]
+    ] == ["sparse_block_alpha", "sparse_block_beta"]
+    assert len(provider.benchmark_workloads(context, candidate)) == 5
+
+
+def test_provider_rejects_candidate_topology_not_bound_to_discovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    provider, context, _opportunity, candidate, *_rest = _provider_products(
+        tmp_path,
+        monkeypatch,
+    )
+    candidate["representation"]["topology"]["component_ids"] = ["different_component"]
+    candidate["candidate_id"] = representation_candidate_id(candidate)
+
+    with pytest.raises(ModelCompileError, match="topology"):
+        provider.emit_representation_ir(context, candidate)
+
+
+def test_provider_rejects_candidate_source_digest_not_bound_to_discovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    provider, context, _opportunity, candidate, *_rest = _provider_products(
+        tmp_path,
+        monkeypatch,
+    )
+    candidate["source_contract_digests"][0] = contract_digest({"different": "source"})
+    candidate["candidate_id"] = representation_candidate_id(candidate)
+
+    with pytest.raises(ModelCompileError, match="source contracts"):
+        provider.emit_representation_ir(context, candidate)
+
+
+def test_provider_never_shares_measurements_across_different_physical_geometry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = _opportunity(tmp_path / "package")
+    second_scope_ids = tuple(
+        sorted(
+            (
+                stable_contract_id("scope", "different_down"),
+                stable_contract_id("scope", "different_gate"),
+            )
+        )
+    )
+    different = replace(
+        first,
+        component_id="different_geometry",
+        scope_ids=second_scope_ids,
+        source_contract_digests=tuple(
+            contract_digest({"scope_id": scope_id}) for scope_id in second_scope_ids
+        ),
+        evidence_ids=(stable_contract_id("evidence", "different_geometry"),),
+        experts_per_token=first.experts_per_token + 1,
+    )
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.providers.resident_expansion.provider."
+        "discover_resident_expansions",
+        lambda context: (first, different),
+    )
+    provider = ExactResidentExpertExpansionProvider()
+    evidence = EvidenceAssessment(
+        accepted=True,
+        evidence_ids=tuple(sorted((*first.evidence_ids, *different.evidence_ids))),
+        facts={"exact": True},
+        reasons=("fixture evidence",),
+    )
+
+    candidates = provider.synthesize_candidates(
+        SimpleNamespace(hardware_profile={"capability_class": "fixture"}),
+        evidence,
+    )
+
+    assert len(candidates) == 2
+    assert {
+        tuple(candidate["representation"]["topology"]["component_ids"])
+        for candidate in candidates
+    } == {(_COMPONENT_ID,), ("different_geometry",)}
+
+
 def test_toolchain_constructs_and_proves_only_the_declared_component_boundary(
     tmp_path: Path,
     monkeypatch,
@@ -753,7 +900,7 @@ def test_toolchain_constructs_and_proves_only_the_declared_component_boundary(
     )
     assert set(results) == set(build_plan.output_paths)
 
-    overlay = json.loads((root / OVERLAY_PATH).read_text())
+    overlay = json.loads((root / component_overlay_path(_COMPONENT_ID)).read_text())
     assert overlay["source_component_id"] == _COMPONENT_ID
     assert len(overlay["resident_derivations"]) == 3
     assert all(
@@ -766,7 +913,7 @@ def test_toolchain_constructs_and_proves_only_the_declared_component_boundary(
     }
     assert replaced_paths == {
         item["artifact_path"]
-        for item in lowering["shader_replacements"]
+        for item in lowering["regions"][0]["shader_replacements"]
         if item["execution_kind"] == "scalar"
     }
 
@@ -798,18 +945,23 @@ def test_toolchain_constructs_and_proves_only_the_declared_component_boundary(
     assert result["facts"]["code_domain"] == {
         "source_code_count": 16,
         "finite_scale_code_count": 255,
+        "region_count": 1,
         "derivation_count": 3,
     }
-    assert result["facts"]["resource_boundary"] == {
-        "component_id": _COMPONENT_ID,
-        "derived_resource_count": 3,
-        "source_component_restored": True,
-    }
-    assert result["facts"]["source_coverage"] == {
-        "component_id": _COMPONENT_ID,
-        "selected_weight_count": 3,
-        "execution_path_count": 4,
-    }
+    assert result["facts"]["resource_boundaries"] == [
+        {
+            "component_id": _COMPONENT_ID,
+            "derived_resource_count": 3,
+            "source_component_restored": True,
+        }
+    ]
+    assert result["facts"]["source_coverage"] == [
+        {
+            "component_id": _COMPONENT_ID,
+            "selected_weight_count": 3,
+            "execution_path_count": 4,
+        }
+    ]
 
 
 def test_proof_rejects_an_internally_consistent_but_incomplete_source_cover(
@@ -826,7 +978,7 @@ def test_proof_rejects_an_internally_consistent_but_incomplete_source_cover(
         lowering,
         _build_plan,
     ) = products
-    incomplete = deepcopy(lowering)
+    incomplete = deepcopy(lowering["regions"][0])
     incomplete["resident_derivations"] = incomplete["resident_derivations"][1:]
 
     with pytest.raises(
@@ -835,7 +987,7 @@ def test_proof_rejects_an_internally_consistent_but_incomplete_source_cover(
     ):
         _verify_source_coverage(context.source_artifacts, incomplete)
 
-    incomplete = deepcopy(lowering)
+    incomplete = deepcopy(lowering["regions"][0])
     incomplete["shader_replacements"] = incomplete["shader_replacements"][1:]
     with pytest.raises(
         ModelCompileError,
@@ -858,7 +1010,7 @@ def test_proof_rejects_overlay_changes_outside_declared_shader_and_residency_edi
         _lowering,
         _build_plan,
     ) = products
-    overlay_path = root / OVERLAY_PATH
+    overlay_path = root / component_overlay_path(_COMPONENT_ID)
     overlay = json.loads(overlay_path.read_text())
     overlay["component"]["circuit"]["nodes"][0]["attrs"]["hidden_size"] += 128
     overlay_path.write_text(json.dumps(overlay))

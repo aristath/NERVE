@@ -75,7 +75,7 @@ non-finite number, or internally inconsistent contract.
 | `prebenchmark_record.v1` | Static integrity, proof, and cheap-sanity gate result |
 | `validation_record.v2` | Complete funnel, benchmark link, full runs, warmed product-performance gate, and counterexamples |
 | `validation_evidence_integrity.v1` | Complete byte coverage of validation evidence |
-| `runtime_implementation_predicate.v5` | Exact measured hardware-profile identities plus capability multiplicities, explicit alternative/source-retained phase ownership, execution-regime and placement guards, and qualified speculative-decoding modes for one verified implementation |
+| `runtime_implementation_predicate.v6` | Exact measured hardware-profile identities plus capability multiplicities, explicit alternative/source-retained phase ownership, execution-regime, residency-policy and placement guards, and qualified speculative-decoding modes for one verified implementation |
 | `runtime_mount_plan.v3` | Runtime-adapter identity, connected replacement regions, and candidate-local component-overlay and tensor-index artifacts |
 | `vulkan_component_overlay.v2` | One component's candidate circuit, execution kernels, and sorted parameter-level resident derivations |
 | `promotion_decision.v2` | Candidate, proof, benchmark, validation, target, artifact, and provenance decision |
@@ -380,6 +380,11 @@ The executor acknowledges the ordered release only after no registered device
 or pooled buffer remains; the host re-attests the declared reservable capacity
 only after that acknowledgement. Other processes and their allocations are not
 part of the NERVE lease and are never unloaded to manufacture an idle device.
+The optimizer does not own a second, independently tuned capacity fraction.
+Every linked runtime executable reports the same versioned device-local memory
+policy, and target preparation fails before device discovery when those reports
+disagree. The runtime's opening-availability partition is therefore the single
+source for both optimizer admission evidence and execution-time enforcement.
 Normal completion never treats stdin EOF, process exit,
 destructor order, or an expired experiment deadline as accelerator teardown.
 Mount and execution commands are bounded cancellation quanta: cancellation is
@@ -466,10 +471,12 @@ allowed capability classes, device kinds, APIs, required processes and
 features; prefill, decode, component, mixed, or state-transition phases;
 measured activation-batch, context, and state ranges; and local, distributed,
 or either placement with an exact device-count range and any required
-interconnects. Physical profile documents remain in the published bundle. An
-implementation may run only on a physical profile represented in its measured
-evidence; matching a capability class alone does not prove equal realized
-performance.
+interconnects. The predicate also seals the measured residency regime: eager,
+demand-retained, and bounded demand-paged execution are not interchangeable
+because their footprint, reload traffic, and synchronization costs differ.
+Physical profile documents remain in the published bundle. An implementation
+may run only on a physical profile represented in its measured evidence;
+matching a capability class alone does not prove equal realized performance.
 
 Each registry entry retains:
 

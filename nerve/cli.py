@@ -383,6 +383,7 @@ def main() -> None:
                 selected_device_ids=args.allow_physical_device,
                 vulkan_driver_files=args.vulkan_driver_manifest,
                 speculative_draft_tokens=args.speculative_draft_tokens,
+                residency_policy=args.residency_policy.replace("-", "_"),
                 cancel_requested=lambda: cancel_requested,
             )
         except ModelCompileCancelled:
@@ -552,7 +553,10 @@ def validate_action_options(
         ("--duplicate-after", bool(args.duplicate_after)),
         ("--chain", args.chain is not None),
         ("--context-size", args.context_size is not None),
-        ("--residency-policy", args.residency_policy != "eager"),
+        (
+            "--residency-policy",
+            args.residency_policy != "eager" and args.optimize_model is None,
+        ),
         ("--vulkan-device-index", args.vulkan_device_index is not None),
         ("--max-new-tokens", args.max_new_tokens is not None),
         ("--seed", args.seed is not None),

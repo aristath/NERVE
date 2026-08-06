@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,10 @@ from nerve.representation_optimizer.analysis.evidence import (
 )
 from nerve.representation_optimizer.benchmarking.orchestrator import (
     benchmark_candidate,
+)
+from nerve.representation_optimizer.benchmarking.contracts import (
+    BenchmarkWorkload,
+    benchmark_workload_id,
 )
 from nerve.representation_optimizer.benchmarking.planning import (
     build_benchmark_plan,
@@ -188,9 +192,7 @@ def _qualified_candidate(
         ordinary_relowerer=CompleteRelowerer([]),
         physical_optimizer=CompletePhysicalOptimizer([]),
     )
-    exact_path = (
-        package_dir / "lowered" / "execution_graph.circuits.json"
-    )
+    exact_path = package_dir / "lowered" / "execution_graph.circuits.json"
     benchmark_plan = build_benchmark_plan(
         candidate_plan=candidate_plan,
         construction_record=construction.record,
@@ -202,17 +204,13 @@ def _qualified_candidate(
         reference_artifact_refs=(
             {
                 "path": exact_path.relative_to(package_dir).as_posix(),
-                "digest": staged_artifact_digest(
-                    exact_path.read_bytes()
-                ),
+                "digest": staged_artifact_digest(exact_path.read_bytes()),
             },
         ),
         matched_conditions={
             "devices": [
                 {
-                    "device_id": profile["hardware_identity"][
-                        "stable_device_id"
-                    ],
+                    "device_id": profile["hardware_identity"]["stable_device_id"],
                     "hardware_profile_digest": contract_digest(profile),
                     "capability_class": profile["capability_class"],
                     "api": profile["provenance"]["api"],
@@ -233,9 +231,7 @@ def _qualified_candidate(
         benchmark_plan=benchmark_plan,
     )
     validation_workspace = tmp_path / "validation-workspace"
-    validation_adapter = FixtureValidationAdapter(
-        validation_behavior
-    )
+    validation_adapter = FixtureValidationAdapter(validation_behavior)
     prebenchmark = prepare_candidate_for_benchmark(
         package_dir=package_dir,
         candidate_workspace_root=candidate_workspace,
@@ -244,9 +240,7 @@ def _qualified_candidate(
         construction_record=construction.record,
         validation_plan=validation_plan,
         session=construction.session,
-        proof_verifiers=ProofVerifierRegistry.from_verifiers(
-            (FixtureProofVerifier(),)
-        ),
+        proof_verifiers=ProofVerifierRegistry.from_verifiers((FixtureProofVerifier(),)),
         adapter=validation_adapter,
     )
     assert prebenchmark.status == "passed"
@@ -343,9 +337,7 @@ def _candidate_plan_and_analysis(
         evidence=(evidence,),
         details=(details,),
     )
-    analysis_run_directory = (
-        tmp_path / "analysis-workspace" / run.run_id
-    )
+    analysis_run_directory = tmp_path / "analysis-workspace" / run.run_id
     write_analysis_run(run, analysis_run_directory)
     problem = ProviderProblem.from_documents(
         package_id=catalog["package_id"],
@@ -392,17 +384,10 @@ def test_promotion_publishes_complete_self_contained_package_atomically(
     assert published == destination
     assert _tree_bytes(qualified.package_dir) == source_before
     assert (
-        (
-            qualified.package_dir
-            / "lowered"
-            / "execution_graph.circuits.json"
-        ).stat().st_ino
-        != (
-            destination
-            / "lowered"
-            / "execution_graph.circuits.json"
-        ).stat().st_ino
-    )
+        qualified.package_dir / "lowered" / "execution_graph.circuits.json"
+    ).stat().st_ino != (
+        destination / "lowered" / "execution_graph.circuits.json"
+    ).stat().st_ino
     manifest = read_json(destination / "vulkan_resident_package.json")
     validate_compiled_package(destination, manifest)
     stage = read_json(destination / "optimization" / "stage.json")
@@ -410,9 +395,12 @@ def test_promotion_publishes_complete_self_contained_package_atomically(
         read_json(destination / "optimization" / "implementations.json")
     )
     assert stage["status"] == "optimized"
-    assert stage["exact_baseline"] == read_json(
-        qualified.package_dir / "optimization" / "stage.json"
-    )["exact_baseline"]
+    assert (
+        stage["exact_baseline"]
+        == read_json(qualified.package_dir / "optimization" / "stage.json")[
+            "exact_baseline"
+        ]
+    )
     assert stage["implementation_registry"]["implementation_count"] == 1
     assert len(registry.implementations) == 1
     entry = registry.implementations[0]
@@ -429,10 +417,7 @@ def test_promotion_publishes_complete_self_contained_package_atomically(
         / "analysis.json"
     ).is_file()
     assert (
-        root
-        / "evidence"
-        / "hardware"
-        / f"{qualified.profile['profile_id']}.json"
+        root / "evidence" / "hardware" / f"{qualified.profile['profile_id']}.json"
     ).is_file()
     assert (
         root
@@ -452,10 +437,7 @@ def test_promotion_publishes_complete_self_contained_package_atomically(
         for evidence_ref in event["evidence_refs"]:
             assert (destination / evidence_ref).is_file()
     integrity_files = manifest["artifact_integrity"]["files"]
-    assert (
-        f"{entry['artifact_bundle']['root_ref']}/promotion.json"
-        in integrity_files
-    )
+    assert f"{entry['artifact_bundle']['root_ref']}/promotion.json" in integrity_files
 
 
 def test_promoted_package_is_relocatable_and_has_no_workspace_dependency(
@@ -474,9 +456,7 @@ def test_promoted_package_is_relocatable_and_has_no_workspace_dependency(
     shutil.rmtree(qualified.candidate_workspace)
     shutil.rmtree(qualified.benchmark_workspace)
     shutil.rmtree(qualified.validation_workspace)
-    shutil.rmtree(
-        qualified.analysis_run_directories[0].parent
-    )
+    shutil.rmtree(qualified.analysis_run_directories[0].parent)
     relocated = tmp_path / "relocated" / "model"
     shutil.copytree(optimized, relocated)
     shutil.rmtree(optimized)
@@ -502,10 +482,7 @@ def test_candidate_that_is_not_faster_cannot_be_prepared_for_publication(
         benchmark_behavior=behavior,
     )
 
-    assert (
-        qualified.benchmark.record.to_json()["decision"]
-        != "materially_faster"
-    )
+    assert qualified.benchmark.record.to_json()["decision"] != "materially_faster"
     assert qualified.validation.status == CandidateState.REJECTED.value
     with pytest.raises(
         ModelCompileError,
@@ -551,9 +528,7 @@ def test_publication_revalidates_evidence_and_leaves_no_partial_package(
 
     assert not destination.exists()
     assert not (tmp_path / ".nerve-package-staging").exists()
-    manifest = read_json(
-        qualified.package_dir / "vulkan_resident_package.json"
-    )
+    manifest = read_json(qualified.package_dir / "vulkan_resident_package.json")
     validate_compiled_package(qualified.package_dir, manifest)
 
 
@@ -606,9 +581,7 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
 
     assert predicate["hardware"] == {
         "measured_profile_ids": [qualified.profile["profile_id"]],
-        "capability_classes": [
-            qualified.profile["capability_class"]
-        ],
+        "capability_classes": [qualified.profile["capability_class"]],
         "device_kinds": ["gpu"],
         "apis": ["vulkan"],
         "required_processes": [],
@@ -628,7 +601,109 @@ def test_promotion_predicate_is_derived_from_measured_regimes_and_target(
             "maximum": 8192,
         },
         "speculative_draft_token_counts": [0],
+        "residency_policies": ["eager"],
     }
+    assert predicate["placement"] == {
+        "mode": "local",
+        "minimum_device_count": 1,
+        "maximum_device_count": 1,
+        "required_interconnects": [],
+    }
+
+
+def test_component_benchmark_qualifies_only_its_physical_device(
+    tmp_path: Path,
+) -> None:
+    qualified = _qualified_candidate(tmp_path)
+    second_profile = deepcopy(qualified.profile)
+    second_profile["hardware_identity"]["stable_device_id"] = (
+        "vulkan:compatible-but-unmeasured"
+    )
+    second_profile["hardware_identity"]["physical_location"] = "fixture_slot_b"
+    second_profile["profile_id"] = stable_contract_id(
+        "hardware_profile",
+        [
+            second_profile["hardware_identity"],
+            second_profile["capability_class"],
+            second_profile["provenance"],
+            second_profile["identity_extensions"],
+            second_profile["measurements"],
+        ],
+    )
+
+    component_ids = ("component_a", "component_b")
+    workloads = []
+    for component_id, workload in zip(
+        component_ids,
+        qualified.candidate_plan.benchmark_workloads,
+        strict=True,
+    ):
+        document = workload.to_json()
+        document["controls"]["component_id"] = component_id
+        document["workload_id"] = benchmark_workload_id(document)
+        workloads.append(BenchmarkWorkload.from_json(document))
+    candidate_plan = replace(
+        qualified.candidate_plan,
+        benchmark_workloads=tuple(workloads),
+    )
+    profiles = (qualified.profile, second_profile)
+    devices = sorted(
+        (
+            {
+                "device_id": profile["hardware_identity"]["stable_device_id"],
+                "hardware_profile_digest": contract_digest(profile),
+                "capability_class": profile["capability_class"],
+                "api": profile["provenance"]["api"],
+            }
+            for profile in profiles
+        ),
+        key=lambda device: device["device_id"],
+    )
+    measured_device_id = qualified.profile["hardware_identity"]["stable_device_id"]
+    benchmark_plan = build_benchmark_plan(
+        candidate_plan=candidate_plan,
+        construction_record=qualified.construction.record,
+        hardware_profiles=profiles,
+        reference_implementation_id="exact-reference",
+        reference_contract_digest=candidate_plan.candidate.to_json()[
+            "source_contract_digests"
+        ][0],
+        reference_artifact_refs=(
+            {
+                "path": "lowered/execution_graph.circuits.json",
+                "digest": staged_artifact_digest(
+                    (
+                        qualified.package_dir
+                        / "lowered"
+                        / "execution_graph.circuits.json"
+                    ).read_bytes()
+                ),
+            },
+        ),
+        matched_conditions={
+            "devices": devices,
+            "placement": {
+                component_id: measured_device_id for component_id in component_ids
+            },
+            "controls": {"scheduler": "normal"},
+            "environment": {"power_profile": "matched"},
+            "capacity_reservation_digest": device_state_digest(
+                {"fixture_state": "capacity_available"}
+            ),
+            "residency_scope": "capacity_partition",
+        },
+    )
+
+    predicate = _derive_runtime_predicate(
+        benchmark_plan=benchmark_plan,
+        validation_plan=qualified.validation.plan,
+        hardware_profiles=profiles,
+        candidate=candidate_plan.candidate.to_json(),
+    ).to_json()
+
+    assert predicate["hardware"]["measured_profile_ids"] == [
+        qualified.profile["profile_id"]
+    ]
     assert predicate["placement"] == {
         "mode": "local",
         "minimum_device_count": 1,
@@ -679,9 +754,7 @@ def test_promotion_rejects_hardware_profile_not_used_by_benchmark(
 ) -> None:
     qualified = _qualified_candidate(tmp_path)
     mismatched_profile = deepcopy(qualified.profile)
-    mismatched_profile["runtime_bindings"] = {
-        "queue": "different measured binding"
-    }
+    mismatched_profile["runtime_bindings"] = {"queue": "different measured binding"}
 
     with pytest.raises(
         ModelCompileError,
@@ -692,9 +765,7 @@ def test_promotion_rejects_hardware_profile_not_used_by_benchmark(
             candidate_workspace_root=qualified.candidate_workspace,
             benchmark_workspace_root=qualified.benchmark_workspace,
             validation_workspace_root=qualified.validation_workspace,
-            analysis_run_directories=(
-                qualified.analysis_run_directories
-            ),
+            analysis_run_directories=(qualified.analysis_run_directories),
             candidate_plan=qualified.candidate_plan,
             construction_record=qualified.construction.record,
             benchmark_record=qualified.benchmark.record,
@@ -710,11 +781,7 @@ def test_publication_revalidates_analysis_provenance(
 ) -> None:
     qualified = _qualified_candidate(tmp_path)
     prepared = _prepare(qualified)
-    details = next(
-        (
-            qualified.analysis_run_directories[0] / "details"
-        ).iterdir()
-    )
+    details = next((qualified.analysis_run_directories[0] / "details").iterdir())
     details.write_text('{"mutated":true}\n')
     destination = tmp_path / "must-not-exist"
 
@@ -815,9 +882,7 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
 ) -> None:
     qualified = _qualified_candidate(tmp_path)
     prepared = _prepare(qualified)
-    source_stage = read_json(
-        qualified.package_dir / "optimization" / "stage.json"
-    )
+    source_stage = read_json(qualified.package_dir / "optimization" / "stage.json")
     registry = ImplementationRegistry.from_json(
         read_json(
             qualified.package_dir
@@ -835,20 +900,12 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
             "measured_profile_ids"
         ],
         capability_classes=(
-            first["runtime_predicate"]["hardware"][
-                "capability_classes"
-            ]
+            first["runtime_predicate"]["hardware"]["capability_classes"]
         ),
-        device_kinds=first["runtime_predicate"]["hardware"][
-            "device_kinds"
-        ],
+        device_kinds=first["runtime_predicate"]["hardware"]["device_kinds"],
         apis=first["runtime_predicate"]["hardware"]["apis"],
-        required_processes=first["runtime_predicate"]["hardware"][
-            "required_processes"
-        ],
-        required_features=first["runtime_predicate"]["hardware"][
-            "required_features"
-        ],
+        required_processes=first["runtime_predicate"]["hardware"]["required_processes"],
+        required_features=first["runtime_predicate"]["hardware"]["required_features"],
         execution_phases=("decode",),
         alternative_execution_phases=("decode",),
         source_retained_execution_phases=(),
@@ -859,6 +916,7 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
         state_activations_minimum=0,
         state_activations_maximum=16_384,
         speculative_draft_token_counts=(3,),
+        residency_policies=("eager",),
         placement_mode="local",
         minimum_device_count=1,
         maximum_device_count=1,
@@ -870,10 +928,7 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
         second_candidate,
         second_predicate,
     )
-    second_root = (
-        "optimization/implementations/"
-        f"{second['implementation_id']}"
-    )
+    second_root = f"optimization/implementations/{second['implementation_id']}"
     second["artifact_bundle"]["root_ref"] = second_root
     second["artifact_bundle"]["candidate_integrity_ref"] = (
         f"{second_root}/candidate/integrity.json"
@@ -885,15 +940,13 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
         if name == "analysis_run_refs":
             for reference in value:
                 reference["artifact_ref"] = (
-                    f"{second_root}/evidence/analysis/"
-                    f"{reference['run_id']}"
+                    f"{second_root}/evidence/analysis/{reference['run_id']}"
                 )
             continue
         if name == "hardware_profile_refs":
             for reference in value:
                 reference["artifact_ref"] = (
-                    f"{second_root}/evidence/hardware/"
-                    f"{reference['profile_id']}.json"
+                    f"{second_root}/evidence/hardware/{reference['profile_id']}.json"
                 )
             continue
         suffix = value.split("/", 3)[-1]
@@ -905,9 +958,9 @@ def test_registry_allows_distinct_verified_implementations_for_same_scope(
     )
 
     assert len(updated.implementations) == 2
-    assert {
-        tuple(entry["scope_ids"]) for entry in updated.implementations
-    } == {tuple(first["scope_ids"])}
+    assert {tuple(entry["scope_ids"]) for entry in updated.implementations} == {
+        tuple(first["scope_ids"])
+    }
     assert {
         tuple(entry["runtime_predicate"]["execution"]["phases"])
         for entry in updated.implementations

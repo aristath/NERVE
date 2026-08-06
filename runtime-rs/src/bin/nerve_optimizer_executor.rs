@@ -87,6 +87,17 @@ fn main() {
         println!("{}", nerve_runtime::RUNTIME_IMPLEMENTATION_FINGERPRINT);
         return;
     }
+    if std::env::args()
+        .skip(1)
+        .eq(["--runtime-device-local-memory-policy"])
+    {
+        println!(
+            "{}",
+            serde_json::to_string(&nerve_runtime::vulkan_device_local_memory_policy())
+                .expect("runtime device-local memory policy must serialize")
+        );
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("nerve-optimizer-executor error: {error}");
         std::process::exit(1);
