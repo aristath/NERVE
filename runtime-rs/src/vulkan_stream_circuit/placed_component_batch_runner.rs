@@ -285,11 +285,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     ),
                 )));
             }
-            shared
-                .buffers
-                .first()
-                .expect("shared demand predicate contains its owner view")
-                .write_bytes(&1u32.to_le_bytes())
+            write_shared_device_predicate_views(shared.buffers.iter(), true)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             Some(shared.buffers)
         } else {
@@ -583,17 +579,15 @@ impl VulkanResidentPlacedComponentBatchRunner {
     fn reset_deferred_demand_pipeline_predicate(
         &self,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let predicate = self
+        let predicates = self
             .demand_pipeline_predicates
             .as_ref()
-            .and_then(|predicates| predicates.first())
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "component batch has no shared demand-pipeline predicate".to_string(),
                 ))
             })?;
-        predicate
-            .write_bytes(&1u32.to_le_bytes())
+        write_shared_device_predicate_views(predicates.iter(), true)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
 

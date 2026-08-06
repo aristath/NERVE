@@ -74,7 +74,7 @@ use crate::vulkan_compute::{
 };
 #[cfg(test)]
 use crate::vulkan_compute::{
-    VulkanGpuResidencyMissingRequest, VulkanStableResourceArenaStats,
+    VulkanComputeDeviceCatalog, VulkanGpuResidencyMissingRequest, VulkanStableResourceArenaStats,
     reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 use crate::vulkan_distributed::{
@@ -142,6 +142,7 @@ include!("vulkan_stream_circuit/token_runtime.rs");
 include!("vulkan_stream_circuit/token_engine.rs");
 include!("vulkan_stream_circuit/resident_package_slices.rs");
 include!("vulkan_stream_circuit/parallel_speculative_state_ingestion.rs");
+include!("vulkan_stream_circuit/parallel_speculative_feedback_state.rs");
 include!("vulkan_stream_circuit/targeted_component_mount.rs");
 include!("vulkan_stream_circuit/targeted_component_execution.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
@@ -185,6 +186,7 @@ include!("vulkan_stream_circuit/compiled_resource_retiering.rs");
 include!("vulkan_stream_circuit/compiled_resource_teardown.rs");
 include!("vulkan_stream_circuit/demand_residency_dispatch_chain.rs");
 include!("vulkan_stream_circuit/demand_residency_batch_chain.rs");
+include!("vulkan_stream_circuit/demand_resident_feedback.rs");
 include!("vulkan_stream_circuit/resident_package_resource_loading.rs");
 include!("vulkan_stream_circuit/resident_package_kernel_loading.rs");
 include!("vulkan_stream_circuit/token_engine_codec.rs");

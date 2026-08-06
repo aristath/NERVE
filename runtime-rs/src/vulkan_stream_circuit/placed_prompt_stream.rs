@@ -4,6 +4,20 @@ struct VulkanResidentInProcessPlacedPendingStreamFeedbackWindow {
     adaptive_feedback_loads_before: Option<u64>,
 }
 
+fn demand_feedback_retry_deferred_after_scalar(
+    was_deferred: bool,
+    input_is_feedback: bool,
+    should_emit_public_output: bool,
+    input_closes_loop_after_processing: bool,
+    residency_changed: bool,
+) -> bool {
+    was_deferred
+        && (!input_is_feedback
+            || !should_emit_public_output
+            || input_closes_loop_after_processing
+            || residency_changed)
+}
+
 pub struct VulkanResidentInProcessPlacedPromptStream {
     package: Arc<VulkanResidentInProcessPlacedModelPackage>,
     processor: VulkanResidentInProcessPlacedStreamProcessor,
@@ -16,6 +30,7 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     speculative_draft_tokens: usize,
     speculative_confidence_threshold: f32,
     feedback_execution_selector: Option<VulkanAdaptiveFeedbackExecutionSelector>,
+    demand_feedback_retry_deferred: bool,
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
@@ -160,6 +175,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             speculative_draft_tokens: 0,
             speculative_confidence_threshold: 0.0,
             feedback_execution_selector: None,
+            demand_feedback_retry_deferred: false,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -245,6 +261,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
             speculative_draft_tokens: self.speculative_draft_tokens,
             speculative_confidence_threshold: self.speculative_confidence_threshold,
             feedback_execution_selector: self.feedback_execution_selector.clone(),
+            demand_feedback_retry_deferred: self.demand_feedback_retry_deferred,
             resident_feedback_template_catalog: BTreeMap::new(),
             pending_scheduler_activation: None,
         })
@@ -355,6 +372,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let zeroed = self
             .processor
             .reset_for_new_session(&self.devices, random_seed)?;
+        self.processor.reset_resident_feedback_session_state()?;
         self.transient_state_pages.clear();
         self.session.next_stream_tick = 0;
         self.session.completed_prompt_event_count = 0;
@@ -364,6 +382,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.active_input_event = None;
         self.pending_input_events.clear();
         self.pending_scheduler_activation = None;
+        self.demand_feedback_retry_deferred = false;
+        self.resident_feedback_template_catalog.clear();
         Ok(zeroed)
     }
 
@@ -391,6 +411,9 @@ impl VulkanResidentInProcessPlacedPromptStream {
     }
 
     fn adaptive_feedback_uses_resident_loop(&self) -> bool {
+        if self.demand_feedback_retry_deferred {
+            return false;
+        }
         self.feedback_execution_selector
             .as_ref()
             .filter(|_| self.speculative_confidence_threshold == 0.0)
@@ -626,18 +649,24 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .id
             .clone();
         let stream_tick = self.session.next_stream_tick;
-        let adaptive_scalar_loads_before = self
+        let adaptive_scalar_is_observed = self
             .feedback_execution_selector
             .as_ref()
-            .filter(|selector| {
+            .is_some_and(|selector| {
                 self.speculative_confidence_threshold == 0.0
                     && !selector.is_calibrated()
                     && selector.next_candidate() == VulkanFeedbackExecutionCandidate::Scalar
                     && activation.input_is_feedback
                     && activation.should_emit_public_output
                     && !activation.input_closes_loop_after_processing
-            })
-            .map(|_| {
+            });
+        let demand_retry_is_observed = self.demand_feedback_retry_deferred
+            && activation.input_is_feedback
+            && activation.should_emit_public_output
+            && !activation.input_closes_loop_after_processing;
+        let adaptive_scalar_loads_before =
+            (adaptive_scalar_is_observed || demand_retry_is_observed)
+                .then(|| {
                 self.package
                     .compiled_resource_load_required_count()
                     .map_err(|error| {
@@ -647,7 +676,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                             )),
                         )
                     })
-            })
+                })
             .transpose()?;
         let adaptive_scalar_started_at = adaptive_scalar_loads_before.map(|_| Instant::now());
         let tail = if activation.should_emit_public_output {
@@ -728,8 +757,16 @@ impl VulkanResidentInProcessPlacedPromptStream {
             })
             .transpose()?
             .unwrap_or(false);
+        self.demand_feedback_retry_deferred = demand_feedback_retry_deferred_after_scalar(
+            self.demand_feedback_retry_deferred,
+            activation.input_is_feedback,
+            activation.should_emit_public_output,
+            activation.input_closes_loop_after_processing,
+            !adaptive_scalar_had_no_loads,
+        );
         if output_event.is_some()
             && completed_input_run.is_none()
+            && adaptive_scalar_is_observed
             && adaptive_scalar_had_no_loads
         {
             self.feedback_execution_selector
@@ -1139,6 +1176,12 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .input_event
             .stop_token_ids
             .clone();
+        let input_token_id = self
+            .active_input_event
+            .as_ref()
+            .and_then(VulkanResidentInProcessPlacedActivePromptEvent::next_activation)
+            .ok_or(VulkanResidentInProcessPlacedRuntimeError::MissingPrivateFeedback)?
+            .input_token_id;
         let replay_slot = self
             .processor
             .resident_feedback_loop
@@ -1166,13 +1209,19 @@ impl VulkanResidentInProcessPlacedPromptStream {
             })
             .transpose()?;
         let started_at = Instant::now();
-        let window = self.processor.submit_resident_feedback_window(
+        let submission = self.processor.submit_resident_feedback_window(
             &self.devices,
             self.session.next_stream_tick,
             tick_count,
+            input_token_id,
             &stop_token_ids,
             replay_slot,
         )?;
+        let VulkanResidentInProcessPlacedFeedbackWindowSubmission::Submitted(window) = submission
+        else {
+            self.demand_feedback_retry_deferred = true;
+            return Ok(None);
+        };
         Ok(Some(
             VulkanResidentInProcessPlacedPendingStreamFeedbackWindow {
                 window,
@@ -1332,22 +1381,19 @@ impl VulkanResidentInProcessPlacedPromptStream {
             );
         if completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
             && planned_tick_count == completion.executed_tick_count
+            && let Some(loads_before) = adaptive_feedback_loads_before
         {
-            let adaptive_feedback_residency_changed = adaptive_feedback_loads_before
-                .map(|before| {
-                    self.package
-                        .compiled_resource_load_required_count()
-                        .map(|after| after != before)
-                        .map_err(|error| {
-                            VulkanResidentInProcessPlacedRuntimeError::Package(
-                                VulkanResidentTokenModelPackageError::new(format!(
-                                    "failed to verify resident-feedback calibration residency: {error}"
-                                )),
-                            )
-                        })
-                })
-                .transpose()?
-                .unwrap_or(false);
+            let adaptive_feedback_residency_changed = self
+                .package
+                .compiled_resource_load_required_count()
+                .map(|loads_after| loads_after != loads_before)
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to verify resident-feedback calibration residency: {error}"
+                        )),
+                    )
+                })?;
             self.feedback_execution_selector
                 .as_mut()
                 .expect("resident-feedback calibration requires an execution selector")

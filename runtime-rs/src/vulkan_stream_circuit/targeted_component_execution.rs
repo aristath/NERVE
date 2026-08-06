@@ -1406,6 +1406,7 @@ impl VulkanTargetedDecodeExecution {
                 physical_residency_schedule,
                 &resident_dispatches,
                 context,
+                None,
             )
             .map_err(|error| targeted_component_error_value(format!(
                 "failed to mount targeted demand-resident prefix: {error}"

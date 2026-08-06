@@ -150,6 +150,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             distributed_dispatch_groups,
             None,
             None,
+            None,
         )
     }
 
@@ -163,6 +164,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         distributed_dispatch_groups: &[Vec<usize>],
         physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
         demand_context: Option<&VulkanDemandResidencyExecutionContext>,
+        demand_pipeline_predicate: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         if tick_plan.device_id != mounted.device_id() {
             return Err(
@@ -213,6 +215,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                     &tick_plan.stages[start..end],
                     physical_residency_schedule,
                     demand_context,
+                    demand_pipeline_predicate.clone(),
                 )?,
             );
         }
@@ -264,11 +267,13 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
 
     fn configure_feedback_indirect_dispatches(
         &mut self,
+        device: &VulkanComputeDevice,
         control: &mut VulkanResidentFeedbackControlPlane,
         device_id: &str,
         prefix_dispatches: &[&VulkanResidentKernelDispatch],
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         generation_tail_dispatch_count: Option<usize>,
+        lane_capacity: usize,
     ) -> Result<(), VulkanError> {
         let first_stage_index = self.first_dispatch_segment_stage_index();
         let last_stage_index = self.last_dispatch_segment_stage_index();
@@ -284,6 +289,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                 &[]
             };
             segment.configure_feedback_indirect_dispatches(
+                device,
                 control,
                 device_id,
                 prefix,
@@ -291,9 +297,18 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                 (Some(segment.start_stage_index) == last_stage_index)
                     .then_some(generation_tail_dispatch_count)
                     .flatten(),
+                lane_capacity,
             )?;
         }
         Ok(())
+    }
+
+    fn feedback_dispatch_count(&self) -> Result<usize, VulkanError> {
+        self.dispatch_segments.iter().try_fold(0usize, |total, segment| {
+            total
+                .checked_add(segment.feedback_dispatch_count()?)
+                .ok_or_else(|| VulkanError("resident feedback dispatch count overflowed".to_string()))
+        })
     }
 
     pub fn distributed_dispatch_at_stage(

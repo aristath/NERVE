@@ -173,36 +173,39 @@ fn prepare_compact_shared_stream_control(
                 },
             )
         })?;
+    let mut control_buffers = vec![&first.mounted.stream_control_buffer];
     for slice in compact_slices {
-        let buffers_alias = Arc::ptr_eq(
-            &first.mounted.stream_control_buffer,
-            &slice.mounted.stream_control_buffer,
-        ) || first
-            .mounted
-            .stream_control_buffer
-            .shares_host_allocation_with(&slice.mounted.stream_control_buffer);
-        if !buffers_alias
-            || slice.cursor.stream_tick != first.cursor.stream_tick
+        if slice.cursor.stream_tick != first.cursor.stream_tick
             || slice.mounted.buffers.dynamic_state_capacity_activations
                 != first.mounted.buffers.dynamic_state_capacity_activations
         {
             return Err(
                 VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
-                    "compact placed slices do not share one stream-control timeline".to_string(),
+                    "compact placed slices disagree on their stream-control timeline".to_string(),
                 )),
             );
         }
+        if control_buffers.iter().all(|existing| {
+            !Arc::ptr_eq(existing, &slice.mounted.stream_control_buffer)
+                && !existing.shares_host_allocation_with(&slice.mounted.stream_control_buffer)
+        }) {
+            // Separate device-local imports share an allocation but not a
+            // host-write visibility domain. Scalar placed execution is a host
+            // control boundary, so every physical device view receives the
+            // current metadata explicitly. Shared-host aliases remain one
+            // mapped allocation and are written once.
+            control_buffers.push(&slice.mounted.stream_control_buffer);
+        }
     }
-    first
-        .mounted
-        .stream_control_buffer
-        .write_bytes_at(
+    let metadata = stream_control_metadata_bytes(VulkanMountedPlacedStreamControl {
+        stream_tick: first.cursor.stream_tick,
+        control_flags: 0,
+        dynamic_state_capacity_activations,
+    });
+    for buffer in control_buffers {
+        buffer.write_bytes_at(
             VULKAN_STREAM_CONTROL_METADATA_OFFSET,
-            &stream_control_metadata_bytes(VulkanMountedPlacedStreamControl {
-                stream_tick: first.cursor.stream_tick,
-                control_flags: 0,
-                dynamic_state_capacity_activations,
-            }),
+            &metadata,
         )
         .map_err(|error| {
             VulkanMountedPlacedResidentInProcessStreamTickError::StreamTick(
@@ -210,7 +213,9 @@ fn prepare_compact_shared_stream_control(
                     VulkanMountedPlacedResidentKernelDispatchError::Vulkan(error),
                 ),
             )
-        })
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

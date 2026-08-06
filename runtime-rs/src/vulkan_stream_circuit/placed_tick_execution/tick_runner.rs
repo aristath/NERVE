@@ -89,11 +89,13 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
     }
     if let Some(turn) = feedback_turn
         && (!slices
-            .iter()
-            .any(|slice| slice.device_id() == turn.input_device_id)
-            || !slices
                 .iter()
-                .any(|slice| slice.device_id() == turn.output_device_id))
+                .any(|slice| slice.device_id() == turn.output_device_id)
+            || turn
+                .synchronization
+                .destination_waits
+                .keys()
+                .any(|device_id| !slices.iter().any(|slice| slice.device_id() == device_id)))
     {
         return Err(
             VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
@@ -181,8 +183,8 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
                     VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
                         "compact placed execution requires mounted edge timeline synchronization"
                             .to_string(),
-                    ))
-                })?;
+                        ))
+                    })?;
                 let device_completed_stage_delta =
                     advance_compact_slice_with_distributed_dependencies(
                         &mut slices[*device_index],

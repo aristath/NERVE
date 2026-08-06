@@ -353,11 +353,6 @@ impl VulkanMountedPlacedStreamCircuit {
                     stream_control_buffer.byte_capacity()
                 ))));
             }
-            if !stream_control_buffer.is_persistently_mapped() {
-                return Err(VulkanStreamCircuitMountError::Vulkan(VulkanError(
-                    "stream-control buffer override is not persistently host mapped".to_string(),
-                )));
-            }
             stream_control_buffer
         } else {
             let mut stream_control_buffer =

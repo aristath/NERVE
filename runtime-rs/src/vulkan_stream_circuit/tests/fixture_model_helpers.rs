@@ -1,33 +1,19 @@
 pub(super) fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, VulkanError> {
     if let Some(raw_uuid) = std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID") {
         let raw_uuid = raw_uuid.to_string_lossy();
-        if raw_uuid.len() != 32 {
-            panic!(
-                "invalid NERVE_TEST_VULKAN_DEVICE_UUID {raw_uuid:?}; expected 32 hexadecimal digits"
-            );
-        }
-        let mut uuid = [0u8; 16];
-        for (index, byte) in uuid.iter_mut().enumerate() {
-            let offset = index * 2;
-            *byte = u8::from_str_radix(&raw_uuid[offset..offset + 2], 16).unwrap_or_else(|error| {
-                panic!("invalid NERVE_TEST_VULKAN_DEVICE_UUID {raw_uuid:?}: {error}")
-            });
-        }
-        let available_devices = VulkanComputeDevice::available_compute_devices()?;
-        let device = available_devices
-            .iter()
-            .find(|device| device.device_uuid == uuid)
-            .unwrap_or_else(|| {
-                panic!("explicit Vulkan test device UUID {raw_uuid:?} is not available")
-            });
-        return Ok(
-            VulkanComputeDevice::new_for_physical_device_index(device.physical_device_index)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "explicit Vulkan test device UUID {raw_uuid:?} could not be opened: {error}"
-                    )
-                }),
+        let uuid = parse_test_vulkan_device_uuid(
+            "NERVE_TEST_VULKAN_DEVICE_UUID",
+            raw_uuid.as_ref(),
         );
+        let physical_device_id = format!("vulkan-uuid:{raw_uuid}");
+        let catalog = VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(
+            &BTreeSet::from([physical_device_id]),
+        )?;
+        return catalog.open_device_uuid(uuid).map_err(|error| {
+            VulkanError(format!(
+                "explicit Vulkan test device UUID {raw_uuid:?} could not be opened: {error}"
+            ))
+        });
     }
     match std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX") {
         Ok(raw_index) => {
@@ -54,6 +40,39 @@ pub(super) fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, Vulka
 
 fn selected_test_vulkan_device_pair() -> Option<(Rc<VulkanComputeDevice>, Rc<VulkanComputeDevice>)>
 {
+    if let (Ok(raw_owner_uuid), Ok(raw_peer_uuid)) = (
+        std::env::var("NERVE_TEST_VULKAN_DEVICE_UUID"),
+        std::env::var("NERVE_TEST_VULKAN_PEER_DEVICE_UUID"),
+    ) {
+        let owner_uuid = parse_test_vulkan_device_uuid(
+            "NERVE_TEST_VULKAN_DEVICE_UUID",
+            &raw_owner_uuid,
+        );
+        let peer_uuid = parse_test_vulkan_device_uuid(
+            "NERVE_TEST_VULKAN_PEER_DEVICE_UUID",
+            &raw_peer_uuid,
+        );
+        assert_ne!(owner_uuid, peer_uuid);
+        let catalog = VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(
+            &BTreeSet::from([
+                format!("vulkan-uuid:{raw_owner_uuid}"),
+                format!("vulkan-uuid:{raw_peer_uuid}"),
+            ]),
+        )
+        .expect("explicit Vulkan test owner and peer devices must be discoverable");
+        return Some((
+            Rc::new(
+                catalog
+                    .open_device_uuid(owner_uuid)
+                    .expect("explicit Vulkan owner UUID must open"),
+            ),
+            Rc::new(
+                catalog
+                    .open_device_uuid(peer_uuid)
+                    .expect("explicit Vulkan peer UUID must open"),
+            ),
+        ));
+    }
     let (Ok(raw_owner_index), Ok(raw_peer_index)) = (
         std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX"),
         std::env::var("NERVE_TEST_VULKAN_PEER_DEVICE_INDEX"),
@@ -76,6 +95,21 @@ fn selected_test_vulkan_device_pair() -> Option<(Rc<VulkanComputeDevice>, Rc<Vul
             .expect("explicit Vulkan peer device must open"),
     );
     Some((owner, peer))
+}
+
+fn parse_test_vulkan_device_uuid(variable: &str, raw_uuid: &str) -> [u8; 16] {
+    if raw_uuid.len() != 32 {
+        panic!(
+            "invalid {variable} {raw_uuid:?}; expected 32 hexadecimal digits"
+        );
+    }
+    let mut uuid = [0u8; 16];
+    for (index, byte) in uuid.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&raw_uuid[offset..offset + 2], 16)
+            .unwrap_or_else(|error| panic!("invalid {variable} {raw_uuid:?}: {error}"));
+    }
+    uuid
 }
 
 fn selected_test_vulkan_device_triple() -> Option<(
@@ -142,7 +176,10 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         device_slice_count: 3,
         every_slice_has_terminal_segment: true,
         distributed_dispatches_are_bridged: true,
+        demand_dispatches_are_pipeline_guarded: true,
         every_edge_is_resident_replayable: true,
+        feedback_stream_control_is_resident_replayable: true,
+        speculative_state_is_resident_replayable: true,
         has_dynamic_push_constants: false,
         window_width: 64,
         sampler_history_capacity: 4_096,
@@ -163,6 +200,22 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         }
         .disabled_reason(),
         Some("host_staged_edge")
+    );
+    assert_eq!(
+        VulkanResidentInProcessPlacedFeedbackLoopEligibility {
+            feedback_stream_control_is_resident_replayable: false,
+            ..eligible
+        }
+        .disabled_reason(),
+        Some("host_staged_feedback_stream_control")
+    );
+    assert_eq!(
+        VulkanResidentInProcessPlacedFeedbackLoopEligibility {
+            speculative_state_is_resident_replayable: false,
+            ..eligible
+        }
+        .disabled_reason(),
+        Some("unreplayable_speculative_state_sync")
     );
     assert_eq!(
         VulkanResidentInProcessPlacedFeedbackLoopEligibility {
@@ -198,6 +251,14 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
     );
     assert_eq!(
         VulkanResidentInProcessPlacedFeedbackLoopEligibility {
+            demand_dispatches_are_pipeline_guarded: false,
+            ..eligible
+        }
+        .disabled_reason(),
+        Some("unguarded_demand_distributed_dispatch")
+    );
+    assert_eq!(
+        VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             has_dynamic_push_constants: true,
             ..eligible
         }
@@ -212,6 +273,35 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         }
         .window_width(),
         None
+    );
+}
+
+#[test]
+fn speculative_feedback_history_tracks_each_decoder_state_contract() {
+    assert_eq!(
+        resident_speculative_feedback_history_requirements([]),
+        VulkanResidentSpeculativeFeedbackHistoryRequirements::default(),
+    );
+    assert_eq!(
+        resident_speculative_feedback_history_requirements([true]),
+        VulkanResidentSpeculativeFeedbackHistoryRequirements {
+            parallel_state: true,
+            normalized_frames: false,
+        },
+    );
+    assert_eq!(
+        resident_speculative_feedback_history_requirements([false]),
+        VulkanResidentSpeculativeFeedbackHistoryRequirements {
+            parallel_state: false,
+            normalized_frames: true,
+        },
+    );
+    assert_eq!(
+        resident_speculative_feedback_history_requirements([true, false]),
+        VulkanResidentSpeculativeFeedbackHistoryRequirements {
+            parallel_state: true,
+            normalized_frames: true,
+        },
     );
 }
 

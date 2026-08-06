@@ -1,6 +1,6 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanParallelSpeculativeSourceTapBatchBinding {
     source_device_id: String,
+    source_scalar_buffer: Arc<VulkanResidentBuffer>,
     source_batch_signal_key: VulkanComponentBatchSignalKey,
     destination_signal_id: String,
     frame_byte_capacity: usize,
@@ -14,6 +14,24 @@ struct VulkanResidentParallelSpeculativeStateIngestion {
 }
 
 impl VulkanResidentParallelSpeculativeStateIngestion {
+    fn mount_execution_graph(
+        device: &VulkanComputeDevice,
+        decoder: &VulkanResidentSpeculativeDecoderProcessor,
+        processor: &VulkanResidentParallelBlockSpeculativeDecoderProcessor,
+        lane_capacity: usize,
+        runtime_identity_suffix: &str,
+    ) -> Result<VulkanResidentPlacedComponentBatchRunner, VulkanResidentInProcessPlacedRuntimeError>
+    {
+        VulkanResidentPlacedComponentBatchRunner::new_single_device_for_nodes(
+            device,
+            &processor.device_slice,
+            &format!("draft:{}:{runtime_identity_suffix}", decoder.id),
+            lane_capacity,
+            VulkanComponentBatchExecutionMode::CausalSequence,
+            processor.state_ingestion_node_ids_by_component.clone(),
+        )
+    }
+
     fn mount(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         target_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
@@ -27,15 +45,13 @@ impl VulkanResidentParallelSpeculativeStateIngestion {
                 device_id: decoder.device_id.clone(),
             }
         })?;
-        let execution_graph =
-            VulkanResidentPlacedComponentBatchRunner::new_single_device_for_nodes(
-                device,
-                &processor.device_slice,
-                &format!("draft:{}:retained-state-ingestion", decoder.id),
-                lane_capacity,
-                VulkanComponentBatchExecutionMode::CausalSequence,
-                processor.state_ingestion_node_ids_by_component.clone(),
-            )?;
+        let execution_graph = Self::mount_execution_graph(
+            device,
+            decoder,
+            processor,
+            lane_capacity,
+            "retained-state-ingestion",
+        )?;
         let mut source_taps = Vec::with_capacity(processor.batch_source_taps.len());
         for binding in &processor.batch_source_taps {
             let source_device_index = target_slices

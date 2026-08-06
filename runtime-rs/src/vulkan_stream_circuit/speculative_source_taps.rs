@@ -12,6 +12,7 @@ enum VulkanSpeculativeSourceTapTransfer {
 struct VulkanResolvedSpeculativeSourceTap<'a> {
     device_id: &'a str,
     scalar_buffer: &'a VulkanResidentBuffer,
+    scalar_buffer_owner: Arc<VulkanResidentBuffer>,
     batch_signal_key: VulkanComponentBatchSignalKey,
     frame_byte_capacity: usize,
 }
@@ -164,7 +165,7 @@ fn resolved_speculative_source_tap_buffer<'a>(
                 )),
             )
         })?;
-    let (buffer, byte_len) = match &descriptor.target {
+    let (buffer, buffer_owner, byte_len) = match &descriptor.target {
         VulkanMountedPlacedBoundDescriptorTarget::Resident {
             target:
                 VulkanBoundDescriptorTarget::ActivationSlot {
@@ -183,7 +184,11 @@ fn resolved_speculative_source_tap_buffer<'a>(
                         "speculative source tap activation slot {buffer_index} is absent"
                     )))
                 })?;
-            (allocation.buffer.as_ref(), *signal_byte_capacity)
+            (
+                allocation.buffer.as_ref(),
+                Arc::clone(&allocation.buffer),
+                *signal_byte_capacity,
+            )
         }
         VulkanMountedPlacedBoundDescriptorTarget::ModelOutput { signal_id } => {
             let allocation = slice
@@ -195,7 +200,11 @@ fn resolved_speculative_source_tap_buffer<'a>(
                         "speculative source tap model output {signal_id:?} is absent"
                     )))
                 })?;
-            (allocation.buffer.as_ref(), allocation.byte_capacity)
+            (
+                allocation.buffer.as_ref(),
+                Arc::clone(&allocation.buffer),
+                allocation.byte_capacity,
+            )
         }
         VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
             let allocation = port.buffer(&slice.mounted.edge_io).ok_or_else(|| {
@@ -203,7 +212,11 @@ fn resolved_speculative_source_tap_buffer<'a>(
                     "speculative source tap produced port is absent".to_string(),
                 ))
             })?;
-            (allocation.as_ref(), port.byte_capacity)
+            (
+                allocation.as_ref(),
+                Arc::clone(allocation),
+                port.byte_capacity,
+            )
         }
         _ => {
             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -235,6 +248,7 @@ fn resolved_speculative_source_tap_buffer<'a>(
     Ok(VulkanResolvedSpeculativeSourceTap {
         device_id: slice.device_id.as_str(),
         scalar_buffer: buffer,
+        scalar_buffer_owner: buffer_owner,
         batch_signal_key,
         frame_byte_capacity: byte_len,
     })

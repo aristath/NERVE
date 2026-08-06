@@ -55,8 +55,8 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     })?;
                 let edge_key =
                     VulkanPlacedEdgePacketKey::from_incoming_endpoint(&incoming.endpoint);
-                let uses_shared_storage = transport.edge_uses_shared_storage(&edge_key);
-                if !uses_shared_storage {
+                let uses_queue_transfer = transport.edge_uses_queue_transfer(&edge_key);
+                if !uses_queue_transfer {
                     transport.record_host_wait(&edge_key);
                     if submission_batch.is_some() {
                         return Err(
@@ -79,7 +79,27 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 }
                 match transport.receive_incoming_edge(slice.mounted, *edge_index) {
                     Ok(_) => {
-                        if uses_shared_storage
+                        if edge_synchronizations.edge_uses_device_local_staging(&edge_key) {
+                            if !edge_synchronizations
+                                .enqueue_destination_staging_transfer(
+                                    &incoming.endpoint,
+                                    slice.device,
+                                    submission_batch,
+                                )
+                                .map_err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                )?
+                            {
+                                return Err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
+                                        VulkanError(format!(
+                                            "staged edge {edge_key:?} has no destination transfer"
+                                        )),
+                                    ),
+                                );
+                            }
+                            transport.record_queue_wait(&edge_key);
+                        } else if uses_queue_transfer
                             && let Some(wait_point) = edge_synchronizations
                                 .take_destination_wait(&incoming.endpoint)
                                 .map_err(
@@ -126,8 +146,8 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             ),
                         );
                     }
-                    let completion_bridge = if dependencies.has_owner_continuation {
-                        None
+                    let (completion_bridge, completion_staging) = if dependencies.has_owner_continuation {
+                        (None, false)
                     } else if let Some(VulkanMountedPlacedStreamTickStage::PublishEdge {
                         edge_index,
                         ..
@@ -154,8 +174,10 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             })?;
                         let edge_key =
                             VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
-                        if !transport.edge_uses_shared_storage(&edge_key) {
-                            None
+                        if edge_synchronizations.edge_uses_device_local_staging(&edge_key) {
+                            (None, true)
+                        } else if !transport.edge_uses_shared_storage(&edge_key) {
+                            (None, false)
                         } else {
                             let signal_point = edge_synchronizations
                                 .prepare_source_signal(&outgoing.endpoint)
@@ -170,13 +192,14 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                                     )
                                 })?;
                             transport.record_queue_signal(&edge_key);
-                            Some(signal_point)
+                            (Some(signal_point), false)
                         }
                     } else {
-                        None
+                        (None, false)
                     };
                     if !dependencies.has_owner_continuation
                         && completion_bridge.is_none()
+                        && !completion_staging
                         && (!submission_policy.signal_completion || submission_batch.is_some())
                     {
                         return Err(
@@ -205,7 +228,8 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             dependency_value,
                             consume_owner_ready_signal: consumes_ready,
                             prepare_owner_continuation: dependencies.has_owner_continuation
-                                || completion_bridge.is_some(),
+                                || completion_bridge.is_some()
+                                || completion_staging,
                             signal_completion: submission_policy.signal_completion
                                 && submission_batch.is_none(),
                             use_feedback_indirect: submission_policy.feedback_lane.is_some(),
@@ -251,7 +275,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         return Err(error.into());
                     }
                     ready_dependency = None;
-                    if dependencies.has_owner_continuation {
+                    if dependencies.has_owner_continuation || completion_staging {
                         completion_dependency =
                             Some((distributed.dispatch_index, dependency_value));
                     } else if let Some(signal_point) = completion_bridge {
@@ -352,15 +376,41 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 wait_points.append(&mut pending_edge_wait_points);
                 if slice.execution_plan.first_dispatch_segment_stage_index()
                     == Some(segment.start_stage_index)
-                    && feedback_turn.is_some_and(|turn| {
-                        turn.input_device_id == slice.device_id() && turn.input_wait.is_some()
-                    })
+                    && feedback_turn
+                        .and_then(|turn| turn.destination_wait(slice.device_id()))
+                        .is_some()
                 {
-                    wait_points.push(
-                        feedback_turn
-                            .and_then(|turn| turn.input_wait)
-                            .expect("resident feedback input wait was present"),
-                    );
+                    let turn = feedback_turn.expect("resident feedback turn was present");
+                    let wait = turn
+                        .destination_wait(slice.device_id())
+                        .expect("resident feedback input wait was present");
+                    if let Some(copy) = turn.destination_copy(slice.device_id()) {
+                        if let Some(batch) = submission_batch {
+                            batch
+                                .enqueue_resident_buffer_copy(
+                                    slice.device,
+                                    copy,
+                                    &[wait],
+                                    &[],
+                                )
+                                .map_err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                )?;
+                        } else {
+                            slice
+                                .device
+                                .submit_resident_buffer_copy_with_timeline_semaphores(
+                                    copy,
+                                    &[wait],
+                                    &[],
+                                )
+                                .map_err(
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                )?;
+                        }
+                    } else {
+                        wait_points.push(wait);
+                    }
                 }
                 let next_dependency = match next_distributed
                     .map(|dispatch_index| {
@@ -446,16 +496,19 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 let is_terminal_segment = slice.execution_plan.last_dispatch_segment_stage_index()
                     == Some(segment.start_stage_index);
                 if is_terminal_segment
-                    && feedback_turn.is_some_and(|turn| turn.output_device_id == slice.device_id())
+                    && feedback_turn.is_some_and(|turn| {
+                        turn.output_device_id == slice.device_id() && turn.output_copy().is_none()
+                    })
                 {
                     signal_points.push(
                         feedback_turn
                             .expect("resident feedback output signal was present")
-                            .output_signal,
+                            .output_signal(),
                     );
                 }
                 if is_terminal_segment
                     && output_turn.is_some_and(|turn| turn.output_device_id == slice.device_id())
+                    && feedback_turn.is_none_or(|turn| turn.output_copy().is_none())
                 {
                     signal_points.push(
                         output_turn
@@ -543,6 +596,42 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         ),
                     );
                 }
+                if is_terminal_segment
+                    && let Some(turn) = feedback_turn
+                    && turn.output_device_id == slice.device_id()
+                    && let Some(copy) = turn.output_copy()
+                {
+                    let mut copy_signals = SmallVec::<[VulkanTimelineSemaphorePoint<'_>; 2]>::new();
+                    copy_signals.push(turn.output_signal());
+                    if let Some(output_turn) = output_turn
+                        && output_turn.output_device_id == slice.device_id()
+                    {
+                        copy_signals.push(output_turn.signal);
+                    }
+                    if let Some(batch) = submission_batch {
+                        batch
+                            .enqueue_resident_buffer_copy(
+                                slice.device,
+                                copy,
+                                &[],
+                                &copy_signals,
+                            )
+                            .map_err(
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                            )?;
+                    } else {
+                        slice
+                            .device
+                            .submit_resident_buffer_copy_with_timeline_semaphores(
+                                copy,
+                                &[],
+                                &copy_signals,
+                            )
+                            .map_err(
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                            )?;
+                    }
+                }
                 completion_dependency = None;
                 ready_dependency = next_dependency;
                 last_submitted_segment = Some(segment);
@@ -567,7 +656,42 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     })?;
                 let edge_key =
                     VulkanPlacedEdgePacketKey::from_outgoing_endpoint(&outgoing.endpoint);
-                if !transport.edge_uses_shared_storage(&edge_key) {
+                if edge_synchronizations.edge_uses_device_local_staging(&edge_key) {
+                    let transfer_wait_points = completion_dependency
+                        .take()
+                        .map(|(dispatch_index, dependency_value)| {
+                            distributed_runners.owner_completion_wait_points(
+                                slice.device_id(),
+                                dispatch_index,
+                                dependency_value,
+                            )
+                        })
+                        .transpose()
+                        .map_err(
+                            VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
+                        )?
+                        .unwrap_or_default();
+                    if !edge_synchronizations
+                        .enqueue_source_staging_transfer(
+                            &outgoing.endpoint,
+                            slice.device,
+                            &transfer_wait_points,
+                            submission_batch,
+                        )
+                        .map_err(
+                            VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                        )?
+                    {
+                        return Err(
+                            VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
+                                VulkanError(format!(
+                                    "staged edge {edge_key:?} has no source transfer"
+                                )),
+                            ),
+                        );
+                    }
+                    transport.record_queue_signal(&edge_key);
+                } else if !transport.edge_uses_queue_transfer(&edge_key) {
                     transport.record_host_wait(&edge_key);
                     if submission_batch.is_some() {
                         return Err(

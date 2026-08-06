@@ -15,6 +15,20 @@ impl Display for VulkanCompiledResourceDeviceStoreError {
 
 impl Error for VulkanCompiledResourceDeviceStoreError {}
 
+fn try_begin_compiled_resource_reclamation(
+    execution_barrier: &std::sync::RwLock<()>,
+) -> Result<Option<std::sync::RwLockWriteGuard<'_, ()>>, VulkanCompiledResourceDeviceStoreError> {
+    match execution_barrier.try_write() {
+        Ok(guard) => Ok(Some(guard)),
+        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource execution barrier was poisoned",
+            ))
+        }
+    }
+}
+
 fn upload_compiled_resource_tier(
     device: &VulkanComputeDevice,
     transfer: &mut VulkanResidentTransferStream,

@@ -81,6 +81,18 @@ impl VulkanInProcessPlacedEdgeTransport {
             })
     }
 
+    fn edge_uses_queue_transfer(&self, key: &VulkanPlacedEdgePacketKey) -> bool {
+        self.direct_copies.get(key).is_some_and(|direct_copy| {
+            matches!(
+                direct_copy.route,
+                VulkanPlacedEdgeTransferRoute::SameDeviceAlias
+                    | VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+                    | VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                    | VulkanPlacedEdgeTransferRoute::SharedHost
+            )
+        })
+    }
+
     pub fn reset_tick_state(&mut self) {
         self.packets.clear();
         self.ready_direct_edges.clear();

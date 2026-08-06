@@ -9,6 +9,8 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
     output_synchronization: VulkanResidentPlacedOutputTimelineSynchronization,
     resident_feedback_loop: Option<VulkanResidentInProcessPlacedFeedbackLoop>,
     speculative_target_frame_history: Option<VulkanResidentSpeculativeTargetFrameHistory>,
+    parallel_speculative_feedback_state:
+        Option<VulkanResidentParallelSpeculativeFeedbackState>,
     activation_schedule: VulkanMountedPlacedResidentInProcessSchedule,
     device_slices: Vec<VulkanResidentInProcessPlacedStreamProcessorDevice>,
     execution_quantum_calibrators:

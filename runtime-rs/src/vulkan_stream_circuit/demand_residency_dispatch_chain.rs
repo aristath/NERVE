@@ -27,6 +27,37 @@ enum VulkanDemandResidencyCommand {
     Suffix(usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum VulkanDemandResidencyChainLane {
+    Scalar,
+    Feedback(usize),
+}
+
+fn demand_feedback_chain_keys(
+    sequence_variant: u8,
+    lane_capacity: usize,
+) -> Result<Vec<(u8, VulkanDemandResidencyChainLane)>, VulkanError> {
+    if lane_capacity == 0 {
+        return Err(VulkanError(
+            "demand feedback chain capacity must not be zero".to_string(),
+        ));
+    }
+    Ok((0..lane_capacity)
+        .map(|lane| {
+            (
+                sequence_variant,
+                VulkanDemandResidencyChainLane::Feedback(lane),
+            )
+        })
+        .collect())
+}
+
+impl VulkanDemandResidencyChainLane {
+    fn uses_shared_pipeline_guard(self) -> bool {
+        matches!(self, Self::Feedback(_))
+    }
+}
+
 struct VulkanDemandResidencyGateRuntime {
     checkpoint_id: String,
     selector_id: String,
@@ -46,6 +77,7 @@ struct VulkanDemandResidencyDispatchChain {
     full_sequence: VulkanResidentKernelSequence,
     resume_sequences: Vec<VulkanResidentKernelSequence>,
     observed_notification_epoch: Cell<u32>,
+    shared_pipeline_guard: bool,
 }
 
 struct VulkanDemandResidencySegment {
@@ -53,16 +85,100 @@ struct VulkanDemandResidencySegment {
     gate_specs: Vec<VulkanDemandResidencyGateSpec>,
     address_table: Arc<VulkanResidentBuffer>,
     address_table_slot_count: usize,
-    chains: RefCell<BTreeMap<u8, VulkanDemandResidencyDispatchChain>>,
+    pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
+    chains: RefCell<BTreeMap<(u8, VulkanDemandResidencyChainLane), VulkanDemandResidencyDispatchChain>>,
 }
 
 impl VulkanDemandResidencySegment {
+    fn feedback_dispatch_count(&self, model_dispatch_count: usize) -> Result<usize, VulkanError> {
+        model_dispatch_count
+            .checked_add(self.gate_specs.len())
+            .ok_or_else(|| VulkanError("demand feedback dispatch count overflowed".to_string()))
+    }
+
+    fn feedback_dispatch_dimensions(
+        &self,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+    ) -> Result<Vec<[u32; 3]>, VulkanError> {
+        let mut gates_after_dispatch = BTreeMap::<usize, usize>::new();
+        for gate in &self.gate_specs {
+            *gates_after_dispatch
+                .entry(gate.command_after_dispatch_index)
+                .or_default() += 1;
+        }
+        let capacity = prefix_dispatches
+            .len()
+            .checked_add(self.feedback_dispatch_count(dispatches.len())?)
+            .and_then(|count| count.checked_add(suffix_dispatches.len()))
+            .ok_or_else(|| {
+                VulkanError("demand feedback dispatch dimensions overflowed".to_string())
+            })?;
+        let mut dimensions = Vec::with_capacity(capacity);
+        dimensions.extend(prefix_dispatches.iter().map(|dispatch| {
+            [
+                dispatch.workgroup_count_x(),
+                dispatch.workgroup_count_y(),
+                1,
+            ]
+        }));
+        for dispatch in dispatches {
+            dimensions.push([
+                dispatch.resident_dispatch.workgroup_count_x(),
+                dispatch.resident_dispatch.workgroup_count_y(),
+                1,
+            ]);
+            let gate_count = gates_after_dispatch
+                .remove(&dispatch.dispatch_index)
+                .unwrap_or(0);
+            // The residency gate kernel is deliberately one workgroup: its 64
+            // lanes cooperatively resolve the bounded selector output. It
+            // still needs its own indirect-control slot so EOS/cancellation
+            // can suppress the gate together with the selector that feeds it.
+            dimensions.extend(std::iter::repeat_n([1, 1, 1], gate_count));
+        }
+        if !gates_after_dispatch.is_empty() {
+            return Err(VulkanError(format!(
+                "demand feedback gates reference dispatches outside their segment: {:?}",
+                gates_after_dispatch.keys().collect::<Vec<_>>()
+            )));
+        }
+        dimensions.extend(suffix_dispatches.iter().map(|dispatch| {
+            [
+                dispatch.workgroup_count_x(),
+                dispatch.workgroup_count_y(),
+                1,
+            ]
+        }));
+        Ok(dimensions)
+    }
+
+    fn pipeline_predicate_for_lane(
+        &self,
+        lane: VulkanDemandResidencyChainLane,
+    ) -> Result<Option<Arc<VulkanResidentBuffer>>, VulkanMountedPlacedResidentKernelDispatchError>
+    {
+        if !lane.uses_shared_pipeline_guard() {
+            return Ok(None);
+        }
+        self.pipeline_continuation_predicate
+            .clone()
+            .map(Some)
+            .ok_or_else(|| {
+                demand_dispatch_error(
+                    "resident feedback demand execution has no shared pipeline predicate",
+                )
+            })
+    }
+
     fn from_segment(
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         schedule: &VulkanPhysicalResidencySchedule,
         dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
         context: VulkanDemandResidencyExecutionContext,
+        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Option<Self>, VulkanMountedPlacedResidentKernelDispatchError> {
         if schedule.execution_scope != context.execution_scope {
             return Err(demand_dispatch_error(format!(
@@ -218,6 +334,7 @@ impl VulkanDemandResidencySegment {
             gate_specs,
             address_table: dynamic_resources.shared_address_table(),
             address_table_slot_count: dynamic_resources.address_table_slot_count(),
+            pipeline_continuation_predicate,
             chains: RefCell::new(BTreeMap::new()),
         }))
     }
@@ -236,7 +353,9 @@ impl VulkanDemandResidencySegment {
         input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
         post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
-        if !self.chains.borrow().contains_key(&sequence_variant) {
+        let chain_lane = VulkanDemandResidencyChainLane::Scalar;
+        let chain_key = (sequence_variant, chain_lane);
+        if !self.chains.borrow().contains_key(&chain_key) {
             let chain = VulkanDemandResidencyDispatchChain::new(
                 device,
                 dispatches,
@@ -245,12 +364,13 @@ impl VulkanDemandResidencySegment {
                 self.address_table_slot_count,
                 prefix_dispatches,
                 suffix_dispatches,
+                self.pipeline_predicate_for_lane(chain_lane)?,
             )?;
-            self.chains.borrow_mut().insert(sequence_variant, chain);
+            self.chains.borrow_mut().insert(chain_key, chain);
         }
         let chains = self.chains.borrow();
         let chain = chains
-            .get(&sequence_variant)
+            .get(&chain_key)
             .expect("demand chain variant was initialized");
         chain.run(
             device,
@@ -265,6 +385,121 @@ impl VulkanDemandResidencySegment {
             &self.context,
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_feedback_initial<'a>(
+        &self,
+        device: &'a VulkanComputeDevice,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        control: VulkanMountedPlacedStreamControl,
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        sequence_variant: u8,
+        feedback_lane: usize,
+        feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_completion: bool,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+    ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        let chain_lane = VulkanDemandResidencyChainLane::Feedback(feedback_lane);
+        let chain_key = (sequence_variant, chain_lane);
+        self.chains
+            .borrow()
+            .get(&chain_key)
+            .ok_or_else(|| {
+                demand_dispatch_error(format!(
+                    "resident feedback demand lane {feedback_lane} was not preallocated before entering the execution epoch"
+                ))
+            })?
+            .enqueue_feedback_initial(
+                device,
+                dispatches,
+                control,
+                prefix_dispatches,
+                suffix_dispatches,
+                feedback_indirect,
+                wait_points,
+                signal_points,
+                signal_completion,
+                submission_batch,
+            )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_feedback_chains(
+        &self,
+        device: &VulkanComputeDevice,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        sequence_variant: u8,
+        lane_capacity: usize,
+    ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        for (chain_key, chain_lane) in demand_feedback_chain_keys(
+            sequence_variant,
+            lane_capacity,
+        )
+        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
+        .into_iter()
+        .map(|key @ (_, lane)| (key, lane))
+        {
+            if self.chains.borrow().contains_key(&chain_key) {
+                continue;
+            }
+            let chain = VulkanDemandResidencyDispatchChain::new(
+                device,
+                dispatches,
+                &self.gate_specs,
+                Arc::clone(&self.address_table),
+                self.address_table_slot_count,
+                prefix_dispatches,
+                suffix_dispatches,
+                self.pipeline_predicate_for_lane(chain_lane)?,
+            )?;
+            self.chains.borrow_mut().insert(chain_key, chain);
+        }
+        Ok(())
+    }
+
+    fn feedback_lane_has_pending_miss(
+        &self,
+        sequence_variant: u8,
+        feedback_lane: usize,
+    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+        self.chains
+            .borrow()
+            .get(&(
+                sequence_variant,
+                VulkanDemandResidencyChainLane::Feedback(feedback_lane),
+            ))
+            .ok_or_else(|| {
+                demand_dispatch_error(format!(
+                    "resident feedback demand lane {feedback_lane} was not prepared"
+                ))
+            })?
+            .has_pending_miss()
+    }
+
+    fn resolve_feedback_lane_miss(
+        &self,
+        device: &VulkanComputeDevice,
+        sequence_variant: u8,
+        feedback_lane: usize,
+    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+        self.chains
+            .borrow()
+            .get(&(
+                sequence_variant,
+                VulkanDemandResidencyChainLane::Feedback(feedback_lane),
+            ))
+            .ok_or_else(|| {
+                demand_dispatch_error(format!(
+                    "resident feedback demand lane {feedback_lane} was not prepared"
+                ))
+            })?
+            .resolve_pending_miss_without_resume(device, &self.context)
+    }
 }
 
 impl VulkanDemandResidencyDispatchChain {
@@ -276,6 +511,7 @@ impl VulkanDemandResidencyDispatchChain {
         address_table_slot_count: usize,
         prefix_dispatches: &[&VulkanResidentKernelDispatch],
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         let mut gates_after_dispatch = BTreeMap::<usize, Vec<usize>>::new();
         for (gate_index, gate) in gate_specs.iter().enumerate() {
@@ -322,16 +558,21 @@ impl VulkanDemandResidencyDispatchChain {
                 "demand gate has no selected computation after it",
             ));
         }
-        let continuation_predicate = Arc::new(
-            device
-                .create_conditional_resident_buffer(size_of::<u32>())
-                .map_err(
-                VulkanMountedPlacedResidentKernelDispatchError::Vulkan,
-            )?,
-        );
-        continuation_predicate
-            .write_bytes(&1u32.to_le_bytes())
-            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        let shared_pipeline_guard = pipeline_continuation_predicate.is_some();
+        let continuation_predicate = match pipeline_continuation_predicate {
+            Some(predicate) => predicate,
+            None => {
+                let predicate = Arc::new(
+                    device
+                        .create_conditional_resident_buffer(size_of::<u32>())
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?,
+                );
+                predicate
+                    .write_bytes(&1u32.to_le_bytes())
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                predicate
+            }
+        };
         let missing_capacity = gate_specs
             .iter()
             .map(|gate| gate.selection_count)
@@ -416,6 +657,7 @@ impl VulkanDemandResidencyDispatchChain {
             full_sequence,
             resume_sequences,
             observed_notification_epoch: Cell::new(0),
+            shared_pipeline_guard,
         })
     }
 
@@ -453,7 +695,7 @@ impl VulkanDemandResidencyDispatchChain {
                 prefix_dispatches,
                 suffix_dispatches,
                 wait_points,
-                signal_points,
+                &[],
                 input_copies,
                 post_copies,
             )?;
@@ -466,6 +708,17 @@ impl VulkanDemandResidencyDispatchChain {
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
             if notification_epoch == self.observed_notification_epoch.get() {
                 self.continuation_enabled.set(true);
+                // A Vulkan semaphore signal is unconditional even when every
+                // producer command was skipped by a residency predicate. Edge
+                // publication is therefore the commit record for a successful
+                // traversal, not part of a speculative traversal that may
+                // miss. Queue order plus the completed sequence wait makes
+                // this bridge visible only after the real activation exists.
+                if !signal_points.is_empty() {
+                    device
+                        .submit_timeline_semaphore_bridge(&[], signal_points)
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                }
                 return Ok(());
             }
             self.continuation_enabled.set(false);
@@ -577,6 +830,144 @@ impl VulkanDemandResidencyDispatchChain {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn enqueue_feedback_initial<'a>(
+        &self,
+        device: &'a VulkanComputeDevice,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        control: VulkanMountedPlacedStreamControl,
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_completion: bool,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+    ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        self.with_prepared_steps(
+            None,
+            dispatches,
+            control,
+            prefix_dispatches,
+            suffix_dispatches,
+            Some(feedback_indirect),
+            |sequence, steps| {
+                device
+                    .record_resident_kernel_sequence(sequence, steps)
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                submission_batch
+                    .enqueue_recorded_sequence(
+                        device,
+                        sequence,
+                        wait_points,
+                        signal_points,
+                        signal_completion,
+                    )
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+            },
+        )
+    }
+
+    fn has_pending_miss(
+        &self,
+    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+        self.missing_queue
+            .notification_epoch()
+            .map(|epoch| epoch != self.observed_notification_epoch.get())
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+    }
+
+    fn resolve_pending_miss_without_resume(
+        &self,
+        device: &VulkanComputeDevice,
+        context: &VulkanDemandResidencyExecutionContext,
+    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+        if !self.has_pending_miss()? {
+            return Ok(false);
+        }
+        self.continuation_enabled.set(false);
+        let missing = self
+            .missing_queue
+            .snapshot()
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        if missing.overflowed || missing.requests.is_empty() {
+            return Err(demand_dispatch_error(format!(
+                "GPU feedback residency gate reported an invalid or overflowing miss queue: epoch={}, published={}, consumed={}, overflowed={}, requests={}",
+                missing.notification_epoch,
+                missing.published_count,
+                missing.consumed_count,
+                missing.overflowed,
+                missing.requests.len()
+            )));
+        }
+        let checkpoint_tags = missing
+            .requests
+            .iter()
+            .map(|request| request.checkpoint_tag)
+            .collect::<BTreeSet<_>>();
+        if checkpoint_tags.len() != 1 {
+            return Err(demand_dispatch_error(format!(
+                "one resident feedback traversal reported misses at multiple checkpoints: {checkpoint_tags:?}"
+            )));
+        }
+        let checkpoint_tag = *checkpoint_tags
+            .first()
+            .expect("one feedback checkpoint tag was validated");
+        let gate = self
+            .gates
+            .iter()
+            .find(|gate| gate.checkpoint_tag == checkpoint_tag)
+            .ok_or_else(|| {
+                demand_dispatch_error(format!(
+                    "GPU feedback residency miss references unknown checkpoint tag {checkpoint_tag}"
+                ))
+            })?;
+        context
+            .store
+            .record_gpu_gate_misses(&gate.selector_id, missing.requests.len())
+            .map_err(|error| {
+                demand_dispatch_error(format!(
+                    "failed to record GPU feedback residency misses for selector {:?}: {error}",
+                    gate.selector_id
+                ))
+            })?;
+        let missing_resource_indices = missing
+            .requests
+            .iter()
+            .map(|request| request.resource_index)
+            .collect::<BTreeSet<_>>();
+        let selected_resource_indices = gate
+            .gate
+            .selected_resource_indices(gate.selection_count)
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        if !missing_resource_indices.is_subset(&selected_resource_indices) {
+            return Err(demand_dispatch_error(
+                "GPU feedback residency misses are not a subset of the selector output",
+            ));
+        }
+        let resource_indices = selected_resource_indices.into_iter().collect::<Vec<_>>();
+        let _ = context
+            .store
+            .load_selector_resources_for_execution(
+                device,
+                &gate.selector_id,
+                &resource_indices,
+                context.owner.clone(),
+            )
+            .map_err(|error| {
+                demand_dispatch_error(format!(
+                    "failed to load feedback selector {:?} resources {resource_indices:?} at checkpoint {:?}: {error}",
+                    gate.selector_id, gate.checkpoint_id
+                ))
+            })?;
+        self.missing_queue
+            .acknowledge_through(missing.published_count)
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        self.observed_notification_epoch
+            .set(missing.notification_epoch);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn run_from_gate(
         &self,
         device: &VulkanComputeDevice,
@@ -590,6 +981,78 @@ impl VulkanDemandResidencyDispatchChain {
         input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
         post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        self.with_prepared_steps(
+            resume_gate_index,
+            dispatches,
+            control,
+            prefix_dispatches,
+            suffix_dispatches,
+            None,
+            |sequence, steps| {
+                if input_copies.is_empty() && post_copies.is_empty() {
+                    device
+                        .record_resident_kernel_sequence(sequence, steps)
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                    device
+                        .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                            sequence,
+                            wait_points,
+                            signal_points,
+                        )
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                    return device
+                        .wait_resident_kernel_sequence(sequence)
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan);
+                }
+                if !wait_points.is_empty() || !signal_points.is_empty() {
+                    return Err(demand_dispatch_error(
+                        "demand-resident inline copies cannot cross a timeline boundary",
+                    ));
+                }
+                let after_step_index = steps
+                    .len()
+                    .checked_sub(1)
+                    .expect("demand-resident chains contain at least one step");
+                let snapshot_copies = post_copies
+                    .iter()
+                    .copied()
+                    .map(|copy| {
+                        VulkanResidentKernelSequenceSnapshotCopy::
+                            unconditional_from_range_after_conditional_step(
+                                after_step_index,
+                                copy,
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                device
+                    .run_resident_kernel_sequence_with_input_and_snapshot_copies(
+                        sequence,
+                        input_copies,
+                        steps,
+                        &snapshot_copies,
+                    )
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_prepared_steps<T, F>(
+        &self,
+        resume_gate_index: Option<usize>,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        control: VulkanMountedPlacedStreamControl,
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        feedback_indirect: Option<&VulkanResidentFeedbackIndirectSequence>,
+        use_steps: F,
+    ) -> Result<T, VulkanMountedPlacedResidentKernelDispatchError>
+    where
+        F: FnOnce(
+            &VulkanResidentKernelSequence,
+            &[VulkanResidentKernelSequenceStep<'_>],
+        ) -> Result<T, VulkanMountedPlacedResidentKernelDispatchError>,
+    {
         let model_push_constants = dispatches
             .iter()
             .map(|dispatch| {
@@ -634,8 +1097,15 @@ impl VulkanDemandResidencyDispatchChain {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        let conditional_regions = demand_dispatch_conditional_regions(
+            &self.commands,
+            start_command_index,
+            direct_gate_command_index,
+            self.shared_pipeline_guard,
+            resume_gate_index.is_some(),
+        )?;
         let mut steps = Vec::with_capacity(self.commands.len() - start_command_index);
-        let mut conditional_region_id = 1u32;
+        let mut feedback_dispatch_index = 0usize;
         for (command_index, command) in self
             .commands
             .iter()
@@ -699,88 +1169,97 @@ impl VulkanDemandResidencyDispatchChain {
                         &[],
                     ),
                 };
-            if command_index <= direct_gate_command_index {
-                steps.push(VulkanResidentKernelSequenceStep::new(
+            let step = if let Some(indirect) = feedback_indirect {
+                let byte_offset = *indirect
+                    .byte_offsets
+                    .get(feedback_dispatch_index)
+                    .ok_or_else(|| {
+                        demand_dispatch_error(
+                            "resident feedback indirect sequence is shorter than its demand chain",
+                        )
+                    })?;
+                feedback_dispatch_index += 1;
+                VulkanResidentKernelSequenceStep::new_indirect(
                     dispatch,
                     push_constants,
-                ));
+                    &indirect.buffer,
+                    byte_offset,
+                )
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
             } else {
-                let region_id =
-                    if matches!(command, VulkanDemandResidencyCommand::Gate(_)) {
-                        conditional_region_id =
-                            conditional_region_id.checked_add(1).ok_or_else(|| {
-                                demand_dispatch_error(
-                                    "demand conditional region count exceeds u32",
-                                )
-                            })?;
-                        let gate_region = conditional_region_id;
-                        conditional_region_id =
-                            conditional_region_id.checked_add(1).ok_or_else(|| {
-                                demand_dispatch_error(
-                                    "demand conditional region count exceeds u32",
-                                )
-                            })?;
-                        gate_region
-                    } else {
-                        conditional_region_id
-                    };
-                steps.push(
-                    VulkanResidentKernelSequenceStep::new_conditional(
-                        dispatch,
-                        push_constants,
+                VulkanResidentKernelSequenceStep::new(dispatch, push_constants)
+            };
+            let conditional_region = conditional_regions
+                .get(command_index - start_command_index)
+                .copied()
+                .flatten();
+            steps.push(match conditional_region {
+                Some(region_id) => step
+                    .with_condition(
                         &self.continuation_predicate,
                         0,
                         false,
                         region_id,
                     )
                     .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?,
-                );
-            }
+                None => step,
+            });
         }
-        if input_copies.is_empty() && post_copies.is_empty() {
-            device
-                .record_resident_kernel_sequence(sequence, &steps)
-                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-            device
-                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
-                    sequence,
-                    wait_points,
-                    signal_points,
-                )
-                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-            return device
-                .wait_resident_kernel_sequence(sequence)
-                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan);
-        }
-        if !wait_points.is_empty() || !signal_points.is_empty() {
+        if let Some(indirect) = feedback_indirect
+            && feedback_dispatch_index != indirect.byte_offsets.len()
+        {
             return Err(demand_dispatch_error(
-                "demand-resident inline copies cannot cross a timeline boundary",
+                "resident feedback indirect sequence is longer than its demand chain",
             ));
         }
-        let after_step_index = steps
-            .len()
-            .checked_sub(1)
-            .expect("demand-resident chains contain at least one step");
-        let snapshot_copies = post_copies
-            .iter()
-            .copied()
-            .map(|copy| {
-                VulkanResidentKernelSequenceSnapshotCopy::
-                    unconditional_from_range_after_conditional_step(
-                        after_step_index,
-                        copy,
-                    )
-            })
-            .collect::<Vec<_>>();
-        device
-            .run_resident_kernel_sequence_with_input_and_snapshot_copies(
-                sequence,
-                input_copies,
-                &steps,
-                &snapshot_copies,
-            )
-            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+        use_steps(sequence, &steps)
     }
+}
+
+fn demand_dispatch_conditional_regions(
+    commands: &[VulkanDemandResidencyCommand],
+    start_command_index: usize,
+    direct_gate_command_index: usize,
+    shared_pipeline_guard: bool,
+    resuming: bool,
+) -> Result<Vec<Option<u32>>, VulkanMountedPlacedResidentKernelDispatchError> {
+    if direct_gate_command_index < start_command_index
+        || direct_gate_command_index >= commands.len()
+        || !matches!(
+            commands[direct_gate_command_index],
+            VulkanDemandResidencyCommand::Gate(_)
+        )
+    {
+        return Err(demand_dispatch_error(format!(
+            "demand direct gate {direct_gate_command_index} is not a gate in the remaining command range {start_command_index}..{}",
+            commands.len(),
+        )));
+    }
+    if resuming && direct_gate_command_index != start_command_index {
+        return Err(demand_dispatch_error(
+            "demand resume must start at its direct gate",
+        ));
+    }
+    let commands = commands.get(start_command_index..).ok_or_else(|| {
+        demand_dispatch_error("demand conditional layout starts outside its command list")
+    })?;
+    let mut region_id = 1u32;
+    let mut previous_was_conditional_gate = false;
+    let mut regions = Vec::with_capacity(commands.len());
+    for (offset, command) in commands.iter().copied().enumerate() {
+        let command_index = start_command_index + offset;
+        let conditional = command_index > direct_gate_command_index
+            || (shared_pipeline_guard && !resuming && command_index <= direct_gate_command_index);
+        if conditional && previous_was_conditional_gate {
+            region_id = region_id.checked_add(1).ok_or_else(|| {
+                demand_dispatch_error("demand conditional region count exceeds u32")
+            })?;
+        }
+        regions.push(conditional.then_some(region_id));
+        previous_was_conditional_gate = conditional
+            && matches!(command, VulkanDemandResidencyCommand::Gate(_));
+    }
+    Ok(regions)
 }
 
 fn demand_dispatch_error(

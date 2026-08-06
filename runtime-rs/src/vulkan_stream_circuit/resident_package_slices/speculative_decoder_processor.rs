@@ -49,6 +49,7 @@ fn mount_speculative_decoder_device_slice(
                 .as_ref()
                 .map(|_| model.device_slice.physical_residency_schedule()),
             model.demand_residency_context.as_ref(),
+            None,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
     if execution_plan.distributed_dispatch_count != 0

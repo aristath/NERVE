@@ -579,11 +579,17 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resource residency mutation lock was poisoned",
             )
         })?;
-        let _execution = self.execution_barrier.write().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned",
-            )
-        })?;
+        let Some(_execution) =
+            try_begin_compiled_resource_reclamation(&self.execution_barrier)?
+        else {
+                // Reclamation is called from the allocator. The requesting
+                // thread may itself own an execution read epoch, so waiting
+                // for exclusivity here can self-deadlock. Reclamation is
+                // opportunistic: another registered store may satisfy the
+                // request, otherwise allocation reports insufficient
+                // headroom instead of freezing the runtime.
+            return Ok(0);
+        };
         let mut released_device_bytes = self
             .device_arena
             .trim_inactive_backing(requested_bytes)

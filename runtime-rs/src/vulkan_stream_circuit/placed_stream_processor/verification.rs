@@ -42,6 +42,38 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if self.speculative_decoders.is_empty() || input_token_ids.is_empty() {
             return Ok(());
         }
+        let requirements = resident_speculative_feedback_history_requirements(
+            self.speculative_decoders
+                .iter()
+                .map(VulkanResidentSpeculativeDecoderProcessor::is_parallel_block),
+        );
+        if requirements.parallel_state {
+            let state = self
+                .parallel_speculative_feedback_state
+                .as_ref()
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "processor did not mount parallel speculative feedback state"
+                            .to_string(),
+                    ))
+                })?;
+            // The output timeline proves that target sampling completed, but
+            // parallel speculative state also depends on source-tap history
+            // copies submitted after that signal. Wait for the terminal
+            // capture on each participating decoder device before copying the
+            // history into its state-ingestion graph. Queue order alone is not
+            // a cross-device or host-observable completion contract.
+            state.wait_source_tap_capture(devices, planned_tick_count)?;
+            state.run_state_ingestion(
+                devices,
+                &self.speculative_decoders,
+                input_token_ids,
+                start_stream_tick,
+            )?;
+        }
+        if !requirements.normalized_frames {
+            return Ok(());
+        }
         let history = self
             .speculative_target_frame_history
             .as_ref()

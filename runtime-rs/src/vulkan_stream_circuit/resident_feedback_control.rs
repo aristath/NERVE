@@ -190,6 +190,23 @@ impl VulkanResidentFeedbackControlPlane {
         device_id: &str,
         dispatches: impl IntoIterator<Item = &'a VulkanResidentKernelDispatch>,
     ) -> Result<VulkanResidentFeedbackIndirectSequence, VulkanError> {
+        self.register_sequence_dimensions(
+            device_id,
+            dispatches.into_iter().map(|dispatch| {
+                [
+                    dispatch.workgroup_count_x(),
+                    dispatch.workgroup_count_y(),
+                    1,
+                ]
+            }),
+        )
+    }
+
+    fn register_sequence_dimensions(
+        &mut self,
+        device_id: &str,
+        dispatch_dimensions: impl IntoIterator<Item = [u32; 3]>,
+    ) -> Result<VulkanResidentFeedbackIndirectSequence, VulkanError> {
         let buffer = self.buffers.get(device_id).cloned().ok_or_else(|| {
             VulkanError(format!(
                 "resident feedback control has no buffer for {device_id:?}"
@@ -197,7 +214,7 @@ impl VulkanResidentFeedbackControlPlane {
         })?;
         let mut byte_offsets = Vec::new();
         let first_dispatch_index = self.dispatch_dimensions.len();
-        for dispatch in dispatches {
+        for dimensions in dispatch_dimensions {
             if self.dispatch_dimensions.len() == self.dispatch_capacity {
                 return Err(VulkanError(format!(
                     "resident feedback control registered more than {} dispatches",
@@ -216,11 +233,7 @@ impl VulkanResidentFeedbackControlPlane {
                 .ok_or_else(|| {
                     VulkanError("resident feedback indirect offset overflowed".to_string())
                 })?;
-            self.dispatch_dimensions.push([
-                dispatch.workgroup_count_x(),
-                dispatch.workgroup_count_y(),
-                1,
-            ]);
+            self.dispatch_dimensions.push(dimensions);
             byte_offsets.push(byte_offset);
         }
         if byte_offsets.is_empty() {
@@ -331,6 +344,14 @@ impl VulkanResidentFeedbackControlPlane {
             stop_reason: buffer.read_persistently_mapped_u32_le_at(2 * size_of::<u32>())?,
             template_replayed: false,
         })
+    }
+
+    /// Aborts an armed feedback window after its terminal queue dependency has
+    /// completed. Demand-residency misses are speculative execution: the
+    /// controller must be rolled back with model and sampler state before the
+    /// scalar retry is allowed to run.
+    fn disarm_aborted_window(&self) -> Result<(), VulkanError> {
+        self.host_buffer()?.write_bytes(&0u32.to_le_bytes())
     }
 
     fn cancellation_handle(&self) -> VulkanResidentFeedbackCancellationHandle {

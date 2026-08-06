@@ -266,7 +266,7 @@ fn cross_physical_resident_edges_match_colocated_feedback_execution() {
             None,
         )
         .unwrap();
-    let input = VulkanResidentTokenInputEvent::new("event", vec![1], 4);
+    let input = VulkanResidentTokenInputEvent::new("event", vec![1, 2, 3, 4, 5], 4);
 
     let mut colocated =
         VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
@@ -297,7 +297,29 @@ fn cross_physical_resident_edges_match_colocated_feedback_execution() {
             0,
         )
         .unwrap();
+    let split_gpu0_control = &split
+        .processor
+        .device("gpu0")
+        .expect("split input device must be mounted")
+        .mounted
+        .stream_control_buffer;
+    let split_gpu1_control = &split
+        .processor
+        .device("gpu1")
+        .expect("split output device must be mounted")
+        .mounted
+        .stream_control_buffer;
+    assert!(
+        split_gpu0_control.shares_host_allocation_with(split_gpu1_control),
+        "cross-device token/tick control is a tiny coherence-critical control plane and must use one shared-host allocation",
+    );
     let split_run = split.submit_input_event(input).unwrap();
+
+    assert_eq!(
+        split.processor.temporal_block_executions.borrow().len(),
+        1,
+        "a multi-token split prompt must exercise the physical-device temporal pipeline",
+    );
 
     assert_eq!(
         split_run.generated_token_ids,

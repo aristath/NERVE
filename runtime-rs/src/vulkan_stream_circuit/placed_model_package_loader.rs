@@ -1296,11 +1296,15 @@ impl VulkanResidentInProcessPlacedModelPackage {
             synchronizations: edge_synchronizations,
             stream_control_buffers,
             every_edge_is_resident_replayable,
+            feedback_stream_control_is_resident_replayable,
         } = create_placed_device_links(
             &self.device_slices,
             &mut distributed_activation_buffers,
             &device_for,
         )?;
+        let demand_feedback_predicates =
+            create_demand_feedback_pipeline_predicates(self, &device_for)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut devices = Vec::with_capacity(self.device_slices.len());
         for package_slice in &self.device_slices {
             let device = device_for(&package_slice.device_id)?;
@@ -1422,6 +1426,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         .as_ref()
                         .map(|_| package_slice.physical_residency_schedule()),
                     demand_context.as_ref(),
+                    demand_feedback_predicates
+                        .as_ref()
+                        .and_then(|predicates| predicates.get(&package_slice.device_id))
+                        .cloned(),
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
             devices.push(VulkanResidentInProcessPlacedStreamProcessorDevice {
@@ -1522,7 +1530,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
         let local_dispatch_count = devices.iter().try_fold(0usize, |total, slice| {
             total
-                .checked_add(slice.resident_execution_plan.dispatch_count)
+                .checked_add(
+                    slice
+                        .resident_execution_plan
+                        .feedback_dispatch_count()
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                )
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                         "resident feedback local dispatch count overflowed".to_string(),
@@ -1565,6 +1578,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
+        let feedback_lane_capacity =
+            VULKAN_BACKEND_LOOP_MAX_WINDOW.min(sampler.history_capacity_activations.max(1));
         for slice in &mut devices {
             let mut prefix_dispatches = SmallVec::<[&VulkanResidentKernelDispatch; 2]>::new();
             let mut suffix_dispatches = SmallVec::<[&VulkanResidentKernelDispatch; 5]>::new();
@@ -1591,11 +1606,13 @@ impl VulkanResidentInProcessPlacedModelPackage {
             slice
                 .resident_execution_plan
                 .configure_feedback_indirect_dispatches(
+                    device_for(&slice.device_id)?,
                     &mut feedback_control,
                     &slice.device_id,
                     &prefix_dispatches,
                     &suffix_dispatches,
                     generation_tail_dispatch_count,
+                    feedback_lane_capacity,
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
@@ -1616,28 +1633,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let output_synchronization =
             VulkanResidentPlacedOutputTimelineSynchronization::new(output_device)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let resident_feedback_loop = VulkanResidentInProcessPlacedFeedbackLoop::new_if_supported(
-            self,
-            &devices,
-            &activation_schedule,
-            every_edge_is_resident_replayable,
-            VulkanResidentPlacedFeedbackMount {
-                input_transducer: &input_transducer,
-                output_transducer: &output_transducer,
-                sampler: &sampler,
-                control: feedback_control,
-            },
-            &device_for,
-        )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let speculative_target_frame_history =
-            VulkanResidentSpeculativeTargetFrameHistory::new_if_needed(
-                self,
-                output_device,
-                &output_transducer,
-                &sampler,
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut speculative_decoders = Vec::with_capacity(self.speculative_decoders.len());
         for decoder in &self.speculative_decoders {
             let draft_device = device_for(&decoder.device_id)?;
@@ -1654,6 +1649,52 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 &device_for,
             )?);
         }
+        let speculative_state_is_resident_replayable =
+            parallel_speculative_feedback_state_is_replayable(
+                &speculative_decoders,
+                &device_for,
+            )?;
+        let resident_feedback_loop = VulkanResidentInProcessPlacedFeedbackLoop::new_if_supported(
+            self,
+            &devices,
+            &activation_schedule,
+            every_edge_is_resident_replayable,
+            feedback_stream_control_is_resident_replayable,
+            VulkanResidentPlacedFeedbackMount {
+                input_transducer: &input_transducer,
+                output_transducer: &output_transducer,
+                sampler: &sampler,
+                control: feedback_control,
+                demand_pipeline_predicates: demand_feedback_predicates,
+                speculative_state_is_resident_replayable,
+            },
+            &device_for,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let speculative_target_frame_history = resident_feedback_loop
+            .as_ref()
+            .map(|_| {
+                VulkanResidentSpeculativeTargetFrameHistory::new_if_needed(
+                self,
+                output_device,
+                &output_transducer,
+                &sampler,
+                )
+            })
+            .transpose()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
+            .flatten();
+        let parallel_speculative_feedback_state = resident_feedback_loop
+            .as_ref()
+            .map(|feedback_loop| {
+                VulkanResidentParallelSpeculativeFeedbackState::new_if_needed(
+                    &speculative_decoders,
+                    feedback_loop.window_policy.maximum_tick_count,
+                    &device_for,
+                )
+            })
+            .transpose()?
+            .flatten();
         let execution_quantum_calibrators = devices
             .iter()
             .map(|slice| {
@@ -1674,6 +1715,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             output_synchronization,
             resident_feedback_loop,
             speculative_target_frame_history,
+            parallel_speculative_feedback_state,
             activation_schedule,
             device_slices: devices,
             execution_quantum_calibrators,

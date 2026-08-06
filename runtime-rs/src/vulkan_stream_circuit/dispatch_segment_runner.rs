@@ -22,6 +22,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         stages: &[VulkanMountedPlacedStreamTickStage],
         physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
         demand_context: Option<&VulkanDemandResidencyExecutionContext>,
+        demand_pipeline_predicate: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         let start_stage_index = stages
             .first()
@@ -90,6 +91,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 schedule,
                 &dispatches,
                 context.clone(),
+                demand_pipeline_predicate,
             )?,
             (None, None) => None,
             _ => {
@@ -121,22 +123,35 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
 
     fn configure_feedback_indirect_dispatches(
         &mut self,
+        device: &VulkanComputeDevice,
         control: &mut VulkanResidentFeedbackControlPlane,
         device_id: &str,
         prefix_dispatches: &[&VulkanResidentKernelDispatch],
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         generation_tail_dispatch_count: Option<usize>,
+        lane_capacity: usize,
     ) -> Result<(), VulkanError> {
-        let dispatches = prefix_dispatches
-            .iter()
-            .copied()
-            .chain(
-                self.dispatches
-                    .iter()
-                    .map(|dispatch| &dispatch.resident_dispatch),
-            )
-            .chain(suffix_dispatches.iter().copied());
-        let indirect = control.register_sequence(device_id, dispatches)?;
+        let indirect = if let Some(demand) = &self.demand_residency {
+            control.register_sequence_dimensions(
+                device_id,
+                demand.feedback_dispatch_dimensions(
+                    &self.dispatches,
+                    prefix_dispatches,
+                    suffix_dispatches,
+                )?,
+            )?
+        } else {
+            let dispatches = prefix_dispatches
+                .iter()
+                .copied()
+                .chain(
+                    self.dispatches
+                        .iter()
+                        .map(|dispatch| &dispatch.resident_dispatch),
+                )
+                .chain(suffix_dispatches.iter().copied());
+            control.register_sequence(device_id, dispatches)?
+        };
         if let Some(generation_tail_dispatch_count) = generation_tail_dispatch_count {
             if suffix_dispatches.len() != generation_tail_dispatch_count + 1 {
                 return Err(VulkanError(format!(
@@ -144,15 +159,45 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                     suffix_dispatches.len()
                 )));
             }
+            let generation_tail_start = indirect
+                .byte_offsets
+                .len()
+                .checked_sub(suffix_dispatches.len())
+                .ok_or_else(|| {
+                    VulkanError(
+                        "resident feedback suffix exceeds its indirect sequence".to_string(),
+                    )
+                })?;
             control.set_generation_tail(
-                indirect.first_dispatch_index
-                    + prefix_dispatches.len()
-                    + self.dispatches.len(),
+                indirect.first_dispatch_index + generation_tail_start,
                 generation_tail_dispatch_count,
             )?;
         }
         self.feedback_indirect = Some(indirect);
+        if let Some(demand) = &self.demand_residency {
+            demand
+                .prepare_feedback_chains(
+                    device,
+                    &self.dispatches,
+                    prefix_dispatches,
+                    suffix_dispatches,
+                    VulkanResidentPlacedTokenTickTail::Sample.sequence_variant(),
+                    lane_capacity,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to preallocate demand feedback chains: {error}"
+                    ))
+                })?;
+        }
         Ok(())
+    }
+
+    fn feedback_dispatch_count(&self) -> Result<usize, VulkanError> {
+        match &self.demand_residency {
+            Some(demand) => demand.feedback_dispatch_count(self.dispatch_count),
+            None => Ok(self.dispatch_count),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -171,9 +216,37 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         if let Some(demand) = &self.demand_residency {
+            if let (Some(feedback_lane), Some(submission_batch), Some(indirect)) = (
+                feedback_lane,
+                submission_batch,
+                self.feedback_indirect.as_ref(),
+            ) {
+                if !snapshot_copies.is_empty() {
+                    return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                        VulkanError(
+                            "demand-resident feedback snapshots require a transactional window baseline"
+                                .to_string(),
+                        ),
+                    ));
+                }
+                return demand.enqueue_feedback_initial(
+                    device,
+                    &self.dispatches,
+                    control,
+                    prefix_dispatches,
+                    suffix_dispatches,
+                    sequence_variant,
+                    feedback_lane,
+                    indirect,
+                    wait_points,
+                    signal_points,
+                    signal_completion,
+                    submission_batch,
+                );
+            }
             if feedback_lane.is_some()
-                || !snapshot_copies.is_empty()
                 || submission_batch.is_some()
+                || !snapshot_copies.is_empty()
                 || !signal_completion
             {
                 return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(

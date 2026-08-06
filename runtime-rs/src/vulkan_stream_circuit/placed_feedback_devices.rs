@@ -16,7 +16,10 @@ struct VulkanResidentInProcessPlacedFeedbackLoopEligibility {
     device_slice_count: usize,
     every_slice_has_terminal_segment: bool,
     distributed_dispatches_are_bridged: bool,
+    demand_dispatches_are_pipeline_guarded: bool,
     every_edge_is_resident_replayable: bool,
+    feedback_stream_control_is_resident_replayable: bool,
+    speculative_state_is_resident_replayable: bool,
     has_dynamic_push_constants: bool,
     window_width: usize,
     sampler_history_capacity: usize,
@@ -30,8 +33,14 @@ impl VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             Some("missing_terminal_segment")
         } else if !self.distributed_dispatches_are_bridged {
             Some("unbridged_distributed_dispatch")
+        } else if !self.demand_dispatches_are_pipeline_guarded {
+            Some("unguarded_demand_distributed_dispatch")
         } else if !self.every_edge_is_resident_replayable {
             Some("host_staged_edge")
+        } else if !self.feedback_stream_control_is_resident_replayable {
+            Some("host_staged_feedback_stream_control")
+        } else if !self.speculative_state_is_resident_replayable {
+            Some("unreplayable_speculative_state_sync")
         } else {
             None
         }
@@ -54,12 +63,32 @@ struct VulkanResidentInProcessPlacedFeedbackLoop {
     replayable: bool,
     scheduler_turn_count_per_tick: usize,
     completed_stage_count_per_tick: usize,
+    demand_residency: Option<VulkanResidentDemandFeedbackState>,
 }
 
 struct VulkanResidentSpeculativeTargetFrameHistory {
     frames: VulkanResidentBuffer,
     frame_byte_capacity: usize,
     lane_copies: Vec<VulkanResidentBufferCopyBatch>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VulkanResidentSpeculativeFeedbackHistoryRequirements {
+    parallel_state: bool,
+    normalized_frames: bool,
+}
+
+fn resident_speculative_feedback_history_requirements(
+    decoder_is_parallel: impl IntoIterator<Item = bool>,
+) -> VulkanResidentSpeculativeFeedbackHistoryRequirements {
+    decoder_is_parallel.into_iter().fold(
+        VulkanResidentSpeculativeFeedbackHistoryRequirements::default(),
+        |mut requirements, is_parallel| {
+            requirements.parallel_state |= is_parallel;
+            requirements.normalized_frames |= !is_parallel;
+            requirements
+        },
+    )
 }
 
 impl VulkanResidentSpeculativeTargetFrameHistory {
@@ -69,12 +98,15 @@ impl VulkanResidentSpeculativeTargetFrameHistory {
         output_transducer: &VulkanResidentOutputTransducerRunner,
         sampler: &VulkanResidentSamplerRunner,
     ) -> Result<Option<Self>, VulkanError> {
-        if !model.speculative_decoders.iter().any(|decoder| {
-            matches!(
-                decoder.execution,
-                VulkanResidentSpeculativeDecoderModelExecution::Autoregressive { .. }
-            )
-        }) {
+        let requirements = resident_speculative_feedback_history_requirements(
+            model.speculative_decoders.iter().map(|decoder| {
+                matches!(
+                    decoder.execution,
+                    VulkanResidentSpeculativeDecoderModelExecution::ParallelBlock { .. }
+                )
+            }),
+        );
+        if !requirements.normalized_frames {
             return Ok(None);
         }
         let lane_capacity =
@@ -188,21 +220,68 @@ struct VulkanResidentPlacedFeedbackMount<'a> {
     output_transducer: &'a VulkanResidentOutputTransducerRunner,
     sampler: &'a VulkanResidentSamplerRunner,
     control: VulkanResidentFeedbackControlPlane,
+    demand_pipeline_predicates: Option<BTreeMap<String, Arc<VulkanResidentBuffer>>>,
+    speculative_state_is_resident_replayable: bool,
 }
 
 struct VulkanResidentPlacedFeedbackTimelineSynchronization {
     output_signal: VulkanTimelineSemaphore,
-    input_wait: VulkanTimelineSemaphore,
+    destination_waits: BTreeMap<String, VulkanTimelineSemaphore>,
     next_value: Cell<u64>,
     pending_value: Cell<Option<u64>>,
+    device_local_staging: Option<VulkanResidentPlacedFeedbackDeviceLocalStaging>,
+}
+
+struct VulkanResidentPlacedFeedbackDeviceLocalStaging {
+    output_copy: Box<VulkanResidentBufferCopy>,
+    destination_copies: BTreeMap<String, Box<VulkanResidentBufferCopy>>,
+    _output_staging: Arc<VulkanResidentBuffer>,
+    _destination_staging: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 
 #[derive(Clone, Copy)]
 struct VulkanPlacedFeedbackTimelineTurn<'a> {
-    input_device_id: &'a str,
+    synchronization: &'a VulkanResidentPlacedFeedbackTimelineSynchronization,
     output_device_id: &'a str,
-    input_wait: Option<VulkanTimelineSemaphorePoint<'a>>,
-    output_signal: VulkanTimelineSemaphorePoint<'a>,
+    destination_value: Option<u64>,
+    output_value: u64,
+}
+
+impl<'a> VulkanPlacedFeedbackTimelineTurn<'a> {
+    fn destination_wait(
+        self,
+        device_id: &str,
+    ) -> Option<VulkanTimelineSemaphorePoint<'a>> {
+        let value = self.destination_value?;
+        self.synchronization
+            .destination_waits
+            .get(device_id)
+            .map(|wait| VulkanTimelineSemaphorePoint::new(wait, value))
+    }
+
+    fn destination_copy(self, device_id: &str) -> Option<&'a VulkanResidentBufferCopy> {
+        self.destination_value?;
+        self.synchronization
+            .device_local_staging
+            .as_ref()?
+            .destination_copies
+            .get(device_id)
+            .map(Box::as_ref)
+    }
+
+    fn output_signal(self) -> VulkanTimelineSemaphorePoint<'a> {
+        VulkanTimelineSemaphorePoint::new(
+            &self.synchronization.output_signal,
+            self.output_value,
+        )
+    }
+
+    fn output_copy(self) -> Option<&'a VulkanResidentBufferCopy> {
+        self.synchronization
+            .device_local_staging
+            .as_ref()
+            .map(|staging| staging.output_copy.as_ref())
+    }
 }
 
 struct VulkanResidentPlacedOutputTimelineSynchronization {
@@ -234,15 +313,31 @@ type VulkanResidentPlacedFeedbackTemplateCatalog =
     BTreeMap<VulkanResidentPlacedFeedbackTemplateKey, VulkanResidentPlacedFeedbackSubmissionReplay>;
 
 impl VulkanResidentPlacedFeedbackTimelineSynchronization {
-    fn new(
-        input_device: &VulkanComputeDevice,
-        output_device: &VulkanComputeDevice,
+    fn new<'a>(
+        device_stream_controls: &[(&str, &'a VulkanComputeDevice, &'a VulkanResidentBuffer)],
+        output_device_id: &str,
     ) -> Result<Option<Self>, VulkanError> {
-        if input_device.shares_logical_device_with(output_device) {
+        let (output_device, output_stream_control) = device_stream_controls
+            .iter()
+            .find(|(device_id, _, _)| *device_id == output_device_id)
+            .map(|(_, device, control)| (*device, *control))
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "resident feedback output device {output_device_id:?} has no stream control"
+                ))
+            })?;
+        let destinations = device_stream_controls
+            .iter()
+            .filter(|(_, device, _)| !device.shares_logical_device_with(output_device))
+            .copied()
+            .collect::<Vec<_>>();
+        if destinations.is_empty() {
             return Ok(None);
         }
-        if !input_device.supports_opaque_fd_timeline_semaphores()
-            || !output_device.supports_opaque_fd_timeline_semaphores()
+        if !output_device.supports_opaque_fd_timeline_semaphores()
+            || destinations
+                .iter()
+                .any(|(_, device, _)| !device.supports_opaque_fd_timeline_semaphores())
         {
             return Err(VulkanError(
                 "cross-device resident feedback requires persistent opaque-file timeline semaphores"
@@ -250,37 +345,80 @@ impl VulkanResidentPlacedFeedbackTimelineSynchronization {
             ));
         }
         let output_signal = output_device.create_opaque_fd_exportable_timeline_semaphore(0)?;
-        let input_wait = input_device.create_timeline_semaphore(0)?;
-        input_device.import_timeline_semaphore_opaque_fd(
-            &input_wait,
-            output_device.export_timeline_semaphore_opaque_fd(&output_signal)?,
-        )?;
+        let mut destination_waits = BTreeMap::new();
+        for (device_id, device, _) in &destinations {
+            let wait = device.create_timeline_semaphore(0)?;
+            device.import_timeline_semaphore_opaque_fd(
+                &wait,
+                output_device.export_timeline_semaphore_opaque_fd(&output_signal)?,
+            )?;
+            destination_waits.insert((*device_id).to_string(), wait);
+        }
+        let controls_are_directly_shared = destinations.iter().all(|(_, _, control)| {
+            control.shares_device_memory_with(output_stream_control)
+                || control.shares_host_allocation_with(output_stream_control)
+        });
+        let device_local_staging = if controls_are_directly_shared {
+            None
+        } else {
+            let peers = destinations
+                .iter()
+                .map(|(_, device, _)| *device)
+                .collect::<Vec<_>>();
+            let allocation = output_device
+                .create_shared_host_allocation(&peers, VULKAN_STREAM_CONTROL_BYTE_CAPACITY)?;
+            let output_staging = Arc::new(
+                output_device.import_shared_host_buffer(Arc::clone(&allocation))?,
+            );
+            let output_copy = Box::new(output_device.create_resident_buffer_copy(
+                output_stream_control,
+                &output_staging,
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+            )?);
+            let mut destination_copies = BTreeMap::new();
+            let mut destination_staging = BTreeMap::new();
+            for (device_id, device, stream_control) in &destinations {
+                let staging = Arc::new(
+                    device.import_shared_host_buffer(Arc::clone(&allocation))?,
+                );
+                let copy = Box::new(device.create_resident_buffer_copy(
+                    &staging,
+                    stream_control,
+                    VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                )?);
+                destination_copies.insert((*device_id).to_string(), copy);
+                destination_staging.insert((*device_id).to_string(), staging);
+            }
+            Some(VulkanResidentPlacedFeedbackDeviceLocalStaging {
+                output_copy,
+                destination_copies,
+                _output_staging: output_staging,
+                _destination_staging: destination_staging,
+            })
+        };
         Ok(Some(Self {
             output_signal,
-            input_wait,
+            destination_waits,
             next_value: Cell::new(1),
             pending_value: Cell::new(None),
+            device_local_staging,
         }))
     }
 
     fn prepare_turn<'a>(
         &'a self,
-        input_device_id: &'a str,
         output_device_id: &'a str,
     ) -> Result<VulkanPlacedFeedbackTimelineTurn<'a>, VulkanError> {
         let value = self.next_value.get();
         self.next_value.set(value.checked_add(1).ok_or_else(|| {
             VulkanError("resident feedback timeline semaphore exhausted its values".to_string())
         })?);
-        let input_wait = self
-            .pending_value
-            .replace(Some(value))
-            .map(|pending| VulkanTimelineSemaphorePoint::new(&self.input_wait, pending));
+        let destination_value = self.pending_value.replace(Some(value));
         Ok(VulkanPlacedFeedbackTimelineTurn {
-            input_device_id,
+            synchronization: self,
             output_device_id,
-            input_wait,
-            output_signal: VulkanTimelineSemaphorePoint::new(&self.output_signal, value),
+            destination_value,
+            output_value: value,
         })
     }
 
@@ -310,13 +448,23 @@ impl VulkanResidentPlacedFeedbackTimelineSynchronization {
         Ok(())
     }
 
+    fn discard_aborted_turns(&self) {
+        // Timeline semaphore values are monotonic and remain valid after an
+        // aborted demand attempt. Only the logical carry into the next window
+        // must be discarded: its payload belongs to rolled-back execution.
+        self.pending_value.set(None);
+    }
+
     fn capture_replay_timeline_state(
         &self,
         state: &mut VulkanTimelineSemaphoreReplayState,
     ) -> Result<(), VulkanError> {
         let next_value = self.next_value.get();
         state.capture(&self.output_signal, next_value)?;
-        state.capture(&self.input_wait, next_value)
+        for wait in self.destination_waits.values() {
+            state.capture(wait, next_value)?;
+        }
+        Ok(())
     }
 }
 
@@ -523,6 +671,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         activation_schedule: &VulkanMountedPlacedResidentInProcessSchedule,
         every_edge_is_resident_replayable: bool,
+        feedback_stream_control_is_resident_replayable: bool,
         mount: VulkanResidentPlacedFeedbackMount<'_>,
         device_for: &F,
     ) -> Result<Option<Self>, VulkanError>
@@ -530,14 +679,13 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         F: Fn(&str) -> Result<&'a VulkanComputeDevice, E>,
         E: Display,
     {
-        if model.resource_residency_policy.is_demand_loaded() {
-            return Ok(None);
-        }
         let VulkanResidentPlacedFeedbackMount {
             input_transducer,
             output_transducer,
             sampler,
             control,
+            demand_pipeline_predicates,
+            speculative_state_is_resident_replayable,
         } = mount;
         let has_dynamic_push_constants = input_transducer
             .resident_dispatch
@@ -568,6 +716,13 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                                 source: VulkanKernelScalarSource::PushConstant,
                             }]
                 });
+        let has_demand_checkpoints = device_slices.iter().any(|slice| {
+            !slice
+                .package_slice
+                .physical_residency_schedule()
+                .checkpoints
+                .is_empty()
+        });
         let window_width = VULKAN_BACKEND_LOOP_MAX_WINDOW
             .min(sampler.history_capacity_activations.max(1));
         let eligibility = VulkanResidentInProcessPlacedFeedbackLoopEligibility {
@@ -584,7 +739,13 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                         dependency.has_owner_producer && dependency.has_owner_continuation
                     })
             }),
+            demand_dispatches_are_pipeline_guarded: !has_demand_checkpoints
+                || device_slices.iter().all(|slice| {
+                    slice.resident_execution_plan.distributed_dispatch_count == 0
+            }),
             every_edge_is_resident_replayable,
+            feedback_stream_control_is_resident_replayable,
+            speculative_state_is_resident_replayable,
             has_dynamic_push_constants,
             window_width,
             sampler_history_capacity: sampler.history_capacity_activations,
@@ -592,15 +753,33 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         let Some(window_width) = eligibility.window_width() else {
             return Ok(None);
         };
-        let input_device = device_for(&model.input_device_id).map_err(|error| {
-            VulkanError(format!("feedback input device resolution failed: {error}"))
-        })?;
         let output_device = device_for(&model.output_device_id).map_err(|error| {
             VulkanError(format!("feedback output device resolution failed: {error}"))
         })?;
-        let feedback_synchronization =
-            VulkanResidentPlacedFeedbackTimelineSynchronization::new(input_device, output_device)?
-                .map(Box::new);
+        let device_stream_controls = device_slices
+            .iter()
+            .map(|slice| {
+                device_for(&slice.device_id)
+                    .map(|device| {
+                        (
+                            slice.device_id.as_str(),
+                            device,
+                            slice.mounted.stream_control_buffer.as_ref(),
+                        )
+                    })
+                    .map_err(|error| {
+                        VulkanError(format!(
+                            "feedback device {:?} resolution failed: {error}",
+                            slice.device_id
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let feedback_synchronization = VulkanResidentPlacedFeedbackTimelineSynchronization::new(
+            &device_stream_controls,
+            &model.output_device_id,
+        )?
+        .map(Box::new);
         let output_synchronization = Box::new(
             VulkanResidentPlacedOutputTimelineSynchronization::new(output_device)?,
         );
@@ -612,14 +791,38 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                         VulkanError("placed feedback stage count overflowed".to_string())
                     })
             })?;
+        let demand_residency = match (
+            has_demand_checkpoints,
+            demand_pipeline_predicates,
+        ) {
+            (true, Some(predicates)) => Some(VulkanResidentDemandFeedbackState::new(
+                predicates,
+                device_slices,
+                device_for,
+            )?),
+            (true, None) => {
+                return Err(VulkanError(
+                    "demand-loaded resident feedback has no shared pipeline predicate"
+                        .to_string(),
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(VulkanError(
+                    "resident feedback without physical demand checkpoints unexpectedly received demand predicates"
+                        .to_string(),
+                ));
+            }
+            (false, None) => None,
+        };
         Ok(Some(Self {
             feedback_synchronization,
             output_synchronization,
             control,
             window_policy: VulkanResidentFeedbackWindowPolicy::new(window_width),
-            replayable: !has_dynamic_push_constants,
+            replayable: demand_residency.is_none() && !has_dynamic_push_constants,
             scheduler_turn_count_per_tick: activation_schedule.turns.len(),
             completed_stage_count_per_tick,
+            demand_residency,
         }))
     }
 }
@@ -796,6 +999,7 @@ struct VulkanPlacedDeviceLinks {
     synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     stream_control_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
     every_edge_is_resident_replayable: bool,
+    feedback_stream_control_is_resident_replayable: bool,
 }
 
 #[derive(Default)]
@@ -809,6 +1013,14 @@ struct VulkanPlacedEdgeTimelineSynchronization {
     next_value: Cell<u64>,
     pending_value: Cell<Option<u64>>,
     transfer_route: VulkanPlacedEdgeTransferRoute,
+    device_local_staging: Option<VulkanPlacedEdgeDeviceLocalStaging>,
+}
+
+struct VulkanPlacedEdgeDeviceLocalStaging {
+    source_copy: Box<VulkanResidentBufferCopy>,
+    destination_copy: Box<VulkanResidentBufferCopy>,
+    _source_staging: Arc<VulkanResidentBuffer>,
+    _destination_staging: Arc<VulkanResidentBuffer>,
 }
 
 impl VulkanPlacedEdgeTimelineSynchronizations {
@@ -819,6 +1031,12 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
         self.edges
             .get(key)
             .map(|synchronization| synchronization.transfer_route)
+    }
+
+    fn edge_uses_device_local_staging(&self, key: &VulkanPlacedEdgePacketKey) -> bool {
+        self.edges.get(key).is_some_and(|synchronization| {
+            synchronization.transfer_route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+        })
     }
 
     fn advance_replayed_dependencies(&self, count: usize) -> Result<(), VulkanError> {
@@ -908,6 +1126,73 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
             &synchronization.destination_wait,
             value,
         )))
+    }
+
+    fn enqueue_source_staging_transfer<'a>(
+        &'a self,
+        endpoint: &VulkanPlacedEdgeEndpoint,
+        source_device: &'a VulkanComputeDevice,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
+    ) -> Result<bool, VulkanError> {
+        let key = VulkanPlacedEdgePacketKey::from_outgoing_endpoint(endpoint);
+        let Some(synchronization) = self.edges.get(&key) else {
+            return Ok(false);
+        };
+        let Some(staging) = &synchronization.device_local_staging else {
+            return Ok(false);
+        };
+        let signal = self
+            .prepare_source_signal(endpoint)?
+            .expect("staged edge synchronization has a source signal");
+        if let Some(batch) = submission_batch {
+            batch.enqueue_resident_buffer_copy(
+                source_device,
+                &staging.source_copy,
+                wait_points,
+                &[signal],
+            )?;
+        } else {
+            source_device.submit_resident_buffer_copy_with_timeline_semaphores(
+                &staging.source_copy,
+                wait_points,
+                &[signal],
+            )?;
+        }
+        Ok(true)
+    }
+
+    fn enqueue_destination_staging_transfer<'a>(
+        &'a self,
+        endpoint: &VulkanPlacedEdgeEndpoint,
+        destination_device: &'a VulkanComputeDevice,
+        submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
+    ) -> Result<bool, VulkanError> {
+        let key = VulkanPlacedEdgePacketKey::from_incoming_endpoint(endpoint);
+        let Some(synchronization) = self.edges.get(&key) else {
+            return Ok(false);
+        };
+        let Some(staging) = &synchronization.device_local_staging else {
+            return Ok(false);
+        };
+        let wait = self
+            .take_destination_wait(endpoint)?
+            .expect("staged edge synchronization has a destination wait");
+        if let Some(batch) = submission_batch {
+            batch.enqueue_resident_buffer_copy(
+                destination_device,
+                &staging.destination_copy,
+                &[wait],
+                &[],
+            )?;
+        } else {
+            destination_device.submit_resident_buffer_copy_with_timeline_semaphores(
+                &staging.destination_copy,
+                &[wait],
+                &[],
+            )?;
+        }
+        Ok(true)
     }
 
     fn has_pending_dependencies(&self) -> bool {
@@ -1029,7 +1314,7 @@ where
                 && destination.supports_opaque_fd_timeline_semaphores()
         });
 
-        let (physical_buffers, shared_route, group_is_resident_replayable) =
+        let (physical_buffers, shared_route, staging_buffers, group_is_resident_replayable) =
             if peer_devices.is_empty() {
                 (
                     vec![Arc::new(
@@ -1038,30 +1323,61 @@ where
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     )],
                     None,
+                    None,
                     true,
                 )
             } else if supports_cross_queue_timeline
                 && let Ok(shared) = source_device
                     .create_shared_resident_buffers(&peer_devices, group.byte_capacity)
             {
-                (shared.buffers, Some(shared.route), true)
+                match shared.route {
+                    VulkanSharedResidentBufferRoute::ExternalDeviceLocal => (
+                        shared.buffers,
+                        Some(VulkanSharedResidentBufferRoute::ExternalDeviceLocal),
+                        None,
+                        true,
+                    ),
+                    VulkanSharedResidentBufferRoute::SharedHost => {
+                        let device_local = unique_devices
+                            .iter()
+                            .map(|(device, _)| {
+                                device
+                                    .create_resident_buffer(group.byte_capacity)
+                                    .map(Arc::new)
+                                    .map_err(
+                                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+                                    )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        (device_local, None, Some(shared.buffers), true)
+                    }
+                }
             } else {
-                let allocation = source_device
+                let staging_allocation = source_device
                     .create_shared_host_allocation(&peer_devices, group.byte_capacity)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                let buffers = unique_devices
+                let staging = unique_devices
                     .iter()
                     .map(|(device, _)| {
                         device
-                            .import_shared_host_buffer(Arc::clone(&allocation))
+                            .import_shared_host_buffer(Arc::clone(&staging_allocation))
+                            .map(Arc::new)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let device_local = unique_devices
+                    .iter()
+                    .map(|(device, _)| {
+                        device
+                            .create_resident_buffer(group.byte_capacity)
                             .map(Arc::new)
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 (
-                    buffers,
-                    supports_cross_queue_timeline
-                        .then_some(VulkanSharedResidentBufferRoute::SharedHost),
+                    device_local,
+                    None,
+                    Some(staging),
                     supports_cross_queue_timeline,
                 )
             };
@@ -1117,16 +1433,70 @@ where
                 .get(&incoming.local_device_id)
                 .cloned()
                 .expect("produced-port destination buffer was allocated");
-            if !devices_share_queue
-                && let Some(route) = shared_route
-            {
-                let transfer_route = match route {
-                    VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
-                        VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
-                    }
-                    VulkanSharedResidentBufferRoute::SharedHost => {
-                        VulkanPlacedEdgeTransferRoute::SharedHost
-                    }
+            if !devices_share_queue && (shared_route.is_some() || staging_buffers.is_some()) {
+                let (transfer_route, device_local_staging) = if let Some(route) = shared_route {
+                    let transfer_route = match route {
+                        VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                            VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                        }
+                        VulkanSharedResidentBufferRoute::SharedHost => unreachable!(
+                            "host-shared produced ports use explicit device-local staging"
+                        ),
+                    };
+                    (transfer_route, None)
+                } else {
+                    let source_staging = staging_buffers
+                        .as_ref()
+                        .and_then(|buffers| buffers.first())
+                        .cloned()
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                "staged produced port has no source staging buffer".to_string(),
+                            ))
+                        })?;
+                    let destination_index = unique_devices
+                        .iter()
+                        .position(|(device, _)| {
+                            device.shares_logical_device_with(destination_device)
+                        })
+                        .expect("produced-port participants include the destination device");
+                    let destination_staging = staging_buffers
+                        .as_ref()
+                        .and_then(|buffers| buffers.get(destination_index))
+                        .cloned()
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                "staged produced port has no destination staging buffer"
+                                    .to_string(),
+                            ))
+                        })?;
+                    let source_copy = Box::new(
+                        source_device
+                            .create_resident_buffer_copy(
+                                &source_buffer,
+                                &source_staging,
+                                group.byte_capacity,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    );
+                    let destination_copy = Box::new(
+                        destination_device
+                            .create_resident_buffer_copy(
+                                &destination_staging,
+                                &incoming_buffer,
+                                group.byte_capacity,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    );
+                    (
+                        VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                        Some(VulkanPlacedEdgeDeviceLocalStaging {
+                            source_copy,
+                            destination_copy,
+                            _source_staging: source_staging,
+                            _destination_staging: destination_staging,
+                        }),
+                    )
                 };
                 let source_signal = source_device
                     .create_opaque_fd_exportable_timeline_semaphore(0)
@@ -1152,6 +1522,7 @@ where
                             next_value: Cell::new(1),
                             pending_value: Cell::new(None),
                             transfer_route,
+                            device_local_staging,
                         },
                     )
                     .is_some()
@@ -1194,6 +1565,7 @@ where
         }
     }
     let mut stream_control_buffers = BTreeMap::new();
+    let feedback_stream_control_is_resident_replayable = true;
     if let Some((owner_device, _)) = unique_devices.first() {
         let buffers = if unique_devices.len() == 1 {
             let mut buffer = owner_device
@@ -1209,6 +1581,13 @@ where
                 .skip(1)
                 .map(|(device, _)| *device)
                 .collect::<Vec<_>>();
+            // Token/tick metadata is a tiny coherence-critical control plane,
+            // not a bulk activation. Keep one host-coherent allocation bound
+            // into every physical device so scalar execution, resident
+            // feedback, rollback, and replay all observe exactly the same
+            // bytes. A device-local DMA-BUF would need explicit external queue
+            // ownership transfers for cross-device read-after-write; the few
+            // control words cannot justify that weaker and more complex path.
             let allocation = owner_device
                 .create_shared_host_allocation(&peers, VULKAN_STREAM_CONTROL_BYTE_CAPACITY)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -1222,9 +1601,11 @@ where
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
-        buffers[0]
-            .write_bytes(&[0; VULKAN_STREAM_CONTROL_BYTE_CAPACITY])
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        for buffer in &buffers {
+            buffer
+                .write_bytes(&[0; VULKAN_STREAM_CONTROL_BYTE_CAPACITY])
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
         for ((_, device_ids), buffer) in unique_devices.iter().zip(buffers) {
             for device_id in device_ids {
                 stream_control_buffers.insert(device_id.clone(), buffer.clone());
@@ -1239,5 +1620,6 @@ where
         },
         stream_control_buffers,
         every_edge_is_resident_replayable,
+        feedback_stream_control_is_resident_replayable,
     })
 }

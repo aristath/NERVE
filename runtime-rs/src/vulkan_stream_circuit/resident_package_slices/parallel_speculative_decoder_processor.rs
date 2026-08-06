@@ -456,6 +456,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             if state_input_signal_ids.contains(&port.endpoint.port_id) {
                 batch_source_taps.push(VulkanParallelSpeculativeSourceTapBatchBinding {
                     source_device_id: source.device_id.to_string(),
+                    source_scalar_buffer: Arc::clone(&source.scalar_buffer_owner),
                     source_batch_signal_key: source.batch_signal_key,
                     destination_signal_id: port.id.clone(),
                     frame_byte_capacity: source.frame_byte_capacity,
