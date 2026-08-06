@@ -414,9 +414,18 @@ def _validate_candidate_source(
         raise ContractValidationError(
             "candidate does not preserve provider problem source contracts"
         )
-    if set(candidate["evidence_refs"]) != set(evidence.evidence_ids):
+    accepted_evidence_ids = set(evidence.evidence_ids)
+    replaced_scope_ids = set(scopes)
+    expected_evidence_refs = {
+        str(record["evidence_id"])
+        for record in context.evidence
+        if record["evidence_id"] in accepted_evidence_ids
+        and record["scope_id"] in replaced_scope_ids
+    }
+    if set(candidate["evidence_refs"]) != expected_evidence_refs:
         raise ContractValidationError(
-            "candidate must retain the exact accepted evidence references"
+            "candidate must retain exactly the accepted evidence references "
+            "for the scopes it replaces"
         )
 
 

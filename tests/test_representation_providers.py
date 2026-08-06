@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 import pytest
@@ -10,7 +11,10 @@ from nerve.representation_optimizer.benchmarking.planning import (
 )
 from nerve.representation_optimizer.contracts import (
     ContractValidationError,
+    algebraic_evidence_id,
     representation_candidate_id,
+    source_behavior_contract_digest,
+    stable_contract_id,
     validate_contract,
 )
 from nerve.representation_optimizer.descriptor_registry import (
@@ -724,6 +728,90 @@ def _problem() -> ProviderProblem:
     )
 
 
+def _two_scope_problem() -> ProviderProblem:
+    scope, source, evidence = deepcopy(contract_fixtures()[:3])
+    second_source = deepcopy(source)
+    second_members = {
+        "component_ids": ["component_2"],
+        "semantic_module_ids": ["layer_2.feature_transform"],
+        "source_node_ids": ["gate_2", "up_2", "down_2"],
+    }
+    second_scope_id = stable_contract_id(
+        "scope",
+        "fixture_package",
+        "semantic_module",
+        second_members["component_ids"],
+        second_members["semantic_module_ids"],
+        second_members["source_node_ids"],
+    )
+    second_source["scope_id"] = second_scope_id
+    second_source["contract_digest"] = source_behavior_contract_digest(
+        second_source
+    )
+    second_scope = deepcopy(scope)
+    second_scope["scope_id"] = second_scope_id
+    second_scope["members"] = second_members
+    second_scope["source_contract_digest"] = second_source["contract_digest"]
+    second_evidence = deepcopy(evidence)
+    second_evidence["evidence_id"] = ""
+    second_evidence["scope_id"] = second_scope_id
+    second_evidence["source_contract_digest"] = second_source["contract_digest"]
+    second_evidence["evidence_id"] = algebraic_evidence_id(second_evidence)
+    return ProviderProblem.from_documents(
+        package_id="fixture_package",
+        scopes=[scope, second_scope],
+        source_contracts=[source, second_source],
+        evidence=[evidence, second_evidence],
+        hardware_profile=hardware_profile_contract(),
+    )
+
+
+class ScopeLocalCandidateProvider(FixtureProvider):
+    def analyze_evidence(self, context):
+        self._called("analyze_evidence")
+        return EvidenceAssessment(
+            accepted=True,
+            evidence_ids=tuple(
+                evidence["evidence_id"] for evidence in context.evidence
+            ),
+            facts={"structural_claim": "one candidate per independent scope"},
+            reasons=("all scope-local evidence is accepted",),
+        )
+
+    def synthesize_candidates(self, context, evidence):
+        self._called("synthesize_candidates")
+        template = super().synthesize_candidates(context, evidence)[0]
+        source_digests = dict(
+            zip(context.scope_ids, context.source_contract_digests, strict=True)
+        )
+        evidence_by_scope = {
+            record["scope_id"]: record["evidence_id"]
+            for record in context.evidence
+        }
+        candidates = []
+        for scope_id in context.scope_ids:
+            candidate = deepcopy(template)
+            candidate["scope_ids"] = [scope_id]
+            candidate["source_contract_digests"] = [source_digests[scope_id]]
+            candidate["evidence_refs"] = [evidence_by_scope[scope_id]]
+            candidate["candidate_id"] = representation_candidate_id(candidate)
+            candidates.append(candidate)
+        return tuple(candidates)
+
+    def emit_representation_ir(self, context, candidate):
+        self._called("emit_representation_ir")
+        evidence_by_scope = {
+            record["scope_id"]: record["evidence_id"]
+            for record in context.evidence
+        }
+        return exact_representation_graph(
+            candidate_id=candidate["candidate_id"],
+            scope_ids=tuple(candidate["scope_ids"]),
+            source_contract_digests=tuple(candidate["source_contract_digests"]),
+            evidence_ref=evidence_by_scope[candidate["scope_ids"][0]],
+        )
+
+
 def test_provider_registry_executes_the_complete_interface_deterministically():
     provider = FixtureProvider("fixture.provider", _descriptor_id())
     registry = ProviderRegistry.from_providers(
@@ -757,6 +845,58 @@ def test_provider_registry_executes_the_complete_interface_deterministically():
         "validation_requirements",
     }
     assert set(provider.calls) == expected_calls
+
+
+def test_provider_candidates_retain_only_evidence_for_their_replaced_scopes():
+    provider = ScopeLocalCandidateProvider(
+        "fixture.scope_local_candidates",
+        _descriptor_id(),
+    )
+    report = ProviderRegistry.from_providers(
+        descriptors=_descriptors(),
+        providers=[provider],
+    ).run(_two_scope_problem())
+
+    assert report.evaluations[0].status == "completed"
+    assert len(report.candidates) == 2
+    evidence_scope_by_id = {
+        record["evidence_id"]: record["scope_id"]
+        for record in _two_scope_problem()
+        .bind_descriptor(_descriptors().get(_descriptor_id()))
+        .evidence
+    }
+    for plan in report.candidates:
+        candidate = plan.candidate.to_json()
+        assert len(candidate["scope_ids"]) == 1
+        assert len(candidate["evidence_refs"]) == 1
+        assert (
+            evidence_scope_by_id[candidate["evidence_refs"][0]]
+            == candidate["scope_ids"][0]
+        )
+
+
+def test_provider_candidate_cannot_claim_evidence_from_an_unreplaced_scope():
+    class CrossScopeEvidenceProvider(ScopeLocalCandidateProvider):
+        def synthesize_candidates(self, context, evidence):
+            candidates = list(super().synthesize_candidates(context, evidence))
+            candidates[0]["evidence_refs"] = list(evidence.evidence_ids)
+            candidates[0]["candidate_id"] = representation_candidate_id(
+                candidates[0]
+            )
+            return tuple(candidates)
+
+    provider = CrossScopeEvidenceProvider(
+        "fixture.cross_scope_evidence",
+        _descriptor_id(),
+    )
+    report = ProviderRegistry.from_providers(
+        descriptors=_descriptors(),
+        providers=[provider],
+    ).run(_two_scope_problem())
+
+    assert report.evaluations[0].status == "failed"
+    assert report.candidates == ()
+    assert "scopes it replaces" in report.evaluations[0].error["message"]
 
 
 def test_provider_can_decline_without_error_or_candidate_construction():
