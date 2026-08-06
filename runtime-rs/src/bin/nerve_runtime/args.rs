@@ -68,7 +68,7 @@ struct Args {
     source_chain: Option<Vec<(String, String)>>,
     chat_template_variables: BTreeMap<String, serde_json::Value>,
     max_new_tokens: usize,
-    speculative_draft_tokens: usize,
+    speculative_draft_tokens: Option<usize>,
     speculative_confidence_threshold: f32,
     resource_residency_policy: ResourceResidencyPolicy,
     context_size: Option<usize>,
@@ -120,7 +120,7 @@ impl Default for Args {
             source_chain: None,
             chat_template_variables: BTreeMap::new(),
             max_new_tokens: 65_536,
-            speculative_draft_tokens: 0,
+            speculative_draft_tokens: None,
             speculative_confidence_threshold: 0.0,
             resource_residency_policy: ResourceResidencyPolicy::Eager,
             context_size: None,
@@ -138,6 +138,27 @@ impl Default for Args {
             json: false,
         }
     }
+}
+
+fn effective_speculative_draft_tokens(
+    args: &Args,
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Result<usize, io::Error> {
+    resolve_speculative_draft_tokens(args.speculative_draft_tokens, || {
+        runtime_model.package.recommended_speculative_draft_tokens()
+    })
+}
+
+fn resolve_speculative_draft_tokens(
+    explicit: Option<usize>,
+    package_recommendation: impl FnOnce() -> Result<Option<usize>, String>,
+) -> Result<usize, io::Error> {
+    if let Some(explicit) = explicit {
+        return Ok(explicit);
+    }
+    package_recommendation()
+        .map(|recommended| recommended.unwrap_or(0))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn sampler_runtime_config(args: &Args) -> VulkanResidentSamplerRuntimeConfig {

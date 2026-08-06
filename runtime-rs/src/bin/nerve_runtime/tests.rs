@@ -26,6 +26,7 @@ mod tests {
         parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
         parse_device_binding_assignment,
         parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
+        resolve_speculative_draft_tokens,
         resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
         runtime_chat_repl_control, runtime_physical_device_bindings_in, submit_chat_turn, usage,
         validate_explicit_logical_device_bindings, runtime_uses_explicit_placement,
@@ -301,11 +302,58 @@ mod tests {
     }
 
     #[test]
+    fn speculative_width_distinguishes_package_default_from_explicit_disable() {
+        let package_default = parse_args_from(std::iter::empty()).unwrap();
+        assert_eq!(package_default.speculative_draft_tokens, None);
+
+        let disabled = parse_args_from(
+            ["--speculative-draft-tokens", "0"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(disabled.speculative_draft_tokens, Some(0));
+
+        let explicit = parse_args_from(
+            ["--speculative-draft-tokens", "7"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(explicit.speculative_draft_tokens, Some(7));
+    }
+
+    #[test]
+    fn speculative_width_uses_package_recommendation_unless_explicitly_overridden() {
+        assert_eq!(
+            resolve_speculative_draft_tokens(None, || Ok(Some(7))).unwrap(),
+            7,
+        );
+        assert_eq!(
+            resolve_speculative_draft_tokens(None, || Ok(None)).unwrap(),
+            0,
+        );
+
+        let package_was_consulted = std::cell::Cell::new(false);
+        assert_eq!(
+            resolve_speculative_draft_tokens(Some(0), || {
+                package_was_consulted.set(true);
+                Err("conflicting package recommendation".to_string())
+            })
+            .unwrap(),
+            0,
+        );
+        assert!(!package_was_consulted.get());
+    }
+
+    #[test]
     fn speculative_controls_are_described_by_contract_not_model_family() {
         let usage = usage();
         let normalized = usage.to_ascii_lowercase();
 
         assert!(normalized.contains("compiled speculative-decoder tokens"));
+        assert!(normalized.contains("package recommendation"));
+        assert!(normalized.contains("pass 0 explicitly to disable"));
         assert!(normalized.contains("compiled confidence"));
         for family in ["DeepSeek", "DSpark", "Qwen", "MTP"] {
             assert!(

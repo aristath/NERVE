@@ -24,6 +24,27 @@ pub struct VulkanResidentModelPackageManifest {
     pub artifact_integrity: VulkanResidentPackageArtifactIntegrity,
 }
 
+impl VulkanResidentModelPackageManifest {
+    /// Returns the package-owned speculative width, when one is declared.
+    /// Multiple attached decoders share one stream-level verification width,
+    /// so independently declared recommendations must agree.
+    pub fn recommended_speculative_draft_tokens(&self) -> Result<Option<usize>, String> {
+        let recommendations = self
+            .speculative_decoders
+            .iter()
+            .filter_map(VulkanResidentSpeculativeDecoderPackageSpec::recommended_draft_tokens)
+            .collect::<BTreeSet<_>>();
+        match recommendations.len() {
+            0 => Ok(None),
+            1 => Ok(recommendations.first().copied()),
+            _ => Err(format!(
+                "compiled speculative decoders disagree on their package-owned default widths: {:?}",
+                recommendations,
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VulkanResidentRuntimeModel {
     pub execution_scope: String,
@@ -318,6 +339,16 @@ pub struct VulkanResidentSpeculativeDecoderPackageSpec {
 }
 
 impl VulkanResidentSpeculativeDecoderPackageSpec {
+    pub fn recommended_draft_tokens(&self) -> Option<usize> {
+        self.proposal_contract
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|proposal| proposal.get("default_draft_tokens"))
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .filter(|tokens| *tokens > 0)
+    }
+
     pub fn dedicated_input_adapter(&self) -> Option<&VulkanResidentDraftInputAdapterPackageSpec> {
         self.input_adapter.as_ref()
     }

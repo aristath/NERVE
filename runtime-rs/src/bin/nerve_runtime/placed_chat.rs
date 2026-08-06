@@ -8,6 +8,7 @@ fn run_placed_chat(
     initial_prompt: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let setup_start = Instant::now();
+    let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let chat_session =
         RuntimeChatSession::from_tokenizer_dir(tokenizer_dir, &args.chat_template_variables)?;
     let stop_token_ids = chat_stop_token_ids_from_manifest(
@@ -45,7 +46,7 @@ fn run_placed_chat(
                     minimum: 0,
                     maximum: capacity,
                 },
-                speculative_draft_tokens: args.speculative_draft_tokens,
+                speculative_draft_tokens,
             },
         )?
     };
@@ -55,7 +56,7 @@ fn run_placed_chat(
         runtime_model,
         Some(capacity),
         args.random_seed,
-        args.speculative_draft_tokens,
+        speculative_draft_tokens,
         sampler_runtime_config(args),
         args.resource_residency_policy,
     )?
@@ -70,10 +71,11 @@ fn run_placed_chat(
         })
         .collect::<Vec<_>>();
     println!(
-        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, residency_policy={}, setup_ms={:.3}",
+        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, speculative_draft_tokens={}, residency_policy={}, setup_ms={:.3}",
         stream_snapshot.device_ids,
         mounted_device_bindings,
         stream_snapshot.context_window_activations,
+        speculative_draft_tokens,
         args.resource_residency_policy.as_runtime_name(),
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
@@ -459,6 +461,7 @@ fn execute_placed_prompt_run(
         ..
     } = context;
     let setup_start = Instant::now();
+    let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let logical_device_ids = runtime_model.placement_device_ids();
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let placement = runtime_model_placement(manifest_dir, &runtime_model)?;
@@ -469,7 +472,7 @@ fn execute_placed_prompt_run(
         runtime_model,
         Some(*capacity),
         args.random_seed,
-        args.speculative_draft_tokens,
+        speculative_draft_tokens,
         sampler_runtime_config(args),
         args.resource_residency_policy,
     )?

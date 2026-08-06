@@ -102,6 +102,7 @@ fn runtime_capacity_packed_model(
     if runtime_uses_explicit_placement(args) {
         return Ok(runtime_model);
     }
+    let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let catalog = runtime_vulkan_device_catalog(args)?;
     let available_devices = catalog.available_compute_devices();
     let profiles = catalog.available_hardware_profiles()?;
@@ -247,7 +248,7 @@ fn runtime_capacity_packed_model(
         &candidates,
         &profiles_by_physical_device,
         context_capacity_activations,
-        args.speculative_draft_tokens,
+        speculative_draft_tokens,
         args.resource_residency_policy,
         RuntimeExecutionEnvelope {
             phases: vec!["decode".to_string(), "prefill".to_string()],
@@ -263,7 +264,7 @@ fn runtime_capacity_packed_model(
                 minimum: 0,
                 maximum: context_capacity_activations,
             },
-            speculative_draft_tokens: args.speculative_draft_tokens,
+            speculative_draft_tokens,
         },
     )
     .map_err(|error| {

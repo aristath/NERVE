@@ -552,7 +552,8 @@ Options:
   --max-new-tokens <N>       Generation stop condition, independent of context size. Default: 65536
   --speculative-draft-tokens <N>
                              Compiled speculative-decoder tokens proposed per verification cycle.
-                             Default: 0 (disabled).
+                             Default: package recommendation when declared, otherwise disabled.
+                             Pass 0 explicitly to disable an attached decoder.
   --speculative-confidence-threshold <F32>
                              Keep the contiguous proposed prefix whose compiled confidence is at
                              least this probability. Default: 0 (target verifies every proposal).

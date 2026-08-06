@@ -124,7 +124,7 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
             }
             "--speculative-draft-tokens" => {
                 parsed.speculative_draft_tokens =
-                    parse_next(&mut raw, "--speculative-draft-tokens")?;
+                    Some(parse_next(&mut raw, "--speculative-draft-tokens")?);
             }
             "--speculative-confidence-threshold" => {
                 parsed.speculative_confidence_threshold =

@@ -446,6 +446,7 @@ fn inspect_placement(
     runtime_model: VulkanResidentRuntimeModel,
 ) -> Result<(), Box<dyn Error>> {
     let capacity = choose_runtime_context_size(package_manifest, args.context_size, 1)?;
+    let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let device_ids = runtime_model.placement_device_ids();
     let bound_devices = runtime_bound_vulkan_devices(args, &device_ids)?;
     let (runtime_model, implementation_selection) = runtime_model
@@ -469,7 +470,7 @@ fn inspect_placement(
                     minimum: 0,
                     maximum: capacity,
                 },
-                speculative_draft_tokens: args.speculative_draft_tokens,
+                speculative_draft_tokens,
             },
         )?;
     let placement = runtime_model_placement(

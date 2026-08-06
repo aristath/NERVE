@@ -45,6 +45,60 @@ fn partition_resource_identity_matches_the_compiler_contract() {
     );
 }
 
+fn parallel_speculative_decoder_with_default(
+    id: &str,
+    default_draft_tokens: usize,
+) -> VulkanResidentSpeculativeDecoderPackageSpec {
+    VulkanResidentSpeculativeDecoderPackageSpec {
+        id: id.to_string(),
+        decoder_type: "fixture".to_string(),
+        source_prefix: id.to_string(),
+        execution_contract: VulkanResidentSpeculativeExecutionContract::ParallelBlock {
+            block_width: 7,
+            source_context_tick_offset: -1,
+            processor_schedule: "parallel_lanes".to_string(),
+            output_schedule: "compiled_component_graph".to_string(),
+        },
+        proposal_contract: Some(serde_json::json!({
+            "execution_block_size": 7,
+            "configured_block_size": 5,
+            "minimum_draft_tokens": 1,
+            "default_draft_tokens": default_draft_tokens,
+            "confidence_prefix": "first_sigmoid_below_runtime_threshold"
+        })),
+        circuit_graph: fixture_model_package_manifest().circuit_graph,
+        input_adapter: None,
+        output_transducer: None,
+        component_executions: Vec::new(),
+        state_contract: serde_json::json!({}),
+        verification_contract: serde_json::json!({}),
+    }
+}
+
+#[test]
+fn package_speculative_default_requires_attached_decoders_to_agree() {
+    let mut manifest = fixture_model_package_manifest();
+    assert_eq!(manifest.recommended_speculative_draft_tokens().unwrap(), None);
+
+    manifest.speculative_decoders.push(
+        parallel_speculative_decoder_with_default("draft_a", 7),
+    );
+    assert_eq!(
+        manifest.recommended_speculative_draft_tokens().unwrap(),
+        Some(7),
+    );
+
+    manifest.speculative_decoders.push(
+        parallel_speculative_decoder_with_default("draft_b", 5),
+    );
+    let error = manifest
+        .recommended_speculative_draft_tokens()
+        .unwrap_err();
+    assert!(error.contains("disagree"));
+    assert!(error.contains("5"));
+    assert!(error.contains("7"));
+}
+
 #[test]
 fn concrete_resource_identity_does_not_depend_on_package_paths() {
     let manifest = fixture_model_package_manifest();

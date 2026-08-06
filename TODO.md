@@ -107,11 +107,14 @@ toward 50 tok/s without regressing supported Qwen models.
      retained as training/checkpoint provenance while the compiled execution
      capacity follows the official seven-token runtime recommendation. Fresh
      b7 input, backbone, sequential Markov, confidence, and output shaders are
-     compiled; widths 1-7 remain legal runtime views of that capacity. Make the
-     package-owned seven-token recommendation activate automatically when an
-     attached decoder is present, while preserving an explicit runtime disable.
-     Finish reference-equivalence evidence for proposal, confidence,
-     verification, commit, and rollback behavior.
+     compiled; widths 1-7 remain legal runtime views of that capacity. The
+     package-owned seven-token recommendation now activates when the runtime
+     option is omitted, while an explicit `--speculative-draft-tokens 0`
+     disables it. Conflicting attached-decoder recommendations fail closed.
+     A normal 128K DeepSeek chat mount reported `speculative_draft_tokens=7`
+     without an override and released every acquired allocation. Finish
+     reference-equivalence evidence for proposal, confidence, verification,
+     commit, and rollback behavior.
 
      The first five-device demand-paged run proves the b7 decoder executes, but
      not yet profitably: calibration measured 10 DSpark cycles, proposed 34
@@ -229,8 +232,11 @@ toward 50 tok/s without regressing supported Qwen models.
    and **137.1206 prefill tok/s** for Qwen3.5-9B. This regression exercised a
    near-capacity expert cache through both warmup and truth conversations; no
    allocator failure recurred and both GPUs returned exactly to their recorded
-   pre-workload reservations. Retain these gates for every subsequent
-   runtime-performance commit.
+   pre-workload reservations. The package-default milestone then re-ran both
+   gates with explicit widths: Qwen3.6-35B-A3B passed at **62.6418 decode
+   tok/s** and **50.4346 prefill tok/s**, while Qwen3.5-9B passed with explicit
+   speculative disable at **48.7560 decode tok/s** and **140.2734 prefill
+   tok/s**. Retain these gates for every subsequent runtime-performance commit.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
