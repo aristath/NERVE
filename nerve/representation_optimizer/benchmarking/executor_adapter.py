@@ -287,8 +287,12 @@ class ResidentComponentExecutionSession:
                 "resident component execution request changed its mounted trial"
             )
         useful_units = int(request.workload["useful_work"]["minimum_units"])
+        sustained_window_count = int(
+            request.workload["useful_work"]["sustained_window_count"]
+        )
         execution = self.executor_session.execute(
             useful_units=useful_units,
+            sustained_window_count=sustained_window_count,
             seed=request.seed,
             request_identity=request.to_json(),
         )
@@ -360,6 +364,9 @@ class ResidentComponentExecutionSession:
         windows = validated_windows(
             report.get("throughput_windows"),
             useful_units,
+            required_count=int(
+                request.workload["useful_work"]["sustained_window_count"]
+            ),
         )
         traces = self._write_execution_traces(request, report)
         permanent_bytes = nonnegative_integer(

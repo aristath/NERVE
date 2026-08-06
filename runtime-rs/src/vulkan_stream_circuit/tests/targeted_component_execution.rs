@@ -1,6 +1,6 @@
 #[test]
 fn targeted_component_quanta_cover_decode_work_exactly() {
-    let quanta = targeted_execution_quanta(8_194, 1).unwrap();
+    let quanta = targeted_execution_quanta(8_194, 1, 2).unwrap();
     assert_eq!(quanta.len(), 129);
     assert!(quanta[..128].iter().all(|repetitions| *repetitions == 64));
     assert_eq!(quanta[128], 2);
@@ -9,7 +9,7 @@ fn targeted_component_quanta_cover_decode_work_exactly() {
 
 #[test]
 fn targeted_component_quanta_cover_prefill_work_exactly() {
-    let quanta = targeted_execution_quanta(4_096, 64).unwrap();
+    let quanta = targeted_execution_quanta(4_096, 64, 2).unwrap();
     assert_eq!(quanta, vec![1; 64]);
     assert_eq!(
         quanta.iter().sum::<usize>() * 64,
@@ -19,13 +19,30 @@ fn targeted_component_quanta_cover_prefill_work_exactly() {
 
 #[test]
 fn targeted_output_prefill_microbenchmark_yields_two_windows() {
-    let quanta = targeted_execution_quanta(128, 4).unwrap();
+    let quanta = targeted_execution_quanta(128, 4, 2).unwrap();
     assert_eq!(quanta, vec![16, 16]);
 }
 
 #[test]
+fn targeted_component_quanta_honor_requested_sustained_windows() {
+    let quanta = targeted_execution_quanta(2, 1, 2).unwrap();
+    assert_eq!(quanta, vec![1, 1]);
+}
+
+#[test]
+fn targeted_component_quanta_reject_more_windows_than_activation_batches() {
+    let error = targeted_execution_quanta(1, 1, 2).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("sustained windows exceed useful activation batches"),
+        "{error}"
+    );
+}
+
+#[test]
 fn targeted_component_quanta_reject_partial_activation_batches() {
-    let error = targeted_execution_quanta(65, 64).unwrap_err();
+    let error = targeted_execution_quanta(65, 64, 1).unwrap_err();
     assert!(
         error
             .to_string()

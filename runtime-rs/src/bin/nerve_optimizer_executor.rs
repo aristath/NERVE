@@ -14,8 +14,8 @@ use nerve_runtime::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v3";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v3";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v4";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v4";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
 
@@ -43,6 +43,7 @@ enum ExecutorCommand {
         schema: String,
         request_id: String,
         useful_units: usize,
+        sustained_window_count: usize,
         seed: u32,
     },
     Close {
@@ -251,11 +252,17 @@ fn execute_session(
                 schema,
                 request_id,
                 useful_units,
+                sustained_window_count,
                 seed,
             } => {
                 require_schema(&schema)?;
-                let report =
-                    session.execute(&device, useful_units, seed, mount.maximum_quantum_wait)?;
+                let report = session.execute(
+                    &device,
+                    useful_units,
+                    sustained_window_count,
+                    seed,
+                    mount.maximum_quantum_wait,
+                )?;
                 write_response(
                     output,
                     &request_id,

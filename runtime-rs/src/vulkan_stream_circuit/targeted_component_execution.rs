@@ -336,15 +336,28 @@ impl VulkanResidentTargetedExecutionSession {
         &self,
         device: &VulkanComputeDevice,
         useful_units: usize,
+        sustained_window_count: usize,
         seed: u32,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentExecutionReport, VulkanResidentTokenModelPackageError> {
         match self {
             Self::Component(session) => {
-                session.execute(device, useful_units, seed, maximum_quantum_wait)
+                session.execute(
+                    device,
+                    useful_units,
+                    sustained_window_count,
+                    seed,
+                    maximum_quantum_wait,
+                )
             }
             Self::OutputTransducer(session) => {
-                session.execute(device, useful_units, seed, maximum_quantum_wait)
+                session.execute(
+                    device,
+                    useful_units,
+                    sustained_window_count,
+                    seed,
+                    maximum_quantum_wait,
+                )
             }
         }
     }
@@ -515,6 +528,7 @@ impl VulkanResidentTargetedOutputTransducerSession {
         &self,
         device: &VulkanComputeDevice,
         useful_units: usize,
+        sustained_window_count: usize,
         seed: u32,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentExecutionReport, VulkanResidentTokenModelPackageError> {
@@ -530,7 +544,12 @@ impl VulkanResidentTargetedOutputTransducerSession {
         }
         self.write_fixture(seed)?;
         let counters =
-            self.execute_quanta(device, useful_units, maximum_quantum_wait)?;
+            self.execute_quanta(
+                device,
+                useful_units,
+                sustained_window_count,
+                maximum_quantum_wait,
+            )?;
         let output_values = match &self.execution {
             VulkanTargetedOutputTransducerExecution::Decode {
                 runner,
@@ -621,12 +640,14 @@ impl VulkanResidentTargetedOutputTransducerSession {
         &self,
         device: &VulkanComputeDevice,
         useful_units: usize,
+        sustained_window_count: usize,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
         let activation_batch_width = self.phase.activation_batch_width();
         let quanta = targeted_execution_quanta(
             useful_units,
             activation_batch_width,
+            sustained_window_count,
         )?;
         let mut counters = VulkanTargetedComponentRunCounters {
             execution_ns: 0,
@@ -965,6 +986,7 @@ impl VulkanResidentTargetedComponentSession {
         &self,
         device: &VulkanComputeDevice,
         useful_units: usize,
+        sustained_window_count: usize,
         seed: u32,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentExecutionReport, VulkanResidentTokenModelPackageError> {
@@ -983,11 +1005,13 @@ impl VulkanResidentTargetedComponentSession {
                 VulkanTargetedComponentExecution::Decode(execution) => execution.execute(
                     device,
                     useful_units,
+                    sustained_window_count,
                     maximum_quantum_wait,
                 )?,
                 VulkanTargetedComponentExecution::Prefill(execution) => execution.execute(
                     device,
                     useful_units,
+                    sustained_window_count,
                     maximum_quantum_wait,
                 )?,
             };
@@ -1449,9 +1473,14 @@ impl VulkanTargetedDecodeExecution {
         &self,
         device: &VulkanComputeDevice,
         useful_units: usize,
+        sustained_window_count: usize,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
-        let quanta = targeted_execution_quanta(useful_units, 1)?;
+        let quanta = targeted_execution_quanta(
+            useful_units,
+            1,
+            sustained_window_count,
+        )?;
         let mut windows = Vec::with_capacity(quanta.len());
         let mut execution_ns = 0u64;
         let mut synchronization_wait_ns = 0u64;
@@ -1874,11 +1903,13 @@ impl VulkanTargetedPrefillExecution {
         &self,
         device: &VulkanComputeDevice,
         useful_units: usize,
+        sustained_window_count: usize,
         maximum_quantum_wait: Duration,
     ) -> Result<VulkanTargetedComponentRunCounters, VulkanResidentTokenModelPackageError> {
         let quanta = targeted_execution_quanta(
             useful_units,
             self.activation_batch_width,
+            sustained_window_count,
         )?;
         let mut windows = Vec::with_capacity(quanta.len());
         let mut execution_ns = 0u64;
@@ -2150,6 +2181,7 @@ fn targeted_prefill_batch_mode_is_supported(
 fn targeted_execution_quanta(
     useful_units: usize,
     activation_batch_width: usize,
+    sustained_window_count: usize,
 ) -> Result<Vec<usize>, VulkanResidentTokenModelPackageError> {
     if activation_batch_width == 0 {
         return targeted_component_error(
@@ -2162,16 +2194,37 @@ fn targeted_execution_quanta(
         ));
     }
     let total_repetitions = useful_units / activation_batch_width;
+    if sustained_window_count == 0 {
+        return targeted_component_error(
+            "targeted execution sustained window count must be positive",
+        );
+    }
+    if sustained_window_count > total_repetitions {
+        return targeted_component_error(
+            "targeted execution sustained windows exceed useful activation batches",
+        );
+    }
     let repetitions_per_quantum =
         (VULKAN_TARGETED_COMPONENT_QUANTUM_USEFUL_UNITS
             / activation_batch_width)
             .max(1);
-    let mut remaining = total_repetitions;
-    let mut quanta = Vec::new();
-    while remaining > 0 {
-        let repetitions = remaining.min(repetitions_per_quantum);
-        quanta.push(repetitions);
-        remaining -= repetitions;
+    let minimum_quantum_count = total_repetitions.div_ceil(repetitions_per_quantum);
+    if minimum_quantum_count >= sustained_window_count {
+        let mut remaining = total_repetitions;
+        let mut quanta = Vec::with_capacity(minimum_quantum_count);
+        while remaining > 0 {
+            let repetitions = remaining.min(repetitions_per_quantum);
+            quanta.push(repetitions);
+            remaining -= repetitions;
+        }
+        return Ok(quanta);
+    }
+    let quantum_count = sustained_window_count;
+    let base_repetitions = total_repetitions / quantum_count;
+    let wider_quantum_count = total_repetitions % quantum_count;
+    let mut quanta = Vec::with_capacity(quantum_count);
+    for index in 0..quantum_count {
+        quanta.push(base_repetitions + usize::from(index < wider_quantum_count));
     }
     Ok(quanta)
 }

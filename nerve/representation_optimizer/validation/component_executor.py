@@ -259,6 +259,7 @@ class ResidentComponentValidationSession:
             )
         execution = self.executor_session.execute(
             useful_units=useful_units,
+            sustained_window_count=1,
             seed=request.seed,
             request_identity=request.to_json(),
         )

@@ -94,6 +94,32 @@ class FixtureExecutor:
             }
             status = "mounted"
         elif command == "execute":
+            window_count = document["sustained_window_count"]
+            window_width = document["useful_units"] // window_count
+            windows = []
+            start_unit = 0
+            remaining_duration_ns = 400
+            for index in range(window_count):
+                end_unit = (
+                    document["useful_units"]
+                    if index == window_count - 1
+                    else start_unit + window_width
+                )
+                duration_ns = (
+                    remaining_duration_ns
+                    if index == window_count - 1
+                    else 400 // window_count
+                )
+                remaining_duration_ns -= duration_ns
+                windows.append(
+                    {
+                        "index": index,
+                        "start_unit": start_unit,
+                        "end_unit": end_unit,
+                        "duration_ns": duration_ns,
+                    }
+                )
+                start_unit = end_unit
             payload = {
                 "component_id": "block_13",
                 "node_id": "head_norm",
@@ -104,14 +130,7 @@ class FixtureExecutor:
                 "execution_ns": 400,
                 "output_digest": _artifact_digest(b"output"),
                 "state_digest": _artifact_digest(b"state"),
-                "throughput_windows": [
-                    {
-                        "index": 0,
-                        "start_unit": 0,
-                        "end_unit": document["useful_units"],
-                        "duration_ns": 400,
-                    }
-                ],
+                "throughput_windows": windows,
                 "resident_parameter_bytes": 4_096,
                 "resident_transient_bytes": 512,
                 "physical_dispatch_count": 1,
@@ -248,6 +267,7 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
         == 131_072
     )
     assert executor.commands[1]["useful_units"] == 8
+    assert executor.commands[1]["sustained_window_count"] == 2
     assert [command["command"] for command in executor.commands] == [
         "mount",
         "execute",
@@ -277,6 +297,40 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert executor.aborted is False
 
 
+def test_resident_component_adapter_rejects_too_few_sustained_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, execution_request, _ = _requests(tmp_path)
+    original_request = executor.request
+
+    def omit_window(document: Json, *, cancel_requested=None) -> Json:
+        response = original_request(
+            document,
+            cancel_requested=cancel_requested,
+        )
+        if document["command"] == "execute":
+            response["payload"]["throughput_windows"] = [
+                {
+                    "index": 0,
+                    "start_unit": 0,
+                    "end_unit": document["useful_units"],
+                    "duration_ns": response["payload"]["execution_ns"],
+                }
+            ]
+        return response
+
+    executor.request = omit_window  # type: ignore[method-assign]
+    session = adapter.open_session(mount_request)
+    with pytest.raises(
+        ModelCompileError,
+        match="omitted required sustained throughput windows",
+    ):
+        session.execute(execution_request)
+    session.close()
+
+
 def test_resident_component_schedule_trace_excludes_timing_jitter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -296,7 +350,10 @@ def test_resident_component_schedule_trace_excludes_timing_jitter(
             execution_count += 1
             duration_ns = 400 + execution_count
             response["payload"]["execution_ns"] = duration_ns
-            response["payload"]["throughput_windows"][0]["duration_ns"] = duration_ns
+            windows = response["payload"]["throughput_windows"]
+            windows[-1]["duration_ns"] = duration_ns - sum(
+                window["duration_ns"] for window in windows[:-1]
+            )
         return response
 
     executor.request = variably_timed  # type: ignore[method-assign]
@@ -547,6 +604,41 @@ def test_approximate_output_comparator_measures_numeric_and_rank_error() -> None
     assert metrics["top_32_mismatch_rate"]["error"] == 0.0
 
 
+def test_benchmark_workload_rejects_more_windows_than_useful_units() -> None:
+    with pytest.raises(
+        ModelCompileError,
+        match="sustained window count exceeds minimum useful work",
+    ):
+        create_benchmark_workload(
+            name="impossible sustained observation",
+            execution_phase="decode",
+            activation_batch_width=1,
+            context_size=0,
+            state_size=0,
+            stream_count=1,
+            mount_mode="resident_reuse",
+            boundary_mode="local",
+            input_artifact={
+                "path": "fixtures/input.bin",
+                "digest": _artifact_digest(b"input"),
+            },
+            initial_state_artifact=None,
+            controls={"execution": "ordinary"},
+            randomness_algorithm="deterministic_fixture_counter",
+            seeds=(17,),
+            deterministic_replay_required=True,
+            permit_sampling_variance=False,
+            permit_numerical_nondeterminism=False,
+            permit_speculative_schedule_variance=False,
+            useful_work_unit="dispatches",
+            minimum_useful_work_units=1,
+            completion_condition="all_dispatches_completed",
+            output_allowance=None,
+            output_allowance_basis={"kind": "unlimited"},
+            sustained_window_count=2,
+        )
+
+
 def _adapter_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -636,7 +728,7 @@ def _requests(
         completion_condition="all_dispatches_completed",
         output_allowance=None,
         output_allowance_basis={"kind": "unlimited"},
-        sustained_window_count=1,
+        sustained_window_count=2,
     ).to_json()
     matched_conditions = {
         "devices": [

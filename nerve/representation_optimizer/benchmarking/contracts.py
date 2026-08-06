@@ -375,10 +375,14 @@ def validate_benchmark_workload(document: Json) -> None:
         raise BenchmarkContractError(
             "matched benchmark currently requires equal useful work"
         )
-    _nonnegative(
+    sustained_window_count = _positive(
         useful["sustained_window_count"],
         "useful_work.sustained_window_count",
     )
+    if sustained_window_count > minimum:
+        raise BenchmarkContractError(
+            "useful_work sustained window count exceeds minimum useful work"
+        )
     _content_identity(
         document,
         "benchmark_workload",

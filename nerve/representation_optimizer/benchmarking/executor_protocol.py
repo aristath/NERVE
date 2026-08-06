@@ -12,8 +12,8 @@ from nerve.representation_optimizer.contracts import (
 )
 
 
-EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v3"
-EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v3"
+EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.executor_command.v4"
+EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.executor_response.v4"
 ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
 
 
@@ -89,7 +89,13 @@ def validate_mount_payload(
         )
 
 
-def validated_windows(value: object, useful_units: int) -> list[Json]:
+def validated_windows(
+    value: object,
+    useful_units: int,
+    *,
+    required_count: int = 1,
+) -> list[Json]:
+    positive_integer(required_count, "required throughput window count")
     if not isinstance(value, list) or not value:
         raise ModelCompileError(
             "resident executor omitted throughput windows"
@@ -129,6 +135,10 @@ def validated_windows(value: object, useful_units: int) -> list[Json]:
     if expected_start != useful_units:
         raise ModelCompileError(
             "resident executor throughput windows do not cover useful work"
+        )
+    if len(windows) < required_count:
+        raise ModelCompileError(
+            "resident executor omitted required sustained throughput windows"
         )
     return windows
 

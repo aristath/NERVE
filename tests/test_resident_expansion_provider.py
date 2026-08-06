@@ -738,6 +738,11 @@ def test_provider_plan_is_component_local_exact_and_product_qualified(
     workloads = provider.benchmark_workloads(context, candidate)
     assert len(workloads) == 5
     assert max(item["useful_work"]["minimum_units"] for item in workloads) == 2
+    assert all(
+        item["useful_work"]["minimum_units"]
+        >= item["useful_work"]["sustained_window_count"]
+        for item in workloads
+    )
     assert {item["regime"]["mount_mode"] for item in workloads} == {
         "cold",
         "resident_reuse",

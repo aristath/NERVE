@@ -262,17 +262,27 @@ class ResidentExecutorSession:
         self,
         *,
         useful_units: int,
+        sustained_window_count: int,
         seed: int,
         request_identity: Json,
     ) -> ResidentExecutorExecution:
         if self.closed:
             raise ModelCompileError("resident executor session is closed")
         positive_integer(useful_units, "resident executor useful units")
+        positive_integer(
+            sustained_window_count,
+            "resident executor sustained window count",
+        )
+        if sustained_window_count > useful_units:
+            raise ModelCompileError(
+                "resident executor sustained windows exceed useful units"
+            )
         command = {
             "schema": EXECUTOR_COMMAND_SCHEMA,
             "command": "execute",
             "request_id": request_id("execute", request_identity),
             "useful_units": useful_units,
+            "sustained_window_count": sustained_window_count,
             "seed": seed,
         }
         started = time.monotonic_ns()
@@ -288,6 +298,7 @@ class ResidentExecutorSession:
             report,
             spec=self.spec,
             useful_units=useful_units,
+            sustained_window_count=sustained_window_count,
         )
         return ResidentExecutorExecution(
             report=report,
@@ -420,6 +431,7 @@ def _validate_execution_report(
     *,
     spec: ResidentExecutorMountSpec,
     useful_units: int,
+    sustained_window_count: int,
 ) -> None:
     if (
         required_text(report, "component_id") != spec.component_id
@@ -443,7 +455,11 @@ def _validate_execution_report(
     required_digest(report, "output_digest")
     required_digest(report, "state_digest")
     positive_integer(report.get("execution_ns"), "executor report execution_ns")
-    validated_windows(report.get("throughput_windows"), useful_units)
+    validated_windows(
+        report.get("throughput_windows"),
+        useful_units,
+        required_count=sustained_window_count,
+    )
     for field in (
         "physical_dispatch_count",
         "queue_submission_count",

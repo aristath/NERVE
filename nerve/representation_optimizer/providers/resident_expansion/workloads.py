@@ -94,7 +94,7 @@ def resident_expansion_benchmark_workloads(
                 "component_id": opportunity.component_id,
                 "physical_node_id": opportunity.node_ids[0],
             },
-            minimum_useful_work_units=1,
+            minimum_useful_work_units=2,
             **common,
         ).to_json()
     )
