@@ -140,7 +140,7 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
         for candidate in &summary.candidate_statuses {
             writeln!(
                 stdout,
-                "  {} / {}: workload={} format={} strategy={} kind={} status={} matches={}",
+                "  {} / {}: workload={} format={} strategy={} kind={} status={} matches={} best_median_ns={}",
                 candidate.comparison_id,
                 candidate.candidate_id,
                 candidate.workload_class,
@@ -148,7 +148,11 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
                 candidate.placement_strategy,
                 candidate.measurement_kind,
                 candidate.status,
-                candidate.matched_measurement_count
+                candidate.matched_measurement_count,
+                candidate
+                    .best_median_duration_ns
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
             )?;
         }
     }

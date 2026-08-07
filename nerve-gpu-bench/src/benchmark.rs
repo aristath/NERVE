@@ -1431,11 +1431,16 @@ mod tests {
         }));
 
         let summary = run.summary();
-        assert!(summary.candidate_statuses.iter().any(|candidate| {
-            candidate.workload_class == "dense_projection"
-                && candidate.format == "f32"
-                && candidate.placement_strategy == "single_target_serial"
-                && candidate.status == "completed"
-        }));
+        let completed_cpu_candidate = summary
+            .candidate_statuses
+            .iter()
+            .find(|candidate| {
+                candidate.workload_class == "dense_projection"
+                    && candidate.format == "f32"
+                    && candidate.placement_strategy == "single_target_serial"
+                    && candidate.status == "completed"
+            })
+            .unwrap();
+        assert!(completed_cpu_candidate.best_median_duration_ns.is_some());
     }
 }

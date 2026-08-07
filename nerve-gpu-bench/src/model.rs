@@ -258,6 +258,8 @@ pub struct ComparisonCandidateStatus {
     pub format: String,
     pub status: String,
     pub matched_measurement_count: usize,
+    pub best_min_duration_ns: Option<u128>,
+    pub best_median_duration_ns: Option<u128>,
 }
 
 #[derive(Debug, Serialize)]
@@ -583,7 +585,16 @@ impl BenchmarkRun {
         let mut statuses = Vec::new();
         for comparison in &self.comparison_sets {
             for candidate in &comparison.candidates {
-                let matched_statuses = self.matched_candidate_statuses(candidate);
+                let matched_measurements = self.matched_candidate_measurements(candidate);
+                let matched_statuses = matched_measurements
+                    .iter()
+                    .map(|measurement| measurement.status)
+                    .collect::<Vec<_>>();
+                let best_summary = matched_measurements
+                    .iter()
+                    .filter(|measurement| measurement.status == "completed")
+                    .filter_map(|measurement| measurement.summary)
+                    .min_by_key(|summary| summary.median_duration_ns);
                 statuses.push(ComparisonCandidateStatus {
                     comparison_id: comparison.comparison_id.clone(),
                     candidate_id: candidate.candidate_id.clone(),
@@ -593,13 +604,18 @@ impl BenchmarkRun {
                     format: comparison.format.clone(),
                     status: combined_candidate_status(&matched_statuses),
                     matched_measurement_count: matched_statuses.len(),
+                    best_min_duration_ns: best_summary.map(|summary| summary.min_duration_ns),
+                    best_median_duration_ns: best_summary.map(|summary| summary.median_duration_ns),
                 });
             }
         }
         statuses
     }
 
-    fn matched_candidate_statuses(&self, candidate: &ComparisonCandidate) -> Vec<&str> {
+    fn matched_candidate_measurements<'a>(
+        &'a self,
+        candidate: &ComparisonCandidate,
+    ) -> Vec<CandidateMeasurementMatch<'a>> {
         match candidate.measurement_kind.as_str() {
             "single" => self
                 .measurements
@@ -610,7 +626,10 @@ impl BenchmarkRun {
                         && measurement.placement_strategy == candidate.placement_strategy
                         && measurement.target_id == candidate.target_ids[0]
                 })
-                .map(|measurement| measurement.status.as_str())
+                .map(|measurement| CandidateMeasurementMatch {
+                    status: measurement.status.as_str(),
+                    summary: measurement.summary.as_ref(),
+                })
                 .collect(),
             "pair" => self
                 .pair_measurements
@@ -622,7 +641,10 @@ impl BenchmarkRun {
                         && measurement.source_target_id == candidate.target_ids[0]
                         && measurement.destination_target_id == candidate.target_ids[1]
                 })
-                .map(|measurement| measurement.status.as_str())
+                .map(|measurement| CandidateMeasurementMatch {
+                    status: measurement.status.as_str(),
+                    summary: measurement.summary.as_ref(),
+                })
                 .collect(),
             "group" => self
                 .group_measurements
@@ -632,11 +654,19 @@ impl BenchmarkRun {
                         && measurement.placement_strategy == candidate.placement_strategy
                         && measurement.target_ids == candidate.target_ids
                 })
-                .map(|measurement| measurement.status.as_str())
+                .map(|measurement| CandidateMeasurementMatch {
+                    status: measurement.status.as_str(),
+                    summary: measurement.summary.as_ref(),
+                })
                 .collect(),
             _ => Vec::new(),
         }
     }
+}
+
+struct CandidateMeasurementMatch<'a> {
+    status: &'a str,
+    summary: Option<&'a Summary>,
 }
 
 fn combined_candidate_status(statuses: &[&str]) -> String {
@@ -1172,7 +1202,9 @@ mod tests {
         let summary = run.summary();
         assert_eq!(summary.candidate_statuses.len(), 2);
         assert_eq!(summary.candidate_statuses[0].status, "completed");
+        assert_eq!(summary.candidate_statuses[0].best_median_duration_ns, None);
         assert_eq!(summary.candidate_statuses[1].status, "missing");
+        assert_eq!(summary.candidate_statuses[1].best_median_duration_ns, None);
         assert!(
             summary
                 .coverage_warnings

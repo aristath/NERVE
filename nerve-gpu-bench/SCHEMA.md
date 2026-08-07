@@ -16,7 +16,9 @@ Coverage warnings are emitted when a selected run has no completed measurement
 for an expected placement strategy on a requested workload/format axis. It also
 resolves every `comparison_sets[].candidates[]` entry against the recorded
 measurements and reports whether that candidate is completed, unmeasured,
-missing, failed, unsupported, or skipped.
+missing, failed, unsupported, or skipped. Completed candidates also expose the
+best matched min/median duration so a planner can rank candidates without
+rejoining the full sample list first.
 
 ## Top-Level Fields
 
