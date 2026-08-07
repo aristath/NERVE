@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SAMPLES: usize = 5;
+const DEFAULT_MAX_GROUP_SIZE: usize = 3;
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 30;
+const MAX_GROUP_SIZE: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -22,6 +24,7 @@ pub enum Command {
         exclude_pci: Vec<String>,
         exclude_kinds: Vec<String>,
         pairs: bool,
+        max_group_size: usize,
     },
 }
 
@@ -81,6 +84,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut exclude_pci = Vec::new();
     let mut exclude_kinds = Vec::new();
     let mut pairs = true;
+    let mut max_group_size = DEFAULT_MAX_GROUP_SIZE;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -101,6 +105,12 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
                 samples = parse_usize(
                     &required_value(&arguments, &mut index, "--samples")?,
                     "--samples",
+                )?;
+            }
+            "--max-group-size" => {
+                max_group_size = parse_usize(
+                    &required_value(&arguments, &mut index, "--max-group-size")?,
+                    "--max-group-size",
                 )?;
             }
             "--include-target" => {
@@ -136,6 +146,11 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
             "--samples must be between 1 and {MAX_SAMPLES}"
         )));
     }
+    if max_group_size == 0 || max_group_size > MAX_GROUP_SIZE {
+        return Err(CliError(format!(
+            "--max-group-size must be between 1 and {MAX_GROUP_SIZE}"
+        )));
+    }
 
     Ok(Command::Run {
         output,
@@ -146,6 +161,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
         exclude_pci,
         exclude_kinds,
         pairs,
+        max_group_size,
     })
 }
 
@@ -168,7 +184,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n"
 }
 
 #[cfg(test)]
@@ -189,6 +205,7 @@ mod tests {
                 exclude_pci: Vec::new(),
                 exclude_kinds: Vec::new(),
                 pairs: true,
+                max_group_size: DEFAULT_MAX_GROUP_SIZE,
             }
         );
     }
@@ -209,12 +226,28 @@ mod tests {
                 include_targets,
                 exclude_kinds,
                 pairs,
+                max_group_size,
                 ..
             } => {
                 assert_eq!(include_targets, ["cpu:host"]);
                 assert_eq!(exclude_kinds, ["integrated_gpu"]);
                 assert!(!pairs);
+                assert_eq!(max_group_size, DEFAULT_MAX_GROUP_SIZE);
             }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_max_group_size() {
+        let command = parse_args([
+            "run".to_string(),
+            "--max-group-size".to_string(),
+            "2".to_string(),
+        ])
+        .unwrap();
+        match command {
+            Command::Run { max_group_size, .. } => assert_eq!(max_group_size, 2),
             _ => panic!("expected run command"),
         }
     }

@@ -20,6 +20,8 @@ types in `src/model.rs` are the source of truth for the first implementation.
 - `measurements`: single-target measurements.
 - `pair_measurements`: ordered pair and two-target synthetic placement
   measurements.
+- `group_measurements`: three-target synthetic placement measurements when
+  enough targets are selected and `--max-group-size 3` is active.
 - `diagnostics`: non-fatal implementation notes.
 
 ## Workload Specs
@@ -36,6 +38,10 @@ Current workload specs:
   source, activation transfer, second half on destination.
 - `synthetic_tensor_split_small_payload`: split logical payload across two
   targets, broadcast activation, compute shards, collect output.
+- `synthetic_layer_split_group_small_payload`: split logical payload across
+  three ordered targets with activation movement between stages.
+- `synthetic_tensor_split_group_small_payload`: split logical payload across
+  three targets, broadcast activation, compute shards, collect output.
 
 GPU-backed specs are emitted before the Vulkan backend exists. Their
 measurements use `status: "unmeasured"` until a backend can execute them.

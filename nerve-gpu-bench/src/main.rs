@@ -43,6 +43,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             exclude_pci,
             exclude_kinds,
             pairs,
+            max_group_size,
         } => {
             let targets = discover_targets();
             let policy = model::RunPolicy {
@@ -53,6 +54,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 exclude_pci,
                 exclude_kinds,
                 pair_measurements: pairs,
+                max_group_size,
             };
             let selection = apply_selection_policy(&targets, &policy);
             let run = run_benchmarks(targets, selection, policy);

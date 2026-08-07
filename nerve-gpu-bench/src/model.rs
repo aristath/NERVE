@@ -31,6 +31,7 @@ pub struct RunPolicy {
     pub exclude_pci: Vec<String>,
     pub exclude_kinds: Vec<String>,
     pub pair_measurements: bool,
+    pub max_group_size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -59,6 +60,7 @@ pub struct BenchmarkRun {
     pub workload_specs: Vec<WorkloadSpec>,
     pub measurements: Vec<Measurement>,
     pub pair_measurements: Vec<PairMeasurement>,
+    pub group_measurements: Vec<GroupMeasurement>,
     pub diagnostics: Vec<String>,
 }
 
@@ -112,6 +114,25 @@ pub struct PairMeasurement {
     pub payload_bytes: usize,
     pub source_payload_bytes: usize,
     pub destination_payload_bytes: usize,
+    pub activation_bytes: usize,
+    pub output_bytes: usize,
+    pub samples: Vec<Sample>,
+    pub summary: Option<Summary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GroupMeasurement {
+    pub workload_id: String,
+    pub target_ids: Vec<String>,
+    pub pattern: String,
+    pub operation_family: String,
+    pub regime: String,
+    pub format: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub participant_count: usize,
+    pub payload_bytes: usize,
+    pub payload_bytes_per_participant: Vec<usize>,
     pub activation_bytes: usize,
     pub output_bytes: usize,
     pub samples: Vec<Sample>,

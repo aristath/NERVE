@@ -126,6 +126,7 @@ mod tests {
             exclude_pci: Vec::new(),
             exclude_kinds: vec!["integrated_gpu".to_string()],
             pair_measurements: true,
+            max_group_size: 3,
         };
         let selection = apply_selection_policy(&targets, &policy);
         assert_eq!(

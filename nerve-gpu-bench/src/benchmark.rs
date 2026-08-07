@@ -3,8 +3,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use crate::model::{
-    BenchmarkRun, Implementation, Measurement, PairMeasurement, RUN_SCHEMA, RunPolicy, Sample,
-    Selection, Summary, Target, WorkloadSpec, now_unix_ms,
+    BenchmarkRun, GroupMeasurement, Implementation, Measurement, PairMeasurement, RUN_SCHEMA,
+    RunPolicy, Sample, Selection, Summary, Target, WorkloadSpec, now_unix_ms,
 };
 
 pub fn run_benchmarks(
@@ -40,12 +40,21 @@ pub fn run_benchmarks(
         }
     }
 
-    let pair_measurements = if policy.pair_measurements {
+    let pair_measurements = if policy.pair_measurements && policy.max_group_size >= 2 {
         build_pair_placeholders(&selected_targets, policy.payload_bytes)
     } else {
         Vec::new()
     };
-    let workload_specs = build_workload_specs(policy.payload_bytes);
+    let group_measurements = if policy.pair_measurements && policy.max_group_size >= 3 {
+        build_group_placeholders(
+            &selected_targets,
+            policy.payload_bytes,
+            policy.max_group_size,
+        )
+    } else {
+        Vec::new()
+    };
+    let workload_specs = build_workload_specs(policy.payload_bytes, policy.max_group_size);
 
     let mut diagnostics = selection.diagnostics.clone();
     diagnostics.push(
@@ -69,6 +78,7 @@ pub fn run_benchmarks(
         workload_specs,
         measurements,
         pair_measurements,
+        group_measurements,
         diagnostics,
     }
 }
@@ -230,6 +240,44 @@ fn build_pair_placeholders(targets: &[&Target], payload_bytes: usize) -> Vec<Pai
     measurements
 }
 
+fn build_group_placeholders(
+    targets: &[&Target],
+    payload_bytes: usize,
+    max_group_size: usize,
+) -> Vec<GroupMeasurement> {
+    let mut measurements = Vec::new();
+    let max_group_size = max_group_size.min(3);
+    if max_group_size < 3 || targets.len() < 3 {
+        return measurements;
+    }
+    for first in 0..targets.len() {
+        for second in (first + 1)..targets.len() {
+            for third in (second + 1)..targets.len() {
+                let target_ids = vec![
+                    targets[first].stable_target_id.clone(),
+                    targets[second].stable_target_id.clone(),
+                    targets[third].stable_target_id.clone(),
+                ];
+                measurements.push(unmeasured_group(
+                    target_ids.clone(),
+                    "synthetic_layer_split_group_small_payload",
+                    "layer_split",
+                    "requires_device_backend",
+                    payload_bytes,
+                ));
+                measurements.push(unmeasured_group(
+                    target_ids,
+                    "synthetic_tensor_split_group_small_payload",
+                    "tensor_split",
+                    "requires_device_backend",
+                    payload_bytes,
+                ));
+            }
+        }
+    }
+    measurements
+}
+
 fn unmeasured_pair(
     source: &str,
     destination: &str,
@@ -261,11 +309,38 @@ fn unmeasured_pair(
     }
 }
 
-fn build_workload_specs(payload_bytes: usize) -> Vec<WorkloadSpec> {
+fn unmeasured_group(
+    target_ids: Vec<String>,
+    pattern: &str,
+    operation_family: &str,
+    reason: &str,
+    payload_bytes: usize,
+) -> GroupMeasurement {
+    let payload_bytes_per_participant = split_bytes(payload_bytes, target_ids.len());
+    GroupMeasurement {
+        workload_id: pattern.to_string(),
+        target_ids,
+        pattern: pattern.to_string(),
+        operation_family: operation_family.to_string(),
+        regime: "small_payload".to_string(),
+        format: "backend_selected".to_string(),
+        status: "unmeasured".to_string(),
+        reason: Some(reason.to_string()),
+        participant_count: payload_bytes_per_participant.len(),
+        payload_bytes,
+        payload_bytes_per_participant,
+        activation_bytes: activation_bytes_for_payload(payload_bytes),
+        output_bytes: output_bytes_for_payload(payload_bytes),
+        samples: Vec::new(),
+        summary: None,
+    }
+}
+
+fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<WorkloadSpec> {
     let half_payload = payload_bytes / 2;
     let activation_bytes = activation_bytes_for_payload(payload_bytes);
     let output_bytes = output_bytes_for_payload(payload_bytes);
-    vec![
+    let mut specs = vec![
         WorkloadSpec {
             workload_id: "single_target_gpu_small_payload".to_string(),
             pattern: "single_target_gpu_compute".to_string(),
@@ -310,7 +385,41 @@ fn build_workload_specs(payload_bytes: usize) -> Vec<WorkloadSpec> {
             output_bytes,
             description: "Split the same logical payload across two targets, broadcast the activation, compute both shards, then collect the output.".to_string(),
         },
-    ]
+    ];
+    if max_group_size >= 3 {
+        let third_payload = payload_bytes / 3;
+        specs.push(WorkloadSpec {
+            workload_id: "synthetic_layer_split_group_small_payload".to_string(),
+            pattern: "synthetic_layer_split_group_small_payload".to_string(),
+            format: "backend_selected".to_string(),
+            participant_count: 3,
+            payload_bytes,
+            parameter_bytes_per_participant: third_payload,
+            activation_bytes,
+            output_bytes,
+            description: "Run thirds of the logical payload across three ordered targets with activation movement between stages.".to_string(),
+        });
+        specs.push(WorkloadSpec {
+            workload_id: "synthetic_tensor_split_group_small_payload".to_string(),
+            pattern: "synthetic_tensor_split_group_small_payload".to_string(),
+            format: "backend_selected".to_string(),
+            participant_count: 3,
+            payload_bytes,
+            parameter_bytes_per_participant: third_payload,
+            activation_bytes,
+            output_bytes,
+            description: "Split the same logical payload across three targets, broadcast the activation, compute shards, then collect the output.".to_string(),
+        });
+    }
+    specs
+}
+
+fn split_bytes(total: usize, parts: usize) -> Vec<usize> {
+    let base = total / parts;
+    let remainder = total % parts;
+    (0..parts)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
 }
 
 fn activation_bytes_for_payload(payload_bytes: usize) -> usize {
@@ -353,6 +462,24 @@ fn summarize(samples: &[Sample]) -> Option<Summary> {
 mod tests {
     use super::*;
 
+    fn target(id: &str, kind: &str) -> Target {
+        Target {
+            stable_target_id: id.to_string(),
+            backend: "test".to_string(),
+            kind: kind.to_string(),
+            name: id.to_string(),
+            vendor_id: None,
+            vendor_name: None,
+            device_id: None,
+            pci_address: None,
+            physical_location: None,
+            numa_node: None,
+            boot_vga: None,
+            capabilities: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
     #[test]
     fn summarizes_samples() {
         let samples = [
@@ -388,7 +515,7 @@ mod tests {
 
     #[test]
     fn workload_specs_describe_small_split_patterns() {
-        let specs = build_workload_specs(5 * 1024 * 1024);
+        let specs = build_workload_specs(5 * 1024 * 1024, 2);
         let ids = specs
             .iter()
             .map(|spec| spec.workload_id.as_str())
@@ -409,5 +536,58 @@ mod tests {
         assert_eq!(layer.participant_count, 2);
         assert_eq!(layer.parameter_bytes_per_participant, 2_621_440);
         assert!(layer.activation_bytes <= 256 * 1024);
+    }
+
+    #[test]
+    fn group_specs_describe_triplet_patterns() {
+        let specs = build_workload_specs(5 * 1024 * 1024, 3);
+        let ids = specs
+            .iter()
+            .map(|spec| spec.workload_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"synthetic_layer_split_group_small_payload"));
+        assert!(ids.contains(&"synthetic_tensor_split_group_small_payload"));
+        let split = split_bytes(10, 3);
+        assert_eq!(split, [4, 3, 3]);
+    }
+
+    #[test]
+    fn run_emits_triplet_placeholders_without_backend_access() {
+        let targets = vec![
+            target("gpu:a", "discrete_gpu"),
+            target("gpu:b", "discrete_gpu"),
+            target("gpu:c", "discrete_gpu"),
+        ];
+        let selection = Selection {
+            selected_target_ids: targets
+                .iter()
+                .map(|target| target.stable_target_id.clone())
+                .collect(),
+            skipped_targets: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let policy = RunPolicy {
+            payload_bytes: 5 * 1024 * 1024,
+            samples: 1,
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 3,
+        };
+        let run = run_benchmarks(targets, selection, policy);
+        assert_eq!(run.group_measurements.len(), 2);
+        assert!(
+            run.group_measurements
+                .iter()
+                .any(|measurement| measurement.operation_family == "tensor_split")
+        );
+        assert_eq!(
+            run.group_measurements[0]
+                .payload_bytes_per_participant
+                .len(),
+            3
+        );
     }
 }
