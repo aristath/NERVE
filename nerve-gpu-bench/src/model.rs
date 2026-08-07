@@ -238,7 +238,9 @@ pub struct BenchmarkRunSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrategyStatusSummary {
     pub comparison_group: String,
+    pub workload_class: String,
     pub placement_strategy: String,
+    pub format: String,
     pub completed_count: usize,
     pub unmeasured_count: usize,
     pub failed_count: usize,
@@ -250,8 +252,10 @@ pub struct StrategyStatusSummary {
 pub struct ComparisonCandidateStatus {
     pub comparison_id: String,
     pub candidate_id: String,
+    pub workload_class: String,
     pub placement_strategy: String,
     pub measurement_kind: String,
+    pub format: String,
     pub status: String,
     pub matched_measurement_count: usize,
 }
@@ -532,13 +536,16 @@ impl BenchmarkRun {
             candidate_statuses: Vec::new(),
             coverage_warnings: Vec::new(),
         };
-        let mut strategy_statuses = BTreeMap::<(String, String), StrategyStatusSummary>::new();
+        let mut strategy_statuses =
+            BTreeMap::<(String, String, String, String), StrategyStatusSummary>::new();
         for measurement in &self.measurements {
             increment_summary_status(&mut summary, &measurement.status);
             increment_strategy_status(
                 &mut strategy_statuses,
                 &measurement.comparison_group,
+                &measurement.workload_class,
                 &measurement.placement_strategy,
+                &measurement.format,
                 &measurement.status,
             );
         }
@@ -547,7 +554,9 @@ impl BenchmarkRun {
             increment_strategy_status(
                 &mut strategy_statuses,
                 &measurement.comparison_group,
+                &measurement.workload_class,
                 &measurement.placement_strategy,
+                &measurement.format,
                 &measurement.status,
             );
         }
@@ -556,7 +565,9 @@ impl BenchmarkRun {
             increment_strategy_status(
                 &mut strategy_statuses,
                 &measurement.comparison_group,
+                &measurement.workload_class,
                 &measurement.placement_strategy,
+                &measurement.format,
                 &measurement.status,
             );
         }
@@ -576,8 +587,10 @@ impl BenchmarkRun {
                 statuses.push(ComparisonCandidateStatus {
                     comparison_id: comparison.comparison_id.clone(),
                     candidate_id: candidate.candidate_id.clone(),
+                    workload_class: comparison.workload_class.clone(),
                     placement_strategy: candidate.placement_strategy.clone(),
                     measurement_kind: candidate.measurement_kind.clone(),
+                    format: comparison.format.clone(),
                     status: combined_candidate_status(&matched_statuses),
                     matched_measurement_count: matched_statuses.len(),
                 });
@@ -656,16 +669,25 @@ fn increment_summary_status(summary: &mut BenchmarkRunSummary, status: &str) {
 }
 
 fn increment_strategy_status(
-    statuses: &mut BTreeMap<(String, String), StrategyStatusSummary>,
+    statuses: &mut BTreeMap<(String, String, String, String), StrategyStatusSummary>,
     comparison_group: &str,
+    workload_class: &str,
     placement_strategy: &str,
+    format: &str,
     status: &str,
 ) {
     let entry = statuses
-        .entry((comparison_group.to_string(), placement_strategy.to_string()))
+        .entry((
+            comparison_group.to_string(),
+            workload_class.to_string(),
+            placement_strategy.to_string(),
+            format.to_string(),
+        ))
         .or_insert_with(|| StrategyStatusSummary {
             comparison_group: comparison_group.to_string(),
+            workload_class: workload_class.to_string(),
             placement_strategy: placement_strategy.to_string(),
+            format: format.to_string(),
             completed_count: 0,
             unmeasured_count: 0,
             failed_count: 0,
@@ -684,7 +706,7 @@ fn increment_strategy_status(
 
 fn coverage_warnings_for_run(
     run: &BenchmarkRun,
-    strategy_statuses: &BTreeMap<(String, String), StrategyStatusSummary>,
+    strategy_statuses: &BTreeMap<(String, String, String, String), StrategyStatusSummary>,
     candidate_statuses: &[ComparisonCandidateStatus],
 ) -> Vec<String> {
     const SMALL_GROUP: &str = "small_payload_placement_comparison";
@@ -694,7 +716,7 @@ fn coverage_warnings_for_run(
         .any(|spec| spec.comparison_group == SMALL_GROUP)
         || strategy_statuses
             .keys()
-            .any(|(comparison_group, _)| comparison_group == SMALL_GROUP);
+            .any(|(comparison_group, _, _, _)| comparison_group == SMALL_GROUP);
     if !has_small_payload_group {
         return Vec::new();
     }
@@ -716,27 +738,47 @@ fn coverage_warnings_for_run(
     }
 
     let mut warnings = Vec::new();
-    for placement_strategy in expected {
-        let key = (SMALL_GROUP.to_string(), placement_strategy.to_string());
-        match strategy_statuses.get(&key) {
-            Some(status) if status.completed_count > 0 => {}
-            Some(status) => warnings.push(format!(
-                "placement strategy {placement_strategy:?} has no completed measurements: unmeasured={} failed={} unsupported={} skipped={}",
-                status.unmeasured_count,
-                status.failed_count,
-                status.unsupported_count,
-                status.skipped_count
-            )),
-            None => warnings.push(format!(
-                "placement strategy {placement_strategy:?} is missing from small_payload_placement_comparison"
-            )),
+    let expected_axes = run
+        .policy
+        .benchmark_workloads
+        .iter()
+        .flat_map(|workload| {
+            run.policy
+                .benchmark_formats
+                .iter()
+                .map(move |format| (workload.as_str(), format.as_str()))
+        })
+        .collect::<Vec<_>>();
+    for (workload_class, format) in expected_axes {
+        for placement_strategy in &expected {
+            let key = (
+                SMALL_GROUP.to_string(),
+                workload_class.to_string(),
+                (*placement_strategy).to_string(),
+                format.to_string(),
+            );
+            match strategy_statuses.get(&key) {
+                Some(status) if status.completed_count > 0 => {}
+                Some(status) => warnings.push(format!(
+                    "placement strategy {placement_strategy:?} has no completed measurements for workload={workload_class} format={format}: unmeasured={} failed={} unsupported={} skipped={}",
+                    status.unmeasured_count,
+                    status.failed_count,
+                    status.unsupported_count,
+                    status.skipped_count
+                )),
+                None => warnings.push(format!(
+                    "placement strategy {placement_strategy:?} is missing from small_payload_placement_comparison for workload={workload_class} format={format}"
+                )),
+            }
         }
     }
     for candidate in candidate_statuses {
         if candidate.status != "completed" {
             warnings.push(format!(
-                "comparison candidate {:?} has no completed measurement: strategy={} kind={} status={} matches={}",
+                "comparison candidate {:?} has no completed measurement: workload={} format={} strategy={} kind={} status={} matches={}",
                 candidate.candidate_id,
+                candidate.workload_class,
+                candidate.format,
                 candidate.placement_strategy,
                 candidate.measurement_kind,
                 candidate.status,

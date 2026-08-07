@@ -122,9 +122,11 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
         for strategy in &summary.strategy_statuses {
             writeln!(
                 stdout,
-                "  {} / {}: completed={} unmeasured={} failed={} unsupported={} skipped={}",
+                "  {} / {} / {} / {}: completed={} unmeasured={} failed={} unsupported={} skipped={}",
                 strategy.comparison_group,
+                strategy.workload_class,
                 strategy.placement_strategy,
+                strategy.format,
                 strategy.completed_count,
                 strategy.unmeasured_count,
                 strategy.failed_count,
@@ -138,9 +140,11 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
         for candidate in &summary.candidate_statuses {
             writeln!(
                 stdout,
-                "  {} / {}: strategy={} kind={} status={} matches={}",
+                "  {} / {}: workload={} format={} strategy={} kind={} status={} matches={}",
                 candidate.comparison_id,
                 candidate.candidate_id,
+                candidate.workload_class,
+                candidate.format,
                 candidate.placement_strategy,
                 candidate.measurement_kind,
                 candidate.status,

@@ -9,13 +9,14 @@ Use `nerve-gpu-bench validate --input <path>` to parse and run basic structural
 validation on a saved result.
 Use `nerve-gpu-bench summarize --input <path>` for a compact status and target
 summary of the same saved result.
-The summary groups status counts by `(comparison_group, placement_strategy)` so
-missing one-target, two-target-serial, or two-target-parallel evidence is easy
-to spot. Coverage warnings are emitted when a selected run has no completed
-measurement for an expected placement strategy. It also resolves every
-`comparison_sets[].candidates[]` entry against the recorded measurements and
-reports whether that candidate is completed, unmeasured, missing, failed,
-unsupported, or skipped.
+The summary groups status counts by `(comparison_group, workload_class,
+placement_strategy, format)` so missing one-target, two-target-serial, or
+two-target-parallel evidence is visible for each operation/format path.
+Coverage warnings are emitted when a selected run has no completed measurement
+for an expected placement strategy on a requested workload/format axis. It also
+resolves every `comparison_sets[].candidates[]` entry against the recorded
+measurements and reports whether that candidate is completed, unmeasured,
+missing, failed, unsupported, or skipped.
 
 ## Top-Level Fields
 
