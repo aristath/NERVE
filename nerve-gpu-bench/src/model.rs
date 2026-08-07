@@ -37,6 +37,7 @@ pub struct FormatCapability {
 pub struct RunPolicy {
     pub payload_bytes: usize,
     pub samples: usize,
+    pub benchmark_formats: Vec<String>,
     pub include_targets: Vec<String>,
     pub exclude_targets: Vec<String>,
     pub exclude_pci: Vec<String>,
@@ -277,6 +278,11 @@ impl BenchmarkRun {
         }
         if self.policy.samples == 0 {
             return Err("policy.samples must be greater than zero".to_string());
+        }
+        if self.policy.benchmark_formats.is_empty()
+            || self.policy.benchmark_formats.iter().any(String::is_empty)
+        {
+            return Err("policy.benchmark_formats must contain non-empty formats".to_string());
         }
         if self.policy.max_group_size == 0 || self.policy.max_group_size > 3 {
             return Err("policy.max_group_size must be between 1 and 3".to_string());
@@ -812,6 +818,7 @@ mod tests {
             policy: RunPolicy {
                 payload_bytes: 1024,
                 samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -859,6 +866,7 @@ mod tests {
             policy: RunPolicy {
                 payload_bytes: 1024,
                 samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -931,6 +939,7 @@ mod tests {
             policy: RunPolicy {
                 payload_bytes: 1024,
                 samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -1016,6 +1025,7 @@ mod tests {
             policy: RunPolicy {
                 payload_bytes: 1024,
                 samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),

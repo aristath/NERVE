@@ -5,6 +5,7 @@ use std::path::PathBuf;
 const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SAMPLES: usize = 5;
 const DEFAULT_MAX_GROUP_SIZE: usize = 3;
+const DEFAULT_BENCHMARK_FORMATS: &[&str] = &["bf16", "f32", "fp4", "fp8", "int4"];
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 30;
 const MAX_GROUP_SIZE: usize = 3;
@@ -25,6 +26,7 @@ pub enum Command {
         output: Option<PathBuf>,
         payload_bytes: usize,
         samples: usize,
+        benchmark_formats: Vec<String>,
         include_targets: Vec<String>,
         exclude_targets: Vec<String>,
         exclude_pci: Vec<String>,
@@ -123,6 +125,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut exclude_targets = Vec::new();
     let mut exclude_pci = Vec::new();
     let mut exclude_kinds = Vec::new();
+    let mut benchmark_formats = Vec::new();
     let mut pairs = true;
     let mut max_group_size = DEFAULT_MAX_GROUP_SIZE;
 
@@ -152,6 +155,9 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
                     &required_value(&arguments, &mut index, "--max-group-size")?,
                     "--max-group-size",
                 )?;
+            }
+            "--format" => {
+                benchmark_formats.push(required_value(&arguments, &mut index, "--format")?);
             }
             "--include-target" => {
                 include_targets.push(required_value(&arguments, &mut index, "--include-target")?);
@@ -191,11 +197,23 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
             "--max-group-size must be between 1 and {MAX_GROUP_SIZE}"
         )));
     }
+    if benchmark_formats.is_empty() {
+        benchmark_formats = DEFAULT_BENCHMARK_FORMATS
+            .iter()
+            .map(|format| (*format).to_string())
+            .collect();
+    }
+    benchmark_formats.sort();
+    benchmark_formats.dedup();
+    if benchmark_formats.iter().any(|format| format.is_empty()) {
+        return Err(CliError("--format cannot be empty".to_string()));
+    }
 
     Ok(Command::Run {
         output,
         payload_bytes,
         samples,
+        benchmark_formats,
         include_targets,
         exclude_targets,
         exclude_pci,
@@ -224,7 +242,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -240,6 +258,10 @@ mod tests {
                 output: None,
                 payload_bytes: DEFAULT_PAYLOAD_BYTES,
                 samples: DEFAULT_SAMPLES,
+                benchmark_formats: DEFAULT_BENCHMARK_FORMATS
+                    .iter()
+                    .map(|format| (*format).to_string())
+                    .collect(),
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -265,12 +287,20 @@ mod tests {
             Command::Run {
                 include_targets,
                 exclude_kinds,
+                benchmark_formats,
                 pairs,
                 max_group_size,
                 ..
             } => {
                 assert_eq!(include_targets, ["cpu:host"]);
                 assert_eq!(exclude_kinds, ["integrated_gpu"]);
+                assert_eq!(
+                    benchmark_formats,
+                    DEFAULT_BENCHMARK_FORMATS
+                        .iter()
+                        .map(|format| (*format).to_string())
+                        .collect::<Vec<_>>()
+                );
                 assert!(!pairs);
                 assert_eq!(max_group_size, DEFAULT_MAX_GROUP_SIZE);
             }
@@ -288,6 +318,24 @@ mod tests {
         .unwrap();
         match command {
             Command::Run { max_group_size, .. } => assert_eq!(max_group_size, 2),
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_benchmark_formats() {
+        let command = parse_args([
+            "run".to_string(),
+            "--format".to_string(),
+            "f32".to_string(),
+            "--format".to_string(),
+            "fp4".to_string(),
+        ])
+        .unwrap();
+        match command {
+            Command::Run {
+                benchmark_formats, ..
+            } => assert_eq!(benchmark_formats, ["f32", "fp4"]),
             _ => panic!("expected run command"),
         }
     }

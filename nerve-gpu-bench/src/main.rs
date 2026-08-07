@@ -52,6 +52,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             output,
             payload_bytes,
             samples,
+            benchmark_formats,
             include_targets,
             exclude_targets,
             exclude_pci,
@@ -63,6 +64,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let policy = model::RunPolicy {
                 payload_bytes,
                 samples,
+                benchmark_formats,
                 include_targets,
                 exclude_targets,
                 exclude_pci,

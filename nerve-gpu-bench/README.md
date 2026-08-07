@@ -40,6 +40,9 @@ and pair-parallel.
 
 Targets also report format capabilities separately from measurements. Capability
 flags are only filters; they do not imply a target is fast for that format.
+The run policy records requested benchmark formats, and backend workload IDs
+are format-specific so F32, BF16, FP8, INT4, and FP4 evidence cannot collapse
+into one generic path.
 
 ## Commands
 
@@ -53,6 +56,15 @@ Run small benchmarks and write JSON:
 
 ```sh
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
+  --output benchmark-results.json
+```
+
+Limit the requested format matrix:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
+  --format f32 \
+  --format fp4 \
   --output benchmark-results.json
 ```
 
