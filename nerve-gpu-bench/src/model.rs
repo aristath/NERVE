@@ -51,6 +51,7 @@ pub struct VulkanDeviceInfo {
     pub memory_heaps: Vec<VulkanMemoryHeap>,
     pub queue_families: Vec<VulkanQueueFamily>,
     pub extension_names: Vec<String>,
+    pub feature_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

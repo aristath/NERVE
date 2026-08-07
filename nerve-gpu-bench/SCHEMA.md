@@ -34,7 +34,8 @@ rejoining the full sample list first.
   fallback, unsupported, or unmeasured support per format. PCI targets may also
   include `pci_link`, a passive sysfs estimate of current/max link width and
   one-way byte rate. Vulkan targets may include `vulkan`, with physical-device
-  properties, memory heaps, queue families, and extension names.
+  properties, memory heaps, queue families, extension names, and probed feature
+  flags.
 - `selected_target_ids`: targets selected for this run.
 - `skipped_targets`: discovered targets skipped by explicit policy.
 - `workload_specs`: logical benchmark contracts generated for the selected
@@ -132,6 +133,9 @@ targets. Their stable IDs use `vulkan:pci:<address>` when `VK_EXT_pci_bus_info`
 is available. Otherwise they include the physical-device index because Vulkan
 device order is driver-defined. Discovery creates a Vulkan instance only; it
 does not create logical devices or run GPU workloads.
+F16 capability uses the shaderFloat16 feature bit. BF16 and FP8 currently use
+extension presence as a conservative probe and remain `unmeasured` until their
+feature bits and kernels are implemented.
 
 Format capability is not a speed claim. A target can lack native FP4 but still
 win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement

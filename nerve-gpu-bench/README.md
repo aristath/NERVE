@@ -38,9 +38,11 @@ the same workload IDs as device-backed single-target candidates.
 With `--features vulkan`, discovery creates a Vulkan instance and enumerates
 physical devices. It records device name/type, API and driver versions, memory
 heaps, queue families, advertised device extensions, and conservative format
-capabilities. When `VK_EXT_pci_bus_info` is available, Vulkan targets use the
-PCI address in their stable target ID. It does not create logical devices,
-allocate GPU memory, submit queues, or run kernels.
+capabilities. F16 support is classified from the Vulkan shaderFloat16 feature
+bit; BF16/FP8 are still extension-presence probes until their feature bits are
+queried. When `VK_EXT_pci_bus_info` is available, Vulkan targets use the PCI
+address in their stable target ID. It does not create logical devices, allocate
+GPU memory, submit queues, or run kernels.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,

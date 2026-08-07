@@ -42,6 +42,7 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
         let queue_properties =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let feature_flags = unsafe { vulkan_feature_flags(instance, physical_device) };
         let extensions = unsafe { instance.enumerate_device_extension_properties(physical_device) }
             .map_err(|error| {
                 format!("could not enumerate Vulkan device extensions for index {index}: {error:?}")
@@ -53,6 +54,7 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
             &memory_properties,
             &queue_properties,
             &extensions,
+            feature_flags,
             pci_address,
         ));
     }
@@ -65,6 +67,7 @@ fn vulkan_target(
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     queue_properties: &[vk::QueueFamilyProperties],
     extensions: &[vk::ExtensionProperties],
+    feature_flags: Vec<String>,
     pci_address: Option<String>,
 ) -> Target {
     let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
@@ -75,7 +78,7 @@ fn vulkan_target(
     let device_type = device_type(properties.device_type).to_string();
     let api_version = api_version(properties.api_version);
     let extension_names = extension_names(extensions);
-    let format_capabilities = vulkan_format_capabilities(&extension_names);
+    let format_capabilities = vulkan_format_capabilities(&extension_names, &feature_flags);
     let memory_heaps = vulkan_memory_heaps(memory_properties);
     let queue_families = vulkan_queue_families(queue_properties);
     let stable_target_id = vulkan_stable_target_id(
@@ -98,6 +101,11 @@ fn vulkan_target(
     if has_compute {
         capabilities.push("vulkan_compute_queue".to_string());
     }
+    capabilities.extend(
+        feature_flags
+            .iter()
+            .map(|feature| format!("vulkan_feature={feature}")),
+    );
 
     Target {
         stable_target_id,
@@ -128,6 +136,7 @@ fn vulkan_target(
             memory_heaps,
             queue_families,
             extension_names,
+            feature_flags,
         }),
         capabilities,
         format_capabilities,
@@ -136,6 +145,25 @@ fn vulkan_target(
             "vulkan_probe_does_not_create_logical_device_or_run_workloads".to_string(),
         ],
     }
+}
+
+unsafe fn vulkan_feature_flags(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Vec<String> {
+    let mut shader_float16_int8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut shader_float16_int8);
+    unsafe {
+        instance.get_physical_device_features2(physical_device, &mut features);
+    }
+    let mut flags = Vec::new();
+    if shader_float16_int8.shader_float16 != 0 {
+        flags.push("shader_float16".to_string());
+    }
+    if shader_float16_int8.shader_int8 != 0 {
+        flags.push("shader_int8".to_string());
+    }
+    flags
 }
 
 unsafe fn vulkan_pci_address(
@@ -236,20 +264,34 @@ fn extension_names(extensions: &[vk::ExtensionProperties]) -> Vec<String> {
     names
 }
 
-fn vulkan_format_capabilities(extension_names: &[String]) -> Vec<FormatCapability> {
+fn vulkan_format_capabilities(
+    extension_names: &[String],
+    feature_flags: &[String],
+) -> Vec<FormatCapability> {
     let supports_bf16 = extension_names
         .iter()
         .any(|extension| extension == "VK_KHR_shader_bfloat16");
     let supports_fp8 = extension_names
         .iter()
         .any(|extension| extension == "VK_EXT_shader_float8");
+    let supports_f16 = feature_flags
+        .iter()
+        .any(|feature| feature == "shader_float16");
     vec![
         format_capability("f32", "native", "vulkan_core", "32-bit float shader path"),
         format_capability(
             "f16",
-            "unmeasured",
-            "vulkan_probe",
-            "requires feature-chain probe before native/emulated classification",
+            if supports_f16 {
+                "native"
+            } else {
+                "unsupported"
+            },
+            "vulkan_feature_chain",
+            if supports_f16 {
+                "shaderFloat16 feature bit is set"
+            } else {
+                "shaderFloat16 feature bit is not set"
+            },
         ),
         format_capability(
             "bf16",
@@ -416,5 +458,22 @@ mod tests {
     #[test]
     fn api_versions_are_human_readable() {
         assert_eq!(api_version(vk::make_api_version(0, 1, 3, 268)), "1.3.268");
+    }
+
+    #[test]
+    fn format_capabilities_use_feature_bits_for_f16() {
+        let capabilities = vulkan_format_capabilities(&[], &["shader_float16".to_string()]);
+        let f16 = capabilities
+            .iter()
+            .find(|capability| capability.format == "f16")
+            .unwrap();
+        assert_eq!(f16.support, "native");
+
+        let capabilities = vulkan_format_capabilities(&[], &[]);
+        let f16 = capabilities
+            .iter()
+            .find(|capability| capability.format == "f16")
+            .unwrap();
+        assert_eq!(f16.support, "unsupported");
     }
 }
