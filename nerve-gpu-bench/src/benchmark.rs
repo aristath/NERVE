@@ -111,12 +111,12 @@ pub fn run_benchmarks(
                 &policy.benchmark_workloads,
             ));
         } else {
-            measurements.extend(unmeasured_single_target(
-                &target.stable_target_id,
+            measurements.extend(run_device_single_target_measurements(
+                target,
                 policy.payload_bytes,
                 &policy.benchmark_formats,
                 &policy.benchmark_workloads,
-                "gpu_backend_not_implemented",
+                policy.execute_vulkan,
             ));
         }
     }
@@ -695,11 +695,64 @@ fn compound_operations(
     transform_operations + output_operations
 }
 
-fn unmeasured_single_target(
+fn run_device_single_target_measurements(
+    target: &Target,
+    payload_bytes: usize,
+    formats: &[String],
+    workloads: &[String],
+    execute_vulkan: bool,
+) -> Vec<Measurement> {
+    if execute_vulkan && target.backend == "vulkan" {
+        return run_vulkan_single_target_measurements(target, payload_bytes, formats, workloads);
+    }
+    single_target_status_measurements(
+        &target.stable_target_id,
+        payload_bytes,
+        formats,
+        workloads,
+        "unmeasured",
+        "gpu_backend_not_implemented",
+    )
+}
+
+#[cfg(feature = "vulkan")]
+fn run_vulkan_single_target_measurements(
+    target: &Target,
+    payload_bytes: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<Measurement> {
+    crate::vulkan_exec::run_vulkan_single_target_measurements(
+        target,
+        payload_bytes,
+        formats,
+        workloads,
+    )
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn run_vulkan_single_target_measurements(
+    target: &Target,
+    payload_bytes: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<Measurement> {
+    single_target_status_measurements(
+        &target.stable_target_id,
+        payload_bytes,
+        formats,
+        workloads,
+        "unsupported",
+        "vulkan_feature_not_enabled",
+    )
+}
+
+pub(crate) fn single_target_status_measurements(
     target_id: &str,
     payload_bytes: usize,
     formats: &[String],
     workloads: &[String],
+    status: &str,
     reason: &str,
 ) -> Vec<Measurement> {
     formats
@@ -715,7 +768,7 @@ fn unmeasured_single_target(
                 operation_family: workload.clone(),
                 regime: "small_payload".to_string(),
                 format: format.clone(),
-                status: "unmeasured".to_string(),
+                status: status.to_string(),
                 reason: Some(reason.to_string()),
                 payload_bytes,
                 working_set_bytes: payload_bytes,
@@ -1500,6 +1553,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 3,
+            execute_vulkan: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert_eq!(run.group_measurements.len(), 2);
@@ -1538,6 +1592,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 2,
+            execute_vulkan: false,
         };
         let plan = plan_benchmarks(targets, selection, policy);
         assert_eq!(plan.schema, PLAN_SCHEMA);
@@ -1575,6 +1630,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 2,
+            execute_vulkan: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert_eq!(run.comparison_sets.len(), 1);
@@ -1627,6 +1683,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 3,
+            execute_vulkan: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert_eq!(run.comparison_sets.len(), 4);
@@ -1682,6 +1739,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 2,
+            execute_vulkan: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert!(run.measurements.iter().any(|measurement| {

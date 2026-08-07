@@ -45,6 +45,11 @@ queried. When `VK_EXT_pci_bus_info` is available, Vulkan targets use the PCI
 address in their stable target ID. It does not create logical devices, allocate
 GPU memory, submit queues, or run kernels.
 
+`run --execute-vulkan` is an explicit opt-in for Vulkan execution scaffolding.
+At this stage it opens a logical device for the selected Vulkan target and
+records that the compute kernel is not implemented yet; it still does not submit
+GPU work.
+
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,
 two-target serialized execution, and two-target parallel execution. A future
@@ -98,6 +103,18 @@ Preview the selected benchmark matrix without executing measurements:
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
   --dry-plan \
   --output benchmark-plan.json
+```
+
+Probe the Vulkan execution boundary without submitting kernels:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml --features vulkan -- run \
+  --execute-vulkan \
+  --include-target vulkan:pci:0000:03:00.0 \
+  --format f32 \
+  --workload dense_projection \
+  --no-pairs \
+  --output benchmark-results.json
 ```
 
 Limit the requested format matrix:

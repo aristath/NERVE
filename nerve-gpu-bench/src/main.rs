@@ -4,6 +4,8 @@ mod discovery;
 mod model;
 mod policy;
 #[cfg(feature = "vulkan")]
+mod vulkan_exec;
+#[cfg(feature = "vulkan")]
 mod vulkan_probe;
 
 use std::error::Error;
@@ -62,6 +64,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             pairs,
             max_group_size,
             dry_plan,
+            execute_vulkan,
         } => {
             let targets = discover_targets();
             let policy = model::RunPolicy {
@@ -75,6 +78,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 exclude_kinds,
                 pair_measurements: pairs,
                 max_group_size,
+                execute_vulkan,
             };
             let selection = apply_selection_policy(&targets, &policy);
             let payload = if dry_plan {
