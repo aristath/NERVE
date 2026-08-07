@@ -152,13 +152,17 @@ toward 50 tok/s without regressing supported Qwen models.
      not yet profitably: calibration measured 10 DSpark cycles, proposed 34
      draft tokens, accepted 14 (41.18%), and selected scalar afterward. Width 4
      was best at 3.734 useful tok/s; width 7 reached only 1.514 useful tok/s.
-     Fuse the complete DSpark proposal, target verification, prefix comparison,
-     state selection, canonical commit, and draft catch-up transaction on the
-     GPU so seven-token execution no longer expands into thousands of host
-     submissions and waits. Re-run one complete warmup conversation followed
-     by the untouched truth conversation; DSpark is complete only when it is
-     behaviorally correct and wins the selector on measured useful committed
-     tokens per second.
+     After eliminating the obvious host submission/fence bottleneck below,
+     prioritize the attached MTP/DSpark/DFlash-class decoder as the primary
+     throughput multiplier. Fuse proposal, target verification, prefix
+     comparison, state selection, canonical commit, and draft catch-up into one
+     GPU transaction so seven-token execution no longer expands into thousands
+     of host submissions and waits. Discover attached draft structures and
+     their execution contracts from package semantics and capabilities, never
+     from model names. Re-run two complete discarded conversations when the
+     second still loads resources, followed by the untouched truth conversation;
+     the attached draft path is complete only when it is behaviorally correct
+     and wins the selector on measured useful committed tokens per second.
      The demand-aware resident feedback checkpoint transaction is now implemented.
      A faulting traversal follows only the causal suffix from each GPU checkpoint,
      loads the missing cohort without replaying completed lanes, and performs one
@@ -171,11 +175,22 @@ toward 50 tok/s without regressing supported Qwen models.
      protocol termination, and canonical rollback; real Qwen3.6-35B and Qwen3.5-9B
      gates remain above their accepted floors.
 
+     Routed demand continuation now consumes the immutable GPU miss record rather
+     than rereading shared selector working memory. One causal checkpoint may
+     legitimately expose several disjoint expert sets as earlier dependencies
+     become resident; the runtime tracks checkpoint-resource pairs against the
+     compiled selector-domain bound and rejects only a resource that faults twice.
+     A forced resident cold run that previously failed immediately completed a
+     coherent thinking response, loaded 5,002 distinct experts with zero eviction,
+     and released every allocation. Its 1.196 decode tok/s included 71.70 seconds
+     of source reads and 51.81 seconds of blocking transfer, so it is correctness
+     evidence rather than a warm performance result.
+
      The 2026-08-07 authoritative DeepSeek run discarded two complete conversations
      because the second still loaded resources, then measured the complete third
      conversation in the same mounted process. It produced coherent thinking-enabled
-     answers with correct Greece/Athens recall at **8.1308 decode tok/s** and
-     **8.2308 prefill tok/s**. The measured set had exactly zero residency misses,
+     answers with correct Greece/Athens recall at **8.2296 decode tok/s** and
+     **8.4030 prefill tok/s**. The measured set had exactly zero residency misses,
      loads, reads, uploads, reloads, or evictions, proving steady-state execution—not
      NVMe paging—is now the limiting path. The first discarded set loaded 132.54 GB;
      the second loaded another 6.36 GB; the third reused all 1,149,648 selected expert
@@ -183,8 +198,9 @@ toward 50 tok/s without regressing supported Qwen models.
      preserved the pre-existing PCI `0000:03:00.0` allocation; no discrete-GPU
      timeout, reset, or page fault occurred.
 
-     The representative 2,224-token steady-state turn exposed the next dominant
-     bottleneck. It spent 292,640.171 ms in decode while measured execution quanta
+     The representative 2,224-token steady-state turn remains the next dominant
+     bottleneck. The latest run spent 302,202.763 ms in decode; the prior instrumented
+     run spent 292,640.171 ms while measured execution quanta
      accounted for only 528.660 ms and resident component device work for 263.870 ms.
      NERVE issued 36,834 resident-sequence submissions, waited on 39,465 sequence
      fences, issued 31,837 copy submissions, and waited on 10,852 copies. Each of the
@@ -307,6 +323,13 @@ toward 50 tok/s without regressing supported Qwen models.
    recall, emitted full thinking traces, returned exactly to their recorded
    59,985,920-byte VRAM baselines, and produced no new kernel GPU fault. Retain
    these gates for every subsequent runtime-performance commit.
+   After routed checkpoint convergence was fixed, the same complete gates passed
+   again: Qwen3.6-35B-A3B measured **57.8022 decode tok/s** and **51.9794 prefill
+   tok/s** on one discrete AMD GPU with its attached decoder enabled; Qwen3.5-9B
+   measured **48.8246 decode tok/s** and **140.0010 prefill tok/s** with explicit
+   speculative disable and its official thinking/sampling profile. Both retained
+   correct Greece recall and returned exactly to their recorded pre-run VRAM
+   reservations.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
