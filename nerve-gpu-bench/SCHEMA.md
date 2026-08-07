@@ -47,8 +47,8 @@ rejoining the full sample list first.
   three-target serial, and three-target parallel.
 - `measurements`: single-target measurements.
 - `pair_measurements`: ordered pair and two-target placement measurements.
-  Current Vulkan execution can emit ordered activation transfer, ordered dense
-  serial pair, and dense parallel pair rows when `policy.execute` is true.
+  Current Vulkan execution can emit ordered activation transfer, ordered serial
+  pair, and parallel pair rows when `policy.execute` is true.
 - `group_measurements`: three-target synthetic placement measurements when
   enough targets are selected and `--max-group-size 3` is active.
 - `diagnostics`: non-fatal implementation notes.
@@ -65,13 +65,13 @@ or GPU measurements.
 `policy.execute` records whether the run was allowed to open Vulkan
 logical devices. When true, selected Vulkan targets may attempt the execution
 boundary. Current Vulkan single-target measurements can complete
-`dense_projection` paths with timestamped compute samples for F32 and
-packed-emulated lower-precision or quantized storage formats. Current Vulkan
-pair measurements can complete ordered host-staged activation transfer,
-two-target dense serial, and two-target dense parallel rows for executable dense
-formats. Other Vulkan workload or format paths are omitted from measurements
-until their kernels are implemented. Comparison candidate summaries report
-those absent records as `missing`.
+`dense_projection`, `moe_expert`, and `router_reduction` paths with timestamped
+compute samples for F32 and packed-emulated lower-precision or quantized storage
+formats. Current Vulkan pair measurements can complete ordered host-staged
+activation transfer, two-target serial, and two-target parallel rows for those
+executable workload/format axes. Other Vulkan workload or format paths are
+omitted from measurements until their kernels are implemented. Comparison
+candidate summaries report those absent records as `missing`.
 
 ## Workload Specs
 
@@ -126,10 +126,10 @@ Current workload spec families:
   collect output.
 
 Device-backed specs are emitted even before every backend path exists. Vulkan
-dense-projection single-target and two-target dense pair measurements can
-complete for executable formats when `--execute` is active. Other device-backed
-specs have no measurement row until a backend can execute them. CPU reference
-compound measurements use the same small payload to keep the
+single-target and two-target pair measurements can complete for executable
+workload/format axes when `--execute` is active. Other device-backed specs have
+no measurement row until a backend can execute them. CPU reference compound
+measurements use the same small payload to keep the
 serialized/layer-split/tensor-split semantics executable.
 CPU F32 single-target measurements use
 `single_target_small_payload:<workload_class>:f32` so they can resolve the same

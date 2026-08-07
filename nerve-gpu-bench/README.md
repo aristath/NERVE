@@ -21,8 +21,9 @@ This first implementation provides:
 - requested CPU F32 single-target workload measurements for dense projection,
   MoE expert, and router/reduction classes, with unsupported records for
   unimplemented CPU formats;
-- opt-in Vulkan dense-projection dispatches with GPU timestamp samples for F32
-  plus packed-emulated baselines for lower-precision and quantized formats;
+- opt-in Vulkan dense-projection, MoE expert, and router/reduction dispatches
+  with GPU timestamp samples for F32 plus packed-emulated baselines for
+  lower-precision and quantized formats;
 - opt-in Vulkan ordered activation transfer, two-target serial dense, and
   two-target parallel dense measurements for small pair comparisons;
 - workload specs and comparison candidates for single-target, pair, and triplet
@@ -32,15 +33,15 @@ This first implementation provides:
 
 Default runs keep GPU work passive. GPU targets are discovered and reported, but
 GPU compute only runs when `run --execute` is provided. The executable Vulkan
-dense path submits a small compute dispatch over the requested payload, measured
-with Vulkan timestamps. F32 uses a float shader path. F16, BF16, FP8 variants,
-FP4/MXFP4/NVFP4, INT formats, and GGUF-style Q/IQ storage families use a
-packed-u32 emulation baseline until native format-specific kernels exist. Peer
-activation transfer, dense layer-split, and dense tensor-split pair paths run
-when `--execute` and pair measurements are active. Non-dense GPU workloads,
-native format-specific kernels, and triplet execution produce no measurement
-rows until their backend kernels exist; their absence is reported as missing
-comparison coverage.
+path submits small workload-specific compute dispatches over the requested
+payload, measured with Vulkan timestamps. F32 uses float shader paths. F16,
+BF16, FP8 variants, FP4/MXFP4/NVFP4, INT formats, and GGUF-style Q/IQ storage
+families use packed-u32 emulation baselines until native format-specific kernels
+exist. Peer activation transfer, dense/MoE/router layer-split, and
+dense/MoE/router tensor-split pair paths run when `--execute` and pair
+measurements are active. Native format-specific kernels and triplet execution
+produce no measurement rows until their backend kernels exist; their absence is
+reported as missing comparison coverage.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts stay testable while GPU coverage grows.
 For CPU single-target comparisons, requested F32 workload records already use
@@ -59,10 +60,10 @@ memory, submit queues, or run kernels.
 
 `run --execute` is an explicit opt-in for Vulkan execution. At this stage it
 opens logical devices for selected Vulkan targets and submits single-target
-dense compute dispatches for the requested executable formats. Pair execution
-also measures ordered host-staged activation transfer, ordered dense
-layer-split execution, and dense tensor-split execution for selected pairs.
-Other Vulkan measurement families are omitted rather than guessed.
+workload dispatches for the requested executable formats. Pair execution also
+measures ordered host-staged activation transfer, ordered layer-split execution,
+and tensor-split execution for selected pairs. Triplet execution and native
+format-specific kernels are omitted rather than guessed.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,

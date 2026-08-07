@@ -60,21 +60,42 @@ const PACKED_U32_TRANSFORM_SHADER_SPV: &[u32] = &[
     65789, 65592,
 ];
 
+const F32_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_moe_expert.spv");
+const F32_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_router_reduction.spv");
+const PACKED_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/packed_moe_expert.spv");
+const PACKED_ROUTER_REDUCTION_SHADER_SPV: &[u8] =
+    include_bytes!("shaders/packed_router_reduction.spv");
+
+#[derive(Clone, Copy)]
+enum ShaderCode {
+    Words(&'static [u32]),
+    Bytes(&'static [u8]),
+}
+
 #[derive(Clone)]
 struct DenseFormatKernel {
     format: String,
-    shader: &'static [u32],
+    shader: ShaderCode,
     bytes_per_storage_element: usize,
     logical_elements_per_storage_element: u64,
     operations_per_storage_element: u64,
     pattern: &'static str,
 }
 
+fn workload_format_kernel(workload_class: &str, format: &str) -> Option<DenseFormatKernel> {
+    match workload_class {
+        "dense_projection" => dense_format_kernel(format),
+        "moe_expert" => moe_expert_kernel(format),
+        "router_reduction" => router_reduction_kernel(format),
+        _ => None,
+    }
+}
+
 fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
     match format {
         "f32" => Some(DenseFormatKernel {
             format: "f32".to_string(),
-            shader: F32_TRANSFORM_SHADER_SPV,
+            shader: ShaderCode::Words(F32_TRANSFORM_SHADER_SPV),
             bytes_per_storage_element: mem::size_of::<f32>(),
             logical_elements_per_storage_element: 1,
             operations_per_storage_element: 2,
@@ -103,12 +124,64 @@ fn packed_dense_kernel(
 ) -> DenseFormatKernel {
     DenseFormatKernel {
         format: format.to_string(),
-        shader: PACKED_U32_TRANSFORM_SHADER_SPV,
+        shader: ShaderCode::Words(PACKED_U32_TRANSFORM_SHADER_SPV),
         bytes_per_storage_element: mem::size_of::<u32>(),
         logical_elements_per_storage_element,
         operations_per_storage_element: 4,
         pattern: "single_target_packed_emulated_compute",
     }
+}
+
+fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
+    match format {
+        "f32" => Some(DenseFormatKernel {
+            format: "f32".to_string(),
+            shader: ShaderCode::Bytes(F32_MOE_EXPERT_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<f32>(),
+            logical_elements_per_storage_element: 1,
+            operations_per_storage_element: 10,
+            pattern: "moe_expert_compute",
+        }),
+        _ => packed_workload_kernel(
+            format,
+            PACKED_MOE_EXPERT_SHADER_SPV,
+            "moe_expert_packed_emulated_compute",
+            12,
+        ),
+    }
+}
+
+fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
+    match format {
+        "f32" => Some(DenseFormatKernel {
+            format: "f32".to_string(),
+            shader: ShaderCode::Bytes(F32_ROUTER_REDUCTION_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<f32>(),
+            logical_elements_per_storage_element: 1,
+            operations_per_storage_element: 8,
+            pattern: "router_reduction_compute",
+        }),
+        _ => packed_workload_kernel(
+            format,
+            PACKED_ROUTER_REDUCTION_SHADER_SPV,
+            "router_reduction_packed_emulated_compute",
+            8,
+        ),
+    }
+}
+
+fn packed_workload_kernel(
+    format: &str,
+    shader: &'static [u8],
+    pattern: &'static str,
+    operations_per_storage_element: u64,
+) -> Option<DenseFormatKernel> {
+    dense_format_kernel(format).map(|base| DenseFormatKernel {
+        shader: ShaderCode::Bytes(shader),
+        operations_per_storage_element,
+        pattern,
+        ..base
+    })
 }
 
 pub fn run_vulkan_single_target_measurements(
@@ -287,10 +360,7 @@ fn run_vulkan_ordered_serial_pair_measurements(
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
-                if workload != "dense_projection" {
-                    return None;
-                }
-                dense_format_kernel(format).map(|kernel| {
+                workload_format_kernel(workload, format).map(|kernel| {
                     match run_vulkan_dense_serial_pair(
                         &source_device,
                         &destination_device,
@@ -361,10 +431,7 @@ fn run_vulkan_parallel_pair_measurements(
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
-                if workload != "dense_projection" {
-                    return None;
-                }
-                dense_format_kernel(format).map(|kernel| {
+                workload_format_kernel(workload, format).map(|kernel| {
                     match run_vulkan_dense_parallel_pair(
                         &left_device,
                         &right_device,
@@ -405,10 +472,7 @@ fn vulkan_measurements(
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(move |workload| {
-                if workload != "dense_projection" {
-                    return None;
-                }
-                dense_format_kernel(format).map(|kernel| {
+                workload_format_kernel(workload, format).map(|kernel| {
                     match run_vulkan_dense_projection(
                         device,
                         target_id,
@@ -442,7 +506,7 @@ fn skipped_vulkan_axes<'a>(
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(move |workload| {
-                if workload == "dense_projection" && dense_format_kernel(format).is_some() {
+                if workload_format_kernel(workload, format).is_some() {
                     None
                 } else {
                     Some((format.as_str(), workload.as_str()))
@@ -1265,7 +1329,7 @@ fn failed_dense_pair_measurements(
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(move |workload| {
-                if workload != "dense_projection" || dense_format_kernel(format).is_none() {
+                if workload_format_kernel(workload, format).is_none() {
                     return None;
                 }
                 Some(failed_dense_pair_measurement(
@@ -1345,7 +1409,7 @@ fn create_compute_resources(
     compute_device: &OpenVulkanComputeDevice,
     storage_buffer: vk::Buffer,
     buffer_size: vk::DeviceSize,
-    shader: &[u32],
+    shader: ShaderCode,
 ) -> Result<ComputeResources, String> {
     let device = &compute_device.device;
     let binding = [vk::DescriptorSetLayoutBinding::default()
@@ -1374,8 +1438,12 @@ fn create_compute_resources(
         )
     }
     .map_err(|error| format!("could not create Vulkan pipeline layout: {error:?}"))?;
+    let shader_words = shader_words(shader)?;
     let shader_module = unsafe {
-        device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(shader), None)
+        device.create_shader_module(
+            &vk::ShaderModuleCreateInfo::default().code(&shader_words),
+            None,
+        )
     }
     .map_err(|error| format!("could not create Vulkan shader module: {error:?}"))?;
     let entry_name = CString::new("main").expect("static string has no nul");
@@ -1436,6 +1504,21 @@ fn create_compute_resources(
         descriptor_pool,
         pipeline,
     })
+}
+
+fn shader_words(shader: ShaderCode) -> Result<Vec<u32>, String> {
+    match shader {
+        ShaderCode::Words(words) => Ok(words.to_vec()),
+        ShaderCode::Bytes(bytes) => {
+            if bytes.len() % mem::size_of::<u32>() != 0 {
+                return Err("SPIR-V bytecode length is not u32-aligned".to_string());
+            }
+            Ok(bytes
+                .chunks_exact(mem::size_of::<u32>())
+                .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect())
+        }
+    }
 }
 
 fn record_compute_dispatch(
@@ -1956,16 +2039,36 @@ mod tests {
     }
 
     #[test]
-    fn non_dense_or_unknown_vulkan_axes_are_skipped() {
+    fn maps_model_storage_formats_to_workload_specific_kernels() {
+        for workload in ["dense_projection", "moe_expert", "router_reduction"] {
+            let f32_kernel = workload_format_kernel(workload, "f32").unwrap();
+            assert_eq!(f32_kernel.format, "f32");
+            assert!(f32_kernel.operations_per_storage_element > 0);
+
+            let packed_kernel = workload_format_kernel(workload, "mxfp4").unwrap();
+            assert_eq!(packed_kernel.format, "mxfp4");
+            assert_eq!(packed_kernel.logical_elements_per_storage_element, 8);
+            assert!(packed_kernel.pattern.contains("compute"));
+        }
+        assert!(workload_format_kernel("unknown_workload", "f32").is_none());
+        assert!(workload_format_kernel("dense_projection", "unknown_format").is_none());
+    }
+
+    #[test]
+    fn unknown_vulkan_axes_are_skipped() {
         let formats = vec!["mxfp4".to_string(), "unknown_format".to_string()];
         let workloads = vec![
             "dense_projection".to_string(),
+            "moe_expert".to_string(),
             "router_reduction".to_string(),
         ];
         let skipped = skipped_vulkan_axes(&formats, &workloads);
         assert!(!skipped.contains(&("mxfp4", "dense_projection")));
-        assert!(skipped.contains(&("mxfp4", "router_reduction")));
+        assert!(!skipped.contains(&("mxfp4", "moe_expert")));
+        assert!(!skipped.contains(&("mxfp4", "router_reduction")));
         assert!(skipped.contains(&("unknown_format", "dense_projection")));
+        assert!(skipped.contains(&("unknown_format", "moe_expert")));
+        assert!(skipped.contains(&("unknown_format", "router_reduction")));
     }
 
     #[test]
@@ -1991,7 +2094,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_pair_failure_rows_cover_only_executable_dense_axes() {
+    fn dense_pair_failure_rows_cover_only_executable_axes() {
         let formats = vec![
             "f32".to_string(),
             "mxfp4".to_string(),
@@ -2019,7 +2122,9 @@ mod tests {
             ids,
             [
                 "synthetic_tensor_split_small_payload:dense_projection:f32",
+                "synthetic_tensor_split_small_payload:router_reduction:f32",
                 "synthetic_tensor_split_small_payload:dense_projection:mxfp4",
+                "synthetic_tensor_split_small_payload:router_reduction:mxfp4",
             ]
         );
         assert!(measurements.iter().all(|measurement| {

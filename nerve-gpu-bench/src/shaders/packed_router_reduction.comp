@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Params {
+    uint elements;
+} params;
+layout(std430, binding = 0) buffer Data {
+    uint values[];
+} data;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= params.elements) {
+        return;
+    }
+    uint x = data.values[index];
+    uint neighbor = data.values[(index * 17u + 13u) % params.elements];
+    uint high = max(x, neighbor);
+    uint low = min(x, neighbor);
+    uint reduced = (high - low) ^ ((x << 11) | (x >> 21));
+    data.values[index] = reduced + 0x9e3779b9u + index;
+}

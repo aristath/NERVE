@@ -1,0 +1,21 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Params {
+    uint elements;
+} params;
+layout(std430, binding = 0) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= params.elements) {
+        return;
+    }
+    float x = data.values[index];
+    float neighbor = data.values[(index * 17u + 13u) % params.elements];
+    float score = max(x, neighbor);
+    float normalized = score / (1.0 + abs(x - neighbor));
+    data.values[index] = fma(normalized, 0.5, score * 0.5);
+}

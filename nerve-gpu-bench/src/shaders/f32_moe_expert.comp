@@ -1,0 +1,20 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Params {
+    uint elements;
+} params;
+layout(std430, binding = 0) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= params.elements) {
+        return;
+    }
+    float x = data.values[index];
+    float gate = max(x, 1.0 / (1.0 + abs(x)));
+    float hidden = fma(x, 0.75, gate * 0.25);
+    data.values[index] = fma(hidden, gate + 0.5, x * 0.125);
+}
