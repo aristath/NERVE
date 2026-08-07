@@ -65,6 +65,9 @@ const F32_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_route
 const F16_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_dense_projection.spv");
 const F16_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_moe_expert.spv");
 const F16_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_router_reduction.spv");
+const INT8_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_dense_projection.spv");
+const INT8_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_moe_expert.spv");
+const INT8_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_router_reduction.spv");
 const PACKED_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/packed_moe_expert.spv");
 const PACKED_ROUTER_REDUCTION_SHADER_SPV: &[u8] =
     include_bytes!("shaders/packed_router_reduction.spv");
@@ -117,7 +120,16 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
         }),
         "bf16" => Some(packed_dense_kernel("bf16", 2)),
         "fp8" | "fp8_e4m3" | "fp8_e5m2" => Some(packed_dense_kernel(format, 4)),
-        "int8" | "q8_0" => Some(packed_dense_kernel(format, 4)),
+        "int8" => Some(DenseFormatKernel {
+            format: "int8".to_string(),
+            shader: ShaderCode::Bytes(INT8_DENSE_PROJECTION_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 4,
+            operations_per_storage_element: 12,
+            pattern: "single_target_int8_native_compute",
+            required_feature: Some("shader_int8"),
+        }),
+        "q8_0" => Some(packed_dense_kernel(format, 4)),
         "q6_k" => Some(packed_dense_kernel(format, 5)),
         "q5_0" | "q5_1" | "q5_k" => Some(packed_dense_kernel(format, 6)),
         "int4" | "q4_0" | "q4_1" | "q4_k" | "iq4_nl" | "iq4_xs" => {
@@ -166,6 +178,15 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
             pattern: "moe_expert_f16_native_compute",
             required_feature: Some("shader_float16"),
         }),
+        "int8" => Some(DenseFormatKernel {
+            format: "int8".to_string(),
+            shader: ShaderCode::Bytes(INT8_MOE_EXPERT_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 4,
+            operations_per_storage_element: 18,
+            pattern: "moe_expert_int8_native_compute",
+            required_feature: Some("shader_int8"),
+        }),
         _ => packed_workload_kernel(
             format,
             PACKED_MOE_EXPERT_SHADER_SPV,
@@ -194,6 +215,15 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 10,
             pattern: "router_reduction_f16_native_compute",
             required_feature: Some("shader_float16"),
+        }),
+        "int8" => Some(DenseFormatKernel {
+            format: "int8".to_string(),
+            shader: ShaderCode::Bytes(INT8_ROUTER_REDUCTION_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 4,
+            operations_per_storage_element: 12,
+            pattern: "router_reduction_int8_native_compute",
+            required_feature: Some("shader_int8"),
         }),
         _ => packed_workload_kernel(
             format,
@@ -2538,6 +2568,9 @@ unsafe fn open_compute_device_from_instance(
     {
         shader_float16_int8.shader_float16 = vk::TRUE;
     }
+    if feature_flags.iter().any(|feature| feature == "shader_int8") {
+        shader_float16_int8.shader_int8 = vk::TRUE;
+    }
     let device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
         .push_next(&mut shader_float16_int8);
@@ -2636,6 +2669,7 @@ mod tests {
             ("bf16", 2),
             ("fp8_e4m3", 4),
             ("fp8_e5m2", 4),
+            ("q8_0", 4),
             ("mxfp4", 8),
             ("nvfp4", 8),
             ("int4", 8),
@@ -2673,6 +2707,27 @@ mod tests {
             "shader_float16"
         ));
         assert!(!feature_flags_include(&[], "shader_float16"));
+    }
+
+    #[test]
+    fn maps_int8_to_native_feature_gated_kernels() {
+        for (workload, pattern) in [
+            ("dense_projection", "single_target_int8_native_compute"),
+            ("moe_expert", "moe_expert_int8_native_compute"),
+            ("router_reduction", "router_reduction_int8_native_compute"),
+        ] {
+            let kernel = workload_format_kernel(workload, "int8").unwrap();
+            assert_eq!(kernel.format, "int8");
+            assert_eq!(kernel.pattern, pattern);
+            assert_eq!(kernel.required_feature, Some("shader_int8"));
+            assert_eq!(kernel.bytes_per_storage_element, mem::size_of::<u32>());
+            assert_eq!(kernel.logical_elements_per_storage_element, 4);
+        }
+        assert!(feature_flags_include(
+            &["shader_int8".to_string()],
+            "shader_int8"
+        ));
+        assert!(!feature_flags_include(&[], "shader_int8"));
     }
 
     #[test]

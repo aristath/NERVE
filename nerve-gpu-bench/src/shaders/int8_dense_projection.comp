@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Params {
+    uint elements;
+} params;
+layout(std430, binding = 0) buffer Data {
+    uint packed_values[];
+} data;
+
+uint8_t lane(uint value, uint shift) {
+    return uint8_t((value >> shift) & 0xffu);
+}
+
+uint pack_lanes(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+    return uint(a) | (uint(b) << 8) | (uint(c) << 16) | (uint(d) << 24);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= params.elements) {
+        return;
+    }
+    uint value = data.packed_values[index];
+    uint8_t a = lane(value, 0u) * uint8_t(3) + uint8_t(17);
+    uint8_t b = lane(value, 8u) * uint8_t(5) + uint8_t(11);
+    uint8_t c = lane(value, 16u) * uint8_t(7) + uint8_t(23);
+    uint8_t d = lane(value, 24u) * uint8_t(9) + uint8_t(29);
+    data.packed_values[index] = pack_lanes(a, b, c, d);
+}
