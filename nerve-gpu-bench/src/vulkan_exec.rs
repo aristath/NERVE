@@ -12,43 +12,23 @@ use crate::benchmark::{
 };
 use crate::model::{GroupMeasurement, Measurement, PairMeasurement, Sample, Summary, Target};
 
-const F32_TRANSFORM_SHADER_SPV: &[u32] = &[
-    119734787, 65536, 851979, 47, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134, 0,
-    196622, 0, 1, 393231, 5, 4, 1852399981, 0, 11, 393232, 4, 17, 64, 1, 1, 196611, 2, 450, 655364,
-    1197427783, 1279741775, 1885560645, 1953718128, 1600482425, 1701734764, 1919509599, 1769235301,
-    25974, 524292, 1197427783, 1279741775, 1852399429, 1685417059, 1768185701, 1952671090, 6649449,
-    262149, 4, 1852399981, 0, 196613, 8, 7890025, 524293, 11, 1197436007, 1633841004, 1986939244,
-    1952539503, 1231974249, 68, 262149, 17, 1752397136, 0, 262150, 17, 0, 7234924, 262149, 19,
-    1752397168, 0, 262149, 31, 1635017028, 0, 327686, 31, 0, 1970037110, 29541, 262149, 33,
-    1635017060, 0, 262215, 11, 11, 28, 196679, 17, 2, 327752, 17, 0, 35, 0, 262215, 30, 6, 4,
-    196679, 31, 3, 327752, 31, 0, 35, 0, 262215, 33, 33, 0, 262215, 33, 34, 0, 262215, 46, 11, 25,
-    131091, 2, 196641, 3, 2, 262165, 6, 32, 0, 262176, 7, 7, 6, 262167, 9, 6, 3, 262176, 10, 1, 9,
-    262203, 10, 11, 1, 262187, 6, 12, 0, 262176, 13, 1, 6, 196638, 17, 6, 262176, 18, 9, 17,
-    262203, 18, 19, 9, 262165, 20, 32, 1, 262187, 20, 21, 0, 262176, 22, 9, 6, 131092, 25, 196630,
-    29, 32, 196637, 30, 29, 196638, 31, 30, 262176, 32, 2, 31, 262203, 32, 33, 2, 262176, 36, 2,
-    29, 262187, 29, 39, 1065354055, 262187, 29, 41, 1048576000, 262187, 6, 44, 64, 262187, 6, 45,
-    1, 393260, 9, 46, 44, 45, 45, 327734, 2, 4, 0, 3, 131320, 5, 262203, 7, 8, 7, 327745, 13, 14,
-    11, 12, 262205, 6, 15, 14, 196670, 8, 15, 262205, 6, 16, 8, 327745, 22, 23, 19, 21, 262205, 6,
-    24, 23, 327856, 25, 26, 16, 24, 196855, 28, 0, 262394, 26, 27, 28, 131320, 27, 262205, 6, 34,
-    8, 262205, 6, 35, 8, 393281, 36, 37, 33, 21, 35, 262205, 29, 38, 37, 327813, 29, 40, 38, 39,
-    327809, 29, 42, 40, 41, 393281, 36, 43, 33, 21, 34, 196670, 43, 42, 131321, 28, 131320, 28,
-    65789, 65592,
-];
-
-const F32_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_moe_expert.spv");
 const F32_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_router_reduction.spv");
-const F16_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_dense_projection.spv");
-const F16_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_moe_expert.spv");
+const F32_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_gemm.spv");
 const F16_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_router_reduction.spv");
-const INT8_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_dense_projection.spv");
-const INT8_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_moe_expert.spv");
 const INT8_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_router_reduction.spv");
 const FORMAT_DEQUANT_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant.spv");
+const FORMAT_DEQUANT_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant_gemm.spv");
 
 #[derive(Clone, Copy)]
 enum ShaderCode {
-    Words(&'static [u32]),
     Bytes(&'static [u8]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KernelShape {
+    Elementwise,
+    F32Gemm,
+    PackedGemm,
 }
 
 #[derive(Clone)]
@@ -61,6 +41,7 @@ struct DenseFormatKernel {
     pattern: &'static str,
     required_feature: Option<&'static str>,
     format_kind: u32,
+    shape: KernelShape,
 }
 
 fn workload_format_kernel(workload_class: &str, format: &str) -> Option<DenseFormatKernel> {
@@ -76,50 +57,123 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
     match format {
         "f32" => Some(DenseFormatKernel {
             format: "f32".to_string(),
-            shader: ShaderCode::Words(F32_TRANSFORM_SHADER_SPV),
+            shader: ShaderCode::Bytes(F32_GEMM_SHADER_SPV),
             bytes_per_storage_element: mem::size_of::<f32>(),
             logical_elements_per_storage_element: 1,
-            operations_per_storage_element: 2,
-            pattern: "single_target_compute",
+            operations_per_storage_element: 0,
+            pattern: "dense_projection_f32_gemm_compute",
             required_feature: None,
             format_kind: 0,
+            shape: KernelShape::F32Gemm,
         }),
-        "f16" => Some(DenseFormatKernel {
-            format: "f16".to_string(),
-            shader: ShaderCode::Bytes(F16_DENSE_PROJECTION_SHADER_SPV),
-            bytes_per_storage_element: mem::size_of::<u32>(),
-            logical_elements_per_storage_element: 2,
-            operations_per_storage_element: 4,
-            pattern: "single_target_f16_native_compute",
-            required_feature: Some("shader_float16"),
-            format_kind: 0,
-        }),
-        "bf16" => Some(format_dequant_kernel("bf16", 2, 1)),
-        "fp8" | "fp8_e4m3" => Some(format_dequant_kernel(format, 4, 2)),
-        "fp8_e5m2" => Some(format_dequant_kernel(format, 4, 3)),
-        "int8" => Some(DenseFormatKernel {
-            format: "int8".to_string(),
-            shader: ShaderCode::Bytes(INT8_DENSE_PROJECTION_SHADER_SPV),
-            bytes_per_storage_element: mem::size_of::<u32>(),
-            logical_elements_per_storage_element: 4,
-            operations_per_storage_element: 12,
-            pattern: "single_target_int8_native_compute",
-            required_feature: Some("shader_int8"),
-            format_kind: 0,
-        }),
-        "q8_0" => Some(format_dequant_kernel(format, 4, 8)),
-        "q6_k" => Some(format_dequant_kernel(format, 5, 9)),
-        "q5_0" | "q5_1" | "q5_k" => Some(format_dequant_kernel(format, 6, 10)),
-        "int4" => Some(format_dequant_kernel(format, 8, 7)),
-        "q4_0" | "q4_1" | "q4_k" => Some(format_dequant_kernel(format, 8, 11)),
-        "q3_k" => Some(format_dequant_kernel(format, 10, 12)),
-        "q2_k" => Some(format_dequant_kernel(format, 16, 13)),
-        "iq4_nl" | "iq4_xs" => Some(format_dequant_kernel(format, 8, 14)),
-        "iq3_s" => Some(format_dequant_kernel(format, 10, 15)),
-        "iq2_xs" => Some(format_dequant_kernel(format, 16, 16)),
-        "fp4" => Some(format_dequant_kernel("fp4", 8, 4)),
-        "mxfp4" => Some(format_dequant_kernel(format, 8, 5)),
-        "nvfp4" => Some(format_dequant_kernel(format, 8, 6)),
+        "f16" => Some(format_dequant_gemm_kernel(
+            "f16",
+            2,
+            17,
+            "dense_projection_f16_gemm_compute",
+        )),
+        "bf16" => Some(format_dequant_gemm_kernel(
+            "bf16",
+            2,
+            1,
+            "dense_projection_bf16_gemm_compute",
+        )),
+        "fp8" | "fp8_e4m3" => Some(format_dequant_gemm_kernel(
+            format,
+            4,
+            2,
+            "dense_projection_fp8_e4m3_gemm_compute",
+        )),
+        "fp8_e5m2" => Some(format_dequant_gemm_kernel(
+            format,
+            4,
+            3,
+            "dense_projection_fp8_e5m2_gemm_compute",
+        )),
+        "int8" => Some(format_dequant_gemm_kernel(
+            "int8",
+            4,
+            8,
+            "dense_projection_int8_gemm_compute",
+        )),
+        "q8_0" => Some(format_dequant_gemm_kernel(
+            format,
+            4,
+            8,
+            "dense_projection_q8_0_gemm_compute",
+        )),
+        "q6_k" => Some(format_dequant_gemm_kernel(
+            format,
+            5,
+            9,
+            "dense_projection_q6_k_gemm_compute",
+        )),
+        "q5_0" | "q5_1" | "q5_k" => Some(format_dequant_gemm_kernel(
+            format,
+            6,
+            10,
+            "dense_projection_q5_gemm_compute",
+        )),
+        "int4" => Some(format_dequant_gemm_kernel(
+            format,
+            8,
+            7,
+            "dense_projection_int4_gemm_compute",
+        )),
+        "q4_0" | "q4_1" | "q4_k" => Some(format_dequant_gemm_kernel(
+            format,
+            8,
+            11,
+            "dense_projection_q4_gemm_compute",
+        )),
+        "q3_k" => Some(format_dequant_gemm_kernel(
+            format,
+            10,
+            12,
+            "dense_projection_q3_k_gemm_compute",
+        )),
+        "q2_k" => Some(format_dequant_gemm_kernel(
+            format,
+            16,
+            13,
+            "dense_projection_q2_k_gemm_compute",
+        )),
+        "iq4_nl" | "iq4_xs" => Some(format_dequant_gemm_kernel(
+            format,
+            8,
+            14,
+            "dense_projection_iq4_gemm_compute",
+        )),
+        "iq3_s" => Some(format_dequant_gemm_kernel(
+            format,
+            10,
+            15,
+            "dense_projection_iq3_s_gemm_compute",
+        )),
+        "iq2_xs" => Some(format_dequant_gemm_kernel(
+            format,
+            16,
+            16,
+            "dense_projection_iq2_xs_gemm_compute",
+        )),
+        "fp4" => Some(format_dequant_gemm_kernel(
+            "fp4",
+            8,
+            4,
+            "dense_projection_fp4_gemm_compute",
+        )),
+        "mxfp4" => Some(format_dequant_gemm_kernel(
+            format,
+            8,
+            5,
+            "dense_projection_mxfp4_gemm_compute",
+        )),
+        "nvfp4" => Some(format_dequant_gemm_kernel(
+            format,
+            8,
+            6,
+            "dense_projection_nvfp4_gemm_compute",
+        )),
         _ => None,
     }
 }
@@ -138,6 +192,26 @@ fn format_dequant_kernel(
         pattern: "single_target_format_dequant_compute",
         required_feature: None,
         format_kind,
+        shape: KernelShape::Elementwise,
+    }
+}
+
+fn format_dequant_gemm_kernel(
+    format: &str,
+    logical_elements_per_storage_element: u64,
+    format_kind: u32,
+    pattern: &'static str,
+) -> DenseFormatKernel {
+    DenseFormatKernel {
+        format: format.to_string(),
+        shader: ShaderCode::Bytes(FORMAT_DEQUANT_GEMM_SHADER_SPV),
+        bytes_per_storage_element: mem::size_of::<u32>(),
+        logical_elements_per_storage_element,
+        operations_per_storage_element: 0,
+        pattern,
+        required_feature: None,
+        format_kind,
+        shape: KernelShape::PackedGemm,
     }
 }
 
@@ -145,35 +219,49 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
     match format {
         "f32" => Some(DenseFormatKernel {
             format: "f32".to_string(),
-            shader: ShaderCode::Bytes(F32_MOE_EXPERT_SHADER_SPV),
+            shader: ShaderCode::Bytes(F32_GEMM_SHADER_SPV),
             bytes_per_storage_element: mem::size_of::<f32>(),
             logical_elements_per_storage_element: 1,
-            operations_per_storage_element: 10,
-            pattern: "moe_expert_compute",
+            operations_per_storage_element: 0,
+            pattern: "moe_expert_f32_gemm_compute",
             required_feature: None,
             format_kind: 0,
+            shape: KernelShape::F32Gemm,
         }),
-        "f16" => Some(DenseFormatKernel {
-            format: "f16".to_string(),
-            shader: ShaderCode::Bytes(F16_MOE_EXPERT_SHADER_SPV),
-            bytes_per_storage_element: mem::size_of::<u32>(),
-            logical_elements_per_storage_element: 2,
-            operations_per_storage_element: 14,
-            pattern: "moe_expert_f16_native_compute",
-            required_feature: Some("shader_float16"),
-            format_kind: 0,
+        "f16" => Some(format_dequant_gemm_kernel(
+            "f16",
+            2,
+            17,
+            "moe_expert_f16_gemm_compute",
+        )),
+        "int8" => Some(format_dequant_gemm_kernel(
+            "int8",
+            4,
+            8,
+            "moe_expert_int8_gemm_compute",
+        )),
+        _ => dense_format_kernel(format).map(|base| DenseFormatKernel {
+            pattern: match format {
+                "bf16" => "moe_expert_bf16_gemm_compute",
+                "fp8" | "fp8_e4m3" => "moe_expert_fp8_e4m3_gemm_compute",
+                "fp8_e5m2" => "moe_expert_fp8_e5m2_gemm_compute",
+                "fp4" => "moe_expert_fp4_gemm_compute",
+                "mxfp4" => "moe_expert_mxfp4_gemm_compute",
+                "nvfp4" => "moe_expert_nvfp4_gemm_compute",
+                "int4" => "moe_expert_int4_gemm_compute",
+                "q8_0" => "moe_expert_q8_0_gemm_compute",
+                "q6_k" => "moe_expert_q6_k_gemm_compute",
+                "q5_0" | "q5_1" | "q5_k" => "moe_expert_q5_gemm_compute",
+                "q4_0" | "q4_1" | "q4_k" => "moe_expert_q4_gemm_compute",
+                "q3_k" => "moe_expert_q3_k_gemm_compute",
+                "q2_k" => "moe_expert_q2_k_gemm_compute",
+                "iq4_nl" | "iq4_xs" => "moe_expert_iq4_gemm_compute",
+                "iq3_s" => "moe_expert_iq3_s_gemm_compute",
+                "iq2_xs" => "moe_expert_iq2_xs_gemm_compute",
+                _ => base.pattern,
+            },
+            ..base
         }),
-        "int8" => Some(DenseFormatKernel {
-            format: "int8".to_string(),
-            shader: ShaderCode::Bytes(INT8_MOE_EXPERT_SHADER_SPV),
-            bytes_per_storage_element: mem::size_of::<u32>(),
-            logical_elements_per_storage_element: 4,
-            operations_per_storage_element: 18,
-            pattern: "moe_expert_int8_native_compute",
-            required_feature: Some("shader_int8"),
-            format_kind: 0,
-        }),
-        _ => format_dequant_workload_kernel(format, "moe_expert_format_dequant_compute", 12),
     }
 }
 
@@ -188,6 +276,7 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             pattern: "router_reduction_compute",
             required_feature: None,
             format_kind: 0,
+            shape: KernelShape::Elementwise,
         }),
         "f16" => Some(DenseFormatKernel {
             format: "f16".to_string(),
@@ -198,6 +287,7 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             pattern: "router_reduction_f16_native_compute",
             required_feature: Some("shader_float16"),
             format_kind: 0,
+            shape: KernelShape::Elementwise,
         }),
         "int8" => Some(DenseFormatKernel {
             format: "int8".to_string(),
@@ -208,6 +298,7 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             pattern: "router_reduction_int8_native_compute",
             required_feature: Some("shader_int8"),
             format_kind: 0,
+            shape: KernelShape::Elementwise,
         }),
         _ => format_dequant_workload_kernel(format, "router_reduction_format_dequant_compute", 8),
     }
@@ -218,12 +309,34 @@ fn format_dequant_workload_kernel(
     pattern: &'static str,
     operation_multiplier: u64,
 ) -> Option<DenseFormatKernel> {
-    dense_format_kernel(format).map(|base| DenseFormatKernel {
+    format_dequant_elementwise_kernel(format).map(|base| DenseFormatKernel {
         operations_per_storage_element: base.logical_elements_per_storage_element
             * operation_multiplier,
         pattern,
         ..base
     })
+}
+
+fn format_dequant_elementwise_kernel(format: &str) -> Option<DenseFormatKernel> {
+    match format {
+        "bf16" => Some(format_dequant_kernel("bf16", 2, 1)),
+        "fp8" | "fp8_e4m3" => Some(format_dequant_kernel(format, 4, 2)),
+        "fp8_e5m2" => Some(format_dequant_kernel(format, 4, 3)),
+        "q8_0" => Some(format_dequant_kernel(format, 4, 8)),
+        "q6_k" => Some(format_dequant_kernel(format, 5, 9)),
+        "q5_0" | "q5_1" | "q5_k" => Some(format_dequant_kernel(format, 6, 10)),
+        "int4" => Some(format_dequant_kernel(format, 8, 7)),
+        "q4_0" | "q4_1" | "q4_k" => Some(format_dequant_kernel(format, 8, 11)),
+        "q3_k" => Some(format_dequant_kernel(format, 10, 12)),
+        "q2_k" => Some(format_dequant_kernel(format, 16, 13)),
+        "iq4_nl" | "iq4_xs" => Some(format_dequant_kernel(format, 8, 14)),
+        "iq3_s" => Some(format_dequant_kernel(format, 10, 15)),
+        "iq2_xs" => Some(format_dequant_kernel(format, 16, 16)),
+        "fp4" => Some(format_dequant_kernel("fp4", 8, 4)),
+        "mxfp4" => Some(format_dequant_kernel(format, 8, 5)),
+        "nvfp4" => Some(format_dequant_kernel(format, 8, 6)),
+        _ => None,
+    }
 }
 
 pub fn run_vulkan_single_target_measurements(
@@ -836,9 +949,90 @@ struct DenseComputeContext {
     query_pool: vk::QueryPool,
     fence: vk::Fence,
     kernel: DenseFormatKernel,
+    plan: ComputePlan,
+    buffer_size: vk::DeviceSize,
+}
+
+#[derive(Clone)]
+struct ComputePlan {
     storage_elements: usize,
     buffer_size: vk::DeviceSize,
-    dispatch_groups: u32,
+    dispatch: [u32; 3],
+    push_constants: Vec<u32>,
+    operations: u64,
+}
+
+fn compute_plan_for_payload(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
+    match kernel.shape {
+        KernelShape::Elementwise => elementwise_compute_plan(payload_bytes, kernel),
+        KernelShape::F32Gemm | KernelShape::PackedGemm => gemm_compute_plan(payload_bytes, kernel),
+    }
+}
+
+fn elementwise_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
+    let storage_elements = (payload_bytes / kernel.bytes_per_storage_element).max(1);
+    ComputePlan {
+        storage_elements,
+        buffer_size: (storage_elements * kernel.bytes_per_storage_element) as vk::DeviceSize,
+        dispatch: [storage_elements.div_ceil(64) as u32, 1, 1],
+        push_constants: vec![storage_elements as u32, kernel.format_kind],
+        operations: storage_elements as u64 * kernel.operations_per_storage_element,
+    }
+}
+
+fn gemm_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
+    let logical_per_storage = kernel.logical_elements_per_storage_element.max(1) as usize;
+    let storage_budget = (payload_bytes / kernel.bytes_per_storage_element).max(1);
+    let (m, k) = if storage_budget
+        >= (16_usize * 256).div_ceil(logical_per_storage)
+            + (256_usize.div_ceil(logical_per_storage) + 16) * 8
+    {
+        (16_usize, 256_usize)
+    } else if storage_budget
+        >= (16_usize * 64).div_ceil(logical_per_storage)
+            + (64_usize.div_ceil(logical_per_storage) + 16) * 8
+    {
+        (16_usize, 64_usize)
+    } else {
+        (8_usize, 32_usize)
+    };
+    let a_logical_elements = m * k;
+    let a_storage_elements = a_logical_elements.div_ceil(logical_per_storage);
+    let storage_per_output_column = k.div_ceil(logical_per_storage) + m;
+    let mut n = storage_budget
+        .saturating_sub(a_storage_elements)
+        .checked_div(storage_per_output_column)
+        .unwrap_or(0)
+        .max(1);
+    let b_logical_elements = k * n;
+    let c_logical_elements = m * n;
+    let input_logical_elements = a_logical_elements + b_logical_elements;
+    let mut c_storage_offset = input_logical_elements.div_ceil(logical_per_storage);
+    let c_storage_elements = c_logical_elements;
+    let mut storage_elements = c_storage_offset + c_storage_elements;
+    while storage_elements > storage_budget && n > 1 {
+        n -= 1;
+        let b_logical_elements = k * n;
+        let c_logical_elements = m * n;
+        c_storage_offset = (a_logical_elements + b_logical_elements).div_ceil(logical_per_storage);
+        storage_elements = c_storage_offset + c_logical_elements;
+    }
+    ComputePlan {
+        storage_elements,
+        buffer_size: (storage_elements * kernel.bytes_per_storage_element) as vk::DeviceSize,
+        dispatch: [n.div_ceil(16) as u32, m.div_ceil(16) as u32, 1],
+        push_constants: vec![
+            m as u32,
+            n as u32,
+            k as u32,
+            0,
+            a_logical_elements as u32,
+            c_storage_offset as u32,
+            logical_per_storage as u32,
+            kernel.format_kind,
+        ],
+        operations: 2 * m as u64 * n as u64 * k as u64,
+    }
 }
 
 impl Drop for DenseComputeContext {
@@ -1228,8 +1422,8 @@ fn create_dense_compute_context(
         return Err("selected Vulkan compute queue does not expose usable timestamps".to_string());
     }
 
-    let storage_elements = (payload_bytes / kernel.bytes_per_storage_element).max(1);
-    let buffer_size = (storage_elements * kernel.bytes_per_storage_element) as vk::DeviceSize;
+    let plan = compute_plan_for_payload(payload_bytes, &kernel);
+    let buffer_size = plan.buffer_size;
     let upload = create_buffer(
         compute_device,
         buffer_size,
@@ -1250,7 +1444,7 @@ fn create_dense_compute_context(
             | vk::BufferUsageFlags::TRANSFER_SRC,
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
-    fill_upload_buffer(&compute_device.device, &upload, storage_elements, &kernel)?;
+    fill_upload_buffer(&compute_device.device, &upload, &plan, &kernel)?;
 
     let resources =
         create_compute_resources(compute_device, storage.buffer, buffer_size, kernel.shader)?;
@@ -1298,9 +1492,8 @@ fn create_dense_compute_context(
         query_pool,
         fence,
         kernel,
-        storage_elements,
+        plan,
         buffer_size,
-        dispatch_groups: storage_elements.div_ceil(64) as u32,
     })
 }
 
@@ -1318,9 +1511,7 @@ fn submit_dense_compute_sample(
         context.storage.buffer,
         context.readback.buffer,
         context.buffer_size,
-        context.storage_elements as u32,
-        context.kernel.format_kind,
-        context.dispatch_groups,
+        &context.plan,
     )?;
     unsafe {
         compute_device
@@ -1346,9 +1537,7 @@ fn submit_dense_compute_sample(
         iterations: 1,
         bytes_read: context.buffer_size as u64,
         bytes_written: context.buffer_size as u64,
-        operations: (context.storage_elements as u64)
-            * context.kernel.logical_elements_per_storage_element
-            * context.kernel.operations_per_storage_element,
+        operations: context.plan.operations,
     })
 }
 
@@ -1462,9 +1651,7 @@ fn run_vulkan_dense_parallel_pair(
             left_context.storage.buffer,
             left_context.readback.buffer,
             left_context.buffer_size,
-            left_context.storage_elements as u32,
-            left_context.kernel.format_kind,
-            left_context.dispatch_groups,
+            &left_context.plan,
         )?;
         record_compute_dispatch(
             right_device,
@@ -1475,9 +1662,7 @@ fn run_vulkan_dense_parallel_pair(
             right_context.storage.buffer,
             right_context.readback.buffer,
             right_context.buffer_size,
-            right_context.storage_elements as u32,
-            right_context.kernel.format_kind,
-            right_context.dispatch_groups,
+            &right_context.plan,
         )?;
         let started = Instant::now();
         unsafe {
@@ -1550,10 +1735,7 @@ fn run_vulkan_dense_parallel_pair(
             bytes_written: left_context.buffer_size as u64
                 + right_context.buffer_size as u64
                 + output_bytes as u64,
-            operations: (left_context.storage_elements as u64
-                + right_context.storage_elements as u64)
-                * kernel.logical_elements_per_storage_element
-                * kernel.operations_per_storage_element,
+            operations: left_context.plan.operations + right_context.plan.operations,
         });
     }
 
@@ -1789,9 +1971,7 @@ fn run_vulkan_dense_parallel_triplet(
                 contexts[index].storage.buffer,
                 contexts[index].readback.buffer,
                 contexts[index].buffer_size,
-                contexts[index].storage_elements as u32,
-                contexts[index].kernel.format_kind,
-                contexts[index].dispatch_groups,
+                &contexts[index].plan,
             )?;
         }
         let started = Instant::now();
@@ -1857,14 +2037,7 @@ fn run_vulkan_dense_parallel_triplet(
                 .map(|context| context.buffer_size as u64)
                 .sum::<u64>()
                 + output_bytes as u64,
-            operations: contexts
-                .iter()
-                .map(|context| {
-                    (context.storage_elements as u64)
-                        * context.kernel.logical_elements_per_storage_element
-                        * context.kernel.operations_per_storage_element
-                })
-                .sum(),
+            operations: contexts.iter().map(|context| context.plan.operations).sum(),
         });
     }
 
@@ -2040,7 +2213,7 @@ fn create_compute_resources(
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)
-        .size((mem::size_of::<u32>() * 2) as u32)];
+        .size((mem::size_of::<u32>() * 8) as u32)];
     let set_layouts = [descriptor_set_layout];
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
@@ -2121,7 +2294,6 @@ fn create_compute_resources(
 
 fn shader_words(shader: ShaderCode) -> Result<Vec<u32>, String> {
     match shader {
-        ShaderCode::Words(words) => Ok(words.to_vec()),
         ShaderCode::Bytes(bytes) => {
             if bytes.len() % mem::size_of::<u32>() != 0 {
                 return Err("SPIR-V bytecode length is not u32-aligned".to_string());
@@ -2143,9 +2315,7 @@ fn record_compute_dispatch(
     storage_buffer: vk::Buffer,
     readback_buffer: vk::Buffer,
     buffer_size: vk::DeviceSize,
-    elements: u32,
-    format_kind: u32,
-    dispatch_groups: u32,
+    plan: &ComputePlan,
 ) -> Result<(), String> {
     let device = &compute_device.device;
     unsafe {
@@ -2199,10 +2369,9 @@ fn record_compute_dispatch(
             &[resources.descriptor_set],
             &[],
         );
-        let push_constants = [elements, format_kind];
         let push_bytes = std::slice::from_raw_parts(
-            push_constants.as_ptr().cast::<u8>(),
-            mem::size_of_val(&push_constants),
+            plan.push_constants.as_ptr().cast::<u8>(),
+            plan.push_constants.len() * mem::size_of::<u32>(),
         );
         device.cmd_push_constants(
             command_buffer,
@@ -2211,7 +2380,12 @@ fn record_compute_dispatch(
             0,
             push_bytes,
         );
-        device.cmd_dispatch(command_buffer, dispatch_groups, 1, 1);
+        device.cmd_dispatch(
+            command_buffer,
+            plan.dispatch[0],
+            plan.dispatch[1],
+            plan.dispatch[2],
+        );
         device.cmd_write_timestamp(
             command_buffer,
             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -2319,7 +2493,7 @@ fn create_buffer(
 fn fill_upload_buffer(
     device: &ash::Device,
     buffer: &VulkanBuffer,
-    elements: usize,
+    plan: &ComputePlan,
     kernel: &DenseFormatKernel,
 ) -> Result<(), String> {
     let ptr = unsafe {
@@ -2327,9 +2501,9 @@ fn fill_upload_buffer(
             .map_memory(buffer.memory, 0, buffer.size, vk::MemoryMapFlags::empty())
             .map_err(|error| format!("could not map Vulkan upload buffer: {error:?}"))?
     };
-    if kernel.format == "f32" {
+    if matches!(kernel.shape, KernelShape::F32Gemm) {
         let values = ptr.cast::<f32>();
-        for index in 0..elements {
+        for index in 0..plan.storage_elements {
             unsafe {
                 values
                     .add(index)
@@ -2338,7 +2512,7 @@ fn fill_upload_buffer(
         }
     } else {
         let values = ptr.cast::<u32>();
-        for index in 0..elements {
+        for index in 0..plan.storage_elements {
             unsafe {
                 values
                     .add(index)
@@ -2648,7 +2822,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_model_storage_formats_to_format_dequant_kernels() {
+    fn maps_model_storage_formats_to_dense_gemm_kernels() {
         for (format, logical_elements, format_kind) in [
             ("bf16", 2, 1),
             ("fp8_e4m3", 4, 2),
@@ -2669,7 +2843,8 @@ mod tests {
         ] {
             let kernel = dense_format_kernel(format).unwrap();
             assert_eq!(kernel.format, format);
-            assert_eq!(kernel.pattern, "single_target_format_dequant_compute");
+            assert_eq!(kernel.shape, KernelShape::PackedGemm);
+            assert!(kernel.pattern.contains("gemm_compute"));
             assert_eq!(kernel.format_kind, format_kind);
             assert_eq!(
                 kernel.logical_elements_per_storage_element,
@@ -2679,16 +2854,32 @@ mod tests {
     }
 
     #[test]
-    fn maps_f16_to_native_feature_gated_kernels() {
-        for (workload, pattern) in [
-            ("dense_projection", "single_target_f16_native_compute"),
-            ("moe_expert", "moe_expert_f16_native_compute"),
-            ("router_reduction", "router_reduction_f16_native_compute"),
+    fn maps_f16_to_gemm_for_dense_and_native_for_router() {
+        for (workload, pattern, shape, required_feature) in [
+            (
+                "dense_projection",
+                "dense_projection_f16_gemm_compute",
+                KernelShape::PackedGemm,
+                None,
+            ),
+            (
+                "moe_expert",
+                "moe_expert_f16_gemm_compute",
+                KernelShape::PackedGemm,
+                None,
+            ),
+            (
+                "router_reduction",
+                "router_reduction_f16_native_compute",
+                KernelShape::Elementwise,
+                Some("shader_float16"),
+            ),
         ] {
             let kernel = workload_format_kernel(workload, "f16").unwrap();
             assert_eq!(kernel.format, "f16");
             assert_eq!(kernel.pattern, pattern);
-            assert_eq!(kernel.required_feature, Some("shader_float16"));
+            assert_eq!(kernel.shape, shape);
+            assert_eq!(kernel.required_feature, required_feature);
             assert_eq!(kernel.bytes_per_storage_element, mem::size_of::<u32>());
             assert_eq!(kernel.logical_elements_per_storage_element, 2);
         }
@@ -2700,16 +2891,32 @@ mod tests {
     }
 
     #[test]
-    fn maps_int8_to_native_feature_gated_kernels() {
-        for (workload, pattern) in [
-            ("dense_projection", "single_target_int8_native_compute"),
-            ("moe_expert", "moe_expert_int8_native_compute"),
-            ("router_reduction", "router_reduction_int8_native_compute"),
+    fn maps_int8_to_gemm_for_dense_and_native_for_router() {
+        for (workload, pattern, shape, required_feature) in [
+            (
+                "dense_projection",
+                "dense_projection_int8_gemm_compute",
+                KernelShape::PackedGemm,
+                None,
+            ),
+            (
+                "moe_expert",
+                "moe_expert_int8_gemm_compute",
+                KernelShape::PackedGemm,
+                None,
+            ),
+            (
+                "router_reduction",
+                "router_reduction_int8_native_compute",
+                KernelShape::Elementwise,
+                Some("shader_int8"),
+            ),
         ] {
             let kernel = workload_format_kernel(workload, "int8").unwrap();
             assert_eq!(kernel.format, "int8");
             assert_eq!(kernel.pattern, pattern);
-            assert_eq!(kernel.required_feature, Some("shader_int8"));
+            assert_eq!(kernel.shape, shape);
+            assert_eq!(kernel.required_feature, required_feature);
             assert_eq!(kernel.bytes_per_storage_element, mem::size_of::<u32>());
             assert_eq!(kernel.logical_elements_per_storage_element, 4);
         }
@@ -2722,18 +2929,51 @@ mod tests {
 
     #[test]
     fn maps_model_storage_formats_to_workload_specific_kernels() {
-        for workload in ["dense_projection", "moe_expert", "router_reduction"] {
+        for workload in ["dense_projection", "moe_expert"] {
             let f32_kernel = workload_format_kernel(workload, "f32").unwrap();
             assert_eq!(f32_kernel.format, "f32");
-            assert!(f32_kernel.operations_per_storage_element > 0);
+            assert!(matches!(f32_kernel.shape, KernelShape::F32Gemm));
 
             let dequant_kernel = workload_format_kernel(workload, "mxfp4").unwrap();
             assert_eq!(dequant_kernel.format, "mxfp4");
             assert_eq!(dequant_kernel.logical_elements_per_storage_element, 8);
-            assert!(dequant_kernel.pattern.contains("compute"));
+            assert!(matches!(dequant_kernel.shape, KernelShape::PackedGemm));
+            assert!(dequant_kernel.pattern.contains("gemm_compute"));
         }
+        let router_kernel = workload_format_kernel("router_reduction", "mxfp4").unwrap();
+        assert_eq!(router_kernel.shape, KernelShape::Elementwise);
+        assert_eq!(
+            router_kernel.pattern,
+            "router_reduction_format_dequant_compute"
+        );
         assert!(workload_format_kernel("unknown_workload", "f32").is_none());
         assert!(workload_format_kernel("dense_projection", "unknown_format").is_none());
+    }
+
+    #[test]
+    fn gemm_plans_keep_split_work_comparable_to_single_payload() {
+        let kernel = workload_format_kernel("dense_projection", "f32").unwrap();
+        let full = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
+        let left = compute_plan_for_payload((5 * 1024 * 1024) / 2, &kernel);
+        let right = compute_plan_for_payload((5 * 1024 * 1024) - (5 * 1024 * 1024) / 2, &kernel);
+        assert!(full.buffer_size as usize <= 5 * 1024 * 1024);
+        assert_eq!(full.push_constants[0], 16);
+        assert_eq!(full.push_constants[2], 256);
+        assert!(full.operations > 0);
+        let split_operations = left.operations + right.operations;
+        let operation_gap = full.operations.abs_diff(split_operations);
+        assert!(operation_gap * 100 < full.operations);
+    }
+
+    #[test]
+    fn packed_gemm_plan_records_format_decode_parameters() {
+        let kernel = workload_format_kernel("moe_expert", "mxfp4").unwrap();
+        let plan = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
+        assert_eq!(kernel.shape, KernelShape::PackedGemm);
+        assert_eq!(plan.push_constants[6], 8);
+        assert_eq!(plan.push_constants[7], 5);
+        assert!(plan.buffer_size as usize <= 5 * 1024 * 1024);
+        assert!(plan.operations > 0);
     }
 
     #[test]

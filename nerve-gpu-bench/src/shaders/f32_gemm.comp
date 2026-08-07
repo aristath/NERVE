@@ -1,0 +1,32 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant) uniform Params {
+    uint m;
+    uint n;
+    uint k;
+    uint a_offset;
+    uint b_offset;
+    uint c_offset;
+    uint logical_per_word;
+    uint format_kind;
+} params;
+layout(std430, binding = 0) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint col = gl_GlobalInvocationID.x;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= params.m || col >= params.n) {
+        return;
+    }
+
+    float accum = 0.0;
+    for (uint kk = 0u; kk < params.k; kk++) {
+        float a = data.values[params.a_offset + row * params.k + kk];
+        float b = data.values[params.b_offset + kk * params.n + col];
+        accum = fma(a, b, accum);
+    }
+    data.values[params.c_offset + row * params.n + col] = accum;
+}
