@@ -86,6 +86,18 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   reduced host synchronization from 17.763 to 17.310 seconds. Qwen3.6-35B-A3B
   passed at 59.4312 decode tok/s and Qwen3.5-9B at 48.6694, with correct recall
   and exact VRAM restoration.
+- A follow-up decoder experiment proved that fewer host submissions are not, by
+  themselves, a resident transaction. It grouped input, ingress copy,
+  demand-resident processing, egress copy, conditional output, and packed
+  readback as five `SubmitInfo2` records in one `queue_submit2` call. On the
+  zero-load DeepSeek truth conversation it cut sequence queue submissions from
+  60,634 to 21,655 and fence waits from 64,965 to 25,986, but regressed decode
+  from 8.4228 to 7.8368 tok/s. Removing a redundant host rewrite of the demand
+  predicate recovered only 8.0160 tok/s. Both variants preserved exact tokens,
+  zero-load residency, recall, teardown, and VRAM reservations, so the measured
+  regression is in the device execution topology rather than paging or model
+  behavior. The experiment was removed in full. Do not retry multi-command
+  queue batching as if it were command fusion.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -123,10 +135,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    quantifies the remaining host contribution.
 
    - Turn each ordered physical-device component segment into a stable bounded
-     command topology. Put ticks, token IDs, dispatch dimensions, router results,
-     expert addresses, sampler state, stop/cancel flags, causal frontiers, and
-     commit records in GPU-resident control buffers consumed through predicates
-     and indirect dispatch.
+     command topology. A bounded quantum must be one deliberately recorded
+     command buffer (or a measured hardware-native equivalent), not several
+     existing command buffers wrapped in one `queue_submit2` call. Put ticks,
+     token IDs, dispatch dimensions, router results, expert addresses, sampler
+     state, stop/cancel flags, causal frontiers, and commit records in
+     GPU-resident control buffers consumed through predicates and indirect
+     dispatch.
    - Submit one bounded stream window per device and watchdog quantum. Normal
      token values, context growth, expert choices, and address-table updates must
      not require command re-recording or a host return.
@@ -135,10 +150,11 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      completion; a previous template experiment reused almost every command buffer
      but fell to 1.205 tok/s because it retained the fragmented submission graph.
    - The mounted input and output graph phases and packed host readback are now
-     reusable transaction segments. Fold source taps, ingress/egress copies,
-     demand-resident processor segments, and terminal readback into the same
-     timeline topology; the remaining copy submissions and completion waits still
-     scale with speculative cycles.
+     reusable transaction segments. Compile their dispatches, ingress/egress
+     copies, demand gates, processor dispatches, and terminal readback into one
+     command stream with exact range-level hazards. Preserve the accepted path
+     until the fused command buffer wins the complete gate; the rejected
+     five-command queue batch must not remain as a fallback or hidden mode.
 
 3. Make a resident sparse-expert hit completely device-owned.
 
