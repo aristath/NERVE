@@ -1451,10 +1451,18 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let output_events = active_input_event.output_events.clone();
         let generated_token_ids = active_input_event.generated_token_ids.clone();
         let start_stream_tick = active_input_event.start_stream_tick;
-        let event_run = active_input_event.into_event_run(
+        let mut event_run = active_input_event.into_event_run(
             self.package.input_device_id.clone(),
             self.package.output_device_id.clone(),
         );
+        // Event completion is the safe boundary for one rotating transfer
+        // sample. Production copies remain free of timestamps and host waits.
+        self.processor
+            .edge_synchronizations
+            .sample_completed_device_local_staging_transfers(
+                &mut event_run.transport_stats,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let session_run = self
             .session
             .complete_prompt_event(start_stream_tick, event_run)?;

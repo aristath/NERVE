@@ -22,6 +22,7 @@ include!("tests/resident_feedback_stream_tests.rs");
 include!("tests/token_engine_tests.rs");
 include!("tests/running_stream_interrupt_tests.rs");
 include!("tests/placed_mount_tests.rs");
+include!("tests/edge_transport_stats.rs");
 include!("tests/split_stream_tick_tests.rs");
 include!("tests/prompt_activation_tests.rs");
 include!("tests/prompt_stream_tests.rs");

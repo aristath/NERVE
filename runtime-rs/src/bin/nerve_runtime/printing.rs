@@ -455,7 +455,7 @@ fn print_runtime_transport_edges(edges: &[RuntimePlacedTransportEdgeReport]) {
     println!("transport_edges:");
     for edge in edges {
         println!(
-            "  edge={} {}->{} signal={} route={} bytes={} transfers={} queue_signals={} queue_waits={} host_waits={} overlap_eligible={} overlap_submissions={}",
+            "  edge={} {}->{} signal={} route={} bytes={} transfers={} queue_signals={} queue_waits={} host_waits={} overlap_eligible={} overlap_submissions={} device_samples={} sampled_device_ms={:.3} estimated_device_ms={:.3} max_sampled_transfer_ms={:.3}",
             edge.edge_index,
             edge.from_device_id,
             edge.to_device_id,
@@ -468,6 +468,10 @@ fn print_runtime_transport_edges(edges: &[RuntimePlacedTransportEdgeReport]) {
             edge.host_wait_count,
             edge.queue_overlap_eligible,
             edge.overlap_submission_count,
+            edge.device_duration_sample_count,
+            nanos_to_millis(edge.sampled_device_duration_ns),
+            nanos_to_millis(edge.estimated_device_duration_ns),
+            nanos_to_millis(edge.maximum_sampled_transfer_duration_ns),
         );
     }
 }

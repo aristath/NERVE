@@ -192,6 +192,10 @@ impl VulkanInProcessPlacedEdgeTransport {
                 host_wait_count: 0,
                 queue_overlap_eligible: route.supports_queue_overlap(),
                 overlap_submission_count: 0,
+                device_duration_sample_count: 0,
+                sampled_device_duration_ns: 0,
+                estimated_device_duration_ns: 0,
+                maximum_sampled_transfer_duration_ns: 0,
             },
         );
         self.direct_copies.insert(

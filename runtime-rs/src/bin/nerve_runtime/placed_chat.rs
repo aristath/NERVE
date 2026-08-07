@@ -723,6 +723,11 @@ fn runtime_placed_transport_edge_reports(
             host_wait_count: edge.host_wait_count,
             queue_overlap_eligible: edge.queue_overlap_eligible,
             overlap_submission_count: edge.overlap_submission_count,
+            device_duration_sample_count: edge.device_duration_sample_count,
+            sampled_device_duration_ns: edge.sampled_device_duration_ns,
+            estimated_device_duration_ns: edge.estimated_device_duration_ns,
+            maximum_sampled_transfer_duration_ns: edge
+                .maximum_sampled_transfer_duration_ns,
         })
         .collect()
 }

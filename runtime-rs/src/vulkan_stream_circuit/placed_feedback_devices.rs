@@ -1039,6 +1039,7 @@ struct VulkanPlacedDeviceLinks {
 #[derive(Default)]
 struct VulkanPlacedEdgeTimelineSynchronizations {
     edges: BTreeMap<VulkanPlacedEdgePacketKey, VulkanPlacedEdgeTimelineSynchronization>,
+    sample_cursor: Cell<usize>,
 }
 
 struct VulkanPlacedEdgeTimelineSynchronization {
@@ -1053,11 +1054,119 @@ struct VulkanPlacedEdgeTimelineSynchronization {
 struct VulkanPlacedEdgeDeviceLocalStaging {
     source_copy: Box<VulkanResidentBufferCopy>,
     destination_copy: Box<VulkanResidentBufferCopy>,
+    sample_source_copy: Box<VulkanResidentBufferCopy>,
+    sample_destination_copy: Box<VulkanResidentBufferCopy>,
+    last_sampled_transfer_duration_ns: Cell<Option<u64>>,
     _source_staging: Arc<VulkanResidentBuffer>,
     _destination_staging: Arc<VulkanResidentBuffer>,
 }
 
 impl VulkanPlacedEdgeTimelineSynchronizations {
+    fn sample_completed_device_local_staging_transfers(
+        &self,
+        stats: &mut VulkanPlacedEdgeTransportStats,
+    ) -> Result<(), VulkanError> {
+        let candidates = stats
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.route == VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+                    && edge.publish_count != 0
+            })
+            .map(|edge| edge.key.clone())
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let sample_index = self.sample_cursor.get() % candidates.len();
+        self.sample_cursor
+            .set(self.sample_cursor.get().wrapping_add(1));
+        let sampled_key = &candidates[sample_index];
+        let sampled_synchronization = self.edges.get(sampled_key).ok_or_else(|| {
+            VulkanError(format!(
+                "completed staged edge {sampled_key:?} has no mounted synchronization"
+            ))
+        })?;
+        let sampled_staging = sampled_synchronization
+            .device_local_staging
+            .as_ref()
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "completed staged edge {sampled_key:?} has no device-local copies"
+                ))
+            })?;
+        let (source_duration_ns, destination_duration_ns) = {
+            // One bounded diagnostic pair runs after the production event has
+            // completed. Production transfers retain their original command
+            // buffers and never wait for or read timestamp queries.
+            let _transfer =
+                runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
+            let source_duration_ns = sampled_staging
+                .sample_source_copy
+                .run_with_device_duration(sampled_staging.sample_source_copy.byte_len())?;
+            let destination_duration_ns = sampled_staging
+                .sample_destination_copy
+                .run_with_device_duration(sampled_staging.sample_destination_copy.byte_len())?;
+            (source_duration_ns, destination_duration_ns)
+        };
+        let sampled_transfer_duration_ns =
+            source_duration_ns.saturating_add(destination_duration_ns);
+        sampled_staging
+            .last_sampled_transfer_duration_ns
+            .set(Some(sampled_transfer_duration_ns));
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::CrossDeviceTransfer,
+            source_duration_ns,
+        );
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::CrossDeviceTransfer,
+            destination_duration_ns,
+        );
+
+        for edge in &mut stats.edges {
+            if edge.route != VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+                || edge.publish_count == 0
+            {
+                continue;
+            }
+            let synchronization = self.edges.get(&edge.key).ok_or_else(|| {
+                VulkanError(format!(
+                    "completed staged edge {:?} has no mounted synchronization",
+                    edge.key
+                ))
+            })?;
+            let staging = synchronization.device_local_staging.as_ref().ok_or_else(|| {
+                VulkanError(format!(
+                    "completed staged edge {:?} has no device-local copies",
+                    edge.key
+                ))
+            })?;
+            let Some(estimate_per_transfer_ns) =
+                staging.last_sampled_transfer_duration_ns.get()
+            else {
+                continue;
+            };
+            if edge.key == *sampled_key {
+                edge.device_duration_sample_count =
+                    edge.device_duration_sample_count.saturating_add(2);
+                edge.sampled_device_duration_ns = edge
+                    .sampled_device_duration_ns
+                    .saturating_add(sampled_transfer_duration_ns);
+                edge.maximum_sampled_transfer_duration_ns = edge
+                    .maximum_sampled_transfer_duration_ns
+                    .max(sampled_transfer_duration_ns);
+            }
+            edge.estimated_device_duration_ns = edge
+                .estimated_device_duration_ns
+                .saturating_add(
+                    estimate_per_transfer_ns.saturating_mul(
+                        u64::try_from(edge.publish_count).unwrap_or(u64::MAX),
+                    ),
+                );
+        }
+        Ok(())
+    }
+
     fn transfer_route(
         &self,
         key: &VulkanPlacedEdgePacketKey,
@@ -1522,11 +1631,32 @@ where
                             )
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     );
+                    let sample_source_copy = Box::new(
+                        source_device
+                            .create_timestamped_resident_buffer_copy(
+                                &source_buffer,
+                                &source_staging,
+                                group.byte_capacity,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    );
+                    let sample_destination_copy = Box::new(
+                        destination_device
+                            .create_timestamped_resident_buffer_copy(
+                                &destination_staging,
+                                &incoming_buffer,
+                                group.byte_capacity,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    );
                     (
                         VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
                         Some(VulkanPlacedEdgeDeviceLocalStaging {
                             source_copy,
                             destination_copy,
+                            sample_source_copy,
+                            sample_destination_copy,
+                            last_sampled_transfer_duration_ns: Cell::new(None),
                             _source_staging: source_staging,
                             _destination_staging: destination_staging,
                         }),
@@ -1651,6 +1781,7 @@ where
         endpoint_overrides,
         synchronizations: VulkanPlacedEdgeTimelineSynchronizations {
             edges: synchronizations,
+            sample_cursor: Cell::new(0),
         },
         stream_control_buffers,
         every_edge_is_resident_replayable,

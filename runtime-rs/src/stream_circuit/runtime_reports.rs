@@ -339,6 +339,10 @@ pub struct RuntimePlacedTransportEdgeReport {
     pub host_wait_count: usize,
     pub queue_overlap_eligible: bool,
     pub overlap_submission_count: usize,
+    pub device_duration_sample_count: usize,
+    pub sampled_device_duration_ns: u64,
+    pub estimated_device_duration_ns: u64,
+    pub maximum_sampled_transfer_duration_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

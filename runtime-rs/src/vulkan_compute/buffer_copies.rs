@@ -192,6 +192,32 @@ impl VulkanResidentBufferCopy {
         })
     }
 
+    fn read_device_duration(&self, flags: vk::QueryResultFlags) -> Result<u64, VulkanError> {
+        let query_pool = self.timestamp_query_pool.ok_or_else(|| {
+            VulkanError(
+                "resident byte copy was not created with timestamp measurement".to_string(),
+            )
+        })?;
+        let mut timestamps = [0_u64; 2];
+        unsafe {
+            self.device
+                .get_query_pool_results(query_pool, 0, &mut timestamps, flags)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to read resident byte copy timestamps: {error:?}"
+                    ))
+                })?;
+        }
+        let duration_ns = timestamps[1].wrapping_sub(timestamps[0]) as f64
+            * f64::from(self.timestamp_period_ns);
+        if !duration_ns.is_finite() || duration_ns <= 0.0 || duration_ns > u64::MAX as f64 {
+            return Err(VulkanError(format!(
+                "resident byte copy produced invalid device duration {duration_ns}"
+            )));
+        }
+        Ok((duration_ns.round() as u64).max(1))
+    }
+
     fn run_internal(&self, len: usize) -> Result<Option<u64>, VulkanError> {
         self.device_health.require_healthy()?;
         if len == 0 {
@@ -246,31 +272,10 @@ impl VulkanResidentBufferCopy {
             )?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
             self.device_health.require_healthy()?;
-            let device_duration_ns = if let Some(query_pool) = self.timestamp_query_pool {
-                let mut timestamps = [0_u64; 2];
-                self.device
-                    .get_query_pool_results(
-                        query_pool,
-                        0,
-                        &mut timestamps,
-                        vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
-                    )
-                    .map_err(|error| {
-                        VulkanError(format!(
-                            "failed to read resident byte copy timestamps: {error:?}"
-                        ))
-                    })?;
-                let duration_ns = timestamps[1].wrapping_sub(timestamps[0]) as f64
-                    * f64::from(self.timestamp_period_ns);
-                if !duration_ns.is_finite()
-                    || duration_ns <= 0.0
-                    || duration_ns > u64::MAX as f64
-                {
-                    return Err(VulkanError(format!(
-                        "resident byte copy produced invalid device duration {duration_ns}"
-                    )));
-                }
-                Some((duration_ns.round() as u64).max(1))
+            let device_duration_ns = if self.timestamp_query_pool.is_some() {
+                Some(self.read_device_duration(
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )?)
             } else {
                 None
             };

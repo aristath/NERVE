@@ -175,6 +175,15 @@ pub struct VulkanPlacedEdgeTransportEdgeStats {
     pub host_wait_count: usize,
     pub queue_overlap_eligible: bool,
     pub overlap_submission_count: usize,
+    /// Number of completed source/destination copy durations sampled at prompt
+    /// boundaries. This is bounded by edges times prompt events, not transfers.
+    pub device_duration_sample_count: usize,
+    /// Sum of the observed source and destination copy samples.
+    pub sampled_device_duration_ns: u64,
+    /// Estimated time for every copy represented by the samples. Each event's
+    /// final completed copy is multiplied by that event's transfer count.
+    pub estimated_device_duration_ns: u64,
+    pub maximum_sampled_transfer_duration_ns: u64,
 }
 
 impl VulkanPlacedEdgeTransportEdgeStats {
@@ -186,6 +195,10 @@ impl VulkanPlacedEdgeTransportEdgeStats {
         self.queue_wait_count = 0;
         self.host_wait_count = 0;
         self.overlap_submission_count = 0;
+        self.device_duration_sample_count = 0;
+        self.sampled_device_duration_ns = 0;
+        self.estimated_device_duration_ns = 0;
+        self.maximum_sampled_transfer_duration_ns = 0;
     }
 
     fn accumulate(&mut self, tick: &Self) {
@@ -210,6 +223,18 @@ impl VulkanPlacedEdgeTransportEdgeStats {
         self.overlap_submission_count = self
             .overlap_submission_count
             .saturating_add(tick.overlap_submission_count);
+        self.device_duration_sample_count = self
+            .device_duration_sample_count
+            .saturating_add(tick.device_duration_sample_count);
+        self.sampled_device_duration_ns = self
+            .sampled_device_duration_ns
+            .saturating_add(tick.sampled_device_duration_ns);
+        self.estimated_device_duration_ns = self
+            .estimated_device_duration_ns
+            .saturating_add(tick.estimated_device_duration_ns);
+        self.maximum_sampled_transfer_duration_ns = self
+            .maximum_sampled_transfer_duration_ns
+            .max(tick.maximum_sampled_transfer_duration_ns);
     }
 }
 
