@@ -116,7 +116,7 @@ pub fn run_benchmarks(
                 policy.payload_bytes,
                 &policy.benchmark_formats,
                 &policy.benchmark_workloads,
-                policy.execute_vulkan,
+                policy.execute,
             ));
         }
     }
@@ -700,9 +700,9 @@ fn run_device_single_target_measurements(
     payload_bytes: usize,
     formats: &[String],
     workloads: &[String],
-    execute_vulkan: bool,
+    execute: bool,
 ) -> Vec<Measurement> {
-    if execute_vulkan && target.backend == "vulkan" {
+    if execute && target.backend == "vulkan" {
         return run_vulkan_single_target_measurements(target, payload_bytes, formats, workloads);
     }
     single_target_status_measurements(
@@ -1555,7 +1555,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 3,
-            execute_vulkan: false,
+            execute: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert_eq!(run.group_measurements.len(), 2);
@@ -1594,7 +1594,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 2,
-            execute_vulkan: false,
+            execute: false,
         };
         let plan = plan_benchmarks(targets, selection, policy);
         assert_eq!(plan.schema, PLAN_SCHEMA);
@@ -1632,7 +1632,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 2,
-            execute_vulkan: false,
+            execute: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert_eq!(run.comparison_sets.len(), 1);
@@ -1685,7 +1685,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 3,
-            execute_vulkan: false,
+            execute: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert_eq!(run.comparison_sets.len(), 4);
@@ -1741,7 +1741,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 2,
-            execute_vulkan: false,
+            execute: false,
         };
         let run = run_benchmarks(targets, selection, policy);
         assert!(run.measurements.iter().any(|measurement| {

@@ -134,7 +134,7 @@ mod tests {
             exclude_kinds: vec!["integrated_gpu".to_string()],
             pair_measurements: true,
             max_group_size: 3,
-            execute_vulkan: false,
+            execute: false,
         };
         let selection = apply_selection_policy(&targets, &policy);
         assert_eq!(
@@ -162,7 +162,7 @@ mod tests {
             exclude_kinds: Vec::new(),
             pair_measurements: true,
             max_group_size: 3,
-            execute_vulkan: false,
+            execute: false,
         };
         let selection = apply_selection_policy(&targets, &policy);
         assert_eq!(selection.selected_target_ids, ["cpu:host"]);

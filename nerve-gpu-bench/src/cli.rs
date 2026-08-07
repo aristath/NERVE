@@ -37,7 +37,7 @@ pub enum Command {
         pairs: bool,
         max_group_size: usize,
         dry_plan: bool,
-        execute_vulkan: bool,
+        execute: bool,
     },
 }
 
@@ -135,7 +135,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut pairs = true;
     let mut max_group_size = DEFAULT_MAX_GROUP_SIZE;
     let mut dry_plan = false;
-    let mut execute_vulkan = false;
+    let mut execute = false;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -184,7 +184,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
             }
             "--no-pairs" => pairs = false,
             "--dry-plan" => dry_plan = true,
-            "--execute-vulkan" => execute_vulkan = true,
+            "--execute" => execute = true,
             other => {
                 return Err(CliError(format!(
                     "unknown run argument {other:?}\n\n{}",
@@ -249,7 +249,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
         pairs,
         max_group_size,
         dry_plan,
-        execute_vulkan,
+        execute,
     })
 }
 
@@ -272,7 +272,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--workload WORKLOAD ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute-vulkan]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--workload WORKLOAD ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -303,7 +303,7 @@ mod tests {
                 pairs: true,
                 max_group_size: DEFAULT_MAX_GROUP_SIZE,
                 dry_plan: false,
-                execute_vulkan: false,
+                execute: false,
             }
         );
     }
@@ -328,7 +328,7 @@ mod tests {
                 pairs,
                 max_group_size,
                 dry_plan,
-                execute_vulkan,
+                execute,
                 ..
             } => {
                 assert_eq!(include_targets, ["cpu:host"]);
@@ -350,7 +350,7 @@ mod tests {
                 assert!(!pairs);
                 assert_eq!(max_group_size, DEFAULT_MAX_GROUP_SIZE);
                 assert!(!dry_plan);
-                assert!(!execute_vulkan);
+                assert!(!execute);
             }
             _ => panic!("expected run command"),
         }
@@ -380,10 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_execute_vulkan() {
-        let command = parse_args(["run".to_string(), "--execute-vulkan".to_string()]).unwrap();
+    fn parses_execute() {
+        let command = parse_args(["run".to_string(), "--execute".to_string()]).unwrap();
         match command {
-            Command::Run { execute_vulkan, .. } => assert!(execute_vulkan),
+            Command::Run { execute, .. } => assert!(execute),
             _ => panic!("expected run command"),
         }
     }

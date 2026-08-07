@@ -88,7 +88,7 @@ pub struct RunPolicy {
     pub exclude_kinds: Vec<String>,
     pub pair_measurements: bool,
     pub max_group_size: usize,
-    pub execute_vulkan: bool,
+    pub execute: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1066,7 +1066,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: false,
                 max_group_size: 1,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_targets: vec![Target {
                 stable_target_id: "cpu:host".to_string(),
@@ -1116,7 +1116,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: false,
                 max_group_size: 1,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_target_count: 1,
             selected_target_ids: vec!["cpu:host".to_string()],
@@ -1152,7 +1152,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: false,
                 max_group_size: 1,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_target_count: 1,
             selected_target_ids: vec!["cpu:host".to_string()],
@@ -1189,7 +1189,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: false,
                 max_group_size: 1,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_targets: vec![Target {
                 stable_target_id: "cpu:host".to_string(),
@@ -1267,7 +1267,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: true,
                 max_group_size: 2,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_targets: vec![
                 Target {
@@ -1360,7 +1360,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: true,
                 max_group_size: 2,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_targets: vec![test_target("gpu:a"), test_target("gpu:b")],
             selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
@@ -1445,7 +1445,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: true,
                 max_group_size: 2,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_targets: vec![test_target("gpu:a"), test_target("gpu:b")],
             selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
@@ -1507,7 +1507,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pair_measurements: true,
                 max_group_size: 2,
-                execute_vulkan: false,
+                execute: false,
             },
             discovered_targets: vec![test_target("gpu:a"), test_target("gpu:b")],
             selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],

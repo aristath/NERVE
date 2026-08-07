@@ -45,7 +45,7 @@ extension-presence probes until their feature bits are queried. When
 stable target ID. Discovery does not create logical devices, allocate GPU
 memory, submit queues, or run kernels.
 
-`run --execute-vulkan` is an explicit opt-in for Vulkan execution scaffolding.
+`run --execute` is an explicit opt-in for Vulkan execution scaffolding.
 At this stage it opens a logical device for the selected Vulkan target and
 records that the compute kernel is not implemented yet; it still does not submit
 GPU work.
@@ -103,7 +103,7 @@ Probe the Vulkan execution boundary without submitting kernels:
 
 ```sh
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
-  --execute-vulkan \
+  --execute \
   --include-target vulkan:pci:0000:03:00.0 \
   --format f32 \
   --workload dense_projection \

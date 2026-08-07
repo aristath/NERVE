@@ -61,7 +61,7 @@ measurement counts, estimated comparison set count, total estimated measurement
 count, and the maximum payload bytes per measurement. It does not execute CPU
 or GPU measurements.
 
-`policy.execute_vulkan` records whether the run was allowed to open Vulkan
+`policy.execute` records whether the run was allowed to open Vulkan
 logical devices. When true, selected Vulkan targets may attempt the execution
 boundary. Current Vulkan single-target measurements stop after logical-device
 creation and remain `status: "unmeasured"` until compute kernels are
