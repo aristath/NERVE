@@ -98,6 +98,16 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   regression is in the device execution topology rather than paging or model
   behavior. The experiment was removed in full. Do not retry multi-command
   queue batching as if it were command fusion.
+- A stricter follow-up recorded input, ingress, demand-resident processing,
+  egress, guarded output, and packed readback into one primary Vulkan command
+  buffer. The fourth complete conversation, after three discarded warmups, was
+  fully resident and behaviorally exact but measured 8.0284 mean decode tok/s
+  versus the accepted 8.4228 baseline: a 4.68% regression. Its result is nearly
+  identical to the rejected multi-command queue batch despite eliminating the
+  intermediate submissions. Serializing independent transfer and compute work
+  into one queue therefore destroys useful device overlap. The integration was
+  removed; the generic retained-copy and owned-invocation primitives remain as
+  building blocks for an asynchronous hardware execution graph.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -131,30 +141,32 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      anomaly. Reject a candidate immediately when it is slower or changes the
      deterministic product path.
 
-2. Compile a persistent per-device stream transaction after the refined trace
-   quantifies the remaining host contribution.
+2. Compile a persistent per-device stream transaction that preserves measured
+   asynchronous device overlap.
 
    - Turn each ordered physical-device component segment into a stable bounded
-     command topology. A bounded quantum must be one deliberately recorded
-     command buffer (or a measured hardware-native equivalent), not several
-     existing command buffers wrapped in one `queue_submit2` call. Put ticks,
-     token IDs, dispatch dimensions, router results, expert addresses, sampler
-     state, stop/cancel flags, causal frontiers, and commit records in
+     hardware execution topology. Preserve independent compute and transfer
+     streams and synchronize them with device-side timeline dependencies and
+     exact range hazards. Do not force independent engines through one serial
+     primary command buffer, and do not disguise existing serialization as
+     several `SubmitInfo2` records in one host call.
+   - Put ticks, token IDs, dispatch dimensions, router results, expert addresses,
+     sampler state, stop/cancel flags, causal frontiers, and commit records in
      GPU-resident control buffers consumed through predicates and indirect
-     dispatch.
-   - Submit one bounded stream window per device and watchdog quantum. Normal
-     token values, context growth, expert choices, and address-table updates must
-     not require command re-recording or a host return.
-   - Prove zero-miss queue submissions scale with devices and windows, not tokens,
-     layers, selected experts, or graph nodes. Command-buffer caching alone is not
+     dispatch. Normal token values, context growth, expert choices, and
+     address-table updates must not require command re-recording or a host return.
+   - Submit one bounded stream window and watchdog quantum as a small fixed set of
+     asynchronous device streams. Prove zero-miss host submissions and waits scale
+     with devices, windows, and the fixed stream topology—not tokens, layers,
+     selected experts, or graph nodes. Command-buffer caching alone is not
      completion; a previous template experiment reused almost every command buffer
      but fell to 1.205 tok/s because it retained the fragmented submission graph.
    - The mounted input and output graph phases and packed host readback are now
-     reusable transaction segments. Compile their dispatches, ingress/egress
-     copies, demand gates, processor dispatches, and terminal readback into one
-     command stream with exact range-level hazards. Preserve the accepted path
-     until the fused command buffer wins the complete gate; the rejected
-     five-command queue batch must not remain as a fallback or hidden mode.
+     reusable transaction segments. Compose their dispatches, ingress/egress
+     copies, demand gates, processor dispatches, and terminal readback into the
+     bounded asynchronous topology. Preserve the accepted path until that topology
+     wins the complete product gate; neither rejected decoder transaction may
+     remain as a fallback, hidden mode, or future target shape.
 
 3. Make a resident sparse-expert hit completely device-owned.
 
