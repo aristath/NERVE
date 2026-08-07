@@ -42,4 +42,10 @@ include!("vulkan_compute/radix_topk_tests.rs");
 include!("vulkan_compute/spirv_interface_tests.rs");
 include!("vulkan_compute/tests.rs");
 #[cfg(test)]
+include!("vulkan_compute/hardware_profile_tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/device_fault_tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/device_local_memory_budget_tests.rs");
+#[cfg(test)]
 include!("vulkan_compute/execution_counter_tests.rs");

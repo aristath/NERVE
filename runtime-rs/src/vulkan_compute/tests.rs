@@ -128,6 +128,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resident_buffer_copy_visibility_covers_every_supported_producer_and_consumer() {
+        let visibility = resident_buffer_copy_visibility();
+
+        assert!(visibility.producer_stages.contains(vk::PipelineStageFlags::HOST));
+        assert!(
+            visibility
+                .producer_stages
+                .contains(vk::PipelineStageFlags::COMPUTE_SHADER)
+        );
+        assert!(
+            visibility
+                .producer_stages
+                .contains(vk::PipelineStageFlags::TRANSFER)
+        );
+        assert!(visibility.producer_access.contains(vk::AccessFlags::HOST_WRITE));
+        assert!(
+            visibility
+                .producer_access
+                .contains(vk::AccessFlags::SHADER_WRITE)
+        );
+        assert!(
+            visibility
+                .producer_access
+                .contains(vk::AccessFlags::TRANSFER_WRITE)
+        );
+        assert_eq!(visibility.copy_read_stage, vk::PipelineStageFlags::TRANSFER);
+        assert_eq!(visibility.copy_read_access, vk::AccessFlags::TRANSFER_READ);
+        assert_eq!(visibility.copy_write_stage, vk::PipelineStageFlags::TRANSFER);
+        assert_eq!(visibility.copy_write_access, vk::AccessFlags::TRANSFER_WRITE);
+        assert!(visibility.consumer_stages.contains(vk::PipelineStageFlags::HOST));
+        assert!(
+            visibility
+                .consumer_stages
+                .contains(vk::PipelineStageFlags::COMPUTE_SHADER)
+        );
+        assert!(
+            visibility
+                .consumer_stages
+                .contains(vk::PipelineStageFlags::TRANSFER)
+        );
+        assert!(
+            visibility
+                .consumer_stages
+                .contains(vk::PipelineStageFlags::DRAW_INDIRECT)
+        );
+        assert!(
+            visibility
+                .consumer_stages
+                .contains(vk::PipelineStageFlags::CONDITIONAL_RENDERING_EXT)
+        );
+        assert!(visibility.consumer_access.contains(vk::AccessFlags::HOST_READ));
+        assert!(
+            visibility
+                .consumer_access
+                .contains(vk::AccessFlags::SHADER_READ)
+        );
+        assert!(
+            visibility
+                .consumer_access
+                .contains(vk::AccessFlags::INDIRECT_COMMAND_READ)
+        );
+        assert!(
+            visibility
+                .consumer_access
+                .contains(vk::AccessFlags::CONDITIONAL_RENDERING_READ_EXT)
+        );
+        assert!(
+            visibility
+                .consumer_access
+                .contains(vk::AccessFlags::TRANSFER_READ)
+        );
+    }
+
+    #[test]
     fn timeline_replay_rebases_each_logical_device_semaphore_independently() {
         let first = VulkanTimelineSemaphoreReplayIdentity {
             device_handle: 11,
@@ -1682,6 +1756,206 @@ mod tests {
     }
 
     #[test]
+    fn shared_imported_predicate_restored_by_shader_enables_same_queue_continuation() {
+        let spirv_words = compile_test_shader_words()
+            .expect("Vulkan predicate restoration test requires a GLSL compiler");
+        let owner_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select the predicate owner")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let worker_index = std::env::var("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must select the predicate consumer")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must be an integer");
+        assert_ne!(owner_index, worker_index);
+        let owner = VulkanComputeDevice::new_for_physical_device_index(owner_index).unwrap();
+        let worker = VulkanComputeDevice::new_for_physical_device_index(worker_index).unwrap();
+        let shared = owner
+            .create_shared_conditional_resident_buffers(&[&worker], 4)
+            .unwrap();
+        let owner_predicate = &shared.buffers[0];
+        let worker_predicate = &shared.buffers[1];
+        owner_predicate.write_bytes(&0u32.to_le_bytes()).unwrap();
+
+        let restore = worker
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, worker_predicate, 4)
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let output = worker.create_resident_buffer(4).unwrap();
+        output.write_bytes(&0u32.to_le_bytes()).unwrap();
+        let continuation = worker
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &output, 4)
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let sequence = worker.create_resident_kernel_sequence().unwrap();
+        worker
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[
+                    VulkanResidentKernelSequenceStep::new(&restore, &[]),
+                    VulkanResidentKernelSequenceStep::new_conditional(
+                        &continuation,
+                        &[],
+                        worker_predicate,
+                        0,
+                        false,
+                        1,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+
+        worker.run_recorded_resident_kernel_sequence(&sequence).unwrap();
+
+        assert_eq!(owner_predicate.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+        assert_eq!(output.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn host_restores_gpu_written_shared_predicate_before_conditional_submission() {
+        let spirv_words = compile_test_shader_words()
+            .expect("Vulkan host predicate restoration test requires a GLSL compiler");
+        let owner_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select the predicate owner")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let worker_index = std::env::var("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must select the predicate consumer")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX must be an integer");
+        assert_ne!(owner_index, worker_index);
+        let owner = VulkanComputeDevice::new_for_physical_device_index(owner_index).unwrap();
+        let worker = VulkanComputeDevice::new_for_physical_device_index(worker_index).unwrap();
+        let shared = owner
+            .create_shared_conditional_resident_buffers(&[&worker], 4)
+            .unwrap();
+        let owner_predicate = &shared.buffers[0];
+        let worker_predicate = &shared.buffers[1];
+
+        owner_predicate
+            .write_bytes(&u32::MAX.to_le_bytes())
+            .unwrap();
+        let suppress = worker
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, worker_predicate, 4)
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let suppress_sequence = worker.create_resident_kernel_sequence().unwrap();
+        worker
+            .record_resident_kernel_sequence(
+                &suppress_sequence,
+                &[VulkanResidentKernelSequenceStep::new(&suppress, &[])],
+            )
+            .unwrap();
+        worker
+            .run_recorded_resident_kernel_sequence(&suppress_sequence)
+            .unwrap();
+        assert_eq!(owner_predicate.read_bytes(4).unwrap(), 0u32.to_le_bytes());
+
+        owner_predicate.write_bytes(&1u32.to_le_bytes()).unwrap();
+        let output = worker.create_resident_buffer(4).unwrap();
+        output.write_bytes(&0u32.to_le_bytes()).unwrap();
+        let continuation = worker
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &output, 4)
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let continuation_sequence = worker.create_resident_kernel_sequence().unwrap();
+        worker
+            .record_resident_kernel_sequence(
+                &continuation_sequence,
+                &[VulkanResidentKernelSequenceStep::new_conditional(
+                    &continuation,
+                    &[],
+                    worker_predicate,
+                    0,
+                    false,
+                    1,
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        worker
+            .run_recorded_resident_kernel_sequence(&continuation_sequence)
+            .unwrap();
+
+        assert_eq!(owner_predicate.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+        assert_eq!(output.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn direct_dispatch_after_suppressed_conditional_indirect_region_still_executes() {
+        let spirv_words = compile_test_shader_words()
+            .expect("Vulkan conditional-region test requires a GLSL compiler");
+        let device = selected_test_vulkan_device().unwrap();
+        let predicate = device.create_conditional_resident_buffer(4).unwrap();
+        predicate.write_bytes(&0u32.to_le_bytes()).unwrap();
+        let dimensions = device
+            .create_resident_buffer(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+            .unwrap();
+        dimensions
+            .write_bytes(&u32_bytes(&[1, 1, 1]))
+            .unwrap();
+        let output = device.create_resident_buffer(4).unwrap();
+        output.write_bytes(&0u32.to_le_bytes()).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &output, 4)
+                    .with_access(VulkanResidentKernelBufferAccess::ReadWrite)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let sequence = device.create_resident_kernel_sequence().unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[
+                    VulkanResidentKernelSequenceStep::new_indirect(
+                        &dispatch,
+                        &[],
+                        &dimensions,
+                        0,
+                    )
+                    .unwrap()
+                    .with_condition(&predicate, 0, false, 1)
+                    .unwrap(),
+                    VulkanResidentKernelSequenceStep::new(&dispatch, &[]),
+                ],
+            )
+            .unwrap();
+
+        device.run_recorded_resident_kernel_sequence(&sequence).unwrap();
+
+        assert_eq!(output.read_bytes(4).unwrap(), 1u32.to_le_bytes());
+    }
+
+    #[test]
     fn resident_kernel_sequence_combines_input_and_intermediate_snapshot_copies() {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
@@ -2000,1021 +2274,56 @@ mod tests {
         );
         assert_eq!(binding.byte_len(), 6);
     }
-}
-#[test]
-fn synthetic_vulkan_hardware_profile_covers_exposed_and_unavailable_processes() {
-    let device = VulkanComputeDeviceInfo {
-        physical_device_index: 2,
-        physical_device_id: "vulkan-uuid:00112233445566778899aabbccddeeff".to_string(),
-        device_uuid: [7; vk::UUID_SIZE],
-        device_name: "synthetic GPU".to_string(),
-        pci_address: Some("0000:02:00.0".to_string()),
-        device_type: "discrete_gpu".to_string(),
-        vendor_id: 0x1002,
-        device_id: 0xabcd,
-        api_version: vk::make_api_version(0, 1, 4, 0),
-        driver_version: 42,
-        compute_queue_family_indices: vec![0],
-        memory_heaps: vec![VulkanMemoryHeapInfo {
-            heap_index: 0,
-            size_bytes: 16 * 1024 * 1024 * 1024,
-            device_local: true,
-        }],
-        selected_by_default: true,
-    };
-    let target = VulkanComputeTargetCapabilities {
-        physical_device_index: 2,
-        physical_device_id: device.physical_device_id.clone(),
-        device_name: device.device_name.clone(),
-        device_type: device.device_type.clone(),
-        vendor_id: device.vendor_id,
-        device_id: device.device_id,
-        shader_features: BTreeSet::from([
-            VulkanShaderFeature::ShaderFloat16,
-            VulkanShaderFeature::ShaderInt8,
-            VulkanShaderFeature::ShaderIntegerDotProduct,
-            VulkanShaderFeature::CooperativeMatrix,
-        ]),
-        subgroup_operations: BTreeSet::from([
-            VulkanSubgroupOperation::Basic,
-            VulkanSubgroupOperation::Arithmetic,
-            VulkanSubgroupOperation::Shuffle,
-        ]),
-        subgroup_compute_supported: true,
-        subgroup_size: 64,
-        max_compute_work_group_invocations: 1024,
-        max_compute_work_group_size_x: 1024,
-        cooperative_float16_shapes: BTreeSet::from([(16, 16, 16)]),
-        cooperative_bfloat16_shapes: BTreeSet::new(),
-        cooperative_float8_e4m3_shapes: BTreeSet::new(),
-        cooperative_sint8_shapes: BTreeSet::from([(16, 16, 32)]),
-    };
-    let facts = VulkanHardwareFacts {
-        api_version: device.api_version,
-        driver_version: device.driver_version,
-        driver_name: "synthetic Vulkan driver".to_string(),
-        driver_info: "synthetic driver info".to_string(),
-        driver_id: "MESA_RADV".to_string(),
-        queue_family_count: 3,
-        compute_queue_count: 2,
-        graphics_queue_count: 1,
-        transfer_queue_count: 3,
-        transfer_only_queue_count: 1,
-        video_decode_queue_count: 1,
-        video_encode_queue_count: 0,
-        extension_names: BTreeSet::from([
-            "VK_KHR_acceleration_structure".to_string(),
-            "VK_KHR_ray_query".to_string(),
-            "VK_KHR_video_decode_queue".to_string(),
-            "VK_KHR_video_queue".to_string(),
-        ]),
-        sampled_formats: BTreeSet::from([
-            "r16_sfloat".to_string(),
-            "r32_sfloat".to_string(),
-        ]),
-        storage_image_formats: BTreeSet::from(["r32_sfloat".to_string()]),
-        linear_filter_formats: BTreeSet::from(["r16_sfloat".to_string()]),
-        cooperative_matrix_variants: BTreeSet::from([
-            "a=FLOAT16;b=FLOAT16;c=FLOAT32;result=FLOAT32;scope=SUBGROUP;m=16;n=16;k=16;saturating=false".to_string(),
-        ]),
-        max_compute_work_group_count_x: 65_535,
-        max_compute_shared_memory_size: 65_536,
-        max_storage_buffer_range: u64::from(u32::MAX),
-        max_uniform_buffer_range: 65_536,
-        min_storage_buffer_offset_alignment: 32,
-        min_uniform_buffer_offset_alignment: 256,
-        max_image_dimension_1d: 16_384,
-        max_image_dimension_2d: 16_384,
-        max_image_dimension_3d: 2_048,
-        max_bound_descriptor_sets: 8,
-        timestamp_compute_and_graphics: true,
-        timestamp_period_bits: 1.0_f32.to_bits(),
-        shared_host_memory_alignment: Some(4096),
-        shared_device_memory_supported: true,
-        external_timeline_semaphore_supported: true,
-        timeline_semaphore_supported: true,
-        synchronization2_supported: true,
-        memory_types: vec![
-            VulkanMemoryTypeFacts {
-                type_index: 0,
-                heap_index: 0,
-                host_visible: true,
-                device_local: true,
-                coherent: true,
-                cached: false,
-                lazily_allocated: false,
-            },
-            VulkanMemoryTypeFacts {
-                type_index: 1,
-                heap_index: 0,
-                host_visible: false,
-                device_local: true,
-                coherent: false,
-                cached: false,
-                lazily_allocated: false,
-            },
-        ],
-    };
 
-    let profile =
-        build_vulkan_hardware_profile(&device, target.clone(), facts.clone()).unwrap();
-    profile.validate().unwrap();
-    let process = |name: &str| {
-        profile
-            .processes
-            .iter()
-            .find(|process| process.name == name)
-            .unwrap()
-    };
-    for required in [
-        "acceleration_structure_construction",
-        "blending",
-        "command_queues",
-        "cooperative_matrix",
-        "copy_engines",
-        "depth_stencil",
-        "device_cache_hierarchy",
-        "device_generated_commands",
-        "device_memory_bandwidth",
-        "execution_graphs",
-        "fixed_function_interpolation",
-        "indirect_work_generation",
-        "occupancy_constraints",
-        "packed_dot_product",
-        "parallel_collective_algorithms",
-        "rasterization",
-        "ray_traversal",
-        "register_file",
-        "resident_command_replay",
-        "shader_atomics",
-        "shader_scalar",
-        "shader_vector",
-        "subgroup_collectives",
-        "synchronization",
-        "texture_sampling",
-        "video_decode",
-        "video_encode",
-        "workgroup_shared_memory",
-    ] {
-        process(required);
-    }
-    assert_eq!(
-        process("cooperative_matrix").availability,
-        HardwareProcessAvailability::Available
-    );
-    assert!(
-        !process("cooperative_matrix").properties["all_reported_variants"]
-            .is_empty()
-    );
-    assert!(process("cooperative_matrix")
-        .numeric_formats
-        .contains(&"i8".to_string()));
-    assert_eq!(
-        process("cooperative_matrix").properties["sint8_shapes"],
-        "16x16x32"
-    );
-    assert_eq!(
-        process("ray_traversal").availability,
-        HardwareProcessAvailability::Available
-    );
-    assert_eq!(
-        process("video_encode").availability,
-        HardwareProcessAvailability::Unavailable
-    );
-    assert_eq!(
-        process("register_file")
-            .properties
-            .get("capacity_visibility")
-            .map(String::as_str),
-        Some("opaque_to_vulkan")
-    );
-    assert_eq!(
-        profile.runtime_bindings["vulkan_runtime_binding"]["physical_device_id"],
-        target.physical_device_id
-    );
-    assert_eq!(
-        profile.capability_extensions["vulkan_compiler_capabilities"]
-            ["subgroup_size"],
-        target.subgroup_size
-    );
-    assert!(
-        profile.capability_extensions["vulkan_compiler_capabilities"]
-            .get("physical_device_id")
-            .is_none()
-    );
-    assert!(profile.memory_domains[0].host_visible);
-    assert!(profile.memory_domains[0].coherent);
-    assert!(!profile.memory_domains[1].host_visible);
-
-    let mut invalid_memory = facts.clone();
-    invalid_memory.memory_types[0].heap_index = 99;
-    assert!(
-        build_vulkan_hardware_profile(&device, target.clone(), invalid_memory)
-            .unwrap_err()
-            .contains("references missing heap")
-    );
-
-    let mut peer_device = device.clone();
-    peer_device.physical_device_index = 3;
-    peer_device.physical_device_id =
-        "vulkan-uuid:ffeeddccbbaa99887766554433221100".to_string();
-    peer_device.device_uuid = [8; vk::UUID_SIZE];
-    let mut peer_target = target.clone();
-    peer_target.physical_device_index = peer_device.physical_device_index;
-    peer_target.physical_device_id = peer_device.physical_device_id.clone();
-    let peer =
-        build_vulkan_hardware_profile(&peer_device, peer_target, facts.clone()).unwrap();
-    assert_eq!(profile.capability_class, peer.capability_class);
-    assert_ne!(profile.profile_id, peer.profile_id);
-
-    let rebuilt = build_vulkan_hardware_profile(&device, target, facts).unwrap();
-    assert_eq!(profile.profile_id, rebuilt.profile_id);
-    assert_eq!(profile.capability_class, rebuilt.capability_class);
-}
-#[test]
-fn physical_device_allowlist_preserves_real_indices_and_excludes_other_devices() {
-    let first = "vulkan-uuid:00000000070000000000000000000000".to_string();
-    let second = "vulkan-uuid:000000000a0000000000000000000000".to_string();
-    let forbidden = "vulkan-uuid:ffffffffffffffffffffffffffffffff".to_string();
-    let discovered = vec![(2, first.clone()), (5, forbidden), (9, second.clone())];
-
-    assert_eq!(
-        allowed_physical_device_indices(
-            &discovered,
-            Some(&BTreeSet::from([first.clone(), second.clone()])),
-        )
-        .unwrap(),
-        vec![2, 9]
-    );
-    assert_eq!(
-        allowed_physical_device_indices(&discovered, None).unwrap(),
-        vec![2, 5, 9]
-    );
-
-    let missing = allowed_physical_device_indices(
-        &discovered,
-        Some(&BTreeSet::from([
-            first,
-            "vulkan-uuid:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
-        ])),
-    )
-    .unwrap_err();
-    assert!(missing.0.contains("are not present"));
-}
-#[test]
-fn memory_type_selection_rejects_implicit_amd_coherent_memory() {
-    let mut properties = vk::PhysicalDeviceMemoryProperties {
-        memory_type_count: 2,
-        memory_heap_count: 1,
-        ..Default::default()
-    };
-    properties.memory_heaps[0].size = 16 * 1024 * 1024;
-    properties.memory_types[0] = vk::MemoryType {
-        property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
-            | vk::MemoryPropertyFlags::HOST_VISIBLE
-            | vk::MemoryPropertyFlags::HOST_COHERENT,
-        heap_index: 0,
-    };
-    properties.memory_types[1] = vk::MemoryType {
-        property_flags: properties.memory_types[0].property_flags
-            | vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
-            | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD,
-        heap_index: 0,
-    };
-
-    assert_eq!(
-        select_memory_type_index(
-            &properties,
-            0b11,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ),
-        Some(0)
-    );
-}
-
-#[test]
-fn device_fault_address_registry_rejects_overlap_and_resolves_boundaries() {
-    let mut registry = VulkanDeviceAddressRegistry::default();
-    registry
-        .register(7, 0x1_0000, 0x2000, "first allocation")
-        .unwrap();
-    registry
-        .register(8, 0x2_0000, 0x1000, "second allocation")
-        .unwrap();
-    registry
-        .register_annotation(70, 0x1_0800, 0x400, "stable resource slot=17")
-        .unwrap();
-
-    let first = registry.resolve(0x1_1abc).unwrap();
-    assert_eq!(first.label, "first allocation");
-    assert_eq!(first.byte_offset, 0x1abc);
-    assert_eq!(first.byte_capacity, 0x2000);
-    let annotated = registry.resolve(0x1_0920).unwrap();
-    assert_eq!(annotated.label, "stable resource slot=17");
-    assert_eq!(annotated.byte_offset, 0x120);
-    assert_eq!(annotated.byte_capacity, 0x400);
-    assert!(registry.resolve(0x1_2000).is_none());
-
-    let overlap = registry
-        .register(9, 0x1_1000, 0x2000, "overlapping allocation")
-        .unwrap_err();
-    assert!(overlap.0.contains("overlaps"));
-    let annotation_overlap = registry
-        .register_annotation(71, 0x1_0900, 0x400, "overlapping slot")
-        .unwrap_err();
-    assert!(annotation_overlap.0.contains("overlaps"));
-    let annotation_outside = registry
-        .register_annotation(72, 0x1_1f00, 0x200, "outside allocation")
-        .unwrap_err();
-    assert!(annotation_outside.0.contains("contained"));
-
-    registry.unregister_annotation(70, 0x1_0800).unwrap();
-    assert_eq!(registry.resolve(0x1_0920).unwrap().label, "first allocation");
-    registry.unregister(7, 0x1_0000).unwrap();
-    assert!(registry.resolve(0x1_1abc).is_none());
-    assert_eq!(registry.resolve(0x2_0000).unwrap().label, "second allocation");
-}
-
-#[test]
-fn device_fault_address_registry_resolves_sign_extended_device_addresses() {
-    let mut registry = VulkanDeviceAddressRegistry::default();
-    registry
-        .register(
-            7,
-            0x8000_c74c_0000,
-            0x10_0000,
-            "addressable allocation",
-        )
-        .unwrap();
-    registry
-        .register_annotation(
-            70,
-            0x8000_c74c_6000,
-            0x20_000,
-            "stable resource slot=17",
-        )
-        .unwrap();
-
-    let (canonical, resolved) = registry
-        .resolve_reported_fault_address(0xffff_8000_c74c_7000)
-        .unwrap();
-    assert_eq!(canonical, 0x8000_c74c_7000);
-    assert_eq!(resolved.label, "stable resource slot=17");
-    assert_eq!(resolved.byte_offset, 0x1000);
-    assert_eq!(resolved.byte_capacity, 0x20_000);
-}
-
-#[test]
-fn device_fault_address_registry_attributes_nearest_sign_extended_range() {
-    let mut registry = VulkanDeviceAddressRegistry::default();
-    registry
-        .register(
-            7,
-            0x8000_c740_0000,
-            0xc_0000,
-            "addressable allocation",
-        )
-        .unwrap();
-    registry
-        .register_annotation(
-            70,
-            0x8000_c74a_0000,
-            0x20_000,
-            "stable resource slot=17",
-        )
-        .unwrap();
-
-    let nearest = registry
-        .nearest_reported_fault_address(0xffff_8000_c74c_7000)
-        .unwrap();
-    assert_eq!(nearest.canonical_address, 0x8000_c74c_7000);
-    assert_eq!(nearest.label, "stable resource slot=17");
-    assert_eq!(nearest.signed_byte_offset, 0x2_7000);
-    assert_eq!(nearest.byte_capacity, 0x20_000);
-    assert_eq!(nearest.gap_bytes, 0x7001);
-}
-
-#[test]
-fn device_fault_address_registry_attributes_retired_sign_extended_range() {
-    let mut registry = VulkanDeviceAddressRegistry::default();
-    registry
-        .register(
-            7,
-            0x8000_c740_0000,
-            0x10_0000,
-            "retired addressable allocation",
-        )
-        .unwrap();
-    registry
-        .register_annotation(
-            70,
-            0x8000_c74c_0000,
-            0x20_000,
-            "retired stable resource slot=17",
-        )
-        .unwrap();
-    registry
-        .unregister_annotation(70, 0x8000_c74c_0000)
-        .unwrap();
-    registry.unregister(7, 0x8000_c740_0000).unwrap();
-
-    assert!(registry.resolve(0x8000_c74c_7000).is_none());
-    let (canonical, retired) = registry
-        .resolve_retired_reported_fault_address(0xffff_8000_c74c_7000)
-        .unwrap();
-    assert_eq!(canonical, 0x8000_c74c_7000);
-    assert_eq!(retired.label, "retired stable resource slot=17");
-    assert_eq!(retired.byte_offset, 0x7000);
-    assert_eq!(retired.byte_capacity, 0x20_000);
-}
-
-#[test]
-fn device_fault_error_context_is_shared_by_detached_queue_objects() {
-    let registry = Arc::new(Mutex::new(VulkanDeviceAddressRegistry::default()));
-
-    let ordinary = vulkan_operation_error_with_device_fault(
-        "copy submit",
-        vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-        None,
-        &registry,
-    );
-    assert_eq!(
-        ordinary.0,
-        "copy submit: ERROR_OUT_OF_DEVICE_MEMORY".to_string()
-    );
-
-    let lost = vulkan_operation_error_with_device_fault(
-        "copy submit",
-        vk::Result::ERROR_DEVICE_LOST,
-        None,
-        &registry,
-    );
-    assert!(lost.0.contains("copy submit: ERROR_DEVICE_LOST"));
-    assert!(lost.0.contains("VK_EXT_device_fault is unavailable"));
-}
-
-#[test]
-fn device_local_memory_budget_preserves_headroom_from_the_opening_snapshot() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-
-    assert_eq!(budget.baseline_available_bytes, 1_000_000);
-    assert_eq!(budget.reservable_bytes, 800_000);
-    assert_eq!(budget.protected_headroom_bytes, 200_000);
-    assert_eq!(budget.counter_tolerance_bytes, 50_000);
-    assert_eq!(budget.remaining_bytes_at(1_000_000), 800_000);
-    assert_eq!(budget.remaining_bytes_at(900_000), 700_000);
-    assert_eq!(budget.remaining_bytes_at(1_100_000), 800_000);
-    assert_eq!(budget.remaining_bytes_at(0), 0);
-    assert_eq!(budget.protected_headroom_deficit_at(150_000), 0);
-    assert_eq!(budget.protected_headroom_deficit_at(149_999), 1);
-}
-
-#[test]
-fn device_local_memory_policy_is_the_authoritative_budget_partition() {
-    let policy = vulkan_device_local_memory_policy();
-    let budget = VulkanDeviceLocalMemoryBudget::capture(
-        policy.capacity_parts_per_million,
-    );
-
-    assert_eq!(policy.schema, VULKAN_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA);
-    assert_eq!(
-        policy.protected_headroom_fraction_ppm,
-        budget.protected_headroom_bytes
-    );
-    assert_eq!(
-        policy.reservable_free_vram_fraction_ppm,
-        budget.reservable_bytes
-    );
-    assert_eq!(
-        policy.protected_headroom_fraction_ppm
-            + policy.reservable_free_vram_fraction_ppm,
-        policy.capacity_parts_per_million
-    );
-}
-
-#[test]
-fn device_local_memory_budget_preserves_the_fraction_on_large_heaps() {
-    let baseline = 64 * 1024 * 1024 * 1024;
-    let budget = VulkanDeviceLocalMemoryBudget::capture(baseline);
-    let protected = baseline
-        * VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM
-        / VULKAN_CAPACITY_PARTS_PER_MILLION;
-
-    assert_eq!(budget.protected_headroom_bytes, protected);
-    assert_eq!(budget.reservable_bytes, baseline - protected);
-    assert!(protected > 4 * 1024 * 1024 * 1024);
-}
-
-#[test]
-fn device_local_memory_budget_rejects_fixed_residency_before_dynamic_allocation() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let admission = budget.admit_pending_bytes_at(900_000, 650_000).unwrap();
-
-    assert_eq!(admission.acquired_bytes, 100_000);
-    assert_eq!(admission.pending_fixed_bytes, 650_000);
-    assert_eq!(admission.allocatable_bytes, 50_000);
-    let error = budget
-        .admit_pending_bytes_at(900_000, 700_001)
-        .unwrap_err();
-    assert!(error.0.contains("stable device-local budget"));
-    assert!(error.0.contains("700000 bytes remaining"));
-}
-
-#[test]
-fn selected_device_memory_budget_never_exceeds_physical_device_local_memory() {
-    let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-        eprintln!("skipping device memory-budget test: explicit Vulkan device unset");
-        return;
-    };
-    let device = VulkanComputeDevice::new_for_physical_device_index(
-        raw_device_index
-            .parse()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer"),
-    )
-    .expect("explicit AMD Vulkan device must open");
-    let budget = device.device_local_memory_budget();
-
-    assert!(
-        budget.baseline_available_bytes <= device.device_local_memory_bytes(),
-        "opening available bytes {} exceed physical device-local bytes {}",
-        budget.baseline_available_bytes,
-        device.device_local_memory_bytes(),
-    );
-    let protected_headroom = budget.baseline_available_bytes
-        * VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM
-        / VULKAN_CAPACITY_PARTS_PER_MILLION;
-    assert_eq!(budget.protected_headroom_bytes, protected_headroom);
-    assert_eq!(
-        budget.reservable_bytes,
-        budget.baseline_available_bytes - protected_headroom,
-    );
-}
-
-#[test]
-fn device_local_memory_reservations_are_bounded_and_released_by_lifetime() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        budget,
-    )));
-    let first = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 800_000)
-        .unwrap();
-    let accounting = tracker.lock().unwrap().accounting_at(200_000);
-    assert_eq!(accounting.tracked_allocation_bytes, 800_000);
-    assert_eq!(accounting.pending_reservation_bytes, 0);
-    assert_eq!(accounting.untracked_acquired_bytes, 0);
-    assert_eq!(accounting.remaining_bytes, 0);
-    assert_eq!(accounting.admissible_remaining_bytes, 50_000);
-
-    let error = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 200_000, 50_001)
-        .unwrap_err();
-    assert!(error.0.contains("beyond the stable 800000-byte budget"));
-
-    drop(first);
-    let accounting = tracker.lock().unwrap().accounting_at(1_000_000);
-    assert_eq!(accounting.tracked_allocation_bytes, 0);
-    assert_eq!(accounting.remaining_bytes, 800_000);
-    assert_eq!(accounting.admissible_remaining_bytes, 850_000);
-}
-
-#[test]
-fn device_local_memory_reclaimer_registration_is_shared_and_lifetime_bounded() {
-    #[derive(Debug)]
-    struct CountingReclaimer(Arc<AtomicU64>);
-
-    impl VulkanDeviceLocalMemoryReclaimer for CountingReclaimer {
-        fn reclaim_device_local_memory(
-            &self,
-            requested_bytes: usize,
-        ) -> Result<usize, VulkanError> {
-            self.0.fetch_add(1, Ordering::AcqRel);
-            Ok(requested_bytes)
-        }
-    }
-
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        VulkanDeviceLocalMemoryBudget::capture(1_000_000),
-    )));
-    let calls = Arc::new(AtomicU64::new(0));
-    let registration = VulkanDeviceLocalMemoryBudgetTracker::register_reclaimer(
-        &tracker,
-        Arc::new(CountingReclaimer(Arc::clone(&calls))),
-    )
-    .unwrap();
-    let live = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker).unwrap();
-    assert_eq!(live.len(), 1);
-    assert_eq!(live[0].reclaim_device_local_memory(17).unwrap(), 17);
-    assert_eq!(calls.load(Ordering::Acquire), 1);
-
-    drop(live);
-    drop(registration);
-    assert!(
-        VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn device_local_execution_pressure_reclaims_until_protected_headroom_is_restored() {
-    #[derive(Debug)]
-    struct RestoringReclaimer {
-        available_bytes: Arc<AtomicU64>,
-        calls: Arc<AtomicU64>,
-    }
-
-    impl VulkanDeviceLocalMemoryReclaimer for RestoringReclaimer {
-        fn reclaim_device_local_memory(
-            &self,
-            requested_bytes: usize,
-        ) -> Result<usize, VulkanError> {
-            self.calls.fetch_add(1, Ordering::AcqRel);
-            self.available_bytes.fetch_add(
-                u64::try_from(requested_bytes).unwrap_or(u64::MAX),
-                Ordering::AcqRel,
-            );
-            Ok(requested_bytes)
-        }
-    }
-
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = VulkanDeviceLocalMemoryBudgetTracker::new(budget);
-    let available_bytes = Arc::new(AtomicU64::new(100_000));
-    let calls = Arc::new(AtomicU64::new(0));
-    let accounting = restore_protected_device_local_headroom(
-        budget,
-        vec![Arc::new(RestoringReclaimer {
-            available_bytes: Arc::clone(&available_bytes),
-            calls: Arc::clone(&calls),
-        })],
-        Duration::ZERO,
-        || {
-            Ok(tracker.accounting_at(
-                available_bytes.load(Ordering::Acquire),
-            ))
-        },
-    )
-    .unwrap();
-
-    assert_eq!(calls.load(Ordering::Acquire), 1);
-    assert_eq!(accounting.currently_available_bytes, 150_000);
-    assert_eq!(budget.protected_headroom_deficit_at(150_000), 0);
-}
-
-#[test]
-fn device_local_execution_pressure_fails_closed_when_release_does_not_settle() {
-    #[derive(Debug)]
-    struct UnsettledReclaimer;
-
-    impl VulkanDeviceLocalMemoryReclaimer for UnsettledReclaimer {
-        fn reclaim_device_local_memory(
-            &self,
-            requested_bytes: usize,
-        ) -> Result<usize, VulkanError> {
-            Ok(requested_bytes)
-        }
-    }
-
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = VulkanDeviceLocalMemoryBudgetTracker::new(budget);
-    let error = restore_protected_device_local_headroom(
-        budget,
-        vec![Arc::new(UnsettledReclaimer)],
-        Duration::ZERO,
-        || Ok(tracker.accounting_at(100_000)),
-    )
-    .unwrap_err();
-
-    assert!(error.0.contains("execution refused"));
-    assert!(error.0.contains("still lacks 50000 bytes"));
-}
-
-#[test]
-fn device_local_execution_pressure_requires_an_evictable_store() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = VulkanDeviceLocalMemoryBudgetTracker::new(budget);
-    let error = restore_protected_device_local_headroom(
-        budget,
-        Vec::new(),
-        Duration::ZERO,
-        || Ok(tracker.accounting_at(100_000)),
-    )
-    .unwrap_err();
-
-    assert!(error.0.contains("execution refused"));
-    assert!(error.0.contains("no evictable residency store"));
-}
-
-#[test]
-fn device_local_execution_pressure_reuses_only_a_recent_physical_observation() {
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        VulkanDeviceLocalMemoryBudget::capture(1_000_000),
-    )));
-    let observations = Arc::new(AtomicU64::new(0));
-    let observe = || {
-        observations.fetch_add(1, Ordering::AcqRel);
-        900_000
-    };
-
-    let first = VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-        observe,
-    )
-    .unwrap();
-    let reused = VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-        observe,
-    )
-    .unwrap();
-    let refreshed = VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::ZERO,
-        observe,
-    )
-    .unwrap();
-
-    assert_eq!(first.currently_available_bytes, 900_000);
-    assert_eq!(reused, first);
-    assert_eq!(refreshed.currently_available_bytes, 900_000);
-    assert_eq!(observations.load(Ordering::Acquire), 2);
-}
-
-#[test]
-fn device_local_execution_reads_the_control_plane_observation_without_querying() {
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        VulkanDeviceLocalMemoryBudget::capture(1_000_000),
-    )));
-    VulkanDeviceLocalMemoryBudgetTracker::record_execution_observation(
-        &tracker,
-        0,
-        900_000,
-    )
-    .unwrap();
-
-    let accounting = VulkanDeviceLocalMemoryBudgetTracker::recent_execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-    )
-    .unwrap()
-    .expect("fresh control-plane observation must be available to execution");
-
-    assert_eq!(accounting.currently_available_bytes, 900_000);
-    assert!(
-        VulkanDeviceLocalMemoryBudgetTracker::recent_execution_accounting(
-            &tracker,
-            Duration::ZERO,
-        )
-        .unwrap()
-        .is_none(),
-    );
-}
-
-#[test]
-fn device_local_execution_observation_is_invalidated_by_tracked_allocations() {
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        VulkanDeviceLocalMemoryBudget::capture(1_000_000),
-    )));
-    let observations = Arc::new(AtomicU64::new(0));
-    let observe = || {
-        observations.fetch_add(1, Ordering::AcqRel);
-        900_000
-    };
-    VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-        observe,
-    )
-    .unwrap();
-    let reservation =
-        VulkanDeviceLocalMemoryReservation::acquire(&tracker, 900_000, 100_000).unwrap();
-
-    VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-        observe,
-    )
-    .unwrap();
-    assert_eq!(observations.load(Ordering::Acquire), 2);
-
-    drop(reservation);
-    VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-        observe,
-    )
-    .unwrap();
-    assert_eq!(observations.load(Ordering::Acquire), 3);
-}
-
-#[test]
-fn device_local_execution_observation_retries_across_an_allocation_race() {
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        VulkanDeviceLocalMemoryBudget::capture(1_000_000),
-    )));
-    let mut observations = 0;
-    let mut reservation = None;
-
-    let accounting = VulkanDeviceLocalMemoryBudgetTracker::execution_accounting(
-        &tracker,
-        Duration::from_secs(1),
-        || {
-            observations += 1;
-            if observations == 1 {
-                reservation = Some(
-                    VulkanDeviceLocalMemoryReservation::acquire(
-                        &tracker,
-                        900_000,
-                        100_000,
-                    )
-                    .unwrap(),
-                );
-                // This is the value observed before the allocation completed.
-                900_000
-            } else {
-                800_000
-            }
-        },
-    )
-    .unwrap();
-
-    assert_eq!(observations, 2);
-    assert_eq!(accounting.currently_available_bytes, 800_000);
-    assert_eq!(accounting.tracked_allocation_bytes, 100_000);
-    drop(reservation);
-}
-
-#[test]
-fn device_local_capacity_permit_is_atomic_and_commits_only_actual_bytes() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        budget,
-    )));
-    let permit = VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
-    let pending = tracker.lock().unwrap().accounting_at(1_000_000);
-    assert_eq!(pending.tracked_allocation_bytes, 0);
-    assert_eq!(pending.pending_reservation_bytes, 400_000);
-    assert_eq!(pending.admissible_remaining_bytes, 562_500);
-    let error = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 562_501)
-        .unwrap_err();
-    assert!(error.to_string().contains("400000 pending"));
-
-    let allocation = permit.commit(300_000).unwrap();
-    let committed = tracker.lock().unwrap().accounting_at(700_000);
-    assert_eq!(committed.tracked_allocation_bytes, 300_000);
-    assert_eq!(committed.pending_reservation_bytes, 0);
-    assert_eq!(committed.untracked_acquired_bytes, 0);
-
-    drop(allocation);
-    let released = tracker.lock().unwrap().accounting_at(1_000_000);
-    assert_eq!(released.tracked_allocation_bytes, 0);
-    assert_eq!(released.pending_reservation_bytes, 0);
-}
-
-#[test]
-fn device_local_capacity_permit_releases_when_commit_cannot_fit() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        budget,
-    )));
-    let permit = VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
-    let error = permit
-        .commit(400_001)
-        .expect_err("an allocation cannot exceed its capacity permit");
-
-    assert!(error.to_string().contains("permit holds 400000 bytes"));
-    assert_eq!(
-        tracker.lock().unwrap().pending_reservation_bytes,
-        0,
-        "the failed consuming commit must release its pending reservation",
-    );
-}
-
-#[test]
-fn device_local_capacity_permit_commit_does_not_readmit_async_counter_changes() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        budget,
-    )));
-    let permit = VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
-
-    // A live heap-budget snapshot could now report enough delayed or external
-    // acquisition to reject a new 400,000-byte request. The existing permit is
-    // already part of the accounting transaction and must remain committable.
-    assert!(VulkanDeviceLocalMemoryPermit::acquire(&tracker, 400_000, 1).is_err());
-    let allocation = permit.commit(400_000).unwrap();
-
-    let committed = tracker.lock().unwrap().accounting_at(600_000);
-    assert_eq!(committed.tracked_allocation_bytes, 400_000);
-    assert_eq!(committed.pending_reservation_bytes, 0);
-    assert_eq!(committed.untracked_acquired_bytes, 0);
-    drop(allocation);
-}
-
-#[test]
-fn device_local_memory_counter_tolerance_is_bounded_by_protected_headroom() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        budget,
-    )));
-    let allocation =
-        VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 850_000).unwrap();
-    let error = VulkanDeviceLocalMemoryReservation::acquire(&tracker, 150_000, 1).unwrap_err();
-
-    assert!(error.to_string().contains("bounded counter tolerance"));
-    assert_eq!(budget.counter_tolerance_bytes, budget.protected_headroom_bytes / 4);
-    drop(allocation);
-}
-
-#[test]
-fn device_local_memory_tolerance_is_applied_before_capacity_saturation() {
-    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
-    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
-        budget,
-    )));
-    let allocation =
-        VulkanDeviceLocalMemoryReservation::acquire(&tracker, 1_000_000, 840_000).unwrap();
-    let accounting = tracker.lock().unwrap().accounting_at(155_000);
-
-    assert_eq!(accounting.untracked_acquired_bytes, 5_000);
-    assert_eq!(accounting.remaining_bytes, 0);
-    assert_eq!(accounting.admissible_remaining_bytes, 5_000);
-    drop(allocation);
-}
-
-#[test]
-fn selected_device_buffer_lifetime_owns_and_releases_capacity() {
-    let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-        eprintln!("skipping device allocation-budget test: explicit Vulkan device unset");
-        return;
-    };
-    let device = VulkanComputeDevice::new_for_physical_device_index(
-        raw_device_index
-            .parse()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer"),
-    )
-    .expect("explicit AMD Vulkan device must open");
-    assert_eq!(
+    #[test]
+    fn resident_copy_completion_observes_an_unfenced_shader_producer() {
+        let spirv_words =
+            compile_test_shader_words().expect("Vulkan copy test requires a GLSL compiler");
+        let device = selected_test_vulkan_device().unwrap();
+        let source = device.create_resident_buffer(12).unwrap();
+        let destination = device.create_resident_buffer(12).unwrap();
+        source.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        destination.write_bytes(&[0; 12]).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &source, 12)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let sequence = device.create_resident_kernel_sequence().unwrap();
         device
-            .device_local_memory_accounting()
-            .unwrap()
-            .tracked_allocation_bytes,
-        0,
-    );
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[VulkanResidentKernelSequenceStep::new(&dispatch, &[])],
+            )
+            .unwrap();
+        let copy = device
+            .create_resident_buffer_copy(&source, &destination, 12)
+            .unwrap();
+        let completion = device.create_timeline_semaphore(0).unwrap();
 
-    let buffer = device.create_addressable_resident_buffer(1 << 20).unwrap();
-    let during = device.device_local_memory_accounting().unwrap();
-    assert!(during.tracked_allocation_bytes >= buffer.byte_capacity() as u64);
-    assert!(during.tracked_allocation_bytes <= during.reservable_bytes);
-
-    drop(buffer);
-    assert_eq!(
         device
-            .device_local_memory_accounting()
-            .unwrap()
-            .tracked_allocation_bytes,
-        0,
-    );
-}
-
-#[test]
-fn live_addressable_buffers_are_registered_for_device_fault_attribution() {
-    let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
-        eprintln!("skipping device-fault attribution test: explicit Vulkan device unset");
-        return;
-    };
-    let device = VulkanComputeDevice::new_for_physical_device_index(
-        raw_device_index
-            .parse()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer"),
-    )
-    .expect("explicit idle AMD Vulkan device must open");
-    assert_eq!(
-        device.supports_device_fault_reporting(),
-        device.has_enabled_device_extension("VK_EXT_device_fault")
-    );
-
-    let buffer = device.create_addressable_resident_buffer(4096).unwrap();
-    let address = buffer.device_address().unwrap();
-    let resolved = device
-        .device_address_registry
-        .lock()
-        .unwrap()
-        .resolve(address + 2048)
-        .unwrap();
-    assert_eq!(resolved.byte_offset, 2048);
-    assert_eq!(resolved.byte_capacity, 4096);
-    assert!(resolved.label.contains("device-local addressable buffer"));
-
-    drop(buffer);
-    assert!(
+            .submit_recorded_resident_kernel_sequence_unfenced_with_timeline_semaphores(
+                &sequence,
+                &[],
+                &[],
+            )
+            .unwrap();
         device
-            .device_address_registry
-            .lock()
-            .unwrap()
-            .resolve(address)
-            .is_none()
-    );
+            .submit_resident_buffer_copy_with_timeline_semaphores(
+                &copy,
+                &[],
+                &[VulkanTimelineSemaphorePoint::new(&completion, 1)],
+            )
+            .unwrap();
+        device.wait_timeline_semaphore_value(&completion, 1).unwrap();
+
+        assert_eq!(
+            bytes_to_u32(&destination.read_bytes(12).unwrap()),
+            vec![2, 3, 42]
+        );
+    }
 }

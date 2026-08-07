@@ -1,3 +1,42 @@
+#[derive(Clone, Copy)]
+struct VulkanResidentBufferCopyVisibility {
+    producer_stages: vk::PipelineStageFlags,
+    producer_access: vk::AccessFlags,
+    copy_read_stage: vk::PipelineStageFlags,
+    copy_read_access: vk::AccessFlags,
+    copy_write_stage: vk::PipelineStageFlags,
+    copy_write_access: vk::AccessFlags,
+    consumer_stages: vk::PipelineStageFlags,
+    consumer_access: vk::AccessFlags,
+}
+
+fn resident_buffer_copy_visibility() -> VulkanResidentBufferCopyVisibility {
+    VulkanResidentBufferCopyVisibility {
+        producer_stages: vk::PipelineStageFlags::HOST
+            | vk::PipelineStageFlags::COMPUTE_SHADER
+            | vk::PipelineStageFlags::TRANSFER,
+        producer_access: vk::AccessFlags::HOST_WRITE
+            | vk::AccessFlags::SHADER_WRITE
+            | vk::AccessFlags::TRANSFER_WRITE,
+        copy_read_stage: vk::PipelineStageFlags::TRANSFER,
+        copy_read_access: vk::AccessFlags::TRANSFER_READ,
+        copy_write_stage: vk::PipelineStageFlags::TRANSFER,
+        copy_write_access: vk::AccessFlags::TRANSFER_WRITE,
+        consumer_stages: vk::PipelineStageFlags::HOST
+            | vk::PipelineStageFlags::COMPUTE_SHADER
+            | vk::PipelineStageFlags::TRANSFER
+            | vk::PipelineStageFlags::DRAW_INDIRECT
+            | vk::PipelineStageFlags::CONDITIONAL_RENDERING_EXT,
+        consumer_access: vk::AccessFlags::HOST_READ
+            | vk::AccessFlags::SHADER_READ
+            | vk::AccessFlags::SHADER_WRITE
+            | vk::AccessFlags::TRANSFER_READ
+            | vk::AccessFlags::TRANSFER_WRITE
+            | vk::AccessFlags::INDIRECT_COMMAND_READ
+            | vk::AccessFlags::CONDITIONAL_RENDERING_READ_EXT,
+    }
+}
+
 impl VulkanComputeDevice {
     pub fn create_shared_host_allocation(
         &self,
@@ -1506,6 +1545,29 @@ impl VulkanComputeDevice {
                     0,
                 );
             }
+            // A resident copy is an independently submitted circuit boundary.
+            // Its source can be produced by a shader, a transfer, or the host
+            // in an earlier submission. Queue submission order alone is not a
+            // Vulkan memory dependency, so make those writes visible before
+            // the transfer reads them.
+            let visibility = resident_buffer_copy_visibility();
+            let source_visibility = [vk::BufferMemoryBarrier::default()
+                .src_access_mask(visibility.producer_access)
+                .dst_access_mask(visibility.copy_read_access)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(source.buffer)
+                .offset(0)
+                .size(byte_len)];
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                visibility.producer_stages,
+                visibility.copy_read_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &source_visibility,
+                &[],
+            );
             let copy_regions = [vk::BufferCopy {
                 src_offset: 0,
                 dst_offset: 0,
@@ -1516,6 +1578,27 @@ impl VulkanComputeDevice {
                 source.buffer,
                 destination.buffer,
                 &copy_regions,
+            );
+            // The destination can feed another transfer, a shader, an
+            // indirect/conditional dispatch, or a host read. Publish the copy
+            // to every supported consumer before a completion semaphore can
+            // make the containing submission externally observable.
+            let destination_visibility = [vk::BufferMemoryBarrier::default()
+                .src_access_mask(visibility.copy_write_access)
+                .dst_access_mask(visibility.consumer_access)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(destination.buffer)
+                .offset(0)
+                .size(byte_len)];
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                visibility.copy_write_stage,
+                visibility.consumer_stages,
+                vk::DependencyFlags::empty(),
+                &[],
+                &destination_visibility,
+                &[],
             );
             if let Some(query_pool) = timestamp_query_pool {
                 self.device.cmd_write_timestamp(
