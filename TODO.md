@@ -159,31 +159,43 @@ toward 50 tok/s without regressing supported Qwen models.
      by the untouched truth conversation; DSpark is complete only when it is
      behaviorally correct and wins the selector on measured useful committed
      tokens per second.
-     A fresh complete-conversation warmup followed by the canonical truth
-     conversation measured **8.1878 decode tok/s** and **8.4208 prefill tok/s**,
-     statistically flat against the accepted 8.0350/8.2372 run. The measured
-     1,485-token truth turn exposed the actual scalar path: demand-loaded token
-     execution deliberately bypasses deferred component batching and uses the
-     synchronous stream-tick executor, while demand-loaded packages are
-     categorically excluded from the resident feedback loop. That turn issued
-     27,000 resident-sequence submissions, waited on 28,919 sequence fences,
-     issued 8,260 copy submissions, and waited on 8,474 copies. Ordinary
-     component batches accounted for only 220.477 ms of device time and
-     404.528 ms of calibrated-quantum wall time within 191,078.849 ms of decode.
-     Build a demand-aware resident feedback transaction: record multiple causal
-     ticks with GPU residency gates, stop the graph at the first real miss,
-     materialize only the missing resource cohort, resume from that checkpoint,
-     and otherwise wait only at the emitted-window boundary. It must retain
-     bounded watchdog quanta and exact stop-token, sampler, state, and routed-
-     expert semantics. Do not disguise the synchronous scalar path behind a
-     larger host loop or revive the rejected suffix-retry batch. A rejected
-     whole-window replay experiment resolved one miss and then restarted the
-     complete five-device graph for every subsequent checkpoint. Its first
-     warmup turn performed 5,001 expert loads, 4,880 sequence submissions, and
-     7,709 copy submissions at 1.931 decode tok/s; a later turn left the host in
-     an unbounded DRM sync wait while PCI `0000:21:00.0` reported an MES
-     `WAIT_REG_MEM` failure. True checkpoint resume must continue the causal
-     suffix exactly once; graph replay is both slower and unsafe.
+     The demand-aware resident feedback checkpoint transaction is now implemented.
+     A faulting traversal follows only the causal suffix from each GPU checkpoint,
+     loads the missing cohort without replaying completed lanes, and performs one
+     clean commit traversal from the captured model/sampler baseline after every
+     demanded resource is resident. It does not revive the rejected complete-graph
+     replay after every miss. Vulkan producer/copy/consumer visibility is explicit,
+     and protocol-terminated generation branches now finalize and retain their real
+     event report before transactional state restoration. Exact tests cover causal
+     frontiers, indirect offsets, cross-device predicates, completion visibility,
+     protocol termination, and canonical rollback; real Qwen3.6-35B and Qwen3.5-9B
+     gates remain above their accepted floors.
+
+     The 2026-08-07 authoritative DeepSeek run discarded two complete conversations
+     because the second still loaded resources, then measured the complete third
+     conversation in the same mounted process. It produced coherent thinking-enabled
+     answers with correct Greece/Athens recall at **8.1308 decode tok/s** and
+     **8.2308 prefill tok/s**. The measured set had exactly zero residency misses,
+     loads, reads, uploads, reloads, or evictions, proving steady-state execution—not
+     NVMe paging—is now the limiting path. The first discarded set loaded 132.54 GB;
+     the second loaded another 6.36 GB; the third reused all 1,149,648 selected expert
+     accesses from residency. Teardown acknowledged all five physical devices and
+     preserved the pre-existing PCI `0000:03:00.0` allocation; no discrete-GPU
+     timeout, reset, or page fault occurred.
+
+     The representative 2,224-token steady-state turn exposed the next dominant
+     bottleneck. It spent 292,640.171 ms in decode while measured execution quanta
+     accounted for only 528.660 ms and resident component device work for 263.870 ms.
+     NERVE issued 36,834 resident-sequence submissions, waited on 39,465 sequence
+     fences, issued 31,837 copy submissions, and waited on 10,852 copies. Each of the
+     four cross-device edges also executed 2,242 separate 32-KiB transfers. Replace
+     lane-by-lane host submission with a persistent resident feedback window per
+     physical device: encode causal lane iteration, component segments, and edge
+     copies in GPU-resident indirect command/control state; submit one bounded command
+     stream per device/window; preserve watchdog quanta; and return to the host only
+     for a real residency miss, cancellation, or completed emitted block. Prove exact
+     stop-token, sampler, routed-expert, state-digest, protocol-boundary, and teardown
+     equivalence before promotion.
    - Isolate product Vulkan execution behind supervised per-device worker
      processes. Normal inference fence, timeline, transfer, and quiescence waits
      now poll at the existing 250 ms execution-quantum target, quarantine a
