@@ -24,6 +24,8 @@ unsupported, or skipped.
 - `implementation`: benchmark package name, version, and backend status.
 - `policy`: user-selected run policy, including payload size and exclusions.
 - `discovered_targets`: every target discovered before policy filtering.
+  Targets include `format_capabilities`, which record native, emulated,
+  fallback, unsupported, or unmeasured support per format.
 - `selected_target_ids`: targets selected for this run.
 - `skipped_targets`: discovered targets skipped by explicit policy.
 - `workload_specs`: logical benchmark contracts generated for the selected
@@ -92,3 +94,7 @@ serialized/layer-split/tensor-split semantics executable.
 The schema records exclusions as run policy. It does not encode permanent bans
 for CPU, integrated GPU, discrete GPU, AMD, NVIDIA, Intel, or any other target
 class.
+
+Format capability is not a speed claim. A target can lack native FP4 but still
+win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement
+must use measurements, not support flags alone.

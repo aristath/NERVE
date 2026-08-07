@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::Target;
+use crate::model::{FormatCapability, Target};
 
 pub fn discover_targets() -> Vec<Target> {
     let mut targets = vec![discover_cpu_target()];
@@ -31,6 +31,45 @@ fn discover_cpu_target() -> Target {
             format!("logical_cpus={cpu_count}"),
             "f32".to_string(),
             "u8_copy".to_string(),
+        ],
+        format_capabilities: vec![
+            format_capability(
+                "u8",
+                "native",
+                "cpu_baseline",
+                "byte movement benchmark path",
+            ),
+            format_capability(
+                "f32",
+                "native",
+                "cpu_baseline",
+                "scalar/vector CPU reference path",
+            ),
+            format_capability(
+                "f16",
+                "unmeasured",
+                "not_probed",
+                "requires explicit CPU feature/backend probe",
+            ),
+            format_capability(
+                "bf16",
+                "unmeasured",
+                "not_probed",
+                "requires explicit CPU feature/backend probe",
+            ),
+            format_capability("fp8", "unmeasured", "not_probed", "requires backend probe"),
+            format_capability(
+                "int4",
+                "unmeasured",
+                "not_probed",
+                "requires packed format benchmark",
+            ),
+            format_capability(
+                "fp4",
+                "unmeasured",
+                "not_probed",
+                "requires packed format benchmark",
+            ),
         ],
         diagnostics: Vec::new(),
     }
@@ -113,7 +152,31 @@ fn pci_target(address: &str, path: &Path, class: &str) -> Target {
         numa_node,
         boot_vga,
         capabilities,
+        format_capabilities: passive_pci_format_capabilities(),
         diagnostics: Vec::new(),
+    }
+}
+
+fn passive_pci_format_capabilities() -> Vec<FormatCapability> {
+    ["f32", "f16", "bf16", "fp8", "int4", "fp4"]
+        .iter()
+        .map(|format| {
+            format_capability(
+                format,
+                "unmeasured",
+                "passive_pci_discovery",
+                "backend has not probed this target",
+            )
+        })
+        .collect()
+}
+
+fn format_capability(format: &str, support: &str, source: &str, notes: &str) -> FormatCapability {
+    FormatCapability {
+        format: format.to_string(),
+        support: support.to_string(),
+        source: source.to_string(),
+        notes: notes.to_string(),
     }
 }
 

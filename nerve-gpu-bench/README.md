@@ -38,6 +38,9 @@ Each selected pair also gets a `comparison_sets` entry that lists the concrete
 candidates: left-only, right-only, left-to-right serial, right-to-left serial,
 and pair-parallel.
 
+Targets also report format capabilities separately from measurements. Capability
+flags are only filters; they do not imply a target is fast for that format.
+
 ## Commands
 
 List discovered targets:

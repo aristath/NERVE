@@ -21,7 +21,16 @@ pub struct Target {
     pub numa_node: Option<i64>,
     pub boot_vga: Option<bool>,
     pub capabilities: Vec<String>,
+    pub format_capabilities: Vec<FormatCapability>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormatCapability {
+    pub format: String,
+    pub support: String,
+    pub source: String,
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +283,9 @@ impl BenchmarkRun {
         }
 
         let discovered_ids = strictly_unique_target_ids(&self.discovered_targets)?;
+        for target in &self.discovered_targets {
+            validate_format_capabilities(target)?;
+        }
         for selected_id in &self.selected_target_ids {
             if !discovered_ids.contains(selected_id) {
                 return Err(format!(
@@ -510,9 +522,11 @@ impl BenchmarkRun {
                 &measurement.status,
             );
         }
-        summary.coverage_warnings = coverage_warnings_for_run(self, &strategy_statuses);
+        let candidate_statuses = self.comparison_candidate_statuses();
+        summary.coverage_warnings =
+            coverage_warnings_for_run(self, &strategy_statuses, &candidate_statuses);
         summary.strategy_statuses = strategy_statuses.into_values().collect();
-        summary.candidate_statuses = self.comparison_candidate_statuses();
+        summary.candidate_statuses = candidate_statuses;
         summary
     }
 
@@ -633,6 +647,7 @@ fn increment_strategy_status(
 fn coverage_warnings_for_run(
     run: &BenchmarkRun,
     strategy_statuses: &BTreeMap<(String, String), StrategyStatusSummary>,
+    candidate_statuses: &[ComparisonCandidateStatus],
 ) -> Vec<String> {
     const SMALL_GROUP: &str = "small_payload_placement_comparison";
     let has_small_payload_group = run
@@ -679,6 +694,18 @@ fn coverage_warnings_for_run(
             )),
         }
     }
+    for candidate in candidate_statuses {
+        if candidate.status != "completed" {
+            warnings.push(format!(
+                "comparison candidate {:?} has no completed measurement: strategy={} kind={} status={} matches={}",
+                candidate.candidate_id,
+                candidate.placement_strategy,
+                candidate.measurement_kind,
+                candidate.status,
+                candidate.matched_measurement_count
+            ));
+        }
+    }
     warnings
 }
 
@@ -707,6 +734,34 @@ fn validate_status(status: &str) -> Result<(), String> {
         "completed" | "unmeasured" | "failed" | "unsupported" | "skipped" => Ok(()),
         other => Err(format!("unsupported measurement status {other:?}")),
     }
+}
+
+fn validate_format_capabilities(target: &Target) -> Result<(), String> {
+    let mut formats = BTreeSet::new();
+    for capability in &target.format_capabilities {
+        if capability.format.is_empty() || capability.support.is_empty() {
+            return Err(format!(
+                "target {:?} has malformed format capability",
+                target.stable_target_id
+            ));
+        }
+        if !formats.insert(capability.format.as_str()) {
+            return Err(format!(
+                "target {:?} has duplicate format capability {:?}",
+                target.stable_target_id, capability.format
+            ));
+        }
+        match capability.support.as_str() {
+            "native" | "emulated" | "fallback" | "unsupported" | "unmeasured" => {}
+            other => {
+                return Err(format!(
+                    "target {:?} has unsupported format capability status {other:?}",
+                    target.stable_target_id
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Implementation {
@@ -738,6 +793,7 @@ mod tests {
             numa_node: None,
             boot_vga: None,
             capabilities: vec!["f32".to_string()],
+            format_capabilities: Vec::new(),
             diagnostics: Vec::new(),
         }];
         let document = targets_to_json(&targets).unwrap();
@@ -776,6 +832,7 @@ mod tests {
                 numa_node: None,
                 boot_vga: None,
                 capabilities: Vec::new(),
+                format_capabilities: Vec::new(),
                 diagnostics: Vec::new(),
             }],
             selected_target_ids: vec!["cpu:host".to_string()],
@@ -822,6 +879,7 @@ mod tests {
                 numa_node: None,
                 boot_vga: None,
                 capabilities: Vec::new(),
+                format_capabilities: Vec::new(),
                 diagnostics: Vec::new(),
             }],
             selected_target_ids: vec!["cpu:host".to_string()],
@@ -894,6 +952,7 @@ mod tests {
                     numa_node: None,
                     boot_vga: None,
                     capabilities: Vec::new(),
+                    format_capabilities: Vec::new(),
                     diagnostics: Vec::new(),
                 },
                 Target {
@@ -909,6 +968,7 @@ mod tests {
                     numa_node: None,
                     boot_vga: None,
                     capabilities: Vec::new(),
+                    format_capabilities: Vec::new(),
                     diagnostics: Vec::new(),
                 },
             ],
@@ -1016,6 +1076,12 @@ mod tests {
         assert_eq!(summary.candidate_statuses.len(), 2);
         assert_eq!(summary.candidate_statuses[0].status, "completed");
         assert_eq!(summary.candidate_statuses[1].status, "missing");
+        assert!(
+            summary
+                .coverage_warnings
+                .iter()
+                .any(|warning| warning.contains("cmp:parallel"))
+        );
     }
 }
 
@@ -1034,6 +1100,7 @@ fn test_target(id: &str) -> Target {
         numa_node: None,
         boot_vga: None,
         capabilities: Vec::new(),
+        format_capabilities: Vec::new(),
         diagnostics: Vec::new(),
     }
 }
