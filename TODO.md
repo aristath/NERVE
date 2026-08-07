@@ -207,73 +207,150 @@ toward 50 tok/s without regressing supported Qwen models.
      `0000:03:00.0` allocation, and produced no discrete-GPU timeout, reset, or
      page fault.
 
-     The representative 2,224-token steady-state turn remains the next dominant
-     bottleneck. The corrected truth run spent 292,793.624 ms in decode while
-     measured execution quanta accounted for only 517.488 ms. NERVE issued 36,834
-     resident-sequence submissions, waited on 39,465 sequence fences, issued 31,726
-     copy submissions, and waited on 10,704 copies. Each of the
-     four cross-device edges also executed 2,242 separate 32-KiB transfers. Replace
-     lane-by-lane host submission with a persistent resident feedback window per
-     physical device: encode causal lane iteration, component segments, and edge
-     copies in GPU-resident indirect command/control state; submit one bounded command
-     stream per device/window; preserve watchdog quanta; and return to the host only
-     for a real residency miss, cancellation, or completed emitted block. Prove exact
-     stop-token, sampler, routed-expert, state-digest, protocol-boundary, and teardown
-     equivalence before promotion.
+     The representative 2,224-token steady-state turn defines the orchestration
+     baseline. It spent 292,793.624 ms in decode, or 131.652 ms per token, while
+     the currently instrumented execution quanta accounted for only 517.488 ms.
+     NERVE prepared 44,727 resident sequences, recorded 23,679 command buffers,
+     issued 36,834 sequence submissions and 31,726 copy submissions, waited on
+     39,465 sequence fences and 10,704 copies, and made 2,631 additional queue
+     batch submissions. That is approximately 32 queue submissions and 22.6
+     waits per generated token. Each of the four cross-device edges also made
+     2,242 separately synchronized 32-KiB transfers. The zero-miss truth set
+     proves this is the steady-state execution path, not paging.
 
-     Do not mistake command-buffer recording for that persistent stream. A rejected
-     demand-template experiment replayed every completed feedback window and reused
-     8,234 of 8,452 resident sequence command buffers, yet a 124-token DeepSeek turn
-     fell to **1.205 decode tok/s**. It still issued 7,976 queue batches, 6,238 copy
-     submissions, and 8,828 copy waits. Reusing the same fragmented submission graph
-     is therefore not the solution. The next candidate must change the submission
-     topology itself: one bounded device-owned transaction must carry routing,
-     demand predicates, expert execution, cross-device edges, sampling, and the
-     attached DSpark proposal/verification/commit loop. Host-visible checkpoints
-     remain only for a true residency fault, cancellation, watchdog progress, or a
-     completed emitted block.
-   - Isolate product Vulkan execution behind supervised per-device worker
-     processes. Normal inference fence, timeline, transfer, and quiescence waits
-     now poll at the existing 250 ms execution-quantum target, quarantine a
-     device after four quanta with no observable progress, retain the first
-     failure, and never revive it through the DRM activity lease. This bounds
-     the coordinator's wait, but an in-process driver fault can still leave
-     Vulkan objects in flight. The coordinator must be able to terminate only
-     the poisoned worker context without unwinding live GPU objects, keep other
-     component workers and the UI responsive, and report the exact device and
-     last completed checkpoint. Validation/optimizer executors already provide
-     process boundaries; generalize that mechanism instead of inventing a
-     second model-specific recovery path.
-   - Optimize the independently material MXFP4 expert path. Retain the source's
-     packed 4-bit payload, amortize or fuse unpacking and activation conversion,
-     and benchmark exact native MXFP4, dense/structured INT4, FP8, and INT8
-     alternatives on each actual target device. Include resident footprint and
-     reload traffic in promotion evidence, not kernel time alone. Direct integer
-     E2M1-to-E4M3 remapping is now exact and materially improves the scalar
-     kernel without expanding expert residency; retain it. The remaining work is
-     device-local alternative measurement and whole-working-set promotion, not
-     another inline scalar reconstruction variant.
-   - Add device timestamps around routing, residency, expert projection,
-     speculative target verification, queue submission, and host synchronization
-     so remaining kernel and orchestration costs are separable after churn is
-     removed. Reduce the current tens of thousands of copy submissions and
-     waits without weakening bounded execution quanta or driver-timeout safety.
-     The scalar real-geometry microbenchmark now measures 0.72736 ms of device
-     work but 5.58972 ms through individually submitted host calls, a 7.69x
-     host/device gap. A representative 1,597-token truth turn recorded 28,167
-     sequence submits, 30,163 fence waits, 8,944 copy submits, and 9,313 copy
-     waits. Collapse cached-hit execution into ordered per-device component
-     segments with timeline synchronization only at real segment boundaries;
-     host waits must remain limited to residency misses, bounded watchdog
-     quanta, and completed emitted blocks.
-   - Complete repeated-process determinism before accepting throughput changes.
-     Scalar and temporal radix/top-k now have deterministic cutoff-tie ordering,
-     score-descending output, compiler bounds, and numeric Vulkan coverage.
-     Audit the remaining sampler RNG consumption, accepted-prefix commit,
-     rollback, reset state, and expert-selection state. Require equality for
-     committed tokens, routed experts, accepted prefixes, and state digests,
-     and measure whether the current 512-entry bitonic ordering costs more than
-     a deterministic radix-prefix implementation would.
+     Do not mistake command-buffer caching for the required solution. A rejected
+     demand-template experiment reused 8,234 of 8,452 command buffers but fell
+     to **1.205 decode tok/s** because it preserved the fragmented submission
+     topology. The implementation must change who advances the stream and where
+     synchronization occurs, not merely replay the same host-driven calls.
+
+   - **3.a Account for the complete critical path.** Add low-overhead host spans
+     and Vulkan timestamps around scheduler/control work, command preparation and
+     recording, queue submission, fence/timeline waits, routing, residency gates,
+     expert gate/up/down projection, attention/index selection, cross-device
+     copies, output projection, sampling, speculative verification, and state
+     commit. Keep aggregate counters and timings enabled during normal chats;
+     do not introduce a special profiling execution path. Attribute at least 95%
+     of wall-clock critical-path time without double-counting overlapped GPU work,
+     report per-token and per-window totals, and prove the instrumentation itself
+     causes no material throughput or quality regression. The current 517.488 ms
+     quantum figure is explicitly incomplete and must not be interpreted as the
+     model's complete GPU time.
+
+   - **3.b Compile a persistent per-device stream transaction.** Turn each ordered
+     physical-device component segment into a stable, bounded command topology.
+     Put stream ticks, token IDs, dispatch dimensions, router results, expert
+     addresses, sampler state, stop/cancel flags, causal frontiers, and commit
+     records in GPU-resident control buffers consumed through indirect dispatch
+     and predicates. Submit one bounded stream window per device and watchdog
+     quantum rather than one call per component or token. A normal completed
+     window must return to the host only for emitted output, cancellation,
+     watchdog progress, or teardown. Command buffers may be re-recorded when the
+     compiled topology changes, but normal token values, context growth, expert
+     choices, and address-table updates must not force re-recording. Prove that
+     zero-miss queue submissions scale with physical devices and windows, not
+     with tokens, layers, selected experts, or graph nodes.
+
+   - **3.c Make a resident hit a completely device-owned operation.** Keep the
+     selector-to-resource address table and validity/version metadata resident.
+     A residency gate whose selected addresses are valid must continue directly
+     into expert execution without a host fence, notification read, or round trip
+     through a host execution epoch. Only a real miss may publish an immutable fault record and
+     stop at the exact causal checkpoint. The host then loads or derives the
+     missing cohort, updates the address table, acknowledges the fault, and resumes
+     only the uncommitted suffix. Cover all-hit windows, one and multiple disjoint
+     misses, eviction between windows, address-version changes, repeated-fault
+     rejection, cancellation during a fault, rollback, and exact teardown. The
+     all-hit and miss/resume paths must produce identical committed tokens,
+     routed experts, sampler state, and state digests from the same checkpoint.
+
+   - **3.d Make cross-device cables part of the compiled transaction.** Represent
+     every physical-device visit as an ordered segment, including graphs that
+     revisit a device such as `gpu0 -> gpu1 -> gpu0`. Use persistent ping-pong or
+     ring activation buffers and timeline semaphores; enqueue source copies,
+     destination staging when peer access is unavailable, and the consumer segment
+     as one dependency chain. A 32-KiB edge must not cause a host wait. Select
+     direct peer transfer or staged transfer from measured device capabilities,
+     keep contiguous layer/component placement by default, and retain arbitrary
+     user wiring. First optimize single-stream latency; only then pipeline different
+     streams across otherwise idle device segments to improve aggregate throughput.
+     Never substitute tensor parallelism for this layer/component pipeline on this
+     workstation.
+
+   - **3.e Fuse and specialize the sparse-MoE hot path after 3.b-3.d.** Keep router
+     top-k, address validation, the selected expert gate/up/down work, and weighted
+     reduction inside the same transaction. Benchmark grouped/fused expert dispatch
+     against separate dispatches using the real six-expert geometry. Retain packed
+     MXFP4/INT4 through consumption, amortize conversion, and test native MXFP4,
+     dense or exactly valid structured INT4, FP8, and INT8 implementations on the
+     assigned device. Structured sparsity is eligible only when the source already
+     satisfies the required structure or a behaviorally validated transformation
+     preserves quality; hardware capability alone is not permission to prune or
+     reinterpret weights. Promotion evidence must include end-to-end throughput,
+     footprint, reload traffic, and headroom, not kernel time alone. Retain the
+     exact E2M1-to-E4M3 remap, but do not spend another milestone on an isolated
+     unpacking variant before orchestration is removed.
+
+   - **3.f Make temporal prefill a real multi-token device transaction.** Execute
+     prompt blocks through the same resident gates, ordered device segments,
+     transfers, attention state updates, and terminal completion without a host
+     loop per token. Select block width from context geometry, available transient
+     state, residency headroom, and measured hardware behavior. Verify every token's
+     causal state against scalar prefill, and measure time-to-first-token separately
+     from decode. The current **8.3570 prefill tok/s** truth result is not acceptable
+     for agentic workloads with large prompts.
+
+   - **3.g Rebuild attached DSpark execution on the persistent transaction.** After
+     scalar execution no longer returns to the host inside a resident window, fuse
+     proposal, target verification, confidence/prefix comparison, accepted-state
+     selection, canonical commit or rollback, and draft catch-up into one
+     device-owned transaction. Preserve the trained five-token minimum geometry
+     and the package's legal seven-token recommendation. Compare scalar, resident,
+     width-five, and width-seven modes using useful committed tokens per complete cycle;
+     include all target work, transfer, rollback, and catch-up time. The current
+     33.33% acceptance with 2.853 and 0.967 useful tok/s is a rejected baseline,
+     not a reason to force speculation. Promote DSpark only after exact proposal,
+     accepted-prefix, sampler, routed-expert, and committed-state equivalence and
+     only when it wins normal chat automatically.
+
+   - **3.h Optimize long-context attention and deterministic selection after the
+     orchestration milestones.** Use the new timers to isolate local attention,
+     compressed-memory indexing, score generation, and the 512-entry top-k. Evaluate
+     fused score-and-select, deterministic radix-prefix, blockwise/hierarchical
+     selection, and avoidance of full-score materialization. Preserve exact
+     cutoff-tie ordering and score-descending output. Benchmark at progressively larger
+     real contexts because the steady turn already declines from 8.527 to 7.118
+     tok/s between its first and fourth sustained-decode windows; optimize the
+     growing component rather than hiding it with a short context.
+
+   - **3.i Preserve bounded failure handling without putting it on the hot path.**
+     Isolate Vulkan execution behind supervised per-device worker processes, but
+     send complete stream transactions across that boundary rather than component
+     calls. Retain the 250 ms watchdog quantum, quarantine a device after four
+     quanta without observable progress, preserve the first failure, and never
+     revive it through the DRM activity lease. The coordinator must be able to
+     terminate only the poisoned worker, keep the other device workers and UI
+     responsive, and report the device and last completed causal checkpoint.
+     Generalize the existing optimizer/validation worker mechanism; do not create
+     a model-specific recovery path or add per-token IPC.
+
+   - **3.j Gate and promote every milestone with product behavior.** Before each
+     performance commit, run tests sequentially and then run the complete DeepSeek,
+     Qwen3.6-35B-A3B, and Qwen3.5-9B quality/performance gates on equivalent allowed
+     AMD placement. DeepSeek truth begins only after a complete conversation has
+     zero residency loads; discard another complete conversation when necessary.
+     Use 128K context, the 65,536-token output allowance, package-owned thinking and
+     sampling behavior, the established short five-turn conversation, turn recall,
+     structured/tool protocol checks, malformed-output rollback, long-stream
+     continuity, and exact teardown. Record per-token critical-path time, queue
+     submissions, waits, command recordings, edge transfers, useful speculative
+     tokens, and prefill/decode rates. Reject any change that wins a microbenchmark
+     but does not improve the full resident conversation, changes committed behavior,
+     regresses Qwen materially, violates placement rules, or fails to restore every
+     pre-workload VRAM reservation. Reach **30 decode tok/s**, continue toward 50,
+     and keep iterating until the attributed critical path contains no material
+     avoidable host round trip, GPU bubble, representation conversion, or unfused
+     memory pass.
 
 4. Complete heterogeneous cost-based auto-placement. The runtime now admits
    demand-paged models against fixed residency plus one full selector wave,
@@ -294,15 +371,6 @@ toward 50 tok/s without regressing supported Qwen models.
    measured execution and transfer costs rather than model or vendor names, so
    a model that exhausts the AMD group can continue contiguously onto a
    compatible discrete Intel GPU or CPU without recompilation.
-
-   Make temporal and speculative batch execution device-segment aware. A valid
-   component path may revisit one physical device after traversing others, but
-   the current one-slice-per-device batch runner cannot distinguish the early
-   and late segments and fails only after scalar decoding begins. Represent and
-   execute ordered component segments, add a regression graph such as
-   `gpu0 -> gpu1 -> gpu0`, and preserve batched verification without silently
-   disabling speculation. Until that is complete, product performance gates
-   must use a non-revisiting contiguous device pipeline.
 
 5. Before every runtime-performance commit, run Qwen3.6-35B-A3B and Qwen3.5-9B
    quality/performance gates sequentially on equivalent healthy AMD placement.
