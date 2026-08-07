@@ -242,6 +242,7 @@ struct VulkanPlacedSubmissionContext<'a, 'batch> {
     state_transactions: Option<&'a [VulkanResidentStateTransactionBank]>,
     feedback_turn: Option<VulkanPlacedFeedbackTimelineTurn<'a>>,
     output_turn: Option<VulkanPlacedOutputTimelineTurn<'a>>,
+    demand_resume: Option<&'a VulkanPlacedDemandFeedbackTickResume>,
     submission_batch: Option<&'batch VulkanResidentQueueSubmissionBatch<'a>>,
 }
 
@@ -252,6 +253,7 @@ impl VulkanPlacedSubmissionContext<'_, '_> {
         state_transactions: None,
         feedback_turn: None,
         output_turn: None,
+        demand_resume: None,
         submission_batch: None,
     };
 }
@@ -262,5 +264,6 @@ struct VulkanPlacedSliceSubmissionContext<'a, 'batch> {
     state_transaction: Option<&'a VulkanResidentStateTransactionBank>,
     feedback_turn: Option<VulkanPlacedFeedbackTimelineTurn<'a>>,
     output_turn: Option<VulkanPlacedOutputTimelineTurn<'a>>,
+    demand_resume: Option<(usize, usize)>,
     submission_batch: Option<&'batch VulkanResidentQueueSubmissionBatch<'a>>,
 }

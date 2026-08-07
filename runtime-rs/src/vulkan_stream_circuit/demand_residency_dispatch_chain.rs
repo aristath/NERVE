@@ -427,6 +427,50 @@ impl VulkanDemandResidencySegment {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn enqueue_feedback_resume<'a>(
+        &self,
+        device: &'a VulkanComputeDevice,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        control: VulkanMountedPlacedStreamControl,
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
+        sequence_variant: u8,
+        feedback_lane: usize,
+        gate_index: usize,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_completion: bool,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+    ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        let chain_key = (
+            sequence_variant,
+            VulkanDemandResidencyChainLane::Feedback(feedback_lane),
+        );
+        self.chains
+            .borrow()
+            .get(&chain_key)
+            .ok_or_else(|| {
+                demand_dispatch_error(format!(
+                    "resident feedback demand lane {feedback_lane} was not preallocated before checkpoint resume"
+                ))
+            })?
+            .enqueue_feedback_resume(
+                device,
+                dispatches,
+                control,
+                prefix_dispatches,
+                suffix_dispatches,
+                feedback_indirect,
+                gate_index,
+                wait_points,
+                signal_points,
+                signal_completion,
+                submission_batch,
+            )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn prepare_feedback_chains(
         &self,
         device: &VulkanComputeDevice,
@@ -486,7 +530,7 @@ impl VulkanDemandResidencySegment {
         device: &VulkanComputeDevice,
         sequence_variant: u8,
         feedback_lane: usize,
-    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+    ) -> Result<Option<usize>, VulkanMountedPlacedResidentKernelDispatchError> {
         self.chains
             .borrow()
             .get(&(
@@ -867,6 +911,46 @@ impl VulkanDemandResidencyDispatchChain {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_feedback_resume<'a>(
+        &self,
+        device: &'a VulkanComputeDevice,
+        dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+        control: VulkanMountedPlacedStreamControl,
+        prefix_dispatches: &[&VulkanResidentKernelDispatch],
+        suffix_dispatches: &[&VulkanResidentKernelDispatch],
+        feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
+        gate_index: usize,
+        wait_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_points: &[VulkanTimelineSemaphorePoint<'_>],
+        signal_completion: bool,
+        submission_batch: &VulkanResidentQueueSubmissionBatch<'a>,
+    ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        self.continuation_enabled.set(true);
+        self.with_prepared_steps(
+            Some(gate_index),
+            dispatches,
+            control,
+            prefix_dispatches,
+            suffix_dispatches,
+            Some(feedback_indirect),
+            |sequence, steps| {
+                device
+                    .record_resident_kernel_sequence(sequence, steps)
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                submission_batch
+                    .enqueue_recorded_sequence(
+                        device,
+                        sequence,
+                        wait_points,
+                        signal_points,
+                        signal_completion,
+                    )
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+            },
+        )
+    }
+
     fn has_pending_miss(
         &self,
     ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
@@ -880,9 +964,9 @@ impl VulkanDemandResidencyDispatchChain {
         &self,
         device: &VulkanComputeDevice,
         context: &VulkanDemandResidencyExecutionContext,
-    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+    ) -> Result<Option<usize>, VulkanMountedPlacedResidentKernelDispatchError> {
         if !self.has_pending_miss()? {
-            return Ok(false);
+            return Ok(None);
         }
         self.continuation_enabled.set(false);
         let missing = self
@@ -912,15 +996,16 @@ impl VulkanDemandResidencyDispatchChain {
         let checkpoint_tag = *checkpoint_tags
             .first()
             .expect("one feedback checkpoint tag was validated");
-        let gate = self
+        let gate_index = self
             .gates
             .iter()
-            .find(|gate| gate.checkpoint_tag == checkpoint_tag)
+            .position(|gate| gate.checkpoint_tag == checkpoint_tag)
             .ok_or_else(|| {
                 demand_dispatch_error(format!(
                     "GPU feedback residency miss references unknown checkpoint tag {checkpoint_tag}"
                 ))
             })?;
+        let gate = &self.gates[gate_index];
         context
             .store
             .record_gpu_gate_misses(&gate.selector_id, missing.requests.len())
@@ -964,7 +1049,7 @@ impl VulkanDemandResidencyDispatchChain {
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         self.observed_notification_epoch
             .set(missing.notification_epoch);
-        Ok(true)
+        Ok(Some(gate_index))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1105,7 +1190,16 @@ impl VulkanDemandResidencyDispatchChain {
             resume_gate_index.is_some(),
         )?;
         let mut steps = Vec::with_capacity(self.commands.len() - start_command_index);
-        let mut feedback_dispatch_index = 0usize;
+        let mut feedback_dispatch_index = feedback_indirect
+            .map(|indirect| {
+                demand_feedback_indirect_command_range(
+                    indirect.byte_offsets.len(),
+                    start_command_index,
+                )
+                .map(|range| range.start)
+            })
+            .transpose()?
+            .unwrap_or(0);
         for (command_index, command) in self
             .commands
             .iter()
@@ -1216,6 +1310,18 @@ impl VulkanDemandResidencyDispatchChain {
     }
 }
 
+fn demand_feedback_indirect_command_range(
+    command_count: usize,
+    start_command_index: usize,
+) -> Result<std::ops::Range<usize>, VulkanMountedPlacedResidentKernelDispatchError> {
+    if start_command_index >= command_count {
+        return Err(demand_dispatch_error(format!(
+            "demand feedback indirect start {start_command_index} is outside its {command_count}-command sequence"
+        )));
+    }
+    Ok(start_command_index..command_count)
+}
+
 fn demand_dispatch_conditional_regions(
     commands: &[VulkanDemandResidencyCommand],
     start_command_index: usize,
@@ -1245,11 +1351,16 @@ fn demand_dispatch_conditional_regions(
     })?;
     let mut region_id = 1u32;
     let mut previous_was_conditional_gate = false;
+    let mut resumed_span_reached_next_gate = false;
     let mut regions = Vec::with_capacity(commands.len());
     for (offset, command) in commands.iter().copied().enumerate() {
         let command_index = start_command_index + offset;
-        let conditional = command_index > direct_gate_command_index
-            || (shared_pipeline_guard && !resuming && command_index <= direct_gate_command_index);
+        let conditional = if resuming {
+            resumed_span_reached_next_gate
+        } else {
+            command_index > direct_gate_command_index
+                || (shared_pipeline_guard && command_index <= direct_gate_command_index)
+        };
         if conditional && previous_was_conditional_gate {
             region_id = region_id.checked_add(1).ok_or_else(|| {
                 demand_dispatch_error("demand conditional region count exceeds u32")
@@ -1258,6 +1369,17 @@ fn demand_dispatch_conditional_regions(
         regions.push(conditional.then_some(region_id));
         previous_was_conditional_gate = conditional
             && matches!(command, VulkanDemandResidencyCommand::Gate(_));
+        if resuming
+            && command_index > direct_gate_command_index
+            && matches!(command, VulkanDemandResidencyCommand::Gate(_))
+        {
+            // The host loaded and pinned the direct checkpoint before this
+            // sequence was submitted. Its selected work and the next gate are
+            // therefore safe to execute without consulting the stale shared
+            // predicate left by the miss. That next gate becomes the new
+            // conditional boundary for all later work.
+            resumed_span_reached_next_gate = true;
+        }
     }
     Ok(regions)
 }

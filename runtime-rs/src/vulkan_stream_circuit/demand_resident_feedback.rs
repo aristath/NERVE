@@ -1,6 +1,323 @@
 struct VulkanResidentDemandFeedbackState {
     predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
     state_transactions: Vec<VulkanResidentStateTransactionBank>,
+    checkpoint_count_per_tick: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VulkanDemandFeedbackCheckpoint {
+    feedback_lane: usize,
+    slice_index: usize,
+    segment_index: usize,
+    gate_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanPlacedDemandFeedbackTickResume {
+    feedback_lane: usize,
+    schedule_start_turn_index: usize,
+    next_stage_indices: Vec<usize>,
+    target_slice_index: usize,
+    target_segment_start_stage_index: usize,
+    gate_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanDemandFeedbackResumePlan {
+    schedule_start_turn_index: usize,
+    next_stage_indices: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanDemandFeedbackAttemptCompletion {
+    Commit,
+    RestoreBaselineAndReplay,
+}
+
+fn demand_feedback_attempt_completion(
+    resolved_checkpoint_since_baseline: bool,
+) -> VulkanDemandFeedbackAttemptCompletion {
+    if resolved_checkpoint_since_baseline {
+        VulkanDemandFeedbackAttemptCompletion::RestoreBaselineAndReplay
+    } else {
+        VulkanDemandFeedbackAttemptCompletion::Commit
+    }
+}
+
+struct VulkanDemandFeedbackStageTopology {
+    node_offsets: Vec<usize>,
+    outgoing: Vec<Vec<usize>>,
+    incoming: Vec<Vec<usize>>,
+}
+
+impl VulkanDemandFeedbackStageTopology {
+    fn from_tick_plans(
+        tick_plans: &[&VulkanMountedPlacedStreamTickPlan],
+    ) -> Result<Self, VulkanError> {
+        let mut node_offsets = Vec::with_capacity(tick_plans.len());
+        let mut node_count = 0usize;
+        for plan in tick_plans {
+            node_offsets.push(node_count);
+            node_count = node_count.checked_add(plan.stages.len()).ok_or_else(|| {
+                VulkanError("demand feedback stage topology overflowed".to_string())
+            })?;
+        }
+        let mut outgoing = vec![Vec::new(); node_count];
+        let mut incoming = vec![Vec::new(); node_count];
+        let mut publishes = BTreeMap::<(usize, String, String), usize>::new();
+        let mut receives = BTreeMap::<(usize, String, String), usize>::new();
+        for (device_index, plan) in tick_plans.iter().enumerate() {
+            for (stage_index, stage) in plan.stages.iter().enumerate() {
+                let node = node_offsets[device_index] + stage_index;
+                if stage_index > 0 {
+                    Self::add_edge(node - 1, node, &mut outgoing, &mut incoming);
+                }
+                match stage {
+                    VulkanMountedPlacedStreamTickStage::PublishEdge {
+                        edge_index,
+                        remote_device_id,
+                        ..
+                    } => {
+                        let key = (
+                            *edge_index,
+                            plan.device_id.clone(),
+                            remote_device_id.clone(),
+                        );
+                        if publishes.insert(key.clone(), node).is_some() {
+                            return Err(VulkanError(format!(
+                                "demand feedback topology repeats published edge {key:?}"
+                            )));
+                        }
+                    }
+                    VulkanMountedPlacedStreamTickStage::ReceiveEdge {
+                        edge_index,
+                        remote_device_id,
+                        ..
+                    } => {
+                        let key = (
+                            *edge_index,
+                            remote_device_id.clone(),
+                            plan.device_id.clone(),
+                        );
+                        if receives.insert(key.clone(), node).is_some() {
+                            return Err(VulkanError(format!(
+                                "demand feedback topology repeats received edge {key:?}"
+                            )));
+                        }
+                    }
+                    VulkanMountedPlacedStreamTickStage::Dispatch { .. } => {}
+                }
+            }
+        }
+        if publishes.keys().collect::<Vec<_>>() != receives.keys().collect::<Vec<_>>() {
+            return Err(VulkanError(
+                "demand feedback topology has unmatched placed edges".to_string(),
+            ));
+        }
+        for (key, source) in publishes {
+            let destination = receives
+                .get(&key)
+                .copied()
+                .expect("matching placed receive edge was validated");
+            Self::add_edge(source, destination, &mut outgoing, &mut incoming);
+        }
+        Ok(Self {
+            node_offsets,
+            outgoing,
+            incoming,
+        })
+    }
+
+    fn add_edge(
+        source: usize,
+        destination: usize,
+        outgoing: &mut [Vec<usize>],
+        incoming: &mut [Vec<usize>],
+    ) {
+        if !outgoing[source].contains(&destination) {
+            outgoing[source].push(destination);
+            incoming[destination].push(source);
+        }
+    }
+
+    fn node(&self, device_index: usize, stage_index: usize) -> Result<usize, VulkanError> {
+        let start = self.node_offsets.get(device_index).copied().ok_or_else(|| {
+            VulkanError(format!(
+                "demand feedback resume device {device_index} is out of bounds"
+            ))
+        })?;
+        let end = self
+            .node_offsets
+            .get(device_index + 1)
+            .copied()
+            .unwrap_or(self.outgoing.len());
+        let node = start.checked_add(stage_index).ok_or_else(|| {
+            VulkanError("demand feedback resume stage overflowed".to_string())
+        })?;
+        if node >= end {
+            return Err(VulkanError(format!(
+                "demand feedback resume stage {stage_index} is out of bounds for device {device_index}"
+            )));
+        }
+        Ok(node)
+    }
+
+    fn is_total_ordered(&self) -> bool {
+        let mut indegree = self.incoming.iter().map(Vec::len).collect::<Vec<_>>();
+        let mut ready = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(node, degree)| (*degree == 0).then_some(node))
+            .collect::<BTreeSet<_>>();
+        let mut visited = 0usize;
+        while let Some(node) = ready.pop_first() {
+            if !ready.is_empty() {
+                return false;
+            }
+            visited += 1;
+            for destination in &self.outgoing[node] {
+                indegree[*destination] -= 1;
+                if indegree[*destination] == 0 {
+                    ready.insert(*destination);
+                }
+            }
+        }
+        visited == self.outgoing.len()
+    }
+
+    fn ancestors(&self, node: usize) -> BTreeSet<usize> {
+        let mut ancestors = BTreeSet::new();
+        let mut pending = self.incoming[node].clone();
+        while let Some(parent) = pending.pop() {
+            if ancestors.insert(parent) {
+                pending.extend(self.incoming[parent].iter().copied());
+            }
+        }
+        ancestors
+    }
+}
+
+fn demand_feedback_resume_plan(
+    tick_plans: &[&VulkanMountedPlacedStreamTickPlan],
+    target_device_index: usize,
+    target_stage_index: usize,
+) -> Result<VulkanDemandFeedbackResumePlan, VulkanError> {
+    let topology = VulkanDemandFeedbackStageTopology::from_tick_plans(tick_plans)?;
+    if !topology.is_total_ordered() {
+        return Err(VulkanError(
+            "demand feedback checkpoint has an independent parallel branch without explicit GPU progress markers"
+                .to_string(),
+        ));
+    }
+    let target = topology.node(target_device_index, target_stage_index)?;
+    if !matches!(
+        tick_plans[target_device_index].stages[target_stage_index],
+        VulkanMountedPlacedStreamTickStage::Dispatch { .. }
+    ) {
+        return Err(VulkanError(
+            "demand feedback checkpoint resume must start at a dispatch segment".to_string(),
+        ));
+    }
+    let ancestors = topology.ancestors(target);
+    let next_stage_indices = tick_plans
+        .iter()
+        .enumerate()
+        .map(|(device_index, plan)| {
+            let start = topology.node_offsets[device_index];
+            plan.stages
+                .iter()
+                .enumerate()
+                .take_while(|(stage_index, _)| ancestors.contains(&(start + stage_index)))
+                .count()
+        })
+        .collect::<Vec<_>>();
+    if next_stage_indices[target_device_index] != target_stage_index {
+        return Err(VulkanError(
+            "demand feedback checkpoint does not follow a contiguous causal prefix".to_string(),
+        ));
+    }
+    let schedule_start_turn_index = demand_feedback_resume_turn_index(
+        tick_plans,
+        target_device_index,
+        target_stage_index,
+    )?;
+    Ok(VulkanDemandFeedbackResumePlan {
+        schedule_start_turn_index,
+        next_stage_indices,
+    })
+}
+
+fn demand_feedback_resume_turn_index(
+    tick_plans: &[&VulkanMountedPlacedStreamTickPlan],
+    target_device_index: usize,
+    target_stage_index: usize,
+) -> Result<usize, VulkanError> {
+    let mut next_stage_indices = vec![0usize; tick_plans.len()];
+    let mut ready_edges = BTreeSet::<VulkanPlacedEdgePacketKey>::new();
+    let mut turn_index = 0usize;
+    loop {
+        let mut progressed = false;
+        for (device_index, plan) in tick_plans.iter().enumerate() {
+            while next_stage_indices[device_index] < plan.stages.len() {
+                if device_index == target_device_index
+                    && next_stage_indices[device_index] == target_stage_index
+                {
+                    return Ok(turn_index);
+                }
+                match &plan.stages[next_stage_indices[device_index]] {
+                    VulkanMountedPlacedStreamTickStage::ReceiveEdge {
+                        edge_index,
+                        remote_device_id,
+                        ..
+                    } => {
+                        let key = VulkanPlacedEdgePacketKey {
+                            edge_index: *edge_index,
+                            from_device_id: remote_device_id.clone(),
+                            to_device_id: plan.device_id.clone(),
+                        };
+                        if !ready_edges.remove(&key) {
+                            break;
+                        }
+                    }
+                    VulkanMountedPlacedStreamTickStage::PublishEdge {
+                        edge_index,
+                        remote_device_id,
+                        ..
+                    } => {
+                        ready_edges.insert(VulkanPlacedEdgePacketKey {
+                            edge_index: *edge_index,
+                            from_device_id: plan.device_id.clone(),
+                            to_device_id: remote_device_id.clone(),
+                        });
+                    }
+                    VulkanMountedPlacedStreamTickStage::Dispatch { .. } => {}
+                }
+                next_stage_indices[device_index] += 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            return Err(VulkanError(
+                "demand feedback resume target is unreachable in the placed activation topology"
+                    .to_string(),
+            ));
+        }
+        turn_index = turn_index.checked_add(1).ok_or_else(|| {
+            VulkanError("demand feedback resume turn index overflowed".to_string())
+        })?;
+    }
+}
+
+fn demand_feedback_continuation_lanes(
+    tick_count: usize,
+    resume_lane: usize,
+) -> Result<std::ops::Range<usize>, VulkanError> {
+    if tick_count == 0 || resume_lane >= tick_count {
+        return Err(VulkanError(format!(
+            "demand feedback resume lane {resume_lane} exceeds window width {tick_count}"
+        )));
+    }
+    Ok(resume_lane..tick_count)
 }
 
 fn create_demand_feedback_pipeline_predicates<'a, F, E>(
@@ -147,11 +464,27 @@ impl VulkanResidentDemandFeedbackState {
         Ok(Self {
             predicates_by_device,
             state_transactions,
+            checkpoint_count_per_tick,
         })
     }
 
     fn reset_pipeline_predicate(&self) -> Result<(), VulkanError> {
         write_shared_device_predicate_views(self.predicates_by_device.values(), true)
+    }
+
+    fn pipeline_predicate_diagnostic(&self) -> Result<BTreeMap<String, u32>, VulkanError> {
+        self.predicates_by_device
+            .iter()
+            .map(|(device_id, predicate)| {
+                let bytes = predicate.read_bytes(size_of::<u32>())?;
+                let value = u32::from_le_bytes(bytes.try_into().map_err(|_| {
+                    VulkanError(format!(
+                        "demand feedback predicate on {device_id:?} did not contain one u32"
+                    ))
+                })?);
+                Ok((device_id.clone(), value))
+            })
+            .collect()
     }
 
     fn capture_window_baseline(
@@ -233,7 +566,8 @@ impl VulkanResidentDemandFeedbackState {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         tick_count: usize,
         sequence_variant: u8,
-    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+    ) -> Result<Option<VulkanDemandFeedbackCheckpoint>, VulkanResidentInProcessPlacedRuntimeError>
+    {
         let mut pending = Vec::new();
         for feedback_lane in 0..tick_count {
             for (slice_index, slice) in device_slices.iter().enumerate() {
@@ -261,7 +595,7 @@ impl VulkanResidentDemandFeedbackState {
             unique_pending_demand_feedback_checkpoint(&pending)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let slice = &device_slices[slice_index];
         let device = devices.get(&slice.device_id).ok_or_else(|| {
@@ -273,9 +607,20 @@ impl VulkanResidentDemandFeedbackState {
             .demand_residency
             .as_ref()
             .expect("pending demand feedback segment remains mounted");
-        demand
+        let gate_index = demand
             .resolve_feedback_lane_miss(device, sequence_variant, feedback_lane)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "demand feedback miss disappeared before it was resolved".to_string(),
+                ))
+            })?;
+        Ok(Some(VulkanDemandFeedbackCheckpoint {
+            feedback_lane,
+            slice_index,
+            segment_index,
+            gate_index,
+        }))
     }
 }
 

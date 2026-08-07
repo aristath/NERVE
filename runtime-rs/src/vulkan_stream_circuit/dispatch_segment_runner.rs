@@ -209,6 +209,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         sequence_variant: u8,
         feedback_lane: Option<usize>,
+        demand_resume_gate: Option<usize>,
         snapshot_copies: &[VulkanResidentKernelSequenceSnapshotCopy<'_>],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
@@ -229,6 +230,23 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                         ),
                     ));
                 }
+                if let Some(gate_index) = demand_resume_gate {
+                    return demand.enqueue_feedback_resume(
+                        device,
+                        &self.dispatches,
+                        control,
+                        prefix_dispatches,
+                        suffix_dispatches,
+                        indirect,
+                        sequence_variant,
+                        feedback_lane,
+                        gate_index,
+                        wait_points,
+                        signal_points,
+                        signal_completion,
+                        submission_batch,
+                    );
+                }
                 return demand.enqueue_feedback_initial(
                     device,
                     &self.dispatches,
@@ -243,6 +261,14 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                     signal_completion,
                     submission_batch,
                 );
+            }
+            if demand_resume_gate.is_some() {
+                return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                    VulkanError(
+                        "demand checkpoint resume requires a feedback lane and deferred submission batch"
+                            .to_string(),
+                    ),
+                ));
             }
             if feedback_lane.is_some()
                 || submission_batch.is_some()
@@ -274,6 +300,14 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 &[],
                 &[],
             );
+        }
+        if demand_resume_gate.is_some() {
+            return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
+                VulkanError(
+                    "demand checkpoint resume references a segment without demand residency"
+                        .to_string(),
+                ),
+            ));
         }
         if let Some(feedback_lane) = feedback_lane {
             while self.feedback_sequences.borrow().len() <= feedback_lane {

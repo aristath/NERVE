@@ -11,6 +11,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
         state_transaction,
         feedback_turn,
         output_turn,
+        demand_resume,
         submission_batch,
     } = submission;
     let can_wait_submitted = submission_policy.signal_completion && submission_batch.is_none();
@@ -573,6 +574,11 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     suffix_dispatches,
                     slice.dispatch_extensions.sequence_variant,
                     submission_policy.feedback_lane,
+                    demand_resume
+                        .filter(|(segment_start_stage_index, _)| {
+                            *segment_start_stage_index == segment.start_stage_index
+                        })
+                        .map(|(_, gate_index)| gate_index),
                     &snapshot_copies,
                     &wait_points,
                     &signal_points,

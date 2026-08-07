@@ -346,6 +346,21 @@ impl VulkanResidentFeedbackControlPlane {
         })
     }
 
+    fn diagnostic_header_words(&self) -> Result<Vec<u32>, VulkanError> {
+        let bytes = self
+            .host_buffer()?
+            .read_bytes(VULKAN_FEEDBACK_CONTROL_HEADER_WORD_COUNT * size_of::<u32>())?;
+        Ok(bytes
+            .chunks_exact(size_of::<u32>())
+            .map(|word| {
+                u32::from_le_bytes(
+                    word.try_into()
+                        .expect("feedback control diagnostic chunks are exact u32s"),
+                )
+            })
+            .collect())
+    }
+
     /// Aborts an armed feedback window after its terminal queue dependency has
     /// completed. Demand-residency misses are speculative execution: the
     /// controller must be rolled back with model and sampler state before the

@@ -177,6 +177,7 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         every_slice_has_terminal_segment: true,
         distributed_dispatches_are_bridged: true,
         demand_dispatches_are_pipeline_guarded: true,
+        demand_checkpoint_resume_is_unambiguous: true,
         every_edge_is_resident_replayable: true,
         feedback_stream_control_is_resident_replayable: true,
         speculative_state_is_resident_replayable: true,
@@ -256,6 +257,14 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         }
         .disabled_reason(),
         Some("unguarded_demand_distributed_dispatch")
+    );
+    assert_eq!(
+        VulkanResidentInProcessPlacedFeedbackLoopEligibility {
+            demand_checkpoint_resume_is_unambiguous: false,
+            ..eligible
+        }
+        .disabled_reason(),
+        Some("ambiguous_demand_checkpoint_resume")
     );
     assert_eq!(
         VulkanResidentInProcessPlacedFeedbackLoopEligibility {

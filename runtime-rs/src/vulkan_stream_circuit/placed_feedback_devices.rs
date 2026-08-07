@@ -17,6 +17,7 @@ struct VulkanResidentInProcessPlacedFeedbackLoopEligibility {
     every_slice_has_terminal_segment: bool,
     distributed_dispatches_are_bridged: bool,
     demand_dispatches_are_pipeline_guarded: bool,
+    demand_checkpoint_resume_is_unambiguous: bool,
     every_edge_is_resident_replayable: bool,
     feedback_stream_control_is_resident_replayable: bool,
     speculative_state_is_resident_replayable: bool,
@@ -35,6 +36,8 @@ impl VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             Some("unbridged_distributed_dispatch")
         } else if !self.demand_dispatches_are_pipeline_guarded {
             Some("unguarded_demand_distributed_dispatch")
+        } else if !self.demand_checkpoint_resume_is_unambiguous {
+            Some("ambiguous_demand_checkpoint_resume")
         } else if !self.every_edge_is_resident_replayable {
             Some("host_staged_edge")
         } else if !self.feedback_stream_control_is_resident_replayable {
@@ -422,6 +425,27 @@ impl VulkanResidentPlacedFeedbackTimelineSynchronization {
         })
     }
 
+    fn prepare_resumed_turn<'a>(
+        &'a self,
+        output_device_id: &'a str,
+    ) -> Result<VulkanPlacedFeedbackTimelineTurn<'a>, VulkanError> {
+        let value = self.next_value.get();
+        self.next_value.set(value.checked_add(1).ok_or_else(|| {
+            VulkanError("resident feedback timeline semaphore exhausted its values".to_string())
+        })?);
+        // The failed attempt already consumed this lane's input dependency.
+        // Its own output and every later logical turn were suppressed by the
+        // shared demand predicate, so replace that abandoned carry with the
+        // continuation's new output without waiting on it as an input.
+        self.pending_value.set(Some(value));
+        Ok(VulkanPlacedFeedbackTimelineTurn {
+            synchronization: self,
+            output_device_id,
+            destination_value: None,
+            output_value: value,
+        })
+    }
+
     fn advance_replayed_turns(&self, count: usize) -> Result<(), VulkanError> {
         let count = u64::try_from(count)
             .map_err(|_| VulkanError("resident feedback replay width exceeds u64".to_string()))?;
@@ -725,6 +749,15 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         });
         let window_width = VULKAN_BACKEND_LOOP_MAX_WINDOW
             .min(sampler.history_capacity_activations.max(1));
+        let demand_checkpoint_resume_is_unambiguous = if has_demand_checkpoints {
+            let tick_plans = device_slices
+                .iter()
+                .map(|slice| slice.resident_execution_plan.tick_plan.as_ref())
+                .collect::<Vec<_>>();
+            VulkanDemandFeedbackStageTopology::from_tick_plans(&tick_plans)?.is_total_ordered()
+        } else {
+            true
+        };
         let eligibility = VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             device_slice_count: device_slices.len(),
             every_slice_has_terminal_segment: device_slices
@@ -743,6 +776,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                 || device_slices.iter().all(|slice| {
                     slice.resident_execution_plan.distributed_dispatch_count == 0
             }),
+            demand_checkpoint_resume_is_unambiguous,
             every_edge_is_resident_replayable,
             feedback_stream_control_is_resident_replayable,
             speculative_state_is_resident_replayable,

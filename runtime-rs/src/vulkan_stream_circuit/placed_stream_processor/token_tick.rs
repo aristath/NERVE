@@ -238,6 +238,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     state_transactions: None,
                     feedback_turn: None,
                     output_turn: Some(output_turn),
+                    demand_resume: None,
                     submission_batch: Some(&submission_batch),
                 },
             )

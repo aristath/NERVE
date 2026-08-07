@@ -54,6 +54,7 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
         state_transactions,
         feedback_turn,
         output_turn,
+        demand_resume,
         submission_batch,
     } = submission;
     schedule
@@ -78,6 +79,51 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
                 "placed feedback resources require a dedicated sequence lane".to_string(),
             )),
         );
+    }
+    if let Some(resume) = demand_resume {
+        if submission_policy.feedback_lane != Some(resume.feedback_lane) {
+            return Err(
+                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
+                    "demand feedback resume lane does not match its submission lane".to_string(),
+                )),
+            );
+        }
+        if resume.next_stage_indices.len() != slices.len()
+            || resume.schedule_start_turn_index >= schedule.turns.len()
+            || resume.target_slice_index >= slices.len()
+        {
+            return Err(
+                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
+                    "demand feedback resume frontier does not match the placed activation schedule"
+                        .to_string(),
+                )),
+            );
+        }
+        for (slice, next_stage_index) in slices.iter_mut().zip(&resume.next_stage_indices) {
+            if *next_stage_index > slice.cursor.tick_plan.stages.len() {
+                return Err(
+                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
+                        format!(
+                            "demand feedback resume stage {next_stage_index} exceeds device {:?} stage count {}",
+                            slice.device_id(),
+                            slice.cursor.tick_plan.stages.len()
+                        ),
+                    )),
+                );
+            }
+            slice.cursor.next_stage_index = *next_stage_index;
+            slice.cursor.completed_stage_count = *next_stage_index;
+        }
+        if slices[resume.target_slice_index].cursor.next_stage_index
+            != resume.target_segment_start_stage_index
+        {
+            return Err(
+                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
+                    "demand feedback resume target is not the target device causal frontier"
+                        .to_string(),
+                )),
+            );
+        }
     }
     if submission_batch.is_some() && submission_policy.wait_for_completion {
         return Err(
@@ -174,8 +220,19 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
         }
     }
 
-    for (turn_index, device_indices) in schedule.turns.iter().enumerate() {
+    let schedule_start_turn_index = demand_resume
+        .map(|resume| resume.schedule_start_turn_index)
+        .unwrap_or(0);
+    for (turn_index, device_indices) in schedule
+        .turns
+        .iter()
+        .enumerate()
+        .skip(schedule_start_turn_index)
+    {
         for device_index in device_indices {
+            if slices[*device_index].cursor.is_completed() {
+                continue;
+            }
             if let Some(runners) = distributed_runners
                 && !slices[*device_index].cursor.capture_execution_trace
             {
@@ -198,6 +255,14 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
                                 .map(|transactions| &transactions[*device_index]),
                             feedback_turn,
                             output_turn,
+                            demand_resume: demand_resume
+                                .filter(|resume| resume.target_slice_index == *device_index)
+                                .map(|resume| {
+                                    (
+                                        resume.target_segment_start_stage_index,
+                                        resume.gate_index,
+                                    )
+                                }),
                             submission_batch,
                         },
                     )?;
@@ -345,7 +410,7 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
         slices,
         transport,
         VulkanMountedPlacedResidentInProcessStreamTickRunStatus::Completed,
-        schedule.turns.len(),
+        schedule.turns.len() - schedule_start_turn_index,
         completed_stage_delta,
     ))
 }
