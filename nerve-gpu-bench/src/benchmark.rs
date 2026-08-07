@@ -3,9 +3,9 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use crate::model::{
-    BenchmarkPlan, BenchmarkRun, ComparisonCandidate, ComparisonSet, GroupMeasurement,
-    Implementation, Measurement, PLAN_SCHEMA, PairMeasurement, RUN_SCHEMA, RunPolicy, Sample,
-    Selection, Summary, Target, WorkloadSpec, now_unix_ms,
+    BenchmarkPlan, BenchmarkRun, ComparisonCandidate, ComparisonSet, Implementation, Measurement,
+    PLAN_SCHEMA, RUN_SCHEMA, RunPolicy, Sample, Selection, Summary, Target, WorkloadSpec,
+    now_unix_ms,
 };
 
 const SMALL_PAYLOAD_COMPARISON_GROUP: &str = "small_payload_placement_comparison";
@@ -122,27 +122,8 @@ pub fn run_benchmarks(
         }
     }
 
-    let pair_measurements = if policy.pair_measurements && policy.max_group_size >= 2 {
-        build_pair_placeholders(
-            &selected_targets,
-            policy.payload_bytes,
-            &policy.benchmark_formats,
-            &policy.benchmark_workloads,
-        )
-    } else {
-        Vec::new()
-    };
-    let group_measurements = if policy.pair_measurements && policy.max_group_size >= 3 {
-        build_group_placeholders(
-            &selected_targets,
-            policy.payload_bytes,
-            &policy.benchmark_formats,
-            &policy.benchmark_workloads,
-            policy.max_group_size,
-        )
-    } else {
-        Vec::new()
-    };
+    let pair_measurements = Vec::new();
+    let group_measurements = Vec::new();
     let workload_specs = build_workload_specs(
         policy.payload_bytes,
         &policy.benchmark_formats,
@@ -159,7 +140,7 @@ pub fn run_benchmarks(
 
     let mut diagnostics = selection.diagnostics.clone();
     diagnostics.push(
-        "GPU execution is opt-in; --execute currently runs Vulkan F32 dense single-target work and leaves other GPU paths unmeasured."
+        "GPU execution is opt-in; missing backend paths are omitted from measurements and reported through comparison coverage."
             .to_string(),
     );
     diagnostics.push(format!(
@@ -713,14 +694,7 @@ fn run_device_single_target_measurements(
             workloads,
         );
     }
-    single_target_status_measurements(
-        &target.stable_target_id,
-        payload_bytes,
-        formats,
-        workloads,
-        "unmeasured",
-        "gpu_backend_not_implemented",
-    )
+    Vec::new()
 }
 
 fn run_vulkan_single_target_measurements(
@@ -789,77 +763,6 @@ pub(crate) fn single_target_status_measurement(
         samples: Vec::new(),
         summary: None,
     }
-}
-
-fn build_pair_placeholders(
-    targets: &[&Target],
-    payload_bytes: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<PairMeasurement> {
-    let mut measurements = Vec::new();
-    for format in formats {
-        for workload in workloads {
-            for source in targets {
-                for destination in targets {
-                    if source.stable_target_id == destination.stable_target_id {
-                        continue;
-                    }
-                    measurements.push(unmeasured_pair(
-                        &source.stable_target_id,
-                        &destination.stable_target_id,
-                        "ordered_activation_transfer",
-                        "activation_transfer_only",
-                        "activation_transfer",
-                        workload,
-                        format,
-                        "requires_device_backend",
-                        payload_bytes,
-                    ));
-                }
-            }
-            for left_index in 0..targets.len() {
-                for right_index in (left_index + 1)..targets.len() {
-                    let left = &targets[left_index].stable_target_id;
-                    let right = &targets[right_index].stable_target_id;
-                    measurements.push(unmeasured_pair(
-                        left,
-                        right,
-                        "synthetic_layer_split_small_payload",
-                        "two_target_serial",
-                        "layer_split",
-                        workload,
-                        format,
-                        "requires_device_backend",
-                        payload_bytes,
-                    ));
-                    measurements.push(unmeasured_pair(
-                        right,
-                        left,
-                        "synthetic_layer_split_small_payload",
-                        "two_target_serial",
-                        "layer_split",
-                        workload,
-                        format,
-                        "requires_device_backend",
-                        payload_bytes,
-                    ));
-                    measurements.push(unmeasured_pair(
-                        left,
-                        right,
-                        "synthetic_tensor_split_small_payload",
-                        "two_target_parallel",
-                        "tensor_split",
-                        workload,
-                        format,
-                        "requires_device_backend",
-                        payload_bytes,
-                    ));
-                }
-            }
-        }
-    }
-    measurements
 }
 
 fn build_comparison_sets(
@@ -1069,126 +972,6 @@ fn comparison_candidate(
         workload_id: workload_id.to_string(),
         target_ids,
         notes: notes.to_string(),
-    }
-}
-
-fn build_group_placeholders(
-    targets: &[&Target],
-    payload_bytes: usize,
-    formats: &[String],
-    workloads: &[String],
-    max_group_size: usize,
-) -> Vec<GroupMeasurement> {
-    let mut measurements = Vec::new();
-    let max_group_size = max_group_size.min(3);
-    if max_group_size < 3 || targets.len() < 3 {
-        return measurements;
-    }
-    for format in formats {
-        for workload in workloads {
-            for first in 0..targets.len() {
-                for second in (first + 1)..targets.len() {
-                    for third in (second + 1)..targets.len() {
-                        let target_ids = vec![
-                            targets[first].stable_target_id.clone(),
-                            targets[second].stable_target_id.clone(),
-                            targets[third].stable_target_id.clone(),
-                        ];
-                        measurements.push(unmeasured_group(
-                            target_ids.clone(),
-                            "synthetic_layer_split_group_small_payload",
-                            "three_target_serial",
-                            "layer_split",
-                            workload,
-                            format,
-                            "requires_device_backend",
-                            payload_bytes,
-                        ));
-                        measurements.push(unmeasured_group(
-                            target_ids,
-                            "synthetic_tensor_split_group_small_payload",
-                            "three_target_parallel",
-                            "tensor_split",
-                            workload,
-                            format,
-                            "requires_device_backend",
-                            payload_bytes,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    measurements
-}
-
-fn unmeasured_pair(
-    source: &str,
-    destination: &str,
-    pattern: &str,
-    placement_strategy: &str,
-    operation_family: &str,
-    workload_class: &str,
-    format: &str,
-    reason: &str,
-    payload_bytes: usize,
-) -> PairMeasurement {
-    let half_payload = payload_bytes / 2;
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    let output_bytes = output_bytes_for_payload(payload_bytes);
-    PairMeasurement {
-        workload_id: format_workload_id(pattern, workload_class, format),
-        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: placement_strategy.to_string(),
-        source_target_id: source.to_string(),
-        destination_target_id: destination.to_string(),
-        pattern: pattern.to_string(),
-        operation_family: operation_family.to_string(),
-        regime: "small_payload".to_string(),
-        format: format.to_string(),
-        status: "unmeasured".to_string(),
-        reason: Some(reason.to_string()),
-        payload_bytes,
-        source_payload_bytes: half_payload,
-        destination_payload_bytes: payload_bytes - half_payload,
-        activation_bytes,
-        output_bytes,
-        samples: Vec::new(),
-        summary: None,
-    }
-}
-
-fn unmeasured_group(
-    target_ids: Vec<String>,
-    pattern: &str,
-    placement_strategy: &str,
-    operation_family: &str,
-    workload_class: &str,
-    format: &str,
-    reason: &str,
-    payload_bytes: usize,
-) -> GroupMeasurement {
-    let payload_bytes_per_participant = split_bytes(payload_bytes, target_ids.len());
-    GroupMeasurement {
-        workload_id: format_workload_id(pattern, workload_class, format),
-        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: placement_strategy.to_string(),
-        target_ids,
-        pattern: pattern.to_string(),
-        operation_family: operation_family.to_string(),
-        regime: "small_payload".to_string(),
-        format: format.to_string(),
-        status: "unmeasured".to_string(),
-        reason: Some(reason.to_string()),
-        participant_count: payload_bytes_per_participant.len(),
-        payload_bytes,
-        payload_bytes_per_participant,
-        activation_bytes: activation_bytes_for_payload(payload_bytes),
-        output_bytes: output_bytes_for_payload(payload_bytes),
-        samples: Vec::new(),
-        summary: None,
     }
 }
 
@@ -1597,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn run_emits_triplet_placeholders_without_backend_access() {
+    fn run_omits_pair_and_group_measurements_without_backend_access() {
         let targets = vec![
             target("gpu:a", "discrete_gpu"),
             target("gpu:b", "discrete_gpu"),
@@ -1625,18 +1408,15 @@ mod tests {
             execute: false,
         };
         let run = run_benchmarks(targets, selection, policy);
-        assert_eq!(run.group_measurements.len(), 2);
-        assert!(
-            run.group_measurements
-                .iter()
-                .any(|measurement| measurement.operation_family == "tensor_split")
-        );
-        assert_eq!(
-            run.group_measurements[0]
-                .payload_bytes_per_participant
-                .len(),
-            3
-        );
+        assert!(run.measurements.is_empty());
+        assert!(run.pair_measurements.is_empty());
+        assert!(run.group_measurements.is_empty());
+        assert!(run.summary().candidate_statuses.iter().any(|candidate| {
+            candidate.placement_strategy == "three_target_parallel"
+                && candidate.measurement_kind == "group"
+                && candidate.status == "missing"
+                && candidate.matched_measurement_count == 0
+        }));
     }
 
     #[test]
@@ -1718,12 +1498,13 @@ mod tests {
                 "two_target_parallel",
             ]
         );
-        let serial_pair_count = run
-            .pair_measurements
-            .iter()
-            .filter(|measurement| measurement.placement_strategy == "two_target_serial")
-            .count();
-        assert_eq!(serial_pair_count, 2);
+        assert!(run.pair_measurements.is_empty());
+        assert!(run.summary().candidate_statuses.iter().any(|candidate| {
+            candidate.placement_strategy == "two_target_parallel"
+                && candidate.measurement_kind == "pair"
+                && candidate.status == "missing"
+                && candidate.matched_measurement_count == 0
+        }));
     }
 
     #[test]
@@ -1781,8 +1562,8 @@ mod tests {
             candidate.comparison_id == triplet.comparison_id
                 && candidate.placement_strategy == "three_target_parallel"
                 && candidate.measurement_kind == "group"
-                && candidate.status == "unmeasured"
-                && candidate.matched_measurement_count == 1
+                && candidate.status == "missing"
+                && candidate.matched_measurement_count == 0
         }));
     }
 

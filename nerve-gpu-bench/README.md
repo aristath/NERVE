@@ -23,8 +23,8 @@ This first implementation provides:
   unimplemented CPU formats;
 - opt-in Vulkan dense-projection dispatches with GPU timestamp samples for F32
   plus packed-emulated baselines for lower-precision and quantized formats;
-- placeholder `unmeasured` GPU records for unimplemented workload/format paths,
-  plus pair/group placeholders up to triplets; and
+- workload specs and comparison candidates for single-target, pair, and triplet
+  placement evidence; and
 - JSON output with discovered targets, selected targets, skipped targets,
   measurements, pair/group candidates, and provenance.
 
@@ -34,8 +34,9 @@ dense path submits a small compute dispatch over the requested payload, measured
 with Vulkan timestamps. F32 uses a float shader path. F16, BF16, FP8 variants,
 FP4/MXFP4/NVFP4, INT formats, and GGUF-style Q/IQ storage families use a
 packed-u32 emulation baseline until native format-specific kernels exist. Peer
-transfer, tensor-split, layer-split, and non-dense GPU workloads remain
-`unmeasured` until their backend kernels exist.
+transfer, tensor-split, layer-split, and non-dense GPU workloads produce no
+measurement rows until their backend kernels exist; their absence is reported as
+missing comparison coverage.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts stay testable while GPU coverage grows.
 For CPU single-target comparisons, requested F32 workload records already use
@@ -55,8 +56,7 @@ memory, submit queues, or run kernels.
 `run --execute` is an explicit opt-in for Vulkan execution. At this stage it
 opens a logical device for the selected Vulkan target and submits single-target
 dense compute dispatches for the requested executable formats. Other Vulkan
-measurement families are still reported as unmeasured or unsupported rather than
-guessed.
+measurement families are omitted rather than guessed.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,

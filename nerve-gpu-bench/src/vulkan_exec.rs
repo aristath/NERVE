@@ -143,66 +143,52 @@ fn vulkan_measurements(
     formats
         .iter()
         .flat_map(|format| {
-            workloads
-                .iter()
-                .map(move |workload| match (format.as_str(), workload.as_str()) {
-                    (_, "dense_projection") => {
-                        if let Some(kernel) = dense_format_kernel(format) {
-                            match run_vulkan_dense_projection(
-                                device,
-                                target_id,
-                                payload_bytes,
-                                samples,
-                                workload,
-                                kernel,
-                            ) {
-                                Ok(measurement) => measurement,
-                                Err(message) => single_target_status_measurement(
-                                    target_id,
-                                    payload_bytes,
-                                    workload,
-                                    format,
-                                    "failed",
-                                    &message,
-                                ),
-                            }
-                        } else {
-                            unsupported_vulkan_format(target_id, payload_bytes, workload, format)
-                        }
-                    }
-                    _ => {
-                        if dense_format_kernel(format).is_some() {
-                            single_target_status_measurement(
-                                target_id,
-                                payload_bytes,
-                                workload,
-                                format,
-                                "unmeasured",
-                                "vulkan_kernel_not_implemented_for_workload",
-                            )
-                        } else {
-                            unsupported_vulkan_format(target_id, payload_bytes, workload, format)
-                        }
+            workloads.iter().filter_map(move |workload| {
+                if workload != "dense_projection" {
+                    return None;
+                }
+                dense_format_kernel(format).map(|kernel| {
+                    match run_vulkan_dense_projection(
+                        device,
+                        target_id,
+                        payload_bytes,
+                        samples,
+                        workload,
+                        kernel,
+                    ) {
+                        Ok(measurement) => measurement,
+                        Err(message) => single_target_status_measurement(
+                            target_id,
+                            payload_bytes,
+                            workload,
+                            format,
+                            "failed",
+                            &message,
+                        ),
                     }
                 })
+            })
         })
         .collect()
 }
 
-fn unsupported_vulkan_format(
-    target_id: &str,
-    payload_bytes: usize,
-    workload: &str,
-    format: &str,
-) -> Measurement {
-    single_target_status_measurement(
-        target_id,
-        payload_bytes,
-        workload,
-        format,
-        "unsupported",
-        "vulkan_execution_backend_has_no_kernel_for_format",
-    )
+#[cfg(test)]
+fn skipped_vulkan_axes<'a>(
+    formats: &'a [String],
+    workloads: &'a [String],
+) -> Vec<(&'a str, &'a str)> {
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(move |workload| {
+                if workload == "dense_projection" && dense_format_kernel(format).is_some() {
+                    None
+                } else {
+                    Some((format.as_str(), workload.as_str()))
+                }
+            })
+        })
+        .collect()
 }
 
 struct OpenVulkanComputeDevice {
@@ -976,6 +962,19 @@ mod tests {
                 logical_elements
             );
         }
+    }
+
+    #[test]
+    fn non_dense_or_unknown_vulkan_axes_are_skipped() {
+        let formats = vec!["mxfp4".to_string(), "unknown_format".to_string()];
+        let workloads = vec![
+            "dense_projection".to_string(),
+            "router_reduction".to_string(),
+        ];
+        let skipped = skipped_vulkan_axes(&formats, &workloads);
+        assert!(!skipped.contains(&("mxfp4", "dense_projection")));
+        assert!(skipped.contains(&("mxfp4", "router_reduction")));
+        assert!(skipped.contains(&("unknown_format", "dense_projection")));
     }
 
     #[test]

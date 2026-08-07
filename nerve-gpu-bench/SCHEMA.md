@@ -66,8 +66,9 @@ logical devices. When true, selected Vulkan targets may attempt the execution
 boundary. Current Vulkan single-target measurements can complete
 `dense_projection` paths with timestamped compute samples for F32 and
 packed-emulated lower-precision or quantized storage formats. Other Vulkan
-workload or format paths remain `status: "unmeasured"` or
-`status: "unsupported"` until their kernels are implemented.
+workload or format paths are omitted from measurements until their kernels are
+implemented. Comparison candidate summaries report those absent records as
+`missing`.
 
 ## Workload Specs
 
@@ -123,9 +124,9 @@ Current workload spec families:
 
 Device-backed specs are emitted even before every backend path exists. Vulkan
 dense-projection single-target measurements can complete for executable formats
-when `--execute` is active. Other device-backed measurements use
-`status: "unmeasured"` until a backend can execute them. CPU reference compound
-measurements use the same small payload to keep the
+when `--execute` is active. Other device-backed specs have no measurement row
+until a backend can execute them. CPU reference compound measurements use the
+same small payload to keep the
 serialized/layer-split/tensor-split semantics executable.
 CPU F32 single-target measurements use
 `single_target_small_payload:<workload_class>:f32` so they can resolve the same
