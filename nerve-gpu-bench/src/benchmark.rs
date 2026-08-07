@@ -3,12 +3,86 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use crate::model::{
-    BenchmarkRun, ComparisonCandidate, ComparisonSet, GroupMeasurement, Implementation,
-    Measurement, PairMeasurement, RUN_SCHEMA, RunPolicy, Sample, Selection, Summary, Target,
-    WorkloadSpec, now_unix_ms,
+    BenchmarkPlan, BenchmarkRun, ComparisonCandidate, ComparisonSet, GroupMeasurement,
+    Implementation, Measurement, PLAN_SCHEMA, PairMeasurement, RUN_SCHEMA, RunPolicy, Sample,
+    Selection, Summary, Target, WorkloadSpec, now_unix_ms,
 };
 
 const SMALL_PAYLOAD_COMPARISON_GROUP: &str = "small_payload_placement_comparison";
+
+pub fn plan_benchmarks(
+    discovered_targets: Vec<Target>,
+    selection: Selection,
+    policy: RunPolicy,
+) -> BenchmarkPlan {
+    let selected_count = selection.selected_target_ids.len();
+    let format_count = policy.benchmark_formats.len();
+    let workload_count = policy.benchmark_workloads.len();
+    let payload_bytes = policy.payload_bytes;
+    let requested_axis_count = format_count * workload_count;
+    let selected = selection
+        .selected_target_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let selected_cpu_count = discovered_targets
+        .iter()
+        .filter(|target| selected.contains(&target.stable_target_id) && target.kind == "cpu")
+        .count();
+    let selected_non_cpu_count = selected_count.saturating_sub(selected_cpu_count);
+    let estimated_single_measurement_count = selected_cpu_count * (5 + requested_axis_count)
+        + selected_non_cpu_count * requested_axis_count;
+    let estimated_pair_measurement_count = if policy.pair_measurements && policy.max_group_size >= 2
+    {
+        let ordered_activation_transfers = selected_count * selected_count.saturating_sub(1);
+        let unordered_pairs = combinations(selected_count, 2);
+        requested_axis_count * (ordered_activation_transfers + unordered_pairs * 3)
+    } else {
+        0
+    };
+    let estimated_group_measurement_count =
+        if policy.pair_measurements && policy.max_group_size >= 3 {
+            requested_axis_count * combinations(selected_count, 3) * 2
+        } else {
+            0
+        };
+    let estimated_comparison_set_count = if policy.pair_measurements && policy.max_group_size >= 2 {
+        let pair_sets = combinations(selected_count, 2);
+        let group_sets = if policy.max_group_size >= 3 {
+            combinations(selected_count, 3)
+        } else {
+            0
+        };
+        requested_axis_count * (pair_sets + group_sets)
+    } else {
+        0
+    };
+    let estimated_measurement_count = estimated_single_measurement_count
+        + estimated_pair_measurement_count
+        + estimated_group_measurement_count;
+    let mut diagnostics = selection.diagnostics.clone();
+    diagnostics.push("dry_plan_only_no_benchmark_measurements_were_executed".to_string());
+    diagnostics.push(format!(
+        "requested_axes={requested_axis_count} formats={format_count} workloads={workload_count}"
+    ));
+    BenchmarkPlan {
+        schema: PLAN_SCHEMA.to_string(),
+        created_at_unix_ms: now_unix_ms(),
+        policy,
+        discovered_target_count: discovered_targets.len(),
+        selected_target_ids: selection.selected_target_ids,
+        skipped_targets: selection.skipped_targets,
+        requested_format_count: format_count,
+        requested_workload_count: workload_count,
+        estimated_single_measurement_count,
+        estimated_pair_measurement_count,
+        estimated_group_measurement_count,
+        estimated_comparison_set_count,
+        estimated_measurement_count,
+        max_payload_bytes_per_measurement: payload_bytes,
+        diagnostics,
+    }
+}
 
 pub fn run_benchmarks(
     discovered_targets: Vec<Target>,
@@ -107,6 +181,14 @@ pub fn run_benchmarks(
         pair_measurements,
         group_measurements,
         diagnostics,
+    }
+}
+
+fn combinations(count: usize, choose: usize) -> usize {
+    match choose {
+        2 if count >= 2 => count * (count - 1) / 2,
+        3 if count >= 3 => count * (count - 1) * (count - 2) / 6,
+        _ => 0,
     }
 }
 
@@ -1432,6 +1514,40 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn dry_plan_counts_selected_matrix_without_running_measurements() {
+        let targets = vec![target("cpu:host", "cpu"), target("gpu:a", "discrete_gpu")];
+        let selection = Selection {
+            selected_target_ids: targets
+                .iter()
+                .map(|target| target.stable_target_id.clone())
+                .collect(),
+            skipped_targets: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let policy = RunPolicy {
+            payload_bytes: 5 * 1024 * 1024,
+            samples: 1,
+            benchmark_formats: vec!["f32".to_string(), "fp8".to_string()],
+            benchmark_workloads: workloads(),
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 2,
+        };
+        let plan = plan_benchmarks(targets, selection, policy);
+        assert_eq!(plan.schema, PLAN_SCHEMA);
+        assert_eq!(plan.requested_format_count, 2);
+        assert_eq!(plan.requested_workload_count, 1);
+        assert_eq!(plan.estimated_single_measurement_count, 9);
+        assert_eq!(plan.estimated_pair_measurement_count, 10);
+        assert_eq!(plan.estimated_group_measurement_count, 0);
+        assert_eq!(plan.estimated_comparison_set_count, 2);
+        assert_eq!(plan.estimated_measurement_count, 19);
     }
 
     #[test]

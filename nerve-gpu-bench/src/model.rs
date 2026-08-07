@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 pub const RUN_SCHEMA: &str = "nerve.gpu_benchmark_run.v1";
+pub const PLAN_SCHEMA: &str = "nerve.gpu_benchmark_plan.v1";
 pub const TARGET_LIST_SCHEMA: &str = "nerve.gpu_benchmark_targets.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +117,25 @@ pub struct BenchmarkRun {
     pub measurements: Vec<Measurement>,
     pub pair_measurements: Vec<PairMeasurement>,
     pub group_measurements: Vec<GroupMeasurement>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BenchmarkPlan {
+    pub schema: String,
+    pub created_at_unix_ms: u128,
+    pub policy: RunPolicy,
+    pub discovered_target_count: usize,
+    pub selected_target_ids: Vec<String>,
+    pub skipped_targets: Vec<SkippedTarget>,
+    pub requested_format_count: usize,
+    pub requested_workload_count: usize,
+    pub estimated_single_measurement_count: usize,
+    pub estimated_pair_measurement_count: usize,
+    pub estimated_group_measurement_count: usize,
+    pub estimated_comparison_set_count: usize,
+    pub estimated_measurement_count: usize,
+    pub max_payload_bytes_per_measurement: usize,
     pub diagnostics: Vec<String>,
 }
 
@@ -703,6 +723,12 @@ impl BenchmarkRun {
 struct CandidateMeasurementMatch<'a> {
     status: &'a str,
     summary: Option<&'a Summary>,
+}
+
+impl BenchmarkPlan {
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 fn combined_candidate_status(statuses: &[&str]) -> String {

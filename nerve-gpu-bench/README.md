@@ -89,6 +89,14 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
   --output benchmark-results.json
 ```
 
+Preview the selected benchmark matrix without executing measurements:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
+  --dry-plan \
+  --output benchmark-plan.json
+```
+
 Limit the requested format matrix:
 
 ```sh

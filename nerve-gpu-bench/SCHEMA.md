@@ -2,6 +2,8 @@
 
 The benchmark output schema is currently identified as
 `nerve.gpu_benchmark_run.v1`.
+Dry-plan output from `run --dry-plan` is identified as
+`nerve.gpu_benchmark_plan.v1`.
 
 This document is descriptive rather than a formal JSON Schema file. The Rust
 types in `src/model.rs` are the source of truth for the first implementation.
@@ -48,6 +50,15 @@ rejoining the full sample list first.
 - `group_measurements`: three-target synthetic placement measurements when
   enough targets are selected and `--max-group-size 3` is active.
 - `diagnostics`: non-fatal implementation notes.
+
+## Dry Plan Fields
+
+`run --dry-plan` emits a JSON plan instead of measurements. It uses the same
+policy and target selection path, then reports selected targets, skipped
+targets, requested format/workload counts, estimated single/pair/group
+measurement counts, estimated comparison set count, total estimated measurement
+count, and the maximum payload bytes per measurement. It does not execute CPU
+or GPU measurements.
 
 ## Workload Specs
 

@@ -36,6 +36,7 @@ pub enum Command {
         exclude_kinds: Vec<String>,
         pairs: bool,
         max_group_size: usize,
+        dry_plan: bool,
     },
 }
 
@@ -132,6 +133,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut benchmark_workloads = Vec::new();
     let mut pairs = true;
     let mut max_group_size = DEFAULT_MAX_GROUP_SIZE;
+    let mut dry_plan = false;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -179,6 +181,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
                 exclude_kinds.push(required_value(&arguments, &mut index, "--exclude-kind")?);
             }
             "--no-pairs" => pairs = false,
+            "--dry-plan" => dry_plan = true,
             other => {
                 return Err(CliError(format!(
                     "unknown run argument {other:?}\n\n{}",
@@ -242,6 +245,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
         exclude_kinds,
         pairs,
         max_group_size,
+        dry_plan,
     })
 }
 
@@ -264,7 +268,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--workload WORKLOAD ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--workload WORKLOAD ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -294,6 +298,7 @@ mod tests {
                 exclude_kinds: Vec::new(),
                 pairs: true,
                 max_group_size: DEFAULT_MAX_GROUP_SIZE,
+                dry_plan: false,
             }
         );
     }
@@ -317,6 +322,7 @@ mod tests {
                 benchmark_workloads,
                 pairs,
                 max_group_size,
+                dry_plan,
                 ..
             } => {
                 assert_eq!(include_targets, ["cpu:host"]);
@@ -337,6 +343,7 @@ mod tests {
                 );
                 assert!(!pairs);
                 assert_eq!(max_group_size, DEFAULT_MAX_GROUP_SIZE);
+                assert!(!dry_plan);
             }
             _ => panic!("expected run command"),
         }
@@ -352,6 +359,15 @@ mod tests {
         .unwrap();
         match command {
             Command::Run { max_group_size, .. } => assert_eq!(max_group_size, 2),
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_dry_plan() {
+        let command = parse_args(["run".to_string(), "--dry-plan".to_string()]).unwrap();
+        match command {
+            Command::Run { dry_plan, .. } => assert!(dry_plan),
             _ => panic!("expected run command"),
         }
     }
