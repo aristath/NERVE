@@ -33,6 +33,8 @@ pub fn run_benchmarks(
                 &target.stable_target_id,
                 policy.payload_bytes,
                 policy.samples,
+                &policy.benchmark_formats,
+                &policy.benchmark_workloads,
             ));
         } else {
             measurements.extend(unmeasured_single_target(
@@ -108,17 +110,166 @@ pub fn run_benchmarks(
     }
 }
 
-fn run_cpu_measurements(target_id: &str, payload_bytes: usize, samples: usize) -> Vec<Measurement> {
+fn run_cpu_measurements(
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<Measurement> {
     let mut measurements = vec![
         run_cpu_copy(target_id, payload_bytes, samples),
         run_cpu_f32_dot(target_id, payload_bytes, samples),
     ];
+    measurements.extend(run_cpu_requested_single_target_measurements(
+        target_id,
+        payload_bytes,
+        samples,
+        formats,
+        workloads,
+    ));
     measurements.extend(run_cpu_compound_reference(
         target_id,
         payload_bytes,
         samples,
     ));
     measurements
+}
+
+fn run_cpu_requested_single_target_measurements(
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<Measurement> {
+    let mut measurements = Vec::new();
+    for format in formats {
+        for workload in workloads {
+            if format == "f32" {
+                measurements.push(run_cpu_f32_requested_workload(
+                    target_id,
+                    payload_bytes,
+                    samples,
+                    workload,
+                ));
+            } else {
+                measurements.push(unsupported_cpu_requested_workload(
+                    target_id,
+                    payload_bytes,
+                    workload,
+                    format,
+                ));
+            }
+        }
+    }
+    measurements
+}
+
+fn run_cpu_f32_requested_workload(
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+) -> Measurement {
+    let elements = (payload_bytes / (2 * std::mem::size_of::<f32>())).max(1);
+    let left = (0..elements)
+        .map(|index| ((index % 1024) as f32) * 0.001)
+        .collect::<Vec<_>>();
+    let right = (0..elements)
+        .map(|index| (((index * 17) % 1024) as f32) * 0.001)
+        .collect::<Vec<_>>();
+
+    black_box(cpu_f32_workload(workload_class, &left, &right));
+
+    let mut measured_samples = Vec::with_capacity(samples);
+    for sample_index in 0..samples {
+        let started = Instant::now();
+        let value = cpu_f32_workload(workload_class, &left, &right);
+        black_box(value);
+        let duration = started.elapsed();
+        measured_samples.push(Sample {
+            sample_index,
+            duration_ns: duration.as_nanos(),
+            iterations: 1,
+            bytes_read: (elements * 2 * std::mem::size_of::<f32>()) as u64,
+            bytes_written: std::mem::size_of::<f32>() as u64,
+            operations: cpu_f32_workload_operations(workload_class, elements),
+        });
+    }
+
+    Measurement {
+        workload_id: format_workload_id("single_target_small_payload", workload_class, "f32"),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: "single_target_serial".to_string(),
+        target_id: target_id.to_string(),
+        pattern: "single_target_compute".to_string(),
+        operation_family: workload_class.to_string(),
+        regime: "small_payload".to_string(),
+        format: "f32".to_string(),
+        status: "completed".to_string(),
+        reason: None,
+        payload_bytes,
+        working_set_bytes: elements * 2 * std::mem::size_of::<f32>(),
+        summary: summarize(&measured_samples),
+        samples: measured_samples,
+    }
+}
+
+fn unsupported_cpu_requested_workload(
+    target_id: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+) -> Measurement {
+    Measurement {
+        workload_id: format_workload_id("single_target_small_payload", workload_class, format),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: "single_target_serial".to_string(),
+        target_id: target_id.to_string(),
+        pattern: "single_target_compute".to_string(),
+        operation_family: workload_class.to_string(),
+        regime: "small_payload".to_string(),
+        format: format.to_string(),
+        status: "unsupported".to_string(),
+        reason: Some("cpu_format_backend_not_implemented".to_string()),
+        payload_bytes,
+        working_set_bytes: payload_bytes,
+        samples: Vec::new(),
+        summary: None,
+    }
+}
+
+fn cpu_f32_workload(workload_class: &str, left: &[f32], right: &[f32]) -> f32 {
+    match workload_class {
+        "dense_projection" => left
+            .iter()
+            .zip(right.iter())
+            .fold(0.0_f32, |sum, (left, right)| {
+                (sum + left.mul_add(*right, 0.125)).mul_add(0.999_999, 0.000_001)
+            }),
+        "moe_expert" => left
+            .iter()
+            .zip(right.iter())
+            .fold(0.0_f32, |sum, (left, right)| {
+                let gate = if *left > *right { *left } else { *right };
+                sum + gate * (left + right) * 0.5
+            }),
+        "router_reduction" => dot_product(left, right),
+        _ => dot_product(left, right),
+    }
+}
+
+fn cpu_f32_workload_operations(workload_class: &str, elements: usize) -> u64 {
+    let operations_per_element = match workload_class {
+        "dense_projection" => 5,
+        "moe_expert" => 6,
+        "router_reduction" => 2,
+        _ => 2,
+    };
+    elements as u64 * operations_per_element
 }
 
 fn run_cpu_copy(target_id: &str, payload_bytes: usize, samples: usize) -> Measurement {
@@ -1242,5 +1393,49 @@ mod tests {
             .filter(|measurement| measurement.placement_strategy == "two_target_serial")
             .count();
         assert_eq!(serial_pair_count, 2);
+    }
+
+    #[test]
+    fn cpu_requested_single_target_measurements_match_comparison_candidates() {
+        let targets = vec![target("cpu:host", "cpu"), target("gpu:a", "discrete_gpu")];
+        let selection = Selection {
+            selected_target_ids: targets
+                .iter()
+                .map(|target| target.stable_target_id.clone())
+                .collect(),
+            skipped_targets: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let policy = RunPolicy {
+            payload_bytes: 64 * 1024,
+            samples: 1,
+            benchmark_formats: vec!["f32".to_string(), "fp8".to_string()],
+            benchmark_workloads: workloads(),
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 2,
+        };
+        let run = run_benchmarks(targets, selection, policy);
+        assert!(run.measurements.iter().any(|measurement| {
+            measurement.target_id == "cpu:host"
+                && measurement.workload_id == "single_target_small_payload:dense_projection:f32"
+                && measurement.status == "completed"
+        }));
+        assert!(run.measurements.iter().any(|measurement| {
+            measurement.target_id == "cpu:host"
+                && measurement.workload_id == "single_target_small_payload:dense_projection:fp8"
+                && measurement.status == "unsupported"
+        }));
+
+        let summary = run.summary();
+        assert!(summary.candidate_statuses.iter().any(|candidate| {
+            candidate.workload_class == "dense_projection"
+                && candidate.format == "f32"
+                && candidate.placement_strategy == "single_target_serial"
+                && candidate.status == "completed"
+        }));
     }
 }

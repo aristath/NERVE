@@ -17,6 +17,9 @@ This first implementation provides:
   Intel, or other target classes;
 - small CPU-only synthetic measurements using a default 5 MiB payload,
   including serialized, layer-split, and tensor-split reference patterns;
+- requested CPU F32 single-target workload measurements for dense projection,
+  MoE expert, and router/reduction classes, with unsupported records for
+  unimplemented CPU formats;
 - placeholder `unmeasured` GPU and pair records for the upcoming Vulkan backend;
   group placeholders up to triplets;
   and
@@ -28,6 +31,8 @@ reported, but GPU compute, peer transfer, tensor-split, and layer-split GPU
 measurements are deliberately marked `unmeasured` until backend kernels exist.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts are testable before GPU backend work starts.
+For CPU single-target comparisons, requested F32 workload records already use
+the same workload IDs as device-backed single-target candidates.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,

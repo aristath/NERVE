@@ -100,6 +100,10 @@ Device-backed specs are emitted before the Vulkan backend exists. Their
 measurements use `status: "unmeasured"` until a backend can execute them. CPU
 reference compound measurements use the same small payload to keep the
 serialized/layer-split/tensor-split semantics executable.
+CPU F32 single-target measurements use
+`single_target_small_payload:<workload_class>:f32` so they can resolve the same
+candidate family as GPU or accelerator targets. CPU formats that are not
+implemented yet are emitted as `status: "unsupported"`.
 
 ## Target Policy
 
