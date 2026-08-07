@@ -60,10 +60,31 @@ pub struct BenchmarkRun {
     pub selected_target_ids: Vec<String>,
     pub skipped_targets: Vec<SkippedTarget>,
     pub workload_specs: Vec<WorkloadSpec>,
+    pub comparison_sets: Vec<ComparisonSet>,
     pub measurements: Vec<Measurement>,
     pub pair_measurements: Vec<PairMeasurement>,
     pub group_measurements: Vec<GroupMeasurement>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComparisonSet {
+    pub comparison_id: String,
+    pub comparison_group: String,
+    pub regime: String,
+    pub format: String,
+    pub target_ids: Vec<String>,
+    pub candidates: Vec<ComparisonCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComparisonCandidate {
+    pub candidate_id: String,
+    pub placement_strategy: String,
+    pub measurement_kind: String,
+    pub workload_id: String,
+    pub target_ids: Vec<String>,
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +193,7 @@ pub struct BenchmarkRunSummary {
     pub discovered_target_count: usize,
     pub selected_target_count: usize,
     pub skipped_target_count: usize,
+    pub comparison_set_count: usize,
     pub single_measurement_count: usize,
     pub pair_measurement_count: usize,
     pub group_measurement_count: usize,
@@ -296,6 +318,57 @@ impl BenchmarkRun {
                 ));
             }
         }
+        let comparison_ids = self
+            .comparison_sets
+            .iter()
+            .map(|comparison| comparison.comparison_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if comparison_ids.len() != self.comparison_sets.len() {
+            return Err("comparison_sets contain duplicate comparison IDs".to_string());
+        }
+        for comparison in &self.comparison_sets {
+            if comparison.comparison_group.is_empty() || comparison.candidates.is_empty() {
+                return Err(format!(
+                    "comparison set {:?} is missing group or candidates",
+                    comparison.comparison_id
+                ));
+            }
+            for target_id in &comparison.target_ids {
+                if !discovered_ids.contains(target_id) {
+                    return Err(format!(
+                        "comparison set {:?} references unknown target {:?}",
+                        comparison.comparison_id, target_id
+                    ));
+                }
+            }
+            let candidate_ids = comparison
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate_id.as_str())
+                .collect::<BTreeSet<_>>();
+            if candidate_ids.len() != comparison.candidates.len() {
+                return Err(format!(
+                    "comparison set {:?} contains duplicate candidate IDs",
+                    comparison.comparison_id
+                ));
+            }
+            for candidate in &comparison.candidates {
+                if candidate.placement_strategy.is_empty() || candidate.workload_id.is_empty() {
+                    return Err(format!(
+                        "comparison candidate {:?} is missing strategy or workload",
+                        candidate.candidate_id
+                    ));
+                }
+                for target_id in &candidate.target_ids {
+                    if !discovered_ids.contains(target_id) {
+                        return Err(format!(
+                            "comparison candidate {:?} references unknown target {:?}",
+                            candidate.candidate_id, target_id
+                        ));
+                    }
+                }
+            }
+        }
         for measurement in &self.measurements {
             if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
             {
@@ -385,6 +458,7 @@ impl BenchmarkRun {
             discovered_target_count: self.discovered_targets.len(),
             selected_target_count: self.selected_target_ids.len(),
             skipped_target_count: self.skipped_targets.len(),
+            comparison_set_count: self.comparison_sets.len(),
             single_measurement_count: self.measurements.len(),
             pair_measurement_count: self.pair_measurements.len(),
             group_measurement_count: self.group_measurements.len(),
@@ -619,6 +693,7 @@ mod tests {
             selected_target_ids: vec!["cpu:host".to_string()],
             skipped_targets: Vec::new(),
             workload_specs: Vec::new(),
+            comparison_sets: Vec::new(),
             measurements: Vec::new(),
             pair_measurements: Vec::new(),
             group_measurements: Vec::new(),
@@ -664,6 +739,7 @@ mod tests {
             selected_target_ids: vec!["cpu:host".to_string()],
             skipped_targets: Vec::new(),
             workload_specs: Vec::new(),
+            comparison_sets: Vec::new(),
             measurements: Vec::new(),
             pair_measurements: Vec::new(),
             group_measurements: Vec::new(),
@@ -750,6 +826,7 @@ mod tests {
             selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
             skipped_targets: Vec::new(),
             workload_specs: Vec::new(),
+            comparison_sets: Vec::new(),
             measurements: Vec::new(),
             pair_measurements: Vec::new(),
             group_measurements: Vec::new(),

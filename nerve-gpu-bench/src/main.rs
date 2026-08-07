@@ -98,7 +98,8 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
     )?;
     writeln!(
         stdout,
-        "measurements: single={} pair={} group={}",
+        "measurements: comparison_sets={} single={} pair={} group={}",
+        summary.comparison_set_count,
         summary.single_measurement_count,
         summary.pair_measurement_count,
         summary.group_measurement_count

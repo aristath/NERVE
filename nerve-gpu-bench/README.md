@@ -34,6 +34,9 @@ small-payload comparison records distinguish one-target serialized execution,
 two-target serialized execution, and two-target parallel execution. A future
 planner should compare those alternatives within the same comparison group,
 instead of assuming any two-target placement is automatically better or worse.
+Each selected pair also gets a `comparison_sets` entry that lists the concrete
+candidates: left-only, right-only, left-to-right serial, right-to-left serial,
+and pair-parallel.
 
 ## Commands
 

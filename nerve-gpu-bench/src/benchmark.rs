@@ -3,8 +3,9 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use crate::model::{
-    BenchmarkRun, GroupMeasurement, Implementation, Measurement, PairMeasurement, RUN_SCHEMA,
-    RunPolicy, Sample, Selection, Summary, Target, WorkloadSpec, now_unix_ms,
+    BenchmarkRun, ComparisonCandidate, ComparisonSet, GroupMeasurement, Implementation,
+    Measurement, PairMeasurement, RUN_SCHEMA, RunPolicy, Sample, Selection, Summary, Target,
+    WorkloadSpec, now_unix_ms,
 };
 
 const SMALL_PAYLOAD_COMPARISON_GROUP: &str = "small_payload_placement_comparison";
@@ -57,6 +58,11 @@ pub fn run_benchmarks(
         Vec::new()
     };
     let workload_specs = build_workload_specs(policy.payload_bytes, policy.max_group_size);
+    let comparison_sets = build_comparison_sets(
+        &selected_targets,
+        policy.pair_measurements,
+        policy.max_group_size,
+    );
 
     let mut diagnostics = selection.diagnostics.clone();
     diagnostics.push(
@@ -78,6 +84,7 @@ pub fn run_benchmarks(
         selected_target_ids: selection.selected_target_ids,
         skipped_targets: selection.skipped_targets,
         workload_specs,
+        comparison_sets,
         measurements,
         pair_measurements,
         group_measurements,
@@ -487,6 +494,15 @@ fn build_pair_placeholders(targets: &[&Target], payload_bytes: usize) -> Vec<Pai
                 payload_bytes,
             ));
             measurements.push(unmeasured_pair(
+                right,
+                left,
+                "synthetic_layer_split_small_payload",
+                "two_target_serial",
+                "layer_split",
+                "requires_device_backend",
+                payload_bytes,
+            ));
+            measurements.push(unmeasured_pair(
                 left,
                 right,
                 "synthetic_tensor_split_small_payload",
@@ -498,6 +514,98 @@ fn build_pair_placeholders(targets: &[&Target], payload_bytes: usize) -> Vec<Pai
         }
     }
     measurements
+}
+
+fn build_comparison_sets(
+    targets: &[&Target],
+    pair_measurements: bool,
+    max_group_size: usize,
+) -> Vec<ComparisonSet> {
+    if !pair_measurements || max_group_size < 2 {
+        return Vec::new();
+    }
+    let mut comparisons = Vec::new();
+    for left_index in 0..targets.len() {
+        for right_index in (left_index + 1)..targets.len() {
+            let left = &targets[left_index].stable_target_id;
+            let right = &targets[right_index].stable_target_id;
+            let comparison_id = format!("{SMALL_PAYLOAD_COMPARISON_GROUP}:{left}|{right}");
+            comparisons.push(ComparisonSet {
+                comparison_id: comparison_id.clone(),
+                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                regime: "small_payload".to_string(),
+                format: "backend_selected".to_string(),
+                target_ids: vec![left.clone(), right.clone()],
+                candidates: vec![
+                    comparison_candidate(
+                        &comparison_id,
+                        "single_left",
+                        "single_target_serial",
+                        "single",
+                        "single_target_gpu_small_payload",
+                        vec![left.clone()],
+                        "Run the whole payload on the first target only.",
+                    ),
+                    comparison_candidate(
+                        &comparison_id,
+                        "single_right",
+                        "single_target_serial",
+                        "single",
+                        "single_target_gpu_small_payload",
+                        vec![right.clone()],
+                        "Run the whole payload on the second target only.",
+                    ),
+                    comparison_candidate(
+                        &comparison_id,
+                        "serial_left_to_right",
+                        "two_target_serial",
+                        "pair",
+                        "synthetic_layer_split_small_payload",
+                        vec![left.clone(), right.clone()],
+                        "Run the first stage on the first target, then transfer activation to the second target.",
+                    ),
+                    comparison_candidate(
+                        &comparison_id,
+                        "serial_right_to_left",
+                        "two_target_serial",
+                        "pair",
+                        "synthetic_layer_split_small_payload",
+                        vec![right.clone(), left.clone()],
+                        "Run the first stage on the second target, then transfer activation to the first target.",
+                    ),
+                    comparison_candidate(
+                        &comparison_id,
+                        "parallel_pair",
+                        "two_target_parallel",
+                        "pair",
+                        "synthetic_tensor_split_small_payload",
+                        vec![left.clone(), right.clone()],
+                        "Split the same logical payload across both targets in parallel.",
+                    ),
+                ],
+            });
+        }
+    }
+    comparisons
+}
+
+fn comparison_candidate(
+    comparison_id: &str,
+    candidate_suffix: &str,
+    placement_strategy: &str,
+    measurement_kind: &str,
+    workload_id: &str,
+    target_ids: Vec<String>,
+    notes: &str,
+) -> ComparisonCandidate {
+    ComparisonCandidate {
+        candidate_id: format!("{comparison_id}:{candidate_suffix}"),
+        placement_strategy: placement_strategy.to_string(),
+        measurement_kind: measurement_kind.to_string(),
+        workload_id: workload_id.to_string(),
+        target_ids,
+        notes: notes.to_string(),
+    }
 }
 
 fn build_group_placeholders(
@@ -948,5 +1056,54 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn pair_comparison_sets_include_single_serial_and_parallel_candidates() {
+        let targets = vec![
+            target("gpu:a", "discrete_gpu"),
+            target("gpu:b", "discrete_gpu"),
+        ];
+        let selection = Selection {
+            selected_target_ids: targets
+                .iter()
+                .map(|target| target.stable_target_id.clone())
+                .collect(),
+            skipped_targets: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let policy = RunPolicy {
+            payload_bytes: 5 * 1024 * 1024,
+            samples: 1,
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 2,
+        };
+        let run = run_benchmarks(targets, selection, policy);
+        assert_eq!(run.comparison_sets.len(), 1);
+        let strategies = run.comparison_sets[0]
+            .candidates
+            .iter()
+            .map(|candidate| candidate.placement_strategy.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            strategies,
+            [
+                "single_target_serial",
+                "single_target_serial",
+                "two_target_serial",
+                "two_target_serial",
+                "two_target_parallel",
+            ]
+        );
+        let serial_pair_count = run
+            .pair_measurements
+            .iter()
+            .filter(|measurement| measurement.placement_strategy == "two_target_serial")
+            .count();
+        assert_eq!(serial_pair_count, 2);
     }
 }

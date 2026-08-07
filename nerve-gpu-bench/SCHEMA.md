@@ -25,6 +25,9 @@ measurement for an expected placement strategy.
 - `skipped_targets`: discovered targets skipped by explicit policy.
 - `workload_specs`: logical benchmark contracts generated for the selected
   payload size.
+- `comparison_sets`: planner-facing candidate sets. For each selected pair, the
+  set currently compares first-target-only, second-target-only, serial
+  first-to-second, serial second-to-first, and parallel two-target execution.
 - `measurements`: single-target measurements.
 - `pair_measurements`: ordered pair and two-target synthetic placement
   measurements.
@@ -51,6 +54,10 @@ Placement decisions must compare alternatives inside the same
 That distinction is intentional: a single GPU can beat two-GPU parallelism, and
 two-GPU serial placement can beat or lose to both depending on compute cost,
 transfer cost, synchronization, and format path.
+
+For two-target comparisons, serial placement is directional. A result should
+preserve both A-to-B and B-to-A candidates because the activation transfer path,
+target speed, and stage ownership may not be symmetric.
 
 Current workload specs:
 
