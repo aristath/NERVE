@@ -167,17 +167,18 @@ fn print_target_table(targets: &[model::Target]) -> Result<(), Box<dyn Error>> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "{:<30} {:<16} {:<12} {:<12} {}",
-        "TARGET", "KIND", "BACKEND", "VENDOR", "LOCATION"
+        "{:<30} {:<16} {:<12} {:<12} {:<18} {}",
+        "TARGET", "KIND", "BACKEND", "VENDOR", "LINK", "LOCATION"
     )?;
     for target in targets {
         writeln!(
             stdout,
-            "{:<30} {:<16} {:<12} {:<12} {}",
+            "{:<30} {:<16} {:<12} {:<12} {:<18} {}",
             target.stable_target_id,
             target.kind,
             target.backend,
             target.vendor_name.as_deref().unwrap_or("unknown"),
+            format_link(target),
             target
                 .pci_address
                 .as_deref()
@@ -186,4 +187,24 @@ fn print_target_table(targets: &[model::Target]) -> Result<(), Box<dyn Error>> {
         )?;
     }
     Ok(())
+}
+
+fn format_link(target: &model::Target) -> String {
+    let Some(link) = &target.pci_link else {
+        return "-".to_string();
+    };
+    match (
+        link.current_link_speed.as_deref(),
+        link.current_link_width,
+        link.current_one_way_bytes_per_second,
+    ) {
+        (Some(speed), Some(width), Some(bytes_per_second)) => {
+            let gib_per_second = bytes_per_second as f64 / 1_073_741_824.0;
+            format!("{speed} x{width} {gib_per_second:.1}GiB/s")
+        }
+        (Some(speed), Some(width), None) => format!("{speed} x{width}"),
+        (Some(speed), None, _) => speed.to_string(),
+        (None, Some(width), _) => format!("x{width}"),
+        _ => "-".to_string(),
+    }
 }

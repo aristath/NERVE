@@ -20,9 +20,21 @@ pub struct Target {
     pub physical_location: Option<String>,
     pub numa_node: Option<i64>,
     pub boot_vga: Option<bool>,
+    pub pci_link: Option<PciLink>,
     pub capabilities: Vec<String>,
     pub format_capabilities: Vec<FormatCapability>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PciLink {
+    pub current_link_speed: Option<String>,
+    pub current_link_width: Option<u32>,
+    pub current_one_way_bytes_per_second: Option<u64>,
+    pub max_link_speed: Option<String>,
+    pub max_link_width: Option<u32>,
+    pub max_one_way_bytes_per_second: Option<u64>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,6 +830,7 @@ mod tests {
             physical_location: Some("host".to_string()),
             numa_node: None,
             boot_vga: None,
+            pci_link: None,
             capabilities: vec!["f32".to_string()],
             format_capabilities: Vec::new(),
             diagnostics: Vec::new(),
@@ -859,6 +872,7 @@ mod tests {
                 physical_location: Some("host".to_string()),
                 numa_node: None,
                 boot_vga: None,
+                pci_link: None,
                 capabilities: Vec::new(),
                 format_capabilities: Vec::new(),
                 diagnostics: Vec::new(),
@@ -908,6 +922,7 @@ mod tests {
                 physical_location: Some("host".to_string()),
                 numa_node: None,
                 boot_vga: None,
+                pci_link: None,
                 capabilities: Vec::new(),
                 format_capabilities: Vec::new(),
                 diagnostics: Vec::new(),
@@ -984,6 +999,7 @@ mod tests {
                     physical_location: None,
                     numa_node: None,
                     boot_vga: None,
+                    pci_link: None,
                     capabilities: Vec::new(),
                     format_capabilities: Vec::new(),
                     diagnostics: Vec::new(),
@@ -1000,6 +1016,7 @@ mod tests {
                     physical_location: None,
                     numa_node: None,
                     boot_vga: None,
+                    pci_link: None,
                     capabilities: Vec::new(),
                     format_capabilities: Vec::new(),
                     diagnostics: Vec::new(),
@@ -1137,6 +1154,7 @@ fn test_target(id: &str) -> Target {
         physical_location: None,
         numa_node: None,
         boot_vga: None,
+        pci_link: None,
         capabilities: Vec::new(),
         format_capabilities: Vec::new(),
         diagnostics: Vec::new(),

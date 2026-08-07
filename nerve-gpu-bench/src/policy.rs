@@ -106,6 +106,7 @@ mod tests {
             physical_location: None,
             numa_node: None,
             boot_vga: None,
+            pci_link: None,
             capabilities: Vec::new(),
             format_capabilities: Vec::new(),
             diagnostics: Vec::new(),

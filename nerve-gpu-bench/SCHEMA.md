@@ -26,7 +26,9 @@ unsupported, or skipped.
   `benchmark_formats`, requested `benchmark_workloads`, and exclusions.
 - `discovered_targets`: every target discovered before policy filtering.
   Targets include `format_capabilities`, which record native, emulated,
-  fallback, unsupported, or unmeasured support per format.
+  fallback, unsupported, or unmeasured support per format. PCI targets may also
+  include `pci_link`, a passive sysfs estimate of current/max link width and
+  one-way byte rate.
 - `selected_target_ids`: targets selected for this run.
 - `skipped_targets`: discovered targets skipped by explicit policy.
 - `workload_specs`: logical benchmark contracts generated for the selected
@@ -111,3 +113,8 @@ must use measurements, not support flags alone.
 Workload class is also not a capability claim. It is the benchmark axis that
 keeps dense projection, MoE expert, router/reduction, and future operation
 families from being merged into one misleading score.
+
+`pci_link.current_one_way_bytes_per_second` and
+`pci_link.max_one_way_bytes_per_second` are passive estimates from link
+speed/width. They are useful priors for candidate ordering, but measured pair
+activation transfer must override them.

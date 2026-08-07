@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{FormatCapability, Target};
+use crate::model::{FormatCapability, PciLink, Target};
 
 pub fn discover_targets() -> Vec<Target> {
     let mut targets = vec![discover_cpu_target()];
@@ -27,6 +27,7 @@ fn discover_cpu_target() -> Target {
         physical_location: Some("host".to_string()),
         numa_node: None,
         boot_vga: None,
+        pci_link: None,
         capabilities: vec![
             format!("logical_cpus={cpu_count}"),
             "f32".to_string(),
@@ -119,20 +120,29 @@ fn pci_target(address: &str, path: &Path, class: &str) -> Target {
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|node| *node >= 0);
 
+    let current_link_speed = read_trimmed(path.join("current_link_speed"));
     let current_link_width = read_trimmed(path.join("current_link_width"));
+    let max_link_speed = read_trimmed(path.join("max_link_speed"));
+    let max_link_width = read_trimmed(path.join("max_link_width"));
     let kind = classify_target_kind(class, vendor_id.as_deref(), current_link_width.as_deref());
+    let pci_link = pci_link(
+        current_link_speed.clone(),
+        current_link_width.clone(),
+        max_link_speed.clone(),
+        max_link_width.clone(),
+    );
     let mut capabilities = Vec::new();
     capabilities.push(format!("pci_class={class}"));
-    if let Some(speed) = read_trimmed(path.join("current_link_speed")) {
+    if let Some(speed) = &current_link_speed {
         capabilities.push(format!("current_link_speed={speed}"));
     }
-    if let Some(width) = current_link_width {
+    if let Some(width) = &current_link_width {
         capabilities.push(format!("current_link_width={width}"));
     }
-    if let Some(max_speed) = read_trimmed(path.join("max_link_speed")) {
+    if let Some(max_speed) = &max_link_speed {
         capabilities.push(format!("max_link_speed={max_speed}"));
     }
-    if let Some(max_width) = read_trimmed(path.join("max_link_width")) {
+    if let Some(max_width) = &max_link_width {
         capabilities.push(format!("max_link_width={max_width}"));
     }
     if let Some(true) = boot_vga {
@@ -151,10 +161,50 @@ fn pci_target(address: &str, path: &Path, class: &str) -> Target {
         physical_location: Some(format!("pci:{address}")),
         numa_node,
         boot_vga,
+        pci_link,
         capabilities,
         format_capabilities: passive_pci_format_capabilities(),
         diagnostics: Vec::new(),
     }
+}
+
+fn pci_link(
+    current_link_speed: Option<String>,
+    current_link_width: Option<String>,
+    max_link_speed: Option<String>,
+    max_link_width: Option<String>,
+) -> Option<PciLink> {
+    let current_width = current_link_width.as_deref().and_then(parse_link_width);
+    let max_width = max_link_width.as_deref().and_then(parse_link_width);
+    let current_one_way_bytes_per_second = current_link_speed
+        .as_deref()
+        .and_then(parse_link_speed_gtps)
+        .zip(current_width)
+        .map(|(gtps, width)| estimate_pcie_one_way_bytes_per_second(gtps, width));
+    let max_one_way_bytes_per_second = max_link_speed
+        .as_deref()
+        .and_then(parse_link_speed_gtps)
+        .zip(max_width)
+        .map(|(gtps, width)| estimate_pcie_one_way_bytes_per_second(gtps, width));
+    if current_link_speed.is_none()
+        && current_width.is_none()
+        && max_link_speed.is_none()
+        && max_width.is_none()
+    {
+        return None;
+    }
+    Some(PciLink {
+        current_link_speed,
+        current_link_width: current_width,
+        current_one_way_bytes_per_second,
+        max_link_speed,
+        max_link_width: max_width,
+        max_one_way_bytes_per_second,
+        notes: vec![
+            "passive_sysfs_estimate_not_measured_peer_bandwidth".to_string(),
+            "one_way_bytes_per_second_uses_pcie_encoding_efficiency".to_string(),
+        ],
+    })
 }
 
 fn passive_pci_format_capabilities() -> Vec<FormatCapability> {
@@ -185,6 +235,20 @@ fn read_trimmed(path: PathBuf) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn parse_link_width(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().filter(|width| *width > 0)
+}
+
+fn parse_link_speed_gtps(value: &str) -> Option<f64> {
+    let number = value.split_whitespace().next()?;
+    number.parse::<f64>().ok().filter(|speed| *speed > 0.0)
+}
+
+fn estimate_pcie_one_way_bytes_per_second(gtps: f64, width: u32) -> u64 {
+    let encoding_efficiency = if gtps <= 5.0 { 0.8 } else { 128.0 / 130.0 };
+    ((gtps * 1_000_000_000.0 * f64::from(width) * encoding_efficiency) / 8.0).round() as u64
 }
 
 fn is_accelerator_or_gpu(class: &str) -> bool {
@@ -253,6 +317,20 @@ mod tests {
         assert_eq!(
             classify_target_kind("0x030000", Some("0x1002"), None),
             "gpu"
+        );
+    }
+
+    #[test]
+    fn parses_pcie_link_bandwidth_estimates() {
+        assert_eq!(parse_link_width("4"), Some(4));
+        assert_eq!(parse_link_speed_gtps("16.0 GT/s PCIe"), Some(16.0));
+        assert_eq!(
+            estimate_pcie_one_way_bytes_per_second(16.0, 4),
+            7_876_923_077
+        );
+        assert_eq!(
+            estimate_pcie_one_way_bytes_per_second(5.0, 4),
+            2_000_000_000
         );
     }
 }

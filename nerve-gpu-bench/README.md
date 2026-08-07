@@ -57,6 +57,10 @@ List discovered targets:
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- list --json
 ```
 
+The JSON target list includes `pci_link` when sysfs exposes PCIe speed/width.
+Those values include parsed current/max width and an estimated one-way byte rate
+for placement priors. They are not a peer-transfer benchmark.
+
 Run small benchmarks and write JSON:
 
 ```sh
