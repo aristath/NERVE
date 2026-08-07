@@ -125,6 +125,8 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- validate \
   --input benchmark-results.json
 ```
 
+`validate` accepts both benchmark run JSON and dry-plan JSON.
+
 Summarize a saved result:
 
 ```sh

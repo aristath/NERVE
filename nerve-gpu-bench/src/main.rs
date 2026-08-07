@@ -38,8 +38,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         Command::Validate { input } => {
             let payload = fs::read_to_string(&input)?;
-            let run = model::parse_benchmark_run_json(&payload)?;
-            run.validate_basic()
+            validate_json_document(&payload)
                 .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
             println!("valid {}", input.display());
         }
@@ -89,6 +88,25 @@ fn run() -> Result<(), Box<dyn Error>> {
                 println!("{payload}");
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_json_document(payload: &str) -> Result<(), Box<dyn Error>> {
+    let value = serde_json::from_str::<serde_json::Value>(payload)?;
+    match value.get("schema").and_then(serde_json::Value::as_str) {
+        Some(model::RUN_SCHEMA) => {
+            let run = model::parse_benchmark_run_json(payload)?;
+            run.validate_basic()?;
+        }
+        Some(model::PLAN_SCHEMA) => {
+            let plan = model::parse_benchmark_plan_json(payload)?;
+            plan.validate_basic()?;
+        }
+        Some(schema) => {
+            return Err(format!("unsupported benchmark JSON schema {schema:?}").into());
+        }
+        None => return Err("missing benchmark JSON schema".into()),
     }
     Ok(())
 }

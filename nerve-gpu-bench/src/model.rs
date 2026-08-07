@@ -730,6 +730,49 @@ impl BenchmarkPlan {
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
+
+    pub fn validate_basic(&self) -> Result<(), String> {
+        if self.schema != PLAN_SCHEMA {
+            return Err(format!(
+                "unsupported benchmark plan schema {:?}",
+                self.schema
+            ));
+        }
+        if self.policy.payload_bytes == 0 {
+            return Err("policy.payload_bytes must be greater than zero".to_string());
+        }
+        if self.policy.samples == 0 {
+            return Err("policy.samples must be greater than zero".to_string());
+        }
+        if self.policy.benchmark_formats.is_empty()
+            || self.policy.benchmark_formats.iter().any(String::is_empty)
+        {
+            return Err("policy.benchmark_formats must contain non-empty formats".to_string());
+        }
+        if self.policy.benchmark_workloads.is_empty()
+            || self.policy.benchmark_workloads.iter().any(String::is_empty)
+        {
+            return Err("policy.benchmark_workloads must contain non-empty workloads".to_string());
+        }
+        if self.requested_format_count != self.policy.benchmark_formats.len() {
+            return Err("requested_format_count does not match policy".to_string());
+        }
+        if self.requested_workload_count != self.policy.benchmark_workloads.len() {
+            return Err("requested_workload_count does not match policy".to_string());
+        }
+        let expected_total = self.estimated_single_measurement_count
+            + self.estimated_pair_measurement_count
+            + self.estimated_group_measurement_count;
+        if self.estimated_measurement_count != expected_total {
+            return Err("estimated_measurement_count does not match component counts".to_string());
+        }
+        if self.selected_target_ids.len() + self.skipped_targets.len()
+            > self.discovered_target_count
+        {
+            return Err("plan selected/skipped counts exceed discovered targets".to_string());
+        }
+        Ok(())
+    }
 }
 
 fn combined_candidate_status(statuses: &[&str]) -> String {
@@ -883,6 +926,10 @@ fn coverage_warnings_for_run(
 }
 
 pub fn parse_benchmark_run_json(input: &str) -> Result<BenchmarkRun, serde_json::Error> {
+    serde_json::from_str(input)
+}
+
+pub fn parse_benchmark_plan_json(input: &str) -> Result<BenchmarkPlan, serde_json::Error> {
     serde_json::from_str(input)
 }
 
@@ -1049,6 +1096,75 @@ mod tests {
         let encoded = run.to_json_pretty().unwrap();
         let parsed = parse_benchmark_run_json(&encoded).unwrap();
         parsed.validate_basic().unwrap();
+    }
+
+    #[test]
+    fn validates_minimal_plan_document() {
+        let plan = BenchmarkPlan {
+            schema: PLAN_SCHEMA.to_string(),
+            created_at_unix_ms: 1,
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: false,
+                max_group_size: 1,
+            },
+            discovered_target_count: 1,
+            selected_target_ids: vec!["cpu:host".to_string()],
+            skipped_targets: Vec::new(),
+            requested_format_count: 1,
+            requested_workload_count: 1,
+            estimated_single_measurement_count: 6,
+            estimated_pair_measurement_count: 0,
+            estimated_group_measurement_count: 0,
+            estimated_comparison_set_count: 0,
+            estimated_measurement_count: 6,
+            max_payload_bytes_per_measurement: 1024,
+            diagnostics: Vec::new(),
+        };
+        let encoded = plan.to_json_pretty().unwrap();
+        let parsed = parse_benchmark_plan_json(&encoded).unwrap();
+        parsed.validate_basic().unwrap();
+    }
+
+    #[test]
+    fn plan_validation_rejects_mismatched_totals() {
+        let plan = BenchmarkPlan {
+            schema: PLAN_SCHEMA.to_string(),
+            created_at_unix_ms: 1,
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: false,
+                max_group_size: 1,
+            },
+            discovered_target_count: 1,
+            selected_target_ids: vec!["cpu:host".to_string()],
+            skipped_targets: Vec::new(),
+            requested_format_count: 1,
+            requested_workload_count: 1,
+            estimated_single_measurement_count: 6,
+            estimated_pair_measurement_count: 0,
+            estimated_group_measurement_count: 0,
+            estimated_comparison_set_count: 0,
+            estimated_measurement_count: 5,
+            max_payload_bytes_per_measurement: 1024,
+            diagnostics: Vec::new(),
+        };
+        let error = plan.validate_basic().unwrap_err();
+        assert!(error.contains("estimated_measurement_count"));
     }
 
     #[test]
