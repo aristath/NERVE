@@ -339,6 +339,16 @@ pub struct VulkanResidentSpeculativeDecoderPackageSpec {
 }
 
 impl VulkanResidentSpeculativeDecoderPackageSpec {
+    pub fn minimum_draft_tokens(&self) -> Option<usize> {
+        self.proposal_contract
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|proposal| proposal.get("minimum_draft_tokens"))
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .filter(|tokens| *tokens > 0)
+    }
+
     pub fn recommended_draft_tokens(&self) -> Option<usize> {
         self.proposal_contract
             .as_ref()

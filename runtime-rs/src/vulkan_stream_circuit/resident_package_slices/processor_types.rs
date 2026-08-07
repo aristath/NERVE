@@ -390,6 +390,7 @@ struct VulkanResidentParallelBlockSpeculativeDecoderProcessor {
     anchor_input_signal_id: String,
     draft_tokens_output_signal_id: String,
     confidence_output_signal_id: String,
+    minimum_draft_token_count: usize,
     block_width: usize,
     source_context_tick_offset: i64,
     state_transaction: VulkanResidentStateTransactionBank,

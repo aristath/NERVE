@@ -40,13 +40,25 @@ impl VulkanResidentInProcessPlacedPromptStream {
             ));
         }
         self.speculative_draft_tokens = speculative_draft_tokens;
-        self.feedback_execution_selector = (speculative_draft_tokens > 0).then(|| {
-            VulkanAdaptiveFeedbackExecutionSelector::new(
-                self.processor
-                    .effective_speculative_draft_token_count(speculative_draft_tokens),
-                self.processor.resident_feedback_next_window_tick_count() >= 2,
+        self.feedback_execution_selector = if speculative_draft_tokens > 0 {
+            let capacity = self
+                .processor
+                .maximum_speculative_draft_token_count(speculative_draft_tokens);
+            let minimum = self.processor.minimum_speculative_draft_token_count();
+            let maximum = validated_speculative_draft_token_count(
+                speculative_draft_tokens,
+                minimum,
+                capacity,
             )
-        });
+            .map_err(placed_scheduler_divergence)?;
+            Some(VulkanAdaptiveFeedbackExecutionSelector::new(
+                minimum,
+                maximum,
+                self.processor.resident_feedback_next_window_tick_count() >= 2,
+            ))
+        } else {
+            None
+        };
         Ok(self)
     }
 
@@ -199,13 +211,25 @@ impl VulkanResidentInProcessPlacedPromptStream {
         self.session.transport = VulkanInProcessPlacedEdgeTransport::new();
         self.package = package;
         self.processor = processor;
-        self.feedback_execution_selector = (self.speculative_draft_tokens > 0).then(|| {
-            VulkanAdaptiveFeedbackExecutionSelector::new(
-                self.processor
-                    .effective_speculative_draft_token_count(self.speculative_draft_tokens),
-                self.processor.resident_feedback_next_window_tick_count() >= 2,
+        self.feedback_execution_selector = if self.speculative_draft_tokens > 0 {
+            let capacity = self
+                .processor
+                .maximum_speculative_draft_token_count(self.speculative_draft_tokens);
+            let minimum = self.processor.minimum_speculative_draft_token_count();
+            let maximum = validated_speculative_draft_token_count(
+                self.speculative_draft_tokens,
+                minimum,
+                capacity,
             )
-        });
+            .map_err(placed_scheduler_divergence)?;
+            Some(VulkanAdaptiveFeedbackExecutionSelector::new(
+                minimum,
+                maximum,
+                self.processor.resident_feedback_next_window_tick_count() >= 2,
+            ))
+        } else {
+            None
+        };
         self.resident_feedback_template_catalog.clear();
         self.pending_scheduler_activation = None;
         Ok(())
@@ -935,6 +959,9 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let draft_token_count = selected_window_width
             .min(active.remaining_public_outputs - 1)
             .min(max_public_outputs - 1);
+        if draft_token_count < self.processor.minimum_speculative_draft_token_count() {
+            return Ok(false);
+        }
         let stop_token_ids = active
             .input_event
             .stop_token_ids

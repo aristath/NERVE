@@ -62,7 +62,7 @@ fn parallel_speculative_decoder_with_default(
         proposal_contract: Some(serde_json::json!({
             "execution_block_size": 7,
             "configured_block_size": 5,
-            "minimum_draft_tokens": 1,
+            "minimum_draft_tokens": 5,
             "default_draft_tokens": default_draft_tokens,
             "confidence_prefix": "first_sigmoid_below_runtime_threshold"
         })),

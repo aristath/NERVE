@@ -71,6 +71,28 @@ enum VulkanFeedbackExecutionCandidate {
     Speculative { draft_width: usize },
 }
 
+fn validated_speculative_draft_token_count(
+    requested: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    if requested == 0 {
+        return Ok(0);
+    }
+    if minimum == 0 || maximum == 0 || minimum > maximum {
+        return Err(format!(
+            "invalid compiled speculative width range {minimum}..={maximum}",
+        ));
+    }
+    let effective = requested.min(maximum);
+    if effective < minimum {
+        return Err(format!(
+            "speculative draft width {effective} is below the compiled minimum {minimum}",
+        ));
+    }
+    Ok(effective)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanAdaptiveFeedbackExecutionSelector {
     candidates: Vec<VulkanFeedbackExecutionCandidate>,
@@ -80,11 +102,17 @@ struct VulkanAdaptiveFeedbackExecutionSelector {
 }
 
 fn adaptive_feedback_execution_candidates(
+    minimum_width: usize,
     maximum_width: usize,
     resident_feedback_available: bool,
 ) -> Vec<VulkanFeedbackExecutionCandidate> {
+    assert!(minimum_width > 0, "speculative minimum width must be nonzero");
     assert!(maximum_width > 0, "speculative window width must be nonzero");
-    let mut widths = BTreeSet::from([1, maximum_width]);
+    assert!(
+        minimum_width <= maximum_width,
+        "speculative minimum width must not exceed its maximum"
+    );
+    let mut widths = BTreeSet::from([minimum_width, maximum_width]);
     let mut class_start = 2usize;
     while class_start <= maximum_width {
         let class_end = class_start
@@ -111,16 +139,23 @@ fn adaptive_feedback_execution_candidates(
     candidates.extend(
         widths
             .into_iter()
-            .filter(|width| *width != maximum_width)
+            .filter(|width| *width >= minimum_width && *width != maximum_width)
             .map(|draft_width| VulkanFeedbackExecutionCandidate::Speculative { draft_width }),
     );
     candidates
 }
 
 impl VulkanAdaptiveFeedbackExecutionSelector {
-    fn new(maximum_width: usize, resident_feedback_available: bool) -> Self {
-        let candidates =
-            adaptive_feedback_execution_candidates(maximum_width, resident_feedback_available);
+    fn new(
+        minimum_width: usize,
+        maximum_width: usize,
+        resident_feedback_available: bool,
+    ) -> Self {
+        let candidates = adaptive_feedback_execution_candidates(
+            minimum_width,
+            maximum_width,
+            resident_feedback_available,
+        );
         let candidate_index = usize::from(candidates.len() == 1);
         let selected_candidate = candidates[0];
         Self {

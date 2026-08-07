@@ -641,6 +641,14 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             1,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let minimum_draft_token_count = model.package.minimum_draft_tokens().ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "parallel speculative decoder {:?} has no minimum draft width",
+                    model.id
+                )),
+            )
+        })?;
 
         Ok(Self {
             device_slice,
@@ -657,6 +665,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             anchor_input_signal_id: anchor_port.id.clone(),
             draft_tokens_output_signal_id,
             confidence_output_signal_id,
+            minimum_draft_token_count,
             block_width: *block_width,
             source_context_tick_offset: *source_context_tick_offset,
             state_transaction,
@@ -736,6 +745,14 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
         let draft_token_count = draft_token_count.min(self.block_width);
         if draft_token_count == 0 {
             return Err(VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget);
+        }
+        if draft_token_count < self.minimum_draft_token_count {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "parallel speculative draft width {draft_token_count} is below the compiled minimum {}",
+                    self.minimum_draft_token_count,
+                )),
+            ));
         }
         let anchor = self
             .mounted()

@@ -160,11 +160,24 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         }
     }
 
-    fn effective_draft_token_count(&self, requested: usize) -> usize {
+    fn maximum_draft_token_count(&self, requested: usize) -> usize {
         match &self.execution {
             VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(_) => requested,
             VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(processor) => {
-                requested.min(processor.block_width)
+                processor.block_width
+            }
+        }
+    }
+
+    fn effective_draft_token_count(&self, requested: usize) -> usize {
+        requested.min(self.maximum_draft_token_count(requested))
+    }
+
+    fn minimum_draft_token_count(&self) -> usize {
+        match &self.execution {
+            VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(_) => 1,
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(processor) => {
+                processor.minimum_draft_token_count
             }
         }
     }

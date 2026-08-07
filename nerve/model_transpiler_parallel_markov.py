@@ -168,7 +168,11 @@ def discover_parallel_markov_drafts(
                         "schedule": "parallel_backbone_then_sequential_markov",
                         "configured_block_size": block_size,
                         "execution_block_size": execution_block_size,
-                        "minimum_draft_tokens": 1,
+                        # A parallel Markov checkpoint is trained as a complete
+                        # semi-autoregressive block. Shorter query layouts do
+                        # not represent a cheaper view of the same behavior;
+                        # they change the learned circuit's input geometry.
+                        "minimum_draft_tokens": block_size,
                         "default_draft_tokens": default_draft_tokens,
                         "noise_token_id": noise_token_id,
                         "sampling": "greedy",

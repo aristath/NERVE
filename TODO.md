@@ -139,7 +139,10 @@ toward 50 tok/s without regressing supported Qwen models.
      retained as training/checkpoint provenance while the compiled execution
      capacity follows the official seven-token runtime recommendation. Fresh
      b7 input, backbone, sequential Markov, confidence, and output shaders are
-     compiled; widths 1-7 remain legal runtime views of that capacity. The
+     compiled. The checkpoint-trained width of five is the minimum legal query
+     geometry; the execution graph may extend that complete block to the
+     official seven-token runtime width, but widths one through four are not
+     valid cheaper views of the same learned circuit. The
      package-owned seven-token recommendation now activates when the runtime
      option is omitted, while an explicit `--speculative-draft-tokens 0`
      disables it. Conflicting attached-decoder recommendations fail closed.
@@ -148,10 +151,11 @@ toward 50 tok/s without regressing supported Qwen models.
      reference-equivalence evidence for proposal, confidence, verification,
      commit, and rollback behavior.
 
-     The first five-device demand-paged run proves the b7 decoder executes, but
-     not yet profitably: calibration measured 10 DSpark cycles, proposed 34
-     draft tokens, accepted 14 (41.18%), and selected scalar afterward. Width 4
-     was best at 3.734 useful tok/s; width 7 reached only 1.514 useful tok/s.
+     The first five-device demand-paged run proved the b7 decoder executes, but
+     its width-one-through-four measurements used invalid partial query
+     geometry and are superseded. The corrected runtime rejects explicit
+     widths below five and calibrates only complete width-five and width-seven
+     blocks before comparing them with scalar and resident feedback.
      After eliminating the obvious host submission/fence bottleneck below,
      prioritize the attached MTP/DSpark/DFlash-class decoder as the primary
      throughput multiplier. Fuse proposal, target verification, prefix

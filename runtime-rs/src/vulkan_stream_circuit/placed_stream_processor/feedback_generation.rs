@@ -1,9 +1,18 @@
 impl VulkanResidentInProcessPlacedStreamProcessor {
-    fn effective_speculative_draft_token_count(&self, requested: usize) -> usize {
+    fn maximum_speculative_draft_token_count(&self, requested: usize) -> usize {
         self.speculative_decoders
-            .first()
-            .map(|decoder| decoder.effective_draft_token_count(requested))
+            .iter()
+            .map(|decoder| decoder.maximum_draft_token_count(requested))
+            .min()
             .unwrap_or_default()
+    }
+
+    fn minimum_speculative_draft_token_count(&self) -> usize {
+        self.speculative_decoders
+            .iter()
+            .map(VulkanResidentSpeculativeDecoderProcessor::minimum_draft_token_count)
+            .max()
+            .unwrap_or(1)
     }
 
     pub fn run_feedback_bounded_in_process(

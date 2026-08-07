@@ -126,7 +126,7 @@ def test_discovers_parallel_backbone_markov_draft_from_tensor_contract(
         "schedule": "parallel_backbone_then_sequential_markov",
         "configured_block_size": 5,
         "execution_block_size": 5,
-        "minimum_draft_tokens": 1,
+        "minimum_draft_tokens": 5,
         "default_draft_tokens": 5,
         "noise_token_id": 31,
         "sampling": "greedy",
@@ -208,7 +208,7 @@ def test_parallel_markov_discovery_reuses_contract_for_unseen_config_and_tensor_
         "schedule": "parallel_backbone_then_sequential_markov",
         "configured_block_size": 5,
         "execution_block_size": 5,
-        "minimum_draft_tokens": 1,
+        "minimum_draft_tokens": 5,
         "default_draft_tokens": 5,
         "noise_token_id": 31,
         "sampling": "greedy",
@@ -278,7 +278,7 @@ def test_lowers_parallel_markov_boundaries_and_sequential_dependency() -> None:
     assert query_block["op"] == "anchor_noise_embedding_block"
     assert query_block["params"] == ["token_embedding"]
     assert query_block["attrs"] == {
-        "minimum_block_size": 1,
+        "minimum_block_size": 5,
         "block_size": 5,
         "noise_token_id": 31,
         "anchor_position": 0,
@@ -474,7 +474,7 @@ def test_compiles_source_owned_recommended_parallel_draft_width(
     model = make_model_graph(structure, Path("transpiled"), {"source": {}})
     graph = model["graph"]["draft_execution_graphs"][0]
 
-    assert draft.attributes["proposal_contract"]["minimum_draft_tokens"] == 1
+    assert draft.attributes["proposal_contract"]["minimum_draft_tokens"] == 5
     assert draft.attributes["proposal_contract"]["configured_block_size"] == 5
     assert draft.attributes["proposal_contract"]["execution_block_size"] == 7
     assert draft.attributes["proposal_contract"]["default_draft_tokens"] == 7

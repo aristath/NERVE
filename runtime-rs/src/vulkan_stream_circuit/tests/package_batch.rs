@@ -844,7 +844,7 @@ fn speculative_candidate(draft_width: usize) -> VulkanFeedbackExecutionCandidate
 #[test]
 fn adaptive_feedback_execution_probes_resident_and_speculative_shape_boundaries() {
     assert_eq!(
-        adaptive_feedback_execution_candidates(5, true),
+        adaptive_feedback_execution_candidates(1, 5, true),
         vec![
             VulkanFeedbackExecutionCandidate::Scalar,
             VulkanFeedbackExecutionCandidate::Resident,
@@ -856,7 +856,7 @@ fn adaptive_feedback_execution_probes_resident_and_speculative_shape_boundaries(
         ]
     );
     assert_eq!(
-        adaptive_feedback_execution_candidates(15, false),
+        adaptive_feedback_execution_candidates(1, 15, false),
         vec![
             VulkanFeedbackExecutionCandidate::Scalar,
             speculative_candidate(15),
@@ -869,18 +869,40 @@ fn adaptive_feedback_execution_probes_resident_and_speculative_shape_boundaries(
         ]
     );
     assert_eq!(
-        adaptive_feedback_execution_candidates(1, true),
+        adaptive_feedback_execution_candidates(1, 1, true),
         vec![
             VulkanFeedbackExecutionCandidate::Scalar,
             VulkanFeedbackExecutionCandidate::Resident,
             speculative_candidate(1),
         ]
     );
+    assert_eq!(
+        adaptive_feedback_execution_candidates(5, 7, false),
+        vec![
+            VulkanFeedbackExecutionCandidate::Scalar,
+            speculative_candidate(7),
+            speculative_candidate(5),
+        ]
+    );
+}
+
+#[test]
+fn speculative_width_validation_rejects_partial_parallel_blocks() {
+    assert_eq!(validated_speculative_draft_token_count(0, 5, 7), Ok(0));
+    assert_eq!(validated_speculative_draft_token_count(5, 5, 7), Ok(5));
+    assert_eq!(validated_speculative_draft_token_count(7, 5, 7), Ok(7));
+    assert_eq!(validated_speculative_draft_token_count(9, 5, 7), Ok(7));
+
+    let error = validated_speculative_draft_token_count(4, 5, 7).unwrap_err();
+    assert!(error.contains("width 4"));
+    assert!(error.contains("minimum 5"));
+    assert!(validated_speculative_draft_token_count(5, 0, 7).is_err());
+    assert!(validated_speculative_draft_token_count(5, 7, 5).is_err());
 }
 
 #[test]
 fn adaptive_feedback_execution_selects_measured_committed_throughput() {
-    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(5, false);
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, 5, false);
     let scores = BTreeMap::from([
         (1, (2, 100)),
         (2, (2, 160)),
@@ -915,7 +937,7 @@ fn adaptive_feedback_execution_selects_measured_committed_throughput() {
 
 #[test]
 fn adaptive_feedback_execution_can_disable_slower_speculation() {
-    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(2, true);
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, 2, true);
 
     for _ in 0..3 {
         assert_eq!(
@@ -951,7 +973,7 @@ fn adaptive_feedback_execution_can_disable_slower_speculation() {
 
 #[test]
 fn adaptive_feedback_execution_excludes_first_shape_warmup() {
-    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(2, false);
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, 2, false);
 
     for elapsed in [10_000, 100, 100] {
         assert_eq!(
@@ -983,7 +1005,7 @@ fn adaptive_feedback_execution_excludes_first_shape_warmup() {
 
 #[test]
 fn adaptive_feedback_execution_ignores_truncated_or_failed_measurements() {
-    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(2, false);
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, 2, false);
 
     selector.record_scalar_tick(0);
     assert_eq!(
@@ -1001,7 +1023,7 @@ fn adaptive_feedback_execution_ignores_truncated_or_failed_measurements() {
 
 #[test]
 fn adaptive_feedback_execution_excludes_one_time_residency_materialization() {
-    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, false);
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, 1, false);
     for _ in 0..3 {
         selector.record_scalar_tick(100);
     }
@@ -1026,7 +1048,7 @@ fn adaptive_feedback_execution_excludes_one_time_residency_materialization() {
 
 #[test]
 fn adaptive_feedback_execution_charges_repeated_residency_churn() {
-    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, false);
+    let mut selector = VulkanAdaptiveFeedbackExecutionSelector::new(1, 1, false);
     for _ in 0..3 {
         selector.record_scalar_tick(100);
     }
