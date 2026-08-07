@@ -23,7 +23,16 @@ pub struct VulkanResidentBufferCopyBatch {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     completion_fence: vk::Fence,
-    copy_count: usize,
+    copies: Vec<VulkanResidentRecordedBufferRangeCopy>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct VulkanResidentRecordedBufferRangeCopy {
+    source: vk::Buffer,
+    destination: vk::Buffer,
+    source_offset: vk::DeviceSize,
+    destination_offset: vk::DeviceSize,
+    byte_len: vk::DeviceSize,
 }
 
 pub struct VulkanResidentBufferReadback {
@@ -64,10 +73,32 @@ impl VulkanResidentBufferReadbackBinding {
 
     pub fn run(&self) -> Result<VulkanResidentBufferReadback, VulkanError> {
         self.copy_batch.run()?;
+        self.read_completed()
+    }
+
+    /// Read bytes after a containing command transaction has completed the
+    /// binding's retained device-to-staging copies. This never submits work.
+    pub fn read_completed(&self) -> Result<VulkanResidentBufferReadback, VulkanError> {
         Ok(VulkanResidentBufferReadback {
             bytes: self.staging.read_bytes(self.total_byte_count)?,
             ranges: self.ranges.clone(),
         })
+    }
+
+    pub fn sequence_snapshot_copies_after_step(
+        &self,
+        after_step_index: usize,
+    ) -> Result<Vec<VulkanResidentKernelSequenceSnapshotCopy<'_>>, VulkanError> {
+        self.copy_batch
+            .sequence_snapshot_copies_after_step(after_step_index)
+    }
+
+    pub fn unconditional_sequence_snapshot_copies_after_conditional_step(
+        &self,
+        after_step_index: usize,
+    ) -> Result<Vec<VulkanResidentKernelSequenceSnapshotCopy<'_>>, VulkanError> {
+        self.copy_batch
+            .unconditional_sequence_snapshot_copies_after_conditional_step(after_step_index)
     }
 }
 
@@ -310,7 +341,37 @@ impl VulkanResidentBufferCopy {
 
 impl VulkanResidentBufferCopyBatch {
     pub fn copy_count(&self) -> usize {
-        self.copy_count
+        self.copies.len()
+    }
+
+    pub fn sequence_snapshot_copies_after_step(
+        &self,
+        after_step_index: usize,
+    ) -> Result<Vec<VulkanResidentKernelSequenceSnapshotCopy<'_>>, VulkanError> {
+        (0..self.copy_count())
+            .map(|copy_index| {
+                VulkanResidentKernelSequenceSnapshotCopy::from_batch(
+                    after_step_index,
+                    self,
+                    copy_index,
+                )
+            })
+            .collect()
+    }
+
+    pub fn unconditional_sequence_snapshot_copies_after_conditional_step(
+        &self,
+        after_step_index: usize,
+    ) -> Result<Vec<VulkanResidentKernelSequenceSnapshotCopy<'_>>, VulkanError> {
+        (0..self.copy_count())
+            .map(|copy_index| {
+                VulkanResidentKernelSequenceSnapshotCopy::batch_after_conditional_step(
+                    after_step_index,
+                    self,
+                    copy_index,
+                )
+            })
+            .collect()
     }
 
     pub fn run(&self) -> Result<(), VulkanError> {

@@ -2207,6 +2207,77 @@ mod tests {
     }
 
     #[test]
+    fn retained_copy_batches_and_readback_mount_in_one_kernel_sequence() {
+        let spirv_words =
+            compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
+        let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
+            .parse::<usize>()
+            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
+        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let producer = device.create_resident_buffer(12).unwrap();
+        let consumer = device.create_resident_buffer(12).unwrap();
+        producer.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        consumer.write_bytes(&[0; 12]).unwrap();
+        let transfer = device
+            .create_resident_buffer_copy_batch(&[
+                VulkanResidentBufferRangeCopy::new(&producer, &consumer, 0, 0, 12).unwrap(),
+            ])
+            .unwrap();
+        let readback = device
+            .create_resident_buffer_readback_binding(&[
+                VulkanResidentBufferReadRange::new(&consumer, 0, 8).unwrap(),
+                VulkanResidentBufferReadRange::new(&consumer, 8, 4).unwrap(),
+            ])
+            .unwrap();
+        let producer_dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &producer, 12)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let consumer_dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &consumer, 12)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let steps = [
+            VulkanResidentKernelSequenceStep::new(&producer_dispatch, &[]),
+            VulkanResidentKernelSequenceStep::new(&consumer_dispatch, &[]),
+        ];
+        let mut copies = transfer
+            .sequence_snapshot_copies_after_step(0)
+            .unwrap();
+        copies.extend(
+            readback
+                .sequence_snapshot_copies_after_step(1)
+                .unwrap(),
+        );
+        let sequence = device.create_resident_kernel_sequence().unwrap();
+        reset_vulkan_resident_execution_counters();
+
+        device
+            .run_resident_kernel_sequence_with_snapshot_copies(&sequence, &steps, &copies)
+            .unwrap();
+        let completed = readback.read_completed().unwrap();
+
+        assert_eq!(completed.range_bytes(0).unwrap(), u32_bytes(&[3, 4]));
+        assert_eq!(completed.range_bytes(1).unwrap(), 43u32.to_le_bytes());
+        let counters = vulkan_resident_execution_counters();
+        assert_eq!(counters.resident_sequence_queue_submits, 1);
+        assert_eq!(counters.resident_sequence_fence_waits, 1);
+        assert_eq!(counters.resident_copy_queue_submits, 0);
+        assert_eq!(counters.resident_copy_waits, 0);
+    }
+
+    #[test]
     fn resident_transfer_stream_bounds_staging_and_completes_with_a_timeline() {
         let device = match selected_test_vulkan_device() {
             Ok(device) => device,

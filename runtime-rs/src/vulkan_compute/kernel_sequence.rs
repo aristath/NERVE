@@ -331,12 +331,17 @@ impl<'a> VulkanResidentKernelSequenceInputCopy<'a> {
 #[derive(Clone, Copy)]
 pub struct VulkanResidentKernelSequenceSnapshotCopy<'a> {
     pub after_step_index: usize,
-    source: &'a VulkanResidentBuffer,
-    destination: &'a VulkanResidentBuffer,
-    source_offset: vk::DeviceSize,
-    destination_offset: vk::DeviceSize,
-    byte_len: vk::DeviceSize,
+    source: VulkanResidentKernelSequenceSnapshotCopySource<'a>,
     allow_after_conditional_step: bool,
+}
+
+#[derive(Clone, Copy)]
+enum VulkanResidentKernelSequenceSnapshotCopySource<'a> {
+    Range(VulkanResidentBufferRangeCopy<'a>),
+    Batch {
+        batch: &'a VulkanResidentBufferCopyBatch,
+        copy_index: usize,
+    },
 }
 
 impl<'a> VulkanResidentKernelSequenceSnapshotCopy<'a> {
@@ -377,11 +382,15 @@ impl<'a> VulkanResidentKernelSequenceSnapshotCopy<'a> {
         }
         Ok(Self {
             after_step_index,
-            source,
-            destination,
-            source_offset: source_offset as vk::DeviceSize,
-            destination_offset: destination_offset as vk::DeviceSize,
-            byte_len: byte_len as vk::DeviceSize,
+            source: VulkanResidentKernelSequenceSnapshotCopySource::Range(
+                VulkanResidentBufferRangeCopy {
+                    source,
+                    destination,
+                    source_offset: source_offset as vk::DeviceSize,
+                    destination_offset: destination_offset as vk::DeviceSize,
+                    byte_len: byte_len as vk::DeviceSize,
+                },
+            ),
             allow_after_conditional_step: false,
         })
     }
@@ -396,23 +405,71 @@ impl<'a> VulkanResidentKernelSequenceSnapshotCopy<'a> {
     ) -> Self {
         Self {
             after_step_index,
+            source: VulkanResidentKernelSequenceSnapshotCopySource::Range(copy),
+            allow_after_conditional_step: true,
+        }
+    }
+
+    /// Mount one already-validated copy from a retained copy batch into a
+    /// larger command sequence. The batch remains independently runnable, but
+    /// this descriptor only records its copy; it never submits the batch.
+    pub fn from_batch(
+        after_step_index: usize,
+        batch: &'a VulkanResidentBufferCopyBatch,
+        copy_index: usize,
+    ) -> Result<Self, VulkanError> {
+        if copy_index >= batch.copies.len() {
+            return Err(VulkanError(format!(
+                "resident copy batch contains {} copies, not index {copy_index}",
+                batch.copies.len()
+            )));
+        }
+        Ok(Self {
+            after_step_index,
+            source: VulkanResidentKernelSequenceSnapshotCopySource::Batch {
+                batch,
+                copy_index,
+            },
+            allow_after_conditional_step: false,
+        })
+    }
+
+    pub fn batch_after_conditional_step(
+        after_step_index: usize,
+        batch: &'a VulkanResidentBufferCopyBatch,
+        copy_index: usize,
+    ) -> Result<Self, VulkanError> {
+        let mut copy = Self::from_batch(after_step_index, batch, copy_index)?;
+        copy.allow_after_conditional_step = true;
+        Ok(copy)
+    }
+
+    fn copy(self) -> VulkanResidentRecordedBufferRangeCopy {
+        match self.source {
+            VulkanResidentKernelSequenceSnapshotCopySource::Range(copy) => {
+                VulkanResidentRecordedBufferRangeCopy {
+                    source: copy.source.buffer,
+                    destination: copy.destination.buffer,
+                    source_offset: copy.source_offset,
+                    destination_offset: copy.destination_offset,
+                    byte_len: copy.byte_len,
+                }
+            }
+            VulkanResidentKernelSequenceSnapshotCopySource::Batch { batch, copy_index } => {
+                batch.copies[copy_index]
+            }
+        }
+    }
+
+    fn recorded(self) -> VulkanResidentKernelRecordedSnapshotCopy {
+        let copy = self.copy();
+        VulkanResidentKernelRecordedSnapshotCopy {
+            after_step_index: self.after_step_index,
             source: copy.source,
             destination: copy.destination,
             source_offset: copy.source_offset,
             destination_offset: copy.destination_offset,
             byte_len: copy.byte_len,
-            allow_after_conditional_step: true,
-        }
-    }
-
-    fn recorded(self) -> VulkanResidentKernelRecordedSnapshotCopy {
-        VulkanResidentKernelRecordedSnapshotCopy {
-            after_step_index: self.after_step_index,
-            source: self.source.buffer,
-            destination: self.destination.buffer,
-            source_offset: self.source_offset,
-            destination_offset: self.destination_offset,
-            byte_len: self.byte_len,
         }
     }
 }

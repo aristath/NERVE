@@ -1306,6 +1306,7 @@ impl VulkanComputeDevice {
                             &[],
                         );
                         for copy in step_snapshot_copies {
+                            let copy = copy.copy();
                             let regions = [vk::BufferCopy {
                                 src_offset: copy.source_offset,
                                 dst_offset: copy.destination_offset,
@@ -1313,8 +1314,8 @@ impl VulkanComputeDevice {
                             }];
                             self.device.cmd_copy_buffer(
                                 sequence.command_buffer,
-                                copy.source.buffer,
-                                copy.destination.buffer,
+                                copy.source,
+                                copy.destination,
                                 &regions,
                             );
                         }

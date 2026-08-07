@@ -1847,7 +1847,16 @@ impl VulkanComputeDevice {
                 command_pool,
                 command_buffer,
                 completion_fence,
-                copy_count: copies.len(),
+                copies: copies
+                    .iter()
+                    .map(|copy| VulkanResidentRecordedBufferRangeCopy {
+                        source: copy.source.buffer,
+                        destination: copy.destination.buffer,
+                        source_offset: copy.source_offset,
+                        destination_offset: copy.destination_offset,
+                        byte_len: copy.byte_len,
+                    })
+                    .collect(),
             })
         }
     }
