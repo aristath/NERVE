@@ -155,7 +155,11 @@ toward 50 tok/s without regressing supported Qwen models.
      its width-one-through-four measurements used invalid partial query
      geometry and are superseded. The corrected runtime rejects explicit
      widths below five and calibrates only complete width-five and width-seven
-     blocks before comparing them with scalar and resident feedback.
+     blocks before comparing them with scalar and resident feedback. The fresh
+     corrected calibration ran three cycles per legal geometry: six cycles
+     proposed 36 tokens and accepted 12 (33.33%). Width five delivered 2.853
+     useful committed tok/s and width seven delivered 0.967, so the selector
+     correctly retained scalar execution instead of slowing normal chat.
      After eliminating the obvious host submission/fence bottleneck below,
      prioritize the attached MTP/DSpark/DFlash-class decoder as the primary
      throughput multiplier. Fuse proposal, target verification, prefix
@@ -190,24 +194,24 @@ toward 50 tok/s without regressing supported Qwen models.
      of source reads and 51.81 seconds of blocking transfer, so it is correctness
      evidence rather than a warm performance result.
 
-     The 2026-08-07 authoritative DeepSeek run discarded two complete conversations
-     because the second still loaded resources, then measured the complete third
-     conversation in the same mounted process. It produced coherent thinking-enabled
-     answers with correct Greece/Athens recall at **8.2296 decode tok/s** and
-     **8.4030 prefill tok/s**. The measured set had exactly zero residency misses,
-     loads, reads, uploads, reloads, or evictions, proving steady-state execution—not
-     NVMe paging—is now the limiting path. The first discarded set loaded 132.54 GB;
-     the second loaded another 6.36 GB; the third reused all 1,149,648 selected expert
-     accesses from residency. Teardown acknowledged all five physical devices and
-     preserved the pre-existing PCI `0000:03:00.0` allocation; no discrete-GPU
-     timeout, reset, or page fault occurred.
+     The corrected 2026-08-07 authoritative DeepSeek run discarded three complete
+     conversations because residency converged through 10,004 loads, then 414,
+     then 8. It measured the complete fourth conversation in the same mounted
+     process at **8.4228 decode tok/s** and **8.3570 prefill tok/s**, with coherent
+     thinking-enabled answers and correct Greece/Athens recall. The truth set had
+     exactly zero residency misses, loads, reads, uploads, reloads, evictions, or
+     blocking time, proving steady-state execution—not NVMe paging—is the limiting
+     path. The discarded sets uploaded 133.75 GB, 5.53 GB, and 106.95 MB before the
+     final set reused its complete working set. Teardown released every NERVE
+     allocation on all five physical devices, preserved the pre-existing PCI
+     `0000:03:00.0` allocation, and produced no discrete-GPU timeout, reset, or
+     page fault.
 
      The representative 2,224-token steady-state turn remains the next dominant
-     bottleneck. The latest run spent 302,202.763 ms in decode; the prior instrumented
-     run spent 292,640.171 ms while measured execution quanta
-     accounted for only 528.660 ms and resident component device work for 263.870 ms.
-     NERVE issued 36,834 resident-sequence submissions, waited on 39,465 sequence
-     fences, issued 31,837 copy submissions, and waited on 10,852 copies. Each of the
+     bottleneck. The corrected truth run spent 292,793.624 ms in decode while
+     measured execution quanta accounted for only 517.488 ms. NERVE issued 36,834
+     resident-sequence submissions, waited on 39,465 sequence fences, issued 31,726
+     copy submissions, and waited on 10,704 copies. Each of the
      four cross-device edges also executed 2,242 separate 32-KiB transfers. Replace
      lane-by-lane host submission with a persistent resident feedback window per
      physical device: encode causal lane iteration, component segments, and edge
@@ -346,6 +350,13 @@ toward 50 tok/s without regressing supported Qwen models.
    speculative disable and its official thinking/sampling profile. Both retained
    correct Greece recall and returned exactly to their recorded pre-run VRAM
    reservations.
+   After enforcing trained parallel-block draft geometry, both gates passed again
+   from `main`: Qwen3.6-35B-A3B measured **53.6328 decode tok/s** and **60.4842
+   prefill tok/s** with its attached decoder enabled, while Qwen3.5-9B measured
+   **48.8470 decode tok/s** and **141.6512 prefill tok/s** with explicit speculative
+   disable. Both used the 128K context, 65,536-token output allowance, official
+   thinking/sampling behavior, one complete discarded conversation, correct
+   Greece/Athens recall, exact teardown, and no new kernel GPU fault.
 
 6. Perform a final adversarial review against `CONCEPT.md`: compiled artifacts
    remain self-contained and model-specific, while compiler discovery, runtime
