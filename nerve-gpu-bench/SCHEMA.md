@@ -133,9 +133,11 @@ targets. Their stable IDs use `vulkan:pci:<address>` when `VK_EXT_pci_bus_info`
 is available. Otherwise they include the physical-device index because Vulkan
 device order is driver-defined. Discovery creates a Vulkan instance only; it
 does not create logical devices or run GPU workloads.
-F16 capability uses the shaderFloat16 feature bit. BF16 and FP8 currently use
-extension presence as a conservative probe and remain `unmeasured` until their
-feature bits and kernels are implemented.
+F16 capability uses the shaderFloat16 feature bit. INT4 is marked `emulated`
+when shaderInt8 is available, because packed INT4 can be unpacked through an
+integer shader path but still requires benchmark kernels. BF16 and FP8 currently
+use extension presence as a conservative probe and remain `unmeasured` until
+their feature bits and kernels are implemented.
 
 Format capability is not a speed claim. A target can lack native FP4 but still
 win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement

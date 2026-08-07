@@ -277,6 +277,7 @@ fn vulkan_format_capabilities(
     let supports_f16 = feature_flags
         .iter()
         .any(|feature| feature == "shader_float16");
+    let supports_int8 = feature_flags.iter().any(|feature| feature == "shader_int8");
     vec![
         format_capability("f32", "native", "vulkan_core", "32-bit float shader path"),
         format_capability(
@@ -323,9 +324,17 @@ fn vulkan_format_capabilities(
         ),
         format_capability(
             "int4",
-            "unmeasured",
-            "vulkan_probe",
-            "requires packed integer benchmark path",
+            if supports_int8 {
+                "emulated"
+            } else {
+                "unmeasured"
+            },
+            "vulkan_feature_chain",
+            if supports_int8 {
+                "shaderInt8 feature bit is set; packed int4 still requires benchmark kernel"
+            } else {
+                "requires packed integer benchmark path"
+            },
         ),
         format_capability(
             "fp4",
@@ -475,5 +484,22 @@ mod tests {
             .find(|capability| capability.format == "f16")
             .unwrap();
         assert_eq!(f16.support, "unsupported");
+    }
+
+    #[test]
+    fn int4_is_emulated_when_shader_int8_is_available() {
+        let capabilities = vulkan_format_capabilities(&[], &["shader_int8".to_string()]);
+        let int4 = capabilities
+            .iter()
+            .find(|capability| capability.format == "int4")
+            .unwrap();
+        assert_eq!(int4.support, "emulated");
+
+        let capabilities = vulkan_format_capabilities(&[], &[]);
+        let int4 = capabilities
+            .iter()
+            .find(|capability| capability.format == "int4")
+            .unwrap();
+        assert_eq!(int4.support, "unmeasured");
     }
 }
