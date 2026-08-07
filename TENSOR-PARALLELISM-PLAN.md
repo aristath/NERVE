@@ -221,6 +221,52 @@ Benchmark results should be classified explicitly as:
 That distinction matters because absence of evidence must not silently become
 permission to place work on a device.
 
+## Benchmark Package Target Policy
+
+The standalone benchmark package must not encode workstation-specific bans as
+global rules. Hardware that was risky or unsuitable on one machine can be valid
+on another machine, and the benchmarker is supposed to discover that from the
+current host.
+
+The package should discover every target class it can see, including:
+
+- CPU targets;
+- integrated GPUs;
+- discrete GPUs;
+- AMD devices;
+- NVIDIA devices;
+- Intel devices; and
+- any other supported accelerator exposed by the backend.
+
+The user should then choose the target set explicitly. The CLI should support
+both inclusion and exclusion controls, for example:
+
+```text
+nerve-gpu-bench --include-target <stable-target-id> --include-target <stable-target-id>
+nerve-gpu-bench --exclude-target <stable-target-id>
+nerve-gpu-bench --exclude-pci 0000:8a:00.0
+nerve-gpu-bench --exclude-kind integrated_gpu
+```
+
+Discovery should report all targets even when a local policy excludes them
+from a particular run. Exclusion is a run policy decision, not a device-class
+truth.
+
+The JSON output should preserve:
+
+- every discovered target;
+- the selected benchmark target set;
+- explicit user exclusions;
+- automatic safety exclusions, if any;
+- the reason each target was skipped; and
+- enough stable identity to let the inference engine map measurements back to
+  current runtime devices.
+
+Local deployment policy can still choose to avoid a display iGPU, a problematic
+driver stack, a busy production GPU, or any other target. That policy belongs
+in the run configuration and result provenance, not as a hard-coded package
+assumption.
+
 The existing transfer calibration is per selected device and covers
 host-to-device, device-to-host, and device-local buffer copy. For tensor
 parallelism decisions we also need pairwise measurements such as:
@@ -395,7 +441,7 @@ following are true:
 - every selected GPU has sufficient safe capacity;
 - predicted distributed cost beats serialized cost by a configured margin;
 - the residency policy can still be admitted exactly;
-- the plan does not involve an excluded integrated/display GPU; and
+- the plan does not involve a target excluded by the active run policy; and
 - the generated report explains why sharding was selected.
 
 ### Stage 5: Expert-Aware Residency Planning
@@ -423,7 +469,9 @@ policy could be more precise:
 - no unmeasured TP;
 - no global TP by default;
 - no slow-link participants without measured justification;
-- no automatic TP on integrated/display GPUs;
+- no hard-coded global bans for CPU, integrated GPU, discrete GPU, AMD, NVIDIA,
+  Intel, or any other target class;
+- target exclusions are explicit run policy, not permanent device-class facts;
 - local component sharding is allowed only from calibrated evidence; and
 - benchmarks must compare equivalent execution settings and placement
   strategies.
