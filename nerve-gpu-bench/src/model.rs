@@ -420,6 +420,7 @@ impl BenchmarkRun {
                         candidate.candidate_id
                     ));
                 }
+                validate_candidate_measurement_kind(candidate)?;
                 if !workload_ids.contains(candidate.workload_id.as_str()) {
                     return Err(format!(
                         "comparison candidate {:?} references unknown workload {:?}",
@@ -852,6 +853,29 @@ fn validate_status(status: &str) -> Result<(), String> {
     }
 }
 
+fn validate_candidate_measurement_kind(candidate: &ComparisonCandidate) -> Result<(), String> {
+    let expected_target_count = match candidate.measurement_kind.as_str() {
+        "single" => 1,
+        "pair" => 2,
+        "group" => 3,
+        other => {
+            return Err(format!(
+                "comparison candidate {:?} has unsupported measurement kind {other:?}",
+                candidate.candidate_id
+            ));
+        }
+    };
+    if candidate.target_ids.len() != expected_target_count {
+        return Err(format!(
+            "comparison candidate {:?} has measurement kind {:?} but {} target IDs",
+            candidate.candidate_id,
+            candidate.measurement_kind,
+            candidate.target_ids.len()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_format_capabilities(target: &Target) -> Result<(), String> {
     let mut formats = BTreeSet::new();
     for capability in &target.format_capabilities {
@@ -1278,6 +1302,69 @@ mod tests {
         };
         let error = run.validate_basic().unwrap_err();
         assert!(error.contains("references unknown workload"));
+    }
+
+    #[test]
+    fn validation_rejects_candidate_kind_target_count_mismatch() {
+        let run = BenchmarkRun {
+            schema: RUN_SCHEMA.to_string(),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            implementation: Implementation::current(),
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: true,
+                max_group_size: 2,
+            },
+            discovered_targets: vec![test_target("gpu:a"), test_target("gpu:b")],
+            selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+            skipped_targets: Vec::new(),
+            workload_specs: vec![WorkloadSpec {
+                workload_id: "synthetic_tensor_split_small_payload:dense_projection:f32"
+                    .to_string(),
+                comparison_group: "small_payload_placement_comparison".to_string(),
+                workload_class: "dense_projection".to_string(),
+                placement_strategy: "two_target_parallel".to_string(),
+                pattern: "synthetic_tensor_split_small_payload".to_string(),
+                format: "f32".to_string(),
+                participant_count: 2,
+                payload_bytes: 1024,
+                parameter_bytes_per_participant: 512,
+                activation_bytes: 1024,
+                output_bytes: 1024,
+                description: "test".to_string(),
+            }],
+            comparison_sets: vec![ComparisonSet {
+                comparison_id: "cmp".to_string(),
+                comparison_group: "small_payload_placement_comparison".to_string(),
+                workload_class: "dense_projection".to_string(),
+                regime: "small_payload".to_string(),
+                format: "f32".to_string(),
+                target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+                candidates: vec![ComparisonCandidate {
+                    candidate_id: "cmp:bad".to_string(),
+                    placement_strategy: "two_target_parallel".to_string(),
+                    measurement_kind: "pair".to_string(),
+                    workload_id: "synthetic_tensor_split_small_payload:dense_projection:f32"
+                        .to_string(),
+                    target_ids: vec!["gpu:a".to_string()],
+                    notes: String::new(),
+                }],
+            }],
+            measurements: Vec::new(),
+            pair_measurements: Vec::new(),
+            group_measurements: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let error = run.validate_basic().unwrap_err();
+        assert!(error.contains("measurement kind"));
     }
 }
 
