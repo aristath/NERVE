@@ -22,21 +22,28 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   measured fourth conversation had zero reads, uploads, reloads, evictions, or
   residency blocking. NVMe paging is therefore not the steady-state limiter.
 - Complete critical-path instrumentation is enabled in normal chat and covers
-  99.99% of host wall time. On the representative 2,224-token zero-load turn,
-  347.836 of 353.316 seconds were host synchronization, while Vulkan timestamps
-  attributed about 97.148 seconds to the formerly broad expert bucket, 133.012
-  seconds to the formerly broad attention/index bucket, and 102.601 seconds to
-  mixed device compute. The host is predominantly waiting for device work; the
+  99.99% of host wall time. The refined 2,224-token DeepSeek truth turn incurred
+  only 4.788 seconds of residency blocking while attributing 70.598 seconds to
+  attention read, 49.812 seconds to hyper-connections, 45.682 seconds to expert
+  gate/up, 29.396 seconds to attention score, 26.420 seconds to dense projection,
+  25.478 seconds to expert down, 8.505 seconds to state memory, and 6.972 seconds
+  to grouped projection. The host is predominantly waiting for device work; the
   earlier claim that compact math was simply masked by host orchestration is no
   longer supported.
-- Semantic attribution now separates genuine sparse-expert operations from
-  grouped attention projections and distinguishes dense/grouped projections,
-  normalization, quantization, state memory, index transforms, attention score,
-  selection and read, positional encoding, hyper-connections, and pointwise
-  activation. The change passed exact tests plus full thinking-enabled gates:
-  Qwen3.6-35B-A3B measured 56.8876 decode tok/s (previously 54.9992), and
-  Qwen3.5-9B measured 48.8396 (previously 48.6968), with correct recall and exact
-  VRAM release.
+- Semantic attribution separates genuine sparse-expert operations from grouped
+  attention projections and distinguishes expert gate/up, down and reduction,
+  dense/grouped projections, normalization, quantization, state memory, index
+  transforms, attention score, selection and read, positional encoding,
+  hyper-connections, and pointwise activation. Cross-device device time is
+  sampled by a bounded rotating probe at completed prompt boundaries; production
+  transfers remain timestamp-free and have zero host waits. A real staged
+  DeepSeek event sampled about 0.1 ms for one source/destination boundary pair,
+  so physical activation movement is not a material steady-state limiter.
+- The refined instrumentation passed exact sequential tests plus complete
+  thinking-enabled regression gates. Qwen3.6-35B-A3B measured 60.6544 decode and
+  45.8668 prefill tok/s; Qwen3.5-9B measured 48.6830 decode and 139.3640 prefill
+  tok/s. Both produced correct turn recall and restored the exact pre-workload
+  VRAM reservations.
 - The current real six-expert MXFP4 microbenchmark measures 1.00392 ms for
   gate/up and 0.43088 ms for down. A host-visible-weight path is 3.912x slower.
   Gate/up is the first sparse-expert kernel target. Two alternative indexed
@@ -51,27 +58,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Work queue
 
-1. Finish critical-path resolution and establish the authoritative refined
-   zero-load profile.
-
-   - Re-run complete DeepSeek conversations in one mounted process until an
-     entire conversation has zero residency loads, then record the refined
-     per-operation device attribution on the untouched truth conversation.
-   - Timestamp cross-device copies without adding a per-copy host readback or
-     wait. Separate expert gate/up from down and reduction so the full-model
-     trace can be reconciled with the real-geometry microbenchmark.
-   - Prove timestamp collection itself has no material cost. If always-on fine
-     regions are measurable, retain coarse always-on counters and collect fine
-     regions by bounded rotating samples in normal chat; do not add a special
-     profiling execution mode.
-   - Remove this item only when at least 95% of wall time remains attributed,
-     device work is not double-counted, cross-device work is visible, and the
-     refined profile identifies the next optimization by measured time.
-
-2. Optimize the hottest refined DeepSeek device kernels without changing model
+1. Optimize the hottest refined DeepSeek device kernels without changing model
    semantics.
 
-   - Start with native compact-MXFP4 expert gate/up. Measure whether repeated
+   - Start with indexed sparse-attention read, the largest measured device phase.
+     Eliminate redundant state-address translation, duplicate key/value reads,
+     serial score reduction, barriers, and full-score materialization where an
+     exact fused or tiled schedule is faster. Preserve score accumulation order,
+     online-softmax semantics, sink handling, compressed-index ordering, and
+     BF16 output bits.
+   - Continue with hyper-connections and native compact-MXFP4 expert gate/up in
+     measured order. Measure whether repeated
      selector-address validation and indirection can be resolved once per routed
      expert by the residency gate and consumed as a compact device-resident route
      table by all expert workgroups.
@@ -87,7 +84,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      anomaly. Reject a candidate immediately when it is slower or changes the
      deterministic product path.
 
-3. Compile a persistent per-device stream transaction after the refined trace
+2. Compile a persistent per-device stream transaction after the refined trace
    quantifies the remaining host contribution.
 
    - Turn each ordered physical-device component segment into a stable bounded
@@ -103,7 +100,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      completion; a previous template experiment reused almost every command buffer
      but fell to 1.205 tok/s because it retained the fragmented submission graph.
 
-4. Make a resident sparse-expert hit completely device-owned.
+3. Make a resident sparse-expert hit completely device-owned.
 
    - Keep selector-to-resource addresses plus validity/version metadata resident.
      An all-hit gate must continue directly into expert execution without a host
@@ -116,7 +113,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      produce identical committed tokens, routed experts, sampler state, and state
      digests from the same checkpoint.
 
-5. Make cross-device transfers part of the compiled transaction.
+4. Make cross-device transfers part of the compiled transaction.
 
    - Preserve arbitrary ordered visits, including `gpu0 -> gpu1 -> gpu0`, with
      persistent activation rings and timeline dependencies. A 32-KiB edge must not
@@ -127,14 +124,14 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    - First optimize single-stream latency. Pipeline independent streams across
      otherwise idle segments only after that path is correct and measured.
 
-6. Make temporal prefill a real multi-token device transaction. Execute prompt
+5. Make temporal prefill a real multi-token device transaction. Execute prompt
    blocks through the same resident gates, ordered segments, transfers, attention
    updates, and terminal completion without a host loop per token. Choose block
    width from context geometry, transient-state capacity, residency headroom, and
    measured hardware behavior. Verify every causal state against scalar prefill
    and report time-to-first-token separately from decode.
 
-7. Rebuild attached DSpark execution on the persistent transaction. The compiler
+6. Rebuild attached DSpark execution on the persistent transaction. The compiler
    already discovers the package-owned `parallel_backbone_markov` decoder and its
    trained five-token minimum and legal seven-token execution width without model
    names. Fuse proposal, target verification, confidence-prefix comparison,
@@ -145,20 +142,19 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    acceptance and 2.853/0.967 useful tok/s width-five/width-seven results are a
    rejected baseline, not a mode to force.
 
-8. Optimize long-context attention and deterministic selection after the refined
-   trace identifies their real contribution. Evaluate fused score/select,
-   deterministic radix-prefix, blockwise or hierarchical selection, and avoiding
-   full-score materialization. Preserve exact tie ordering and score-descending
-   output. Measure progressively larger real contexts rather than hiding growth
-   behind a short benchmark.
+7. Optimize deterministic attention scoring and selection after the attention-read
+   path. Evaluate fused score/select, deterministic radix-prefix, blockwise or
+   hierarchical selection, and avoiding full-score materialization. Preserve
+   exact tie ordering and score-descending output. Measure progressively larger
+   real contexts rather than hiding growth behind a short benchmark.
 
-9. Preserve bounded failure handling without putting it on the hot path. Isolate
+8. Preserve bounded failure handling without putting it on the hot path. Isolate
    Vulkan execution behind supervised per-device workers carrying complete stream
    transactions, not component calls. Retain bounded watchdog progress, quarantine
    only the poisoned worker, preserve the first failure and last causal checkpoint,
    and keep all other workers and the UI responsive without per-token IPC.
 
-10. Complete capability-driven per-component representation selection. Preserve
+9. Complete capability-driven per-component representation selection. Preserve
     the native source representation whenever it wins on the assigned target.
     Add dense or exactly valid structured INT4, FP8, INT8, and FP16 candidates only
     through device-local measurement and behavioral-equivalence evidence. Promotion
@@ -166,13 +162,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     traffic, representation boundaries, and live headroom; capability advertises a
     candidate but never selects it by itself.
 
-11. Extend the generic product gate with a representative tool-call round trip,
+10. Extend the generic product gate with a representative tool-call round trip,
     malformed-output rollback, and long-stream continuity. Use package-owned chat
     behavior and sampling defaults, official thinking behavior, agentic context,
     complete-conversation warmup, coherent final answers, turn recall, and exact
     teardown without model-name branches.
 
-12. Complete heterogeneous cost-based placement. Keep the existing smallest
+11. Complete heterogeneous cost-based placement. Keep the existing smallest
     capacity-safe contiguous device prefix, partial-reservation handling, integrated
     GPU exclusion, explicit-wiring preservation, and representation/placement
     fixed-point solve. Add compiler-emitted compatible BF16/INT8 alternatives and
@@ -180,7 +176,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     compatible discrete Intel GPU or CPU without recompilation when AMD capacity is
     exhausted.
 
-13. Gate every runtime-performance milestone before commit. Run exact sequential
+12. Gate every runtime-performance milestone before commit. Run exact sequential
     tests, then full DeepSeek, Qwen3.6-35B-A3B, and Qwen3.5-9B conversations on
     equivalent allowlisted discrete AMD placement. DeepSeek truth starts only after
     a complete zero-load conversation. Reject microbenchmark-only wins, behavioral
@@ -189,7 +185,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     toward 50, and stop only when the attributed path has no material avoidable host
     round trip, GPU bubble, conversion, or unfused memory pass.
 
-14. Perform a final adversarial review against `CONCEPT.md`. Compiled artifacts
+13. Perform a final adversarial review against `CONCEPT.md`. Compiled artifacts
     must remain self-contained and model-specific; compiler discovery, runtime
     operators, graph wiring, placement, representation, residency, and stream
     transactions must remain reusable by unseen models. Finish with an empty TODO,
