@@ -5,7 +5,11 @@ use std::path::PathBuf;
 const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SAMPLES: usize = 5;
 const DEFAULT_MAX_GROUP_SIZE: usize = 3;
-const DEFAULT_BENCHMARK_FORMATS: &[&str] = &["bf16", "f32", "fp4", "fp8", "int4"];
+const DEFAULT_BENCHMARK_FORMATS: &[&str] = &[
+    "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "nvfp4", "int8", "int4", "q8_0", "q6_k",
+    "q5_0", "q5_1", "q5_k", "q4_0", "q4_1", "q4_k", "q3_k", "q2_k", "iq4_nl", "iq4_xs", "iq3_s",
+    "iq2_xs", "f32",
+];
 const DEFAULT_BENCHMARK_WORKLOADS: &[&str] =
     &["dense_projection", "moe_expert", "router_reduction"];
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
@@ -279,6 +283,16 @@ pub fn usage() -> &'static str {
 mod tests {
     use super::*;
 
+    fn default_benchmark_formats() -> Vec<String> {
+        let mut formats = DEFAULT_BENCHMARK_FORMATS
+            .iter()
+            .map(|format| (*format).to_string())
+            .collect::<Vec<_>>();
+        formats.sort();
+        formats.dedup();
+        formats
+    }
+
     #[test]
     fn parses_run_defaults() {
         let command = parse_args(["run".to_string()]).unwrap();
@@ -288,10 +302,7 @@ mod tests {
                 output: None,
                 payload_bytes: DEFAULT_PAYLOAD_BYTES,
                 samples: DEFAULT_SAMPLES,
-                benchmark_formats: DEFAULT_BENCHMARK_FORMATS
-                    .iter()
-                    .map(|format| (*format).to_string())
-                    .collect(),
+                benchmark_formats: default_benchmark_formats(),
                 benchmark_workloads: DEFAULT_BENCHMARK_WORKLOADS
                     .iter()
                     .map(|workload| (*workload).to_string())
@@ -333,13 +344,7 @@ mod tests {
             } => {
                 assert_eq!(include_targets, ["cpu:host"]);
                 assert_eq!(exclude_kinds, ["integrated_gpu"]);
-                assert_eq!(
-                    benchmark_formats,
-                    DEFAULT_BENCHMARK_FORMATS
-                        .iter()
-                        .map(|format| (*format).to_string())
-                        .collect::<Vec<_>>()
-                );
+                assert_eq!(benchmark_formats, default_benchmark_formats());
                 assert_eq!(
                     benchmark_workloads,
                     DEFAULT_BENCHMARK_WORKLOADS

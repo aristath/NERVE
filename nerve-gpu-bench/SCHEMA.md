@@ -63,10 +63,11 @@ or GPU measurements.
 
 `policy.execute` records whether the run was allowed to open Vulkan
 logical devices. When true, selected Vulkan targets may attempt the execution
-boundary. Current Vulkan single-target measurements can complete the F32
-`dense_projection` path with timestamped compute samples. Other Vulkan workload
-or format paths remain `status: "unmeasured"` or `status: "unsupported"` until
-their kernels are implemented.
+boundary. Current Vulkan single-target measurements can complete
+`dense_projection` paths with timestamped compute samples for F32 and
+packed-emulated lower-precision or quantized storage formats. Other Vulkan
+workload or format paths remain `status: "unmeasured"` or
+`status: "unsupported"` until their kernels are implemented.
 
 ## Workload Specs
 
@@ -92,8 +93,8 @@ For two-target comparisons, serial placement is directional. A result should
 preserve both A-to-B and B-to-A candidates because the activation transfer path,
 target speed, and stage ownership may not be symmetric.
 Comparison sets are also workload- and format-specific. The same target pair can
-have a different answer for dense projection, MoE expert, router reduction, F32,
-BF16, FP8, INT4, or FP4.
+have a different answer for dense projection, MoE expert, router reduction, F16,
+BF16, FP8 variants, FP4/MXFP4/NVFP4, INT formats, GGUF Q/IQ formats, or F32.
 
 Current workload spec families:
 
@@ -121,10 +122,11 @@ Current workload spec families:
   collect output.
 
 Device-backed specs are emitted even before every backend path exists. Vulkan
-F32 dense-projection single-target measurements can complete when `--execute`
-is active. Other device-backed measurements use `status: "unmeasured"` until a
-backend can execute them. CPU reference compound measurements use the same small
-payload to keep the serialized/layer-split/tensor-split semantics executable.
+dense-projection single-target measurements can complete for executable formats
+when `--execute` is active. Other device-backed measurements use
+`status: "unmeasured"` until a backend can execute them. CPU reference compound
+measurements use the same small payload to keep the
+serialized/layer-split/tensor-split semantics executable.
 CPU F32 single-target measurements use
 `single_target_small_payload:<workload_class>:f32` so they can resolve the same
 candidate family as GPU or accelerator targets. CPU formats that are not
@@ -141,15 +143,15 @@ Vulkan targets are detected targets. Their stable IDs use
 include the physical-device index because Vulkan device order is driver-defined.
 Discovery creates a Vulkan instance only; it does not create logical devices or
 run GPU workloads.
-F16 capability uses the shaderFloat16 feature bit. INT4 is marked `emulated`
-when shaderInt8 is available, because packed INT4 can be unpacked through an
-integer shader path but still requires benchmark kernels. BF16 and FP8 currently
-use extension presence as a conservative probe and remain `unmeasured` until
-their feature bits and kernels are implemented.
+F16 capability uses the shaderFloat16 feature bit. BF16 and FP8 variant
+capabilities use extension presence as conservative native-path probes. FP4,
+MXFP4, NVFP4, INT, GGUF Q-family, and IQ-family formats can be marked
+`emulated` when the generic packed-u32 baseline can run, but native
+format-specific math/dequant kernels still require separate measurements.
 
-Format capability is not a speed claim. A target can lack native FP4 but still
-win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement
-must use measurements, not support flags alone.
+Format capability is not a speed claim. A target can lack native FP4/MXFP4 but
+still win F16, BF16, FP8, routing, logits, sampler, or fallback/dequantized
+work. Placement must use measurements, not support flags alone.
 
 Workload class is also not a capability claim. It is the benchmark axis that
 keeps dense projection, MoE expert, router/reduction, and future operation

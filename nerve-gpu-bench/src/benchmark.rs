@@ -1596,7 +1596,7 @@ mod tests {
         let policy = RunPolicy {
             payload_bytes: 5 * 1024 * 1024,
             samples: 1,
-            benchmark_formats: vec!["f32".to_string(), "fp8".to_string()],
+            benchmark_formats: vec!["f32".to_string(), "fp8_e4m3".to_string()],
             benchmark_workloads: workloads(),
             include_targets: Vec::new(),
             exclude_targets: Vec::new(),
@@ -1743,7 +1743,7 @@ mod tests {
         let policy = RunPolicy {
             payload_bytes: 64 * 1024,
             samples: 1,
-            benchmark_formats: vec!["f32".to_string(), "fp8".to_string()],
+            benchmark_formats: vec!["f32".to_string(), "fp8_e4m3".to_string()],
             benchmark_workloads: workloads(),
             include_targets: Vec::new(),
             exclude_targets: Vec::new(),
@@ -1761,7 +1761,8 @@ mod tests {
         }));
         assert!(run.measurements.iter().any(|measurement| {
             measurement.target_id == "cpu:host"
-                && measurement.workload_id == "single_target_small_payload:dense_projection:fp8"
+                && measurement.workload_id
+                    == "single_target_small_payload:dense_projection:fp8_e4m3"
                 && measurement.status == "unsupported"
         }));
 

@@ -30,6 +30,81 @@ const F32_TRANSFORM_SHADER_SPV: &[u32] = &[
     65789, 65592,
 ];
 
+const PACKED_U32_TRANSFORM_SHADER_SPV: &[u32] = &[
+    119734787, 65536, 851979, 54, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134, 0,
+    196622, 0, 1, 393231, 5, 4, 1852399981, 0, 11, 393232, 4, 17, 64, 1, 1, 196611, 2, 450, 655364,
+    1197427783, 1279741775, 1885560645, 1953718128, 1600482425, 1701734764, 1919509599, 1769235301,
+    25974, 524292, 1197427783, 1279741775, 1852399429, 1685417059, 1768185701, 1952671090, 6649449,
+    262149, 4, 1852399981, 0, 196613, 8, 7890025, 524293, 11, 1197436007, 1633841004, 1986939244,
+    1952539503, 1231974249, 68, 262149, 17, 1752397136, 0, 262150, 17, 0, 7234924, 262149, 19,
+    1752397168, 0, 196613, 29, 120, 262149, 31, 1635017028, 0, 327686, 31, 0, 1970037110, 29541,
+    262149, 33, 1635017060, 0, 262215, 11, 11, 28, 196679, 17, 2, 327752, 17, 0, 35, 0, 262215, 30,
+    6, 4, 196679, 31, 3, 327752, 31, 0, 35, 0, 262215, 33, 33, 0, 262215, 33, 34, 0, 262215, 53,
+    11, 25, 131091, 2, 196641, 3, 2, 262165, 6, 32, 0, 262176, 7, 7, 6, 262167, 9, 6, 3, 262176,
+    10, 1, 9, 262203, 10, 11, 1, 262187, 6, 12, 0, 262176, 13, 1, 6, 196638, 17, 6, 262176, 18, 9,
+    17, 262203, 18, 19, 9, 262165, 20, 32, 1, 262187, 20, 21, 0, 262176, 22, 9, 6, 131092, 25,
+    196637, 30, 6, 196638, 31, 30, 262176, 32, 2, 31, 262203, 32, 33, 2, 262176, 35, 2, 6, 262187,
+    6, 39, 1664525, 262187, 6, 41, 1013904223, 262187, 20, 45, 16, 262187, 6, 51, 64, 262187, 6,
+    52, 1, 393260, 9, 53, 51, 52, 52, 327734, 2, 4, 0, 3, 131320, 5, 262203, 7, 8, 7, 262203, 7,
+    29, 7, 327745, 13, 14, 11, 12, 262205, 6, 15, 14, 196670, 8, 15, 262205, 6, 16, 8, 327745, 22,
+    23, 19, 21, 262205, 6, 24, 23, 327856, 25, 26, 16, 24, 196855, 28, 0, 262394, 26, 27, 28,
+    131320, 27, 262205, 6, 34, 8, 393281, 35, 36, 33, 21, 34, 262205, 6, 37, 36, 196670, 29, 37,
+    262205, 6, 38, 29, 327812, 6, 40, 38, 39, 327808, 6, 42, 40, 41, 196670, 29, 42, 262205, 6, 43,
+    29, 262205, 6, 44, 29, 327874, 6, 46, 44, 45, 327878, 6, 47, 43, 46, 196670, 29, 47, 262205, 6,
+    48, 8, 262205, 6, 49, 29, 393281, 35, 50, 33, 21, 48, 196670, 50, 49, 131321, 28, 131320, 28,
+    65789, 65592,
+];
+
+struct DenseFormatKernel {
+    format: String,
+    shader: &'static [u32],
+    bytes_per_storage_element: usize,
+    logical_elements_per_storage_element: u64,
+    operations_per_storage_element: u64,
+    pattern: &'static str,
+}
+
+fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
+    match format {
+        "f32" => Some(DenseFormatKernel {
+            format: "f32".to_string(),
+            shader: F32_TRANSFORM_SHADER_SPV,
+            bytes_per_storage_element: mem::size_of::<f32>(),
+            logical_elements_per_storage_element: 1,
+            operations_per_storage_element: 2,
+            pattern: "single_target_compute",
+        }),
+        "f16" => Some(packed_dense_kernel("f16", 2)),
+        "bf16" => Some(packed_dense_kernel("bf16", 2)),
+        "fp8" | "fp8_e4m3" | "fp8_e5m2" => Some(packed_dense_kernel(format, 4)),
+        "int8" | "q8_0" => Some(packed_dense_kernel(format, 4)),
+        "q6_k" => Some(packed_dense_kernel(format, 5)),
+        "q5_0" | "q5_1" | "q5_k" => Some(packed_dense_kernel(format, 6)),
+        "int4" | "q4_0" | "q4_1" | "q4_k" | "iq4_nl" | "iq4_xs" => {
+            Some(packed_dense_kernel(format, 8))
+        }
+        "q3_k" | "iq3_s" => Some(packed_dense_kernel(format, 10)),
+        "q2_k" | "iq2_xs" => Some(packed_dense_kernel(format, 16)),
+        "fp4" => Some(packed_dense_kernel("fp4", 8)),
+        "mxfp4" | "nvfp4" => Some(packed_dense_kernel(format, 8)),
+        _ => None,
+    }
+}
+
+fn packed_dense_kernel(
+    format: &str,
+    logical_elements_per_storage_element: u64,
+) -> DenseFormatKernel {
+    DenseFormatKernel {
+        format: format.to_string(),
+        shader: PACKED_U32_TRANSFORM_SHADER_SPV,
+        bytes_per_storage_element: mem::size_of::<u32>(),
+        logical_elements_per_storage_element,
+        operations_per_storage_element: 4,
+        pattern: "single_target_packed_emulated_compute",
+    }
+}
+
 pub fn run_vulkan_single_target_measurements(
     target: &Target,
     payload_bytes: usize,
@@ -71,42 +146,63 @@ fn vulkan_measurements(
             workloads
                 .iter()
                 .map(move |workload| match (format.as_str(), workload.as_str()) {
-                    ("f32", "dense_projection") => match run_vulkan_f32_dense_projection(
-                        device,
-                        target_id,
-                        payload_bytes,
-                        samples,
-                        workload,
-                    ) {
-                        Ok(measurement) => measurement,
-                        Err(message) => single_target_status_measurement(
-                            target_id,
-                            payload_bytes,
-                            workload,
-                            format,
-                            "failed",
-                            &message,
-                        ),
-                    },
-                    ("f32", _) => single_target_status_measurement(
-                        target_id,
-                        payload_bytes,
-                        workload,
-                        format,
-                        "unmeasured",
-                        "vulkan_f32_kernel_not_implemented_for_workload",
-                    ),
-                    _ => single_target_status_measurement(
-                        target_id,
-                        payload_bytes,
-                        workload,
-                        format,
-                        "unsupported",
-                        "vulkan_execution_backend_currently_supports_f32_only",
-                    ),
+                    (_, "dense_projection") => {
+                        if let Some(kernel) = dense_format_kernel(format) {
+                            match run_vulkan_dense_projection(
+                                device,
+                                target_id,
+                                payload_bytes,
+                                samples,
+                                workload,
+                                kernel,
+                            ) {
+                                Ok(measurement) => measurement,
+                                Err(message) => single_target_status_measurement(
+                                    target_id,
+                                    payload_bytes,
+                                    workload,
+                                    format,
+                                    "failed",
+                                    &message,
+                                ),
+                            }
+                        } else {
+                            unsupported_vulkan_format(target_id, payload_bytes, workload, format)
+                        }
+                    }
+                    _ => {
+                        if dense_format_kernel(format).is_some() {
+                            single_target_status_measurement(
+                                target_id,
+                                payload_bytes,
+                                workload,
+                                format,
+                                "unmeasured",
+                                "vulkan_kernel_not_implemented_for_workload",
+                            )
+                        } else {
+                            unsupported_vulkan_format(target_id, payload_bytes, workload, format)
+                        }
+                    }
                 })
         })
         .collect()
+}
+
+fn unsupported_vulkan_format(
+    target_id: &str,
+    payload_bytes: usize,
+    workload: &str,
+    format: &str,
+) -> Measurement {
+    single_target_status_measurement(
+        target_id,
+        payload_bytes,
+        workload,
+        format,
+        "unsupported",
+        "vulkan_execution_backend_has_no_kernel_for_format",
+    )
 }
 
 struct OpenVulkanComputeDevice {
@@ -144,19 +240,20 @@ impl Drop for VulkanBuffer {
     }
 }
 
-fn run_vulkan_f32_dense_projection(
+fn run_vulkan_dense_projection(
     compute_device: &OpenVulkanComputeDevice,
     target_id: &str,
     payload_bytes: usize,
     samples: usize,
     workload_class: &str,
+    kernel: DenseFormatKernel,
 ) -> Result<Measurement, String> {
     if compute_device.timestamp_valid_bits == 0 || compute_device.timestamp_period_ns <= 0.0 {
         return Err("selected Vulkan compute queue does not expose usable timestamps".to_string());
     }
 
-    let elements = (payload_bytes / mem::size_of::<f32>()).max(1);
-    let buffer_size = (elements * mem::size_of::<f32>()) as vk::DeviceSize;
+    let storage_elements = (payload_bytes / kernel.bytes_per_storage_element).max(1);
+    let buffer_size = (storage_elements * kernel.bytes_per_storage_element) as vk::DeviceSize;
     let upload = create_buffer(
         compute_device,
         buffer_size,
@@ -177,9 +274,10 @@ fn run_vulkan_f32_dense_projection(
             | vk::BufferUsageFlags::TRANSFER_SRC,
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
-    fill_upload_buffer(&compute_device.device, &upload, elements)?;
+    fill_upload_buffer(&compute_device.device, &upload, storage_elements, &kernel)?;
 
-    let resources = create_compute_resources(compute_device, storage.buffer, buffer_size)?;
+    let resources =
+        create_compute_resources(compute_device, storage.buffer, buffer_size, kernel.shader)?;
     let command_pool = unsafe {
         compute_device.device.create_command_pool(
             &vk::CommandPoolCreateInfo::default()
@@ -214,10 +312,10 @@ fn run_vulkan_f32_dense_projection(
     }
     .map_err(|error| format!("could not create Vulkan fence: {error:?}"))?;
 
-    let dispatch_groups = elements.div_ceil(64) as u32;
+    let dispatch_groups = storage_elements.div_ceil(64) as u32;
     let mut measured_samples = Vec::with_capacity(samples);
     for sample_index in 0..samples {
-        record_f32_dispatch(
+        record_compute_dispatch(
             compute_device,
             &resources,
             command_buffer,
@@ -226,7 +324,7 @@ fn run_vulkan_f32_dense_projection(
             storage.buffer,
             readback.buffer,
             buffer_size,
-            elements as u32,
+            storage_elements as u32,
             dispatch_groups,
         )?;
         unsafe {
@@ -253,9 +351,15 @@ fn run_vulkan_f32_dense_projection(
             iterations: 1,
             bytes_read: buffer_size as u64,
             bytes_written: buffer_size as u64,
-            operations: (elements as u64) * 2,
+            operations: (storage_elements as u64)
+                * kernel.logical_elements_per_storage_element
+                * kernel.operations_per_storage_element,
         });
-        black_box(read_first_f32(&compute_device.device, &readback)?);
+        black_box(read_first_storage_word(
+            &compute_device.device,
+            &readback,
+            &kernel,
+        )?);
     }
 
     unsafe {
@@ -270,15 +374,18 @@ fn run_vulkan_f32_dense_projection(
     }
 
     Ok(Measurement {
-        workload_id: format!("single_target_small_payload:{workload_class}:f32"),
+        workload_id: format!(
+            "single_target_small_payload:{workload_class}:{}",
+            kernel.format
+        ),
         comparison_group: "small_payload_placement_comparison".to_string(),
         workload_class: workload_class.to_string(),
         placement_strategy: "single_target_serial".to_string(),
         target_id: target_id.to_string(),
-        pattern: "single_target_compute".to_string(),
+        pattern: kernel.pattern.to_string(),
         operation_family: workload_class.to_string(),
         regime: "small_payload".to_string(),
-        format: "f32".to_string(),
+        format: kernel.format.to_string(),
         status: "completed".to_string(),
         reason: None,
         payload_bytes,
@@ -315,6 +422,7 @@ fn create_compute_resources(
     compute_device: &OpenVulkanComputeDevice,
     storage_buffer: vk::Buffer,
     buffer_size: vk::DeviceSize,
+    shader: &[u32],
 ) -> Result<ComputeResources, String> {
     let device = &compute_device.device;
     let binding = [vk::DescriptorSetLayoutBinding::default()
@@ -344,10 +452,7 @@ fn create_compute_resources(
     }
     .map_err(|error| format!("could not create Vulkan pipeline layout: {error:?}"))?;
     let shader_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(F32_TRANSFORM_SHADER_SPV),
-            None,
-        )
+        device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(shader), None)
     }
     .map_err(|error| format!("could not create Vulkan shader module: {error:?}"))?;
     let entry_name = CString::new("main").expect("static string has no nul");
@@ -410,7 +515,7 @@ fn create_compute_resources(
     })
 }
 
-fn record_f32_dispatch(
+fn record_compute_dispatch(
     compute_device: &OpenVulkanComputeDevice,
     resources: &ComputeResources,
     command_buffer: vk::CommandBuffer,
@@ -594,36 +699,56 @@ fn fill_upload_buffer(
     device: &ash::Device,
     buffer: &VulkanBuffer,
     elements: usize,
+    kernel: &DenseFormatKernel,
 ) -> Result<(), String> {
     let ptr = unsafe {
         device
             .map_memory(buffer.memory, 0, buffer.size, vk::MemoryMapFlags::empty())
             .map_err(|error| format!("could not map Vulkan upload buffer: {error:?}"))?
     };
-    let values = ptr.cast::<f32>();
-    for index in 0..elements {
-        unsafe {
-            values
-                .add(index)
-                .write(((index % 1024) as f32) * 0.001 + 1.0);
+    if kernel.format == "f32" {
+        let values = ptr.cast::<f32>();
+        for index in 0..elements {
+            unsafe {
+                values
+                    .add(index)
+                    .write(((index % 1024) as f32) * 0.001 + 1.0);
+            }
+        }
+    } else {
+        let values = ptr.cast::<u32>();
+        for index in 0..elements {
+            unsafe {
+                values
+                    .add(index)
+                    .write((index as u32).wrapping_mul(2_654_435_761) ^ 0xa5a5_5a5a);
+            }
         }
     }
     unsafe { device.unmap_memory(buffer.memory) };
     Ok(())
 }
 
-fn read_first_f32(device: &ash::Device, buffer: &VulkanBuffer) -> Result<f32, String> {
+fn read_first_storage_word(
+    device: &ash::Device,
+    buffer: &VulkanBuffer,
+    kernel: &DenseFormatKernel,
+) -> Result<u32, String> {
     let ptr = unsafe {
         device
             .map_memory(
                 buffer.memory,
                 0,
-                mem::size_of::<f32>() as vk::DeviceSize,
+                kernel.bytes_per_storage_element as vk::DeviceSize,
                 vk::MemoryMapFlags::empty(),
             )
             .map_err(|error| format!("could not map Vulkan readback buffer: {error:?}"))?
     };
-    let value = unsafe { ptr.cast::<f32>().read() };
+    let value = if kernel.format == "f32" {
+        unsafe { ptr.cast::<f32>().read().to_bits() }
+    } else {
+        unsafe { ptr.cast::<u32>().read() }
+    };
     unsafe { device.unmap_memory(buffer.memory) };
     Ok(value)
 }
@@ -826,6 +951,18 @@ mod tests {
             ),
             Some(1)
         );
+    }
+
+    #[test]
+    fn maps_model_storage_formats_to_packed_dense_kernel() {
+        for format in [
+            "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "mxfp4", "nvfp4", "int4", "q5_1", "q4_k",
+            "iq4_xs", "iq2_xs",
+        ] {
+            let kernel = dense_format_kernel(format).unwrap();
+            assert_eq!(kernel.format, format);
+            assert_eq!(kernel.pattern, "single_target_packed_emulated_compute");
+        }
     }
 
     #[test]

@@ -308,41 +308,67 @@ fn vulkan_format_capabilities(
                 "VK_KHR_shader_bfloat16 not advertised"
             },
         ),
-        format_capability(
-            "fp8",
-            if supports_fp8 {
-                "unmeasured"
-            } else {
-                "unsupported"
-            },
-            "vulkan_device_extensions",
-            if supports_fp8 {
-                "VK_EXT_shader_float8 advertised; feature bits not queried yet"
-            } else {
-                "VK_EXT_shader_float8 not advertised"
-            },
-        ),
-        format_capability(
-            "int4",
-            if supports_int8 {
-                "emulated"
-            } else {
-                "unmeasured"
-            },
-            "vulkan_feature_chain",
-            if supports_int8 {
-                "shaderInt8 feature bit is set; packed int4 still requires benchmark kernel"
-            } else {
-                "requires packed integer benchmark path"
-            },
-        ),
-        format_capability(
-            "fp4",
-            "unmeasured",
-            "vulkan_probe",
-            "requires packed float benchmark path",
-        ),
+        fp8_format_capability("fp8_e4m3", supports_fp8),
+        fp8_format_capability("fp8_e5m2", supports_fp8),
+        packed_format_capability("int8", supports_int8),
+        packed_format_capability("int4", supports_int8),
+        packed_format_capability("fp4", false),
+        packed_format_capability("mxfp4", false),
+        packed_format_capability("nvfp4", false),
+        packed_quant_format_capability("q8_0"),
+        packed_quant_format_capability("q6_k"),
+        packed_quant_format_capability("q5_0"),
+        packed_quant_format_capability("q5_1"),
+        packed_quant_format_capability("q5_k"),
+        packed_quant_format_capability("q4_0"),
+        packed_quant_format_capability("q4_1"),
+        packed_quant_format_capability("q4_k"),
+        packed_quant_format_capability("q3_k"),
+        packed_quant_format_capability("q2_k"),
+        packed_quant_format_capability("iq4_nl"),
+        packed_quant_format_capability("iq4_xs"),
+        packed_quant_format_capability("iq3_s"),
+        packed_quant_format_capability("iq2_xs"),
     ]
+}
+
+fn fp8_format_capability(format: &str, supports_fp8: bool) -> FormatCapability {
+    format_capability(
+        format,
+        if supports_fp8 {
+            "unmeasured"
+        } else {
+            "unsupported"
+        },
+        "vulkan_device_extensions",
+        if supports_fp8 {
+            "VK_EXT_shader_float8 advertised; feature bits not queried yet"
+        } else {
+            "VK_EXT_shader_float8 not advertised"
+        },
+    )
+}
+
+fn packed_format_capability(format: &str, native_integer_feature: bool) -> FormatCapability {
+    format_capability(
+        format,
+        "emulated",
+        "vulkan_packed_u32_baseline",
+        if native_integer_feature {
+            "packed storage benchmark path can run; native feature bit is also present"
+        } else {
+            "packed storage benchmark path can run; native format-specific kernel is not implemented yet"
+        },
+    )
+}
+
+fn packed_quant_format_capability(format: &str) -> FormatCapability {
+    format_capability(
+        format,
+        "emulated",
+        "vulkan_packed_u32_baseline",
+        "packed storage benchmark path can run; native dequant kernel is not implemented yet",
+    )
 }
 
 fn format_capability(format: &str, support: &str, source: &str, notes: &str) -> FormatCapability {
@@ -487,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn int4_is_emulated_when_shader_int8_is_available() {
+    fn int4_has_emulated_packed_baseline_without_native_int8() {
         let capabilities = vulkan_format_capabilities(&[], &["shader_int8".to_string()]);
         let int4 = capabilities
             .iter()
@@ -500,6 +526,6 @@ mod tests {
             .iter()
             .find(|capability| capability.format == "int4")
             .unwrap();
-        assert_eq!(int4.support, "unmeasured");
+        assert_eq!(int4.support, "emulated");
     }
 }

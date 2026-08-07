@@ -3,6 +3,12 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{FormatCapability, PciLink, Target};
 
+const MODEL_BENCHMARK_FORMATS: &[&str] = &[
+    "f32", "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "nvfp4", "int8", "int4", "q8_0",
+    "q6_k", "q5_0", "q5_1", "q5_k", "q4_0", "q4_1", "q4_k", "q3_k", "q2_k", "iq4_nl", "iq4_xs",
+    "iq3_s", "iq2_xs",
+];
+
 pub fn discover_targets() -> Vec<Target> {
     let mut targets = vec![discover_cpu_target()];
     targets.extend(discover_pci_targets(Path::new("/sys/bus/pci/devices")));
@@ -35,45 +41,7 @@ fn discover_cpu_target() -> Target {
             "f32".to_string(),
             "u8_copy".to_string(),
         ],
-        format_capabilities: vec![
-            format_capability(
-                "u8",
-                "native",
-                "cpu_baseline",
-                "byte movement benchmark path",
-            ),
-            format_capability(
-                "f32",
-                "native",
-                "cpu_baseline",
-                "scalar/vector CPU reference path",
-            ),
-            format_capability(
-                "f16",
-                "unmeasured",
-                "not_probed",
-                "requires explicit CPU feature/backend probe",
-            ),
-            format_capability(
-                "bf16",
-                "unmeasured",
-                "not_probed",
-                "requires explicit CPU feature/backend probe",
-            ),
-            format_capability("fp8", "unmeasured", "not_probed", "requires backend probe"),
-            format_capability(
-                "int4",
-                "unmeasured",
-                "not_probed",
-                "requires packed format benchmark",
-            ),
-            format_capability(
-                "fp4",
-                "unmeasured",
-                "not_probed",
-                "requires packed format benchmark",
-            ),
-        ],
+        format_capabilities: cpu_format_capabilities(),
         diagnostics: Vec::new(),
     }
 }
@@ -86,6 +54,37 @@ fn read_cpu_model_name() -> Option<String> {
         .and_then(|suffix| suffix.split_once(':').map(|(_, value)| value.trim()))
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn cpu_format_capabilities() -> Vec<FormatCapability> {
+    let mut capabilities = vec![
+        format_capability(
+            "u8",
+            "native",
+            "cpu_baseline",
+            "byte movement benchmark path",
+        ),
+        format_capability(
+            "f32",
+            "native",
+            "cpu_baseline",
+            "scalar/vector CPU reference path",
+        ),
+    ];
+    capabilities.extend(
+        MODEL_BENCHMARK_FORMATS
+            .iter()
+            .filter(|format| **format != "f32")
+            .map(|format| {
+                format_capability(
+                    format,
+                    "unmeasured",
+                    "not_probed",
+                    "requires explicit CPU feature/backend probe",
+                )
+            }),
+    );
+    capabilities
 }
 
 fn discover_pci_targets(root: &Path) -> Vec<Target> {
@@ -211,7 +210,7 @@ fn pci_link(
 }
 
 fn passive_pci_format_capabilities() -> Vec<FormatCapability> {
-    ["f32", "f16", "bf16", "fp8", "int4", "fp4"]
+    MODEL_BENCHMARK_FORMATS
         .iter()
         .map(|format| {
             format_capability(

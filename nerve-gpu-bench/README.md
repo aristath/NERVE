@@ -21,19 +21,21 @@ This first implementation provides:
 - requested CPU F32 single-target workload measurements for dense projection,
   MoE expert, and router/reduction classes, with unsupported records for
   unimplemented CPU formats;
-- opt-in Vulkan F32 single-target dense-projection dispatches with GPU
-  timestamp samples;
+- opt-in Vulkan dense-projection dispatches with GPU timestamp samples for F32
+  plus packed-emulated baselines for lower-precision and quantized formats;
 - placeholder `unmeasured` GPU records for unimplemented workload/format paths,
   plus pair/group placeholders up to triplets; and
 - JSON output with discovered targets, selected targets, skipped targets,
   measurements, pair/group candidates, and provenance.
 
 Default runs keep GPU work passive. GPU targets are discovered and reported, but
-GPU compute only runs when `run --execute` is provided. The first executable
-Vulkan path is a small F32 dense-projection-shaped compute dispatch over the
-requested payload, measured with Vulkan timestamps. Peer transfer,
-tensor-split, layer-split, non-F32 formats, and non-dense GPU workloads remain
-`unmeasured` or `unsupported` until their backend kernels exist.
+GPU compute only runs when `run --execute` is provided. The executable Vulkan
+dense path submits a small compute dispatch over the requested payload, measured
+with Vulkan timestamps. F32 uses a float shader path. F16, BF16, FP8 variants,
+FP4/MXFP4/NVFP4, INT formats, and GGUF-style Q/IQ storage families use a
+packed-u32 emulation baseline until native format-specific kernels exist. Peer
+transfer, tensor-split, layer-split, and non-dense GPU workloads remain
+`unmeasured` until their backend kernels exist.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts stay testable while GPU coverage grows.
 For CPU single-target comparisons, requested F32 workload records already use
@@ -42,17 +44,19 @@ the same workload IDs as device-backed single-target candidates.
 Discovery creates a Vulkan instance and enumerates physical devices. It records
 device name/type, API and driver versions, memory heaps, queue families,
 advertised device extensions, and conservative format capabilities. F16 support
-is classified from the Vulkan shaderFloat16 feature bit, and INT4 is marked as
-an emulated path when shaderInt8 is available. BF16/FP8 are still
-extension-presence probes until their feature bits are queried. When
+is classified from the Vulkan shaderFloat16 feature bit. BF16 and FP8 variant
+capabilities still use extension presence as conservative native-path probes.
+Packed low-bit and quantized storage formats are marked as emulated baselines
+when the generic packed-u32 benchmark path can cover them. When
 `VK_EXT_pci_bus_info` is available, Vulkan targets use the PCI address in their
 stable target ID. Discovery does not create logical devices, allocate GPU
 memory, submit queues, or run kernels.
 
 `run --execute` is an explicit opt-in for Vulkan execution. At this stage it
-opens a logical device for the selected Vulkan target and submits the first F32
-single-target dense compute dispatch. Other Vulkan measurement families are
-still reported as unmeasured or unsupported rather than guessed.
+opens a logical device for the selected Vulkan target and submits single-target
+dense compute dispatches for the requested executable formats. Other Vulkan
+measurement families are still reported as unmeasured or unsupported rather than
+guessed.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,
@@ -67,9 +71,9 @@ candidates.
 
 Targets also report format capabilities separately from measurements. Capability
 flags are only filters; they do not imply a target is fast for that format.
-The run policy records requested benchmark formats, and backend workload IDs
-are format-specific so F32, BF16, FP8, INT4, and FP4 evidence cannot collapse
-into one generic path.
+The run policy records requested benchmark formats, and backend workload IDs are
+format-specific so F16, BF16, FP8 variants, MXFP4/NVFP4, INT formats, GGUF Q/IQ
+formats, and F32 evidence cannot collapse into one generic path.
 
 The workload matrix is separate from the format matrix. Defaults include dense
 projection, MoE expert, and router/reduction shapes because one device may win
