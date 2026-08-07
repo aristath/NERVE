@@ -21,6 +21,7 @@ pub struct Target {
     pub numa_node: Option<i64>,
     pub boot_vga: Option<bool>,
     pub pci_link: Option<PciLink>,
+    pub vulkan: Option<VulkanDeviceInfo>,
     pub capabilities: Vec<String>,
     pub format_capabilities: Vec<FormatCapability>,
     pub diagnostics: Vec<String>,
@@ -35,6 +36,34 @@ pub struct PciLink {
     pub max_link_width: Option<u32>,
     pub max_one_way_bytes_per_second: Option<u64>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanDeviceInfo {
+    pub physical_device_index: usize,
+    pub device_name: String,
+    pub device_type: String,
+    pub api_version: String,
+    pub driver_version: u32,
+    pub vendor_id: String,
+    pub device_id: String,
+    pub memory_heaps: Vec<VulkanMemoryHeap>,
+    pub queue_families: Vec<VulkanQueueFamily>,
+    pub extension_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanMemoryHeap {
+    pub heap_index: u32,
+    pub size_bytes: u64,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanQueueFamily {
+    pub family_index: u32,
+    pub queue_count: u32,
+    pub flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -933,6 +962,7 @@ mod tests {
             numa_node: None,
             boot_vga: None,
             pci_link: None,
+            vulkan: None,
             capabilities: vec!["f32".to_string()],
             format_capabilities: Vec::new(),
             diagnostics: Vec::new(),
@@ -975,6 +1005,7 @@ mod tests {
                 numa_node: None,
                 boot_vga: None,
                 pci_link: None,
+                vulkan: None,
                 capabilities: Vec::new(),
                 format_capabilities: Vec::new(),
                 diagnostics: Vec::new(),
@@ -1025,6 +1056,7 @@ mod tests {
                 numa_node: None,
                 boot_vga: None,
                 pci_link: None,
+                vulkan: None,
                 capabilities: Vec::new(),
                 format_capabilities: Vec::new(),
                 diagnostics: Vec::new(),
@@ -1102,6 +1134,7 @@ mod tests {
                     numa_node: None,
                     boot_vga: None,
                     pci_link: None,
+                    vulkan: None,
                     capabilities: Vec::new(),
                     format_capabilities: Vec::new(),
                     diagnostics: Vec::new(),
@@ -1119,6 +1152,7 @@ mod tests {
                     numa_node: None,
                     boot_vga: None,
                     pci_link: None,
+                    vulkan: None,
                     capabilities: Vec::new(),
                     format_capabilities: Vec::new(),
                     diagnostics: Vec::new(),
@@ -1383,6 +1417,7 @@ fn test_target(id: &str) -> Target {
         numa_node: None,
         boot_vga: None,
         pci_link: None,
+        vulkan: None,
         capabilities: Vec::new(),
         format_capabilities: Vec::new(),
         diagnostics: Vec::new(),

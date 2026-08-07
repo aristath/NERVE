@@ -31,7 +31,8 @@ rejoining the full sample list first.
   Targets include `format_capabilities`, which record native, emulated,
   fallback, unsupported, or unmeasured support per format. PCI targets may also
   include `pci_link`, a passive sysfs estimate of current/max link width and
-  one-way byte rate.
+  one-way byte rate. Vulkan targets may include `vulkan`, with physical-device
+  properties, memory heaps, queue families, and extension names.
 - `selected_target_ids`: targets selected for this run.
 - `skipped_targets`: discovered targets skipped by explicit policy.
 - `workload_specs`: logical benchmark contracts generated for the selected
@@ -114,6 +115,12 @@ implemented yet are emitted as `status: "unsupported"`.
 The schema records exclusions as run policy. It does not encode permanent bans
 for CPU, integrated GPU, discrete GPU, AMD, NVIDIA, Intel, or any other target
 class.
+
+When compiled with the `vulkan` feature, Vulkan targets are additional detected
+targets. Their stable IDs include the physical-device index because Vulkan
+device order is driver-defined until a PCI/UUID mapping layer is added.
+Discovery creates a Vulkan instance only; it does not create logical devices or
+run GPU workloads.
 
 Format capability is not a speed claim. A target can lack native FP4 but still
 win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement

@@ -12,6 +12,7 @@ without coupling the benchmark implementation to runtime placement code.
 This first implementation provides:
 
 - CPU and PCI accelerator target discovery from the host;
+- optional Vulkan physical-device discovery behind the `vulkan` feature;
 - explicit include/exclude run policy;
 - no hard-coded global bans for CPU, integrated GPU, discrete GPU, AMD, NVIDIA,
   Intel, or other target classes;
@@ -33,6 +34,12 @@ CPU reference versions of the small compound patterns execute today so the
 logical workload contracts are testable before GPU backend work starts.
 For CPU single-target comparisons, requested F32 workload records already use
 the same workload IDs as device-backed single-target candidates.
+
+With `--features vulkan`, discovery creates a Vulkan instance and enumerates
+physical devices. It records device name/type, API and driver versions, memory
+heaps, queue families, advertised device extensions, and conservative format
+capabilities. It does not create logical devices, allocate GPU memory, submit
+queues, or run kernels.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,
@@ -62,6 +69,12 @@ List discovered targets:
 
 ```sh
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- list --json
+```
+
+List Vulkan physical devices as targets:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml --features vulkan -- list --json
 ```
 
 The JSON target list includes `pci_link` when sysfs exposes PCIe speed/width.

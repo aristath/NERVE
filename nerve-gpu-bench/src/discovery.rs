@@ -6,6 +6,8 @@ use crate::model::{FormatCapability, PciLink, Target};
 pub fn discover_targets() -> Vec<Target> {
     let mut targets = vec![discover_cpu_target()];
     targets.extend(discover_pci_targets(Path::new("/sys/bus/pci/devices")));
+    #[cfg(feature = "vulkan")]
+    targets.extend(crate::vulkan_probe::discover_vulkan_targets());
     targets.sort_by(|left, right| left.stable_target_id.cmp(&right.stable_target_id));
     targets
 }
@@ -28,6 +30,7 @@ fn discover_cpu_target() -> Target {
         numa_node: None,
         boot_vga: None,
         pci_link: None,
+        vulkan: None,
         capabilities: vec![
             format!("logical_cpus={cpu_count}"),
             "f32".to_string(),
@@ -162,6 +165,7 @@ fn pci_target(address: &str, path: &Path, class: &str) -> Target {
         numa_node,
         boot_vga,
         pci_link,
+        vulkan: None,
         capabilities,
         format_capabilities: passive_pci_format_capabilities(),
         diagnostics: Vec::new(),
