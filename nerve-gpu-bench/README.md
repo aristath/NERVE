@@ -70,7 +70,9 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
 The summary includes placement-strategy coverage so a result can be checked for
 the key alternatives: one-target serialized, two-target serialized, and
 two-target parallel. It also reports coverage warnings when an expected
-strategy has no completed measurement.
+strategy has no completed measurement. Comparison candidates are resolved
+against concrete measurements, so missing A-only, B-only, A-to-B serial,
+B-to-A serial, or pair-parallel evidence is visible directly.
 
 Select or exclude targets:
 

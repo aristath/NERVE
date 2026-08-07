@@ -203,6 +203,7 @@ pub struct BenchmarkRunSummary {
     pub unsupported_count: usize,
     pub skipped_count: usize,
     pub strategy_statuses: Vec<StrategyStatusSummary>,
+    pub candidate_statuses: Vec<ComparisonCandidateStatus>,
     pub coverage_warnings: Vec<String>,
 }
 
@@ -215,6 +216,16 @@ pub struct StrategyStatusSummary {
     pub failed_count: usize,
     pub unsupported_count: usize,
     pub skipped_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComparisonCandidateStatus {
+    pub comparison_id: String,
+    pub candidate_id: String,
+    pub placement_strategy: String,
+    pub measurement_kind: String,
+    pub status: String,
+    pub matched_measurement_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -468,6 +479,7 @@ impl BenchmarkRun {
             unsupported_count: 0,
             skipped_count: 0,
             strategy_statuses: Vec::new(),
+            candidate_statuses: Vec::new(),
             coverage_warnings: Vec::new(),
         };
         let mut strategy_statuses = BTreeMap::<(String, String), StrategyStatusSummary>::new();
@@ -500,7 +512,83 @@ impl BenchmarkRun {
         }
         summary.coverage_warnings = coverage_warnings_for_run(self, &strategy_statuses);
         summary.strategy_statuses = strategy_statuses.into_values().collect();
+        summary.candidate_statuses = self.comparison_candidate_statuses();
         summary
+    }
+
+    fn comparison_candidate_statuses(&self) -> Vec<ComparisonCandidateStatus> {
+        let mut statuses = Vec::new();
+        for comparison in &self.comparison_sets {
+            for candidate in &comparison.candidates {
+                let matched_statuses = self.matched_candidate_statuses(candidate);
+                statuses.push(ComparisonCandidateStatus {
+                    comparison_id: comparison.comparison_id.clone(),
+                    candidate_id: candidate.candidate_id.clone(),
+                    placement_strategy: candidate.placement_strategy.clone(),
+                    measurement_kind: candidate.measurement_kind.clone(),
+                    status: combined_candidate_status(&matched_statuses),
+                    matched_measurement_count: matched_statuses.len(),
+                });
+            }
+        }
+        statuses
+    }
+
+    fn matched_candidate_statuses(&self, candidate: &ComparisonCandidate) -> Vec<&str> {
+        match candidate.measurement_kind.as_str() {
+            "single" => self
+                .measurements
+                .iter()
+                .filter(|measurement| {
+                    candidate.target_ids.len() == 1
+                        && measurement.workload_id == candidate.workload_id
+                        && measurement.placement_strategy == candidate.placement_strategy
+                        && measurement.target_id == candidate.target_ids[0]
+                })
+                .map(|measurement| measurement.status.as_str())
+                .collect(),
+            "pair" => self
+                .pair_measurements
+                .iter()
+                .filter(|measurement| {
+                    candidate.target_ids.len() == 2
+                        && measurement.workload_id == candidate.workload_id
+                        && measurement.placement_strategy == candidate.placement_strategy
+                        && measurement.source_target_id == candidate.target_ids[0]
+                        && measurement.destination_target_id == candidate.target_ids[1]
+                })
+                .map(|measurement| measurement.status.as_str())
+                .collect(),
+            "group" => self
+                .group_measurements
+                .iter()
+                .filter(|measurement| {
+                    measurement.workload_id == candidate.workload_id
+                        && measurement.placement_strategy == candidate.placement_strategy
+                        && measurement.target_ids == candidate.target_ids
+                })
+                .map(|measurement| measurement.status.as_str())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn combined_candidate_status(statuses: &[&str]) -> String {
+    if statuses.is_empty() {
+        "missing".to_string()
+    } else if statuses.contains(&"completed") {
+        "completed".to_string()
+    } else if statuses.contains(&"failed") {
+        "failed".to_string()
+    } else if statuses.contains(&"unsupported") {
+        "unsupported".to_string()
+    } else if statuses.contains(&"unmeasured") {
+        "unmeasured".to_string()
+    } else if statuses.contains(&"skipped") {
+        "skipped".to_string()
+    } else {
+        "unknown".to_string()
     }
 }
 
@@ -772,6 +860,7 @@ mod tests {
         );
         assert_eq!(summary.strategy_statuses[0].completed_count, 1);
         assert!(summary.coverage_warnings.is_empty());
+        assert!(summary.candidate_statuses.is_empty());
     }
 
     #[test]
@@ -855,5 +944,96 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("two_target_parallel"))
         );
+    }
+
+    #[test]
+    fn resolves_comparison_candidate_measurement_statuses() {
+        let run = BenchmarkRun {
+            schema: RUN_SCHEMA.to_string(),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            implementation: Implementation::current(),
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: true,
+                max_group_size: 2,
+            },
+            discovered_targets: vec![test_target("gpu:a"), test_target("gpu:b")],
+            selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+            skipped_targets: Vec::new(),
+            workload_specs: Vec::new(),
+            comparison_sets: vec![ComparisonSet {
+                comparison_id: "cmp".to_string(),
+                comparison_group: "small_payload_placement_comparison".to_string(),
+                regime: "small_payload".to_string(),
+                format: "backend_selected".to_string(),
+                target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+                candidates: vec![
+                    ComparisonCandidate {
+                        candidate_id: "cmp:single".to_string(),
+                        placement_strategy: "single_target_serial".to_string(),
+                        measurement_kind: "single".to_string(),
+                        workload_id: "single_target_gpu_small_payload".to_string(),
+                        target_ids: vec!["gpu:a".to_string()],
+                        notes: String::new(),
+                    },
+                    ComparisonCandidate {
+                        candidate_id: "cmp:parallel".to_string(),
+                        placement_strategy: "two_target_parallel".to_string(),
+                        measurement_kind: "pair".to_string(),
+                        workload_id: "synthetic_tensor_split_small_payload".to_string(),
+                        target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+                        notes: String::new(),
+                    },
+                ],
+            }],
+            measurements: vec![Measurement {
+                workload_id: "single_target_gpu_small_payload".to_string(),
+                comparison_group: "small_payload_placement_comparison".to_string(),
+                placement_strategy: "single_target_serial".to_string(),
+                target_id: "gpu:a".to_string(),
+                pattern: "single".to_string(),
+                operation_family: "test".to_string(),
+                regime: "small_payload".to_string(),
+                format: "backend_selected".to_string(),
+                status: "completed".to_string(),
+                reason: None,
+                payload_bytes: 1024,
+                working_set_bytes: 1024,
+                samples: Vec::new(),
+                summary: None,
+            }],
+            pair_measurements: Vec::new(),
+            group_measurements: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let summary = run.summary();
+        assert_eq!(summary.candidate_statuses.len(), 2);
+        assert_eq!(summary.candidate_statuses[0].status, "completed");
+        assert_eq!(summary.candidate_statuses[1].status, "missing");
+    }
+}
+
+#[cfg(test)]
+fn test_target(id: &str) -> Target {
+    Target {
+        stable_target_id: id.to_string(),
+        backend: "test".to_string(),
+        kind: "discrete_gpu".to_string(),
+        name: id.to_string(),
+        vendor_id: None,
+        vendor_name: None,
+        device_id: None,
+        pci_address: None,
+        physical_location: None,
+        numa_node: None,
+        boot_vga: None,
+        capabilities: Vec::new(),
+        diagnostics: Vec::new(),
     }
 }

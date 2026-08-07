@@ -129,6 +129,21 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
             )?;
         }
     }
+    if !summary.candidate_statuses.is_empty() {
+        writeln!(stdout, "comparison_candidates:")?;
+        for candidate in &summary.candidate_statuses {
+            writeln!(
+                stdout,
+                "  {} / {}: strategy={} kind={} status={} matches={}",
+                candidate.comparison_id,
+                candidate.candidate_id,
+                candidate.placement_strategy,
+                candidate.measurement_kind,
+                candidate.status,
+                candidate.matched_measurement_count
+            )?;
+        }
+    }
     if !summary.coverage_warnings.is_empty() {
         writeln!(stdout, "coverage_warnings:")?;
         for warning in &summary.coverage_warnings {
