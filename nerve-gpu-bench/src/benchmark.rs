@@ -715,7 +715,6 @@ fn run_device_single_target_measurements(
     )
 }
 
-#[cfg(feature = "vulkan")]
 fn run_vulkan_single_target_measurements(
     target: &Target,
     payload_bytes: usize,
@@ -727,23 +726,6 @@ fn run_vulkan_single_target_measurements(
         payload_bytes,
         formats,
         workloads,
-    )
-}
-
-#[cfg(not(feature = "vulkan"))]
-fn run_vulkan_single_target_measurements(
-    target: &Target,
-    payload_bytes: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<Measurement> {
-    single_target_status_measurements(
-        &target.stable_target_id,
-        payload_bytes,
-        formats,
-        workloads,
-        "unsupported",
-        "vulkan_feature_not_enabled",
     )
 }
 

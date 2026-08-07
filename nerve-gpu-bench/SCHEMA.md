@@ -62,10 +62,10 @@ count, and the maximum payload bytes per measurement. It does not execute CPU
 or GPU measurements.
 
 `policy.execute_vulkan` records whether the run was allowed to open Vulkan
-logical devices. When true and the binary is compiled with the `vulkan` feature,
-selected Vulkan targets may attempt the execution boundary. Current Vulkan
-single-target measurements stop after logical-device creation and remain
-`status: "unmeasured"` until compute kernels are implemented.
+logical devices. When true, selected Vulkan targets may attempt the execution
+boundary. Current Vulkan single-target measurements stop after logical-device
+creation and remain `status: "unmeasured"` until compute kernels are
+implemented.
 
 ## Workload Specs
 
@@ -134,11 +134,11 @@ The schema records exclusions as run policy. It does not encode permanent bans
 for CPU, integrated GPU, discrete GPU, AMD, NVIDIA, Intel, or any other target
 class.
 
-When compiled with the `vulkan` feature, Vulkan targets are additional detected
-targets. Their stable IDs use `vulkan:pci:<address>` when `VK_EXT_pci_bus_info`
-is available. Otherwise they include the physical-device index because Vulkan
-device order is driver-defined. Discovery creates a Vulkan instance only; it
-does not create logical devices or run GPU workloads.
+Vulkan targets are detected targets. Their stable IDs use
+`vulkan:pci:<address>` when `VK_EXT_pci_bus_info` is available. Otherwise they
+include the physical-device index because Vulkan device order is driver-defined.
+Discovery creates a Vulkan instance only; it does not create logical devices or
+run GPU workloads.
 F16 capability uses the shaderFloat16 feature bit. INT4 is marked `emulated`
 when shaderInt8 is available, because packed INT4 can be unpacked through an
 integer shader path but still requires benchmark kernels. BF16 and FP8 currently

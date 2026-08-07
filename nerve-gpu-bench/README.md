@@ -12,7 +12,7 @@ without coupling the benchmark implementation to runtime placement code.
 This first implementation provides:
 
 - CPU and PCI accelerator target discovery from the host;
-- optional Vulkan physical-device discovery behind the `vulkan` feature;
+- Vulkan physical-device discovery;
 - explicit include/exclude run policy;
 - no hard-coded global bans for CPU, integrated GPU, discrete GPU, AMD, NVIDIA,
   Intel, or other target classes;
@@ -35,15 +35,15 @@ logical workload contracts are testable before GPU backend work starts.
 For CPU single-target comparisons, requested F32 workload records already use
 the same workload IDs as device-backed single-target candidates.
 
-With `--features vulkan`, discovery creates a Vulkan instance and enumerates
-physical devices. It records device name/type, API and driver versions, memory
-heaps, queue families, advertised device extensions, and conservative format
-capabilities. F16 support is classified from the Vulkan shaderFloat16 feature
-bit, and INT4 is marked as an emulated path when shaderInt8 is available.
-BF16/FP8 are still extension-presence probes until their feature bits are
-queried. When `VK_EXT_pci_bus_info` is available, Vulkan targets use the PCI
-address in their stable target ID. It does not create logical devices, allocate
-GPU memory, submit queues, or run kernels.
+Discovery creates a Vulkan instance and enumerates physical devices. It records
+device name/type, API and driver versions, memory heaps, queue families,
+advertised device extensions, and conservative format capabilities. F16 support
+is classified from the Vulkan shaderFloat16 feature bit, and INT4 is marked as
+an emulated path when shaderInt8 is available. BF16/FP8 are still
+extension-presence probes until their feature bits are queried. When
+`VK_EXT_pci_bus_info` is available, Vulkan targets use the PCI address in their
+stable target ID. Discovery does not create logical devices, allocate GPU
+memory, submit queues, or run kernels.
 
 `run --execute-vulkan` is an explicit opt-in for Vulkan execution scaffolding.
 At this stage it opens a logical device for the selected Vulkan target and
@@ -80,12 +80,6 @@ List discovered targets:
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- list --json
 ```
 
-List Vulkan physical devices as targets:
-
-```sh
-cargo run --manifest-path nerve-gpu-bench/Cargo.toml --features vulkan -- list --json
-```
-
 The JSON target list includes `pci_link` when sysfs exposes PCIe speed/width.
 Those values include parsed current/max width and an estimated one-way byte rate
 for placement priors. They are not a peer-transfer benchmark.
@@ -108,7 +102,7 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
 Probe the Vulkan execution boundary without submitting kernels:
 
 ```sh
-cargo run --manifest-path nerve-gpu-bench/Cargo.toml --features vulkan -- run \
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
   --execute-vulkan \
   --include-target vulkan:pci:0000:03:00.0 \
   --format f32 \

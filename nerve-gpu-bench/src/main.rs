@@ -3,9 +3,7 @@ mod cli;
 mod discovery;
 mod model;
 mod policy;
-#[cfg(feature = "vulkan")]
 mod vulkan_exec;
-#[cfg(feature = "vulkan")]
 mod vulkan_probe;
 
 use std::error::Error;
